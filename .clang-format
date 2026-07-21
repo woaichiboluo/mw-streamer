@@ -1,0 +1,4 @@
+BasedOnStyle: Google
+Standard: c++17
+IncludeBlocks: Regroup
+IncludeIsMainRegex: '(_integration_test|_test)?$'
