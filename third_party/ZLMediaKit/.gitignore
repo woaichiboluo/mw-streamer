@@ -1,0 +1,22 @@
+# Compiled Object files
+*.o
+*.obj
+*.d
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Static libraries
+*.lib
+
+/X64/
+
+
+/cmake-build-debug/
+/cmake-build-release/
+/.vs/
+/.vscode/
+/.idea/
+/build/
+/cmake-build-*

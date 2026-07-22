@@ -13,11 +13,13 @@
 #
 # Supported components:
 #
-#   AVCODEC AVFORMAT AVUTIL SWRESAMPLE SWSCALE
+#   AVCODEC AVDEVICE AVFILTER AVFORMAT AVUTIL SWRESAMPLE SWSCALE
 #
 # Imported targets:
 #
 #   FFmpeg::avcodec
+#   FFmpeg::avdevice
+#   FFmpeg::avfilter
 #   FFmpeg::avformat
 #   FFmpeg::avutil
 #   FFmpeg::swresample
@@ -29,7 +31,16 @@
 
 include(FindPackageHandleStandardArgs)
 
-set(_FFMPEG_SUPPORTED_COMPONENTS AVCODEC AVFORMAT AVUTIL SWRESAMPLE SWSCALE)
+set(
+  _FFMPEG_SUPPORTED_COMPONENTS
+  AVCODEC
+  AVDEVICE
+  AVFILTER
+  AVFORMAT
+  AVUTIL
+  SWRESAMPLE
+  SWSCALE
+)
 
 if(NOT FFmpeg_FIND_COMPONENTS)
   set(FFmpeg_FIND_COMPONENTS AVCODEC AVFORMAT AVUTIL)
@@ -60,6 +71,14 @@ foreach(_requested_component IN LISTS FFmpeg_FIND_COMPONENTS)
     set(_pkg_config_name libavcodec)
     set(_library_name avcodec)
     set(_header_name libavcodec/avcodec.h)
+  elseif(_component STREQUAL "AVDEVICE")
+    set(_pkg_config_name libavdevice)
+    set(_library_name avdevice)
+    set(_header_name libavdevice/avdevice.h)
+  elseif(_component STREQUAL "AVFILTER")
+    set(_pkg_config_name libavfilter)
+    set(_library_name avfilter)
+    set(_header_name libavfilter/avfilter.h)
   elseif(_component STREQUAL "AVFORMAT")
     set(_pkg_config_name libavformat)
     set(_library_name avformat)
