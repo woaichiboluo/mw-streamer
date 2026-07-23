@@ -15,6 +15,7 @@
 #include "Pusher/PusherBase.h"
 #include "Poller/Timer.h"
 #include "Util/TimeTicker.h"
+#include "TS/TSMediaSource.h"
 #include <memory>
 #include <string>
 #include "SrtCaller.h"
@@ -39,16 +40,18 @@ protected:
 
     //// SrtCaller override////
     void onHandShakeFinished() override;
-    void onResult(const toolkit::SockException &ex) override;
+    void onResult(const toolkit::SockException &ex, bool was_connected) override;
 
     bool isPlayer() override {return false;}
     uint16_t getLatency() override;
     float getTimeOutSec() override;
     std::string getPassphrase() override;
+    void sendTsData(const TSPacket::Ptr &packet, bool flush);
 
 protected:
     std::weak_ptr<TSMediaSource> _push_src;
     TSMediaSource::RingType::RingReader::Ptr _ts_reader;
+    bool _wait_for_key = true;
 
     size_t getSendSpeed() override;
     size_t getSendTotalBytes() override;

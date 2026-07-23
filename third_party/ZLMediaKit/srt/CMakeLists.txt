@@ -23,15 +23,16 @@
 
 file(GLOB SRT_SRC_LIST *.cpp *.h *.hpp)
 
-add_library(srt STATIC ${SRT_SRC_LIST})
-add_library(ZLMediaKit::SRT ALIAS srt)
-target_link_libraries(srt
+add_library(zlmediakit_srt_adapter STATIC ${SRT_SRC_LIST})
+add_library(ZLMediaKit::SRT ALIAS zlmediakit_srt_adapter)
+target_link_libraries(zlmediakit_srt_adapter
   PUBLIC
     ZLMediaKit::MediaKit
-    ZLMediaKit::ToolKit)
-target_compile_options(srt
+    ZLMediaKit::ToolKit
+    SRT::SRT)
+target_compile_options(zlmediakit_srt_adapter
   PRIVATE ${COMPILE_OPTIONS_DEFAULT})
-target_include_directories(srt
+target_include_directories(zlmediakit_srt_adapter
   PRIVATE
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
   PUBLIC

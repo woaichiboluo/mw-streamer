@@ -30,6 +30,7 @@ public:
 
 public:
     uint64_t time_stamp = 0;
+    bool key_pos = false;
 };
 
 // TS直播源  [AUTO-TRANSLATED:0d25ead6]
@@ -90,6 +91,7 @@ public:
         if (!_ring) {
             createRing();
         }
+        packet->key_pos = key;
         if (key) {
             _have_video = true;
         }

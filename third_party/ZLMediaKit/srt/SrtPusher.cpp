@@ -29,7 +29,7 @@ void SrtPusher::publish(const string &strUrl) {
     try {
         _url.parse(strUrl);
     } catch (std::exception &ex) {
-        onResult(SockException(Err_other, StrPrinter << "illegal srt url:" << ex.what()));
+        onResult(SockException(Err_other, StrPrinter << "illegal srt url:" << ex.what()), false);
         return;
     }
 
@@ -45,30 +45,33 @@ void SrtPusher::publish(const string &strUrl) {
 }
 
 void SrtPusher::teardown() {
-    SrtCaller::onResult(SockException(Err_other, StrPrinter << "teardown: " << _url._full_url));
+    if (!getPoller()->isCurrentThread()) {
+        getPoller()->sync([this]() { teardown(); });
+        return;
+    }
+    _ts_reader.reset();
+    teardownSrt();
 }
 
 void SrtPusher::onHandShakeFinished() {
-    SrtCaller::onHandShakeFinished();
-    onResult(SockException(Err_success, "srt push success"));
+    onResult(SockException(Err_success, "srt push success"), false);
     doPublish();
 }
 
-void SrtPusher::onResult(const SockException &ex) {
-    SrtCaller::onResult(ex);
-
+void SrtPusher::onResult(const SockException &ex, bool was_connected) {
     if (!ex) {
         onPublishResult(ex);
     } else {
+        _ts_reader.reset();
         WarnL << ex.getErrCode() << " " << ex.what();
         if (ex.getErrCode() == Err_shutdown) {
             // 主动shutdown的，不触发回调
             return;
         }
-        if (!_is_handleshake_finished) {
-            onPublishResult(ex);
-        } else {
+        if (was_connected) {
             onShutdown(ex);
+        } else {
+            onPublishResult(ex);
         }
     }
     return;
@@ -92,9 +95,10 @@ std::string SrtPusher::getPassphrase() {
 void SrtPusher::doPublish() {
     auto src = _push_src.lock();
     if (!src) {
-        onResult(SockException(Err_eof, "the media source was released"));
+        reportSrtError(SockException(Err_eof, "the media source was released"));
         return;
     }
+    _wait_for_key = true;
     // 异步查找直播流
     std::weak_ptr<SrtPusher> weak_self = static_pointer_cast<SrtPusher>(shared_from_this());
     _ts_reader = src->getRing()->attach(getPoller());
@@ -104,7 +108,7 @@ void SrtPusher::doPublish() {
             // 本对象已经销毁
             return;
         }
-        strong_self->onShutdown(SockException(Err_shutdown));
+        strong_self->reportSrtError(SockException(Err_eof, "the media source was released"));
     });
     _ts_reader->setReadCB([weak_self](const TSMediaSource::RingDataType &ts_list) {
         auto strong_self = weak_self.lock();
@@ -115,9 +119,23 @@ void SrtPusher::doPublish() {
         size_t i = 0;
         auto size = ts_list->size();
         ts_list->for_each([&](const TSPacket::Ptr &ts) { 
-            strong_self->onSendTSData(ts, ++i == size); 
+            strong_self->sendTsData(ts, ++i == size);
         });
     });
+}
+
+void SrtPusher::sendTsData(const TSPacket::Ptr &packet, bool flush) {
+    if (!packet || !packet->size()) {
+        return;
+    }
+
+    if (_wait_for_key) {
+        if (!packet->key_pos) {
+            return;
+        }
+        _wait_for_key = false;
+    }
+    SrtCaller::onSendTSData(packet, flush);
 }
 
 size_t SrtPusher::getSendSpeed() {

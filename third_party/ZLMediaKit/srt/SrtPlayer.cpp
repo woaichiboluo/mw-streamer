@@ -21,6 +21,7 @@ namespace mediakit {
 
 SrtPlayer::SrtPlayer(const EventPoller::Ptr &poller) 
     : SrtCaller(poller) {
+    (*this)[Client::kSrtTrackReadyTimeoutMS] = 30000;
     DebugL;
 }
 
@@ -33,7 +34,7 @@ void SrtPlayer::play(const string &strUrl) {
     try {
         _url.parse(strUrl);
     } catch (std::exception &ex) {
-        onResult(SockException(Err_other, StrPrinter << "illegal srt url:" << ex.what()));
+        onResult(SockException(Err_other, StrPrinter << "illegal srt url:" << ex.what()), false);
         return;
     }
 
@@ -49,7 +50,12 @@ void SrtPlayer::play(const string &strUrl) {
 }
 
 void SrtPlayer::teardown() {
-    SrtCaller::onResult(SockException(Err_other, StrPrinter << "teardown: " << _url._full_url));
+    if (!getPoller()->isCurrentThread()) {
+        getPoller()->sync([this]() { teardown(); });
+        return;
+    }
+    _check_timer.reset();
+    teardownSrt();
 }
 
 void SrtPlayer::pause(bool bPause) {
@@ -61,13 +67,10 @@ void SrtPlayer::speed(float speed) {
 }
 
 void SrtPlayer::onHandShakeFinished() {
-    SrtCaller::onHandShakeFinished();
-    onResult(SockException(Err_success, "srt play success"));
+    onResult(SockException(Err_success, "srt play success"), false);
 }
 
-void SrtPlayer::onResult(const SockException &ex) {
-    SrtCaller::onResult(ex);
-
+void SrtPlayer::onResult(const SockException &ex, bool was_connected) {
      if (!ex) {
         // 播放成功
         onPlayResult(ex);
@@ -87,29 +90,31 @@ void SrtPlayer::onResult(const SockException &ex) {
                 }
                 if (strongSelf->_recv_ticker.elapsedTime() > timeout * 1000) {
                     // 接收媒体数据包超时
-                    strongSelf->onResult(SockException(Err_timeout, "receive srt media data timeout:" + strongSelf->_url._full_url));
+                    strongSelf->reportSrtError(
+                        SockException(Err_timeout, "receive srt media data timeout:" + strongSelf->_url._full_url));
                     return false;
                 }
 
                 return true;
             }, getPoller());
     } else {
+        _check_timer.reset();
         WarnL << ex.getErrCode() << " " << ex.what();
         if (ex.getErrCode() == Err_shutdown) {
             // 主动shutdown的，不触发回调
             return;
         }
-        if (!_is_handleshake_finished) {
-            onPlayResult(ex);
-        } else {
+        if (was_connected) {
             onShutdown(ex);
+        } else {
+            onPlayResult(ex);
         }
     }
     return;
 }
 
 
-void SrtPlayer::onSRTData(SRT::DataPacket::Ptr pkt) {
+void SrtPlayer::onSRTData(const toolkit::Buffer::Ptr &buffer) {
     _recv_ticker.resetTime();
 }
 
@@ -139,12 +144,42 @@ size_t SrtPlayer::getRecvTotalBytes() {
 ///////////////////////////////////////////////////
 // SrtPlayerImp
 
+void SrtPlayerImp::teardown() {
+    if (!getPoller()->isCurrentThread()) {
+        getPoller()->sync([this]() { teardown(); });
+        return;
+    }
+    _track_ready_timer.reset();
+    _play_result_emitted = true;
+    Super::teardown();
+}
+
 void SrtPlayerImp::onPlayResult(const toolkit::SockException &ex) {
     if (ex) {
+        _track_ready_timer.reset();
+        _play_result_emitted = true;
         Super::onPlayResult(ex);
+        return;
     }
-    //success result only occur when addTrackCompleted
-    return;
+
+    auto timeout_ms = (*this)[Client::kSrtTrackReadyTimeoutMS].as<uint64_t>();
+    if (timeout_ms) {
+        std::weak_ptr<SrtPlayerImp> weak_self =
+            std::static_pointer_cast<SrtPlayerImp>(shared_from_this());
+        _track_ready_timer = std::make_shared<Timer>(
+            timeout_ms / 1000.0f,
+            [weak_self, timeout_ms]() {
+                auto strong_self = weak_self.lock();
+                if (strong_self && !strong_self->_play_result_emitted) {
+                    strong_self->failTrackReady(SockException(
+                        Err_timeout,
+                        StrPrinter << "wait srt tracks ready timeout after " << timeout_ms << "ms"));
+                }
+                return false;
+            },
+            getPoller());
+    }
+    // success result only occurs when addTrackCompleted
 }
 
 std::vector<Track::Ptr> SrtPlayerImp::getTracks(bool ready /*= true*/) const {
@@ -152,19 +187,41 @@ std::vector<Track::Ptr> SrtPlayerImp::getTracks(bool ready /*= true*/) const {
 }
 
 void SrtPlayerImp::addTrackCompleted() {
+    if (_play_result_emitted) {
+        return;
+    }
+    _play_result_emitted = true;
+    _track_ready_timer.reset();
     Super::onPlayResult(toolkit::SockException(toolkit::Err_success, "play success"));
 }
 
-void SrtPlayerImp::onSRTData(SRT::DataPacket::Ptr pkt) {
-    SrtPlayer::onSRTData(pkt);
+void SrtPlayerImp::failTrackReady(const toolkit::SockException &ex) {
+    if (_play_result_emitted) {
+        return;
+    }
+    _play_result_emitted = true;
+    _track_ready_timer.reset();
+    SrtPlayer::teardown();
+    _decoder.reset();
+    _demuxer.reset();
+    Super::onPlayResult(ex);
+}
+
+void SrtPlayerImp::onSRTData(const toolkit::Buffer::Ptr &buffer) {
+    SrtPlayer::onSRTData(buffer);
 
     if (_benchmark_mode) {
         return;
     }
 
-    auto strong_self = shared_from_this();
     if (!_demuxer) {
         auto demuxer = std::make_shared<HlsDemuxer>();
+        // SRT/TS中途加入可能需要等待下一个长GOP关键帧。禁止MediaSink按全局
+        // 10秒规则删除未就绪轨道；由SRT专属定时器明确上报播放失败。
+        demuxer->setTrackReadyTimeoutMS(0);
+        GET_CONFIG(bool, add_mute_audio, Protocol::kAddMuteAudio);
+        auto &add_mute_audio_option = (*this)[Protocol::kAddMuteAudio];
+        demuxer->enableMuteAudio(add_mute_audio_option.empty() ? add_mute_audio : add_mute_audio_option.as<bool>());
         demuxer->start(getPoller(), this);
         _demuxer = std::move(demuxer);
     }
@@ -174,7 +231,7 @@ void SrtPlayerImp::onSRTData(SRT::DataPacket::Ptr pkt) {
     }
 
     if (_decoder && _demuxer) {
-        _decoder->input(reinterpret_cast<const uint8_t *>(pkt->payloadData()), pkt->payloadSize());
+        _decoder->input(reinterpret_cast<const uint8_t *>(buffer->data()), buffer->size());
     }
 
     return;

@@ -13,4 +13,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
+find_package(SRT REQUIRED)
+
 add_subdirectory(third_party/ZLMediaKit)

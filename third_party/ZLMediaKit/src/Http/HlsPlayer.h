@@ -27,12 +27,14 @@ class HlsDemuxer : public MediaSinkInterface , public TrackSource, public std::e
 public:
     ~HlsDemuxer() override { _timer = nullptr; }
 
+    void enableMuteAudio(bool flag) { _delegate.enableMuteAudio(flag); }
     void start(const toolkit::EventPoller::Ptr &poller, TrackListener *listener);
     bool inputFrame(const Frame::Ptr &frame) override;
     bool addTrack(const Track::Ptr &track) override { return _delegate.addTrack(track); }
     void addTrackCompleted() override { _delegate.addTrackCompleted(); }
     void resetTracks() override { ((MediaSink &)_delegate).resetTracks(); }
     std::vector<Track::Ptr> getTracks(bool ready = true) const override { return _delegate.getTracks(ready); }
+    void setTrackReadyTimeoutMS(uint32_t timeout_ms) { _delegate.setTrackReadyTimeoutMS(timeout_ms); }
     void pushTask(std::function<void()> task);
 
 private:
@@ -130,9 +132,9 @@ private:
     int _timeout_multiple = MIN_TIMEOUT_MULTIPLE;
     int _try_fetch_index_times = 0;
     int _ts_download_failed_count = 0;
-    // RFC 8216 reload interval depends on whether the last media sequence
-    // changed. We intentionally keep this lightweight and only track the
-    // sequence number for live playlist refresh timing.
+    // RFC 8216 reload interval depends on whether the playlist changed.
+    // A growing event playlist may append segments without changing its
+    // media sequence, so a newly observed segment also counts as a change.
     bool _playlist_reload_changed = true;
 
 protected:

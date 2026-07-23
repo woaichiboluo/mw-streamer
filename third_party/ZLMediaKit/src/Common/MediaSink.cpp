@@ -118,9 +118,9 @@ void MediaSink::checkTrackIfReady() {
         }
     }
 
-    // 等待音频超时时间
-    GET_CONFIG(uint32_t, kWaitAudioTrackDataMS, General::kWaitAudioTrackDataMS);
-    if (_max_track_size > 1) {
+    // 实例级Track超时策略会统一处理所有未就绪轨道，不再应用全局音频快速丢弃规则
+    if (!_track_ready_timeout_overridden && _max_track_size > 1) {
+        GET_CONFIG(uint32_t, kWaitAudioTrackDataMS, General::kWaitAudioTrackDataMS);
         for (auto it = _track_map.begin(); it != _track_map.end();) {
             if (it->second.first->getTrackType() == TrackAudio && _ticker.elapsedTime() > kWaitAudioTrackDataMS && !it->second.second) {
                 // 音频超时且完全没收到音频数据，忽略音频
@@ -137,8 +137,12 @@ void MediaSink::checkTrackIfReady() {
     }
 
     if (!_all_track_ready) {
-        GET_CONFIG(uint32_t, kMaxWaitReadyMS, General::kWaitTrackReadyMS);
-        if (_ticker.elapsedTime() > kMaxWaitReadyMS) {
+        uint32_t max_wait_ready_ms = _track_ready_timeout_ms;
+        if (!_track_ready_timeout_overridden) {
+            GET_CONFIG(uint32_t, configured_max_wait_ready_ms, General::kWaitTrackReadyMS);
+            max_wait_ready_ms = configured_max_wait_ready_ms;
+        }
+        if (max_wait_ready_ms && _ticker.elapsedTime() > max_wait_ready_ms) {
             // 如果超过规定时间，那么不再等待并忽略未准备好的Track  [AUTO-TRANSLATED:fd089806]
             // If it exceeds the specified time, then stop waiting and ignore unprepared Tracks
             emitAllTrackReady();
@@ -329,6 +333,11 @@ bool MediaSink::isAllTrackReady() const {
     return _all_track_ready;
 }
 
+void MediaSink::setTrackReadyTimeoutMS(uint32_t timeout_ms) {
+    _track_ready_timeout_overridden = true;
+    _track_ready_timeout_ms = timeout_ms;
+}
+
 void MediaSink::enableAudio(bool flag) {
     _enable_audio = flag;
 }
@@ -379,9 +388,17 @@ void Demuxer::setTrackListener(TrackListener *listener, bool wait_track_ready) {
     if (wait_track_ready) {
         auto sink = std::make_shared<MediaSinkDelegate>();
         sink->setTrackListener(listener);
+        sink->enableMuteAudio(_add_mute_audio);
         _sink = std::move(sink);
     }
     _listener = listener;
+}
+
+void Demuxer::enableMuteAudio(bool flag) {
+    _add_mute_audio = flag;
+    if (_sink) {
+        _sink->enableMuteAudio(flag);
+    }
 }
 
 bool Demuxer::addTrack(const Track::Ptr &track) {

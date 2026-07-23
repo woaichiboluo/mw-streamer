@@ -983,6 +983,9 @@ bool RtspPlayerImp::onCheckSDP(const std::string &sdp) {
         _rtsp_media_src->setSdp(sdp);
     }
     _demuxer = std::make_shared<RtspDemuxer>();
+    GET_CONFIG(bool, add_mute_audio, Protocol::kAddMuteAudio);
+    auto &add_mute_audio_option = (*this)[Protocol::kAddMuteAudio];
+    _demuxer->enableMuteAudio(add_mute_audio_option.empty() ? add_mute_audio : add_mute_audio_option.as<bool>());
     _demuxer->setTrackListener(this, (*this)[Client::kWaitTrackReady].as<bool>());
     _demuxer->loadSdp(sdp);
     return true;

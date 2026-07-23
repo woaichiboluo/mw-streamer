@@ -155,6 +155,13 @@ public:
     bool isAllTrackReady() const;
 
     /**
+     * 设置等待Track就绪的实例级超时时间；0表示不在MediaSink内部超时丢弃Track
+     * Set the per-instance timeout for waiting for Tracks to become ready;
+     * zero disables dropping unready Tracks inside MediaSink
+     */
+    void setTrackReadyTimeoutMS(uint32_t timeout_ms);
+
+    /**
      * 设置是否开启音频
      * Set whether to enable audio
      
@@ -249,7 +256,9 @@ private:
     bool _only_audio = false;
     bool _add_mute_audio = true;
     bool _all_track_ready = false;
+    bool _track_ready_timeout_overridden = false;
     size_t _max_track_size = 2;
+    uint32_t _track_ready_timeout_ms = 0;
 
     toolkit::Ticker _ticker;
     MuteAudioMaker::Ptr _mute_audio_maker;
@@ -282,6 +291,7 @@ private:
 class Demuxer : protected TrackListener, public TrackSource {
 public:
     void setTrackListener(TrackListener *listener, bool wait_track_ready = false);
+    void enableMuteAudio(bool flag);
     std::vector<Track::Ptr> getTracks(bool trackReady = true) const override;
 
 protected:
@@ -293,6 +303,7 @@ private:
     MediaSink::Ptr _sink;
     TrackListener *_listener = nullptr;
     std::vector<Track::Ptr> _origin_track;
+    bool _add_mute_audio = true;
 };
 
 }//namespace mediakit

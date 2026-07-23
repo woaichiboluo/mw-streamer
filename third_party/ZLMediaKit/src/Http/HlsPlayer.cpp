@@ -204,12 +204,28 @@ void HlsPlayer::fetchSegment() {
 
 bool HlsPlayer::onParsed(bool is_m3u8_inner, int64_t sequence, const map<int, ts_segment> &ts_map) {
     if (!is_m3u8_inner) {
-        auto playlist_changed = _last_sequence != sequence;
-        _playlist_reload_changed = playlist_changed;
+        auto sequence_changed = _last_sequence != sequence;
+        auto segment_added = false;
         // 这是ts播放列表  [AUTO-TRANSLATED:7ce3d81b]
         // This is the ts playlist
         // This is the ts playlist
-        if (!playlist_changed) {
+        _last_sequence = sequence;
+        for (auto &pr : ts_map) {
+            auto &ts = pr.second;
+            if (_ts_url_cache.emplace(ts.url).second) {
+                segment_added = true;
+                // 该ts未重复  [AUTO-TRANSLATED:4b6fab6b]
+                // This ts is not duplicated
+                // The ts is not repeated
+                _ts_list.emplace_back(ts);
+                // 按时间排序  [AUTO-TRANSLATED:7b61e414]
+                // Sort by time
+                // Sort by time
+                _ts_url_sort.emplace_back(ts.url);
+            }
+        }
+        _playlist_reload_changed = sequence_changed || segment_added;
+        if (!segment_added) {
             // 如果是重复的ts列表，那么忽略  [AUTO-TRANSLATED:d15a47f3]
             // If it is a duplicate ts list, then ignore it
             // 但是需要注意, 如果当前ts列表为空了, 那么表明直播结束了或者m3u8文件有问题,需要重新拉流  [AUTO-TRANSLATED:438a8df0]
@@ -228,21 +244,7 @@ bool HlsPlayer::onParsed(bool is_m3u8_inner, int64_t sequence, const map<int, ts
             return true;
         }
 
-        _last_sequence = sequence;
         _wait_index_update_ticker.resetTime();
-        for (auto &pr : ts_map) {
-            auto &ts = pr.second;
-            if (_ts_url_cache.emplace(ts.url).second) {
-                // 该ts未重复  [AUTO-TRANSLATED:4b6fab6b]
-                // This ts is not duplicated
-                // The ts is not repeated
-                _ts_list.emplace_back(ts);
-                // 按时间排序  [AUTO-TRANSLATED:7b61e414]
-                // Sort by time
-                // Sort by time
-                _ts_url_sort.emplace_back(ts.url);
-            }
-        }
         if (_ts_url_sort.size() > 2 * ts_map.size()) {
             // 去除防重列表中过多的数据  [AUTO-TRANSLATED:94173d03]
             // Remove excessive data from the anti-repetition list
@@ -502,6 +504,9 @@ void HlsPlayerImp::onPlayResult(const SockException &ex) {
         PlayerImp<HlsPlayer, PlayerBase>::onPlayResult(ex);
     } else {
         auto demuxer = std::make_shared<HlsDemuxer>();
+        GET_CONFIG(bool, add_mute_audio, Protocol::kAddMuteAudio);
+        auto &add_mute_audio_option = (*this)[Protocol::kAddMuteAudio];
+        demuxer->enableMuteAudio(add_mute_audio_option.empty() ? add_mute_audio : add_mute_audio_option.as<bool>());
         demuxer->start(getPoller(), this);
         _demuxer = std::move(demuxer);
     }

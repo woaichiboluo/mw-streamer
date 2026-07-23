@@ -43,8 +43,8 @@ protected:
 
     //// SrtCaller override////
     void onHandShakeFinished() override;
-    void onSRTData(SRT::DataPacket::Ptr pkt) override;
-    void onResult(const toolkit::SockException &ex) override;
+    void onSRTData(const toolkit::Buffer::Ptr &buffer) override;
+    void onResult(const toolkit::SockException &ex, bool was_connected) override;
 
     bool isPlayer() override {return true;}
 

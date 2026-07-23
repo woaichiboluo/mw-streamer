@@ -517,6 +517,9 @@ extern const std::string kRtspSpeed;
 extern const std::string kLatency;
 // Set SRT PassPhrase
 extern const std::string kPassPhrase;
+// SRT等待所有声明轨道就绪的超时时间，默认30000毫秒；0表示不超时
+// Timeout for SRT to wait for all declared tracks, default 30000ms; zero disables the timeout
+extern const std::string kSrtTrackReadyTimeoutMS;
 // 自定义rtsp/http头
 extern const std::string kCustomHeader;
 // 指定采用什么播放协议

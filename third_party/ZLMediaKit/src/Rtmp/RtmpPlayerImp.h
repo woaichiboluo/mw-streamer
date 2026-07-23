@@ -90,6 +90,9 @@ private:
             return;
         }
         _demuxer = std::make_shared<RtmpDemuxer>();
+        GET_CONFIG(bool, add_mute_audio, Protocol::kAddMuteAudio);
+        auto &add_mute_audio_option = this->Super::operator[](Protocol::kAddMuteAudio);
+        _demuxer->enableMuteAudio(add_mute_audio_option.empty() ? add_mute_audio : add_mute_audio_option.template as<bool>());
         //TraceL<<" _wait_track_ready "<<_wait_track_ready;
         _demuxer->setTrackListener(this, _wait_track_ready);
         _demuxer->loadMetaData(val);

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2016-present The ZLMediaKit project authors. All Rights Reserved.
  *
  * This file is part of ZLMediaKit(https://github.com/ZLMediaKit/ZLMediaKit).
@@ -9,1070 +9,726 @@
  */
 
 #include "SrtCaller.h"
-#include "srt/Ack.hpp"
-#include "Common/config.h"
+
+#include <algorithm>
+#include <cstring>
+#include <utility>
+
+#include <srt/srt.h>
+
 #include "Common/Parser.h"
-#include <random>
+#include "SrtEpollReactor.h"
+#include "Util/util.h"
 
 using namespace toolkit;
 using namespace std;
-using namespace SRT;
-
-namespace SRT {
-
-static const std::string kTimeOutSec = "srt.timeoutSec";
-static const std::string kLatencyMul = "srt.latencyMul";
-static const std::string kPktBufSize = "srt.pktBufSize";
-
-static toolkit::onceToken s_srt_config([]() {
-    toolkit::mINI::Instance()[kTimeOutSec] = 5;
-    toolkit::mINI::Instance()[kLatencyMul] = 4;
-    toolkit::mINI::Instance()[kPktBufSize] = 8192;
-});
-
-} // namespace SRT
 
 namespace mediakit {
 
-//zlm play format
-//srt://127.0.0.1:9000?streamid=#!::r=live/test
-//srt://127.0.0.1:9000?streamid=#!::r=live/test,h=__defaultVhost__
-//zlm push format
-//srt://127.0.0.1:9000?streamid=#!::r=live/test,m=publish
-//srt://127.0.0.1:9000?streamid=#!::r=live/test,h=__defaultVhost__,m=publish
-void SrtUrl::parse(const string &strUrl) {
-    //DebugL << "url: " << strUrl;
-    _full_url = strUrl;
-    auto url = strUrl;
+constexpr size_t SrtCaller::kMaxQueueBytes;
+constexpr size_t SrtCaller::kLivePayloadSize;
+constexpr size_t SrtCaller::kLiveMaxPayloadSize;
+constexpr size_t SrtCaller::kReceiveSlotCount;
+constexpr size_t SrtCaller::kMaxPacketsPerEvent;
 
-    auto ip = findSubString(url.data(), "://", "?");
-    splitUrl(ip, _host, _port);
+namespace {
 
-    if (!SockUtil::getDomainIP(_host.c_str(), _port, _addr, AF_INET, SOCK_DGRAM, IPPROTO_UDP)) {
-        throw std::invalid_argument("invalid host: " + _host);
+SockException makeSrtException(const string &operation, int srt_error) {
+    ErrCode code = Err_other;
+    switch (srt_error) {
+        case SRT_ETIMEOUT:
+            code = Err_timeout;
+            break;
+        case SRT_ECONNREJ:
+            code = Err_refused;
+            break;
+        case SRT_ECONNLOST:
+        case SRT_ENOCONN:
+            code = Err_reset;
+            break;
+        default:
+            break;
     }
-
-    auto _params = findSubString(url.data(), "?" , NULL);
-
-    auto kv = Parser::parseArgs(_params);
-    auto it = kv.find("streamid");
-    if (it != kv.end()) {
-        auto streamid = it->second;
-        if (!toolkit::start_with(streamid, "#!::")) {
-            return;
-        }
-        _streamid = streamid;
-    }
-
-    //TraceL << "ip:      " << ip;
-    //TraceL << "_host:   " << _host;
-    //TraceL << "_port:   " << _port;
-    //TraceL << "_params: " << _params;
-    //TraceL << "_streamid: " << _streamid;
-    return;
+    const char *detail = srt_getlasterror_str();
+    return SockException(code, operation + ": " + (detail ? detail : "unknown libsrt error"), srt_error);
 }
 
-
-////////////  SrtCaller //////////////////////////
-SrtCaller::SrtCaller(const toolkit::EventPoller::Ptr &poller) {
-    _poller = poller ? std::move(poller) : EventPollerPool::Instance().getPoller();
-    _start_timestamp = SteadyClock::now();
-    _socket_id       = generateSocketId();
-
-    /* _init_seq_number = generateInitSeq(); */
-    _init_seq_number = 0;
-
-    _last_pkt_seq                    = _init_seq_number - 1;
-    _pkt_recv_rate_context           = std::make_shared<SRT::PacketRecvRateContext>(_start_timestamp);
-    _estimated_link_capacity_context = std::make_shared<SRT::EstimatedLinkCapacityContext>(_start_timestamp);
-    _estimated_link_capacity_context->setLastSeq(_last_pkt_seq);
-
-    _send_packet_seq_number = _init_seq_number;
+SockException makeSocketStateException(SRTSOCKET fd, bool was_connected) {
+    if (!was_connected) {
+        auto reason = srt_getrejectreason(fd);
+        const char *detail = srt_rejectreason_str(reason);
+        return SockException(Err_refused,
+                             string("srt connection rejected: ") + (detail ? detail : "unknown reason"),
+                             reason);
+    }
+    return SockException(Err_reset, "srt connection closed");
 }
 
-SrtCaller::~SrtCaller(void) {
-    DebugL;
+template <typename T>
+bool setSocketOption(SRTSOCKET fd, SRT_SOCKOPT option, const T &value, const char *name, SockException &ex) {
+    if (srt_setsockflag(fd, option, &value, sizeof(value)) != SRT_ERROR) {
+        return true;
+    }
+    auto error = srt_getlasterror(nullptr);
+    ex = makeSrtException(string("set ") + name, error);
+    return false;
+}
+
+} // namespace
+
+// srt://127.0.0.1:9000?streamid=#!::r=live/test
+// srt://127.0.0.1:9000?streamid=#!::r=live/test,m=publish
+void SrtUrl::parse(const string &url) {
+    _full_url = url;
+    _params.clear();
+    _streamid.clear();
+    _host.clear();
+    _port = 0;
+    memset(&_addr, 0, sizeof(_addr));
+
+    auto address = findSubString(url.data(), "://", "?");
+    splitUrl(address, _host, _port);
+    if (_host.empty() || !_port) {
+        throw invalid_argument("missing host or port");
+    }
+
+    if (!SockUtil::getDomainIP(_host.c_str(), _port, _addr, AF_UNSPEC, SOCK_DGRAM, IPPROTO_UDP)) {
+        throw invalid_argument("invalid host: " + _host);
+    }
+
+    _params = findSubString(url.data(), "?", nullptr);
+    auto args = Parser::parseArgs(_params);
+    auto it = args.find("streamid");
+    if (it != args.end()) {
+        _streamid = it->second;
+    }
+}
+
+SrtCaller::SrtCaller(const EventPoller::Ptr &poller)
+    : _poller(poller ? poller : EventPollerPool::Instance().getPoller()) {}
+
+SrtCaller::~SrtCaller() {
+    teardownSrt();
+}
+
+void SrtCaller::prepareReceiveSlots() {
+    if (!isPlayer()) {
+        return;
+    }
+
+    lock_guard<mutex> lock(_recv_mutex);
+    while (_recv_slot_count < kReceiveSlotCount) {
+        _recv_free_slots.emplace_back(BufferRaw::create(kLiveMaxPayloadSize));
+        ++_recv_slot_count;
+    }
+}
+
+bool SrtCaller::configureSocket(int32_t socket, SockException &ex) {
+    auto fd = static_cast<SRTSOCKET>(socket);
+    auto transport = SRTT_LIVE;
+    bool async = false;
+    bool sender = !isPlayer();
+    auto timeout_ms = max(1, static_cast<int>(getTimeOutSec() * 1000));
+    auto payload_size = static_cast<int>(kLivePayloadSize);
+
+    if (!setSocketOption(fd, SRTO_TRANSTYPE, transport, "SRTO_TRANSTYPE", ex)
+        || !setSocketOption(fd, SRTO_RCVSYN, async, "SRTO_RCVSYN", ex)
+        || !setSocketOption(fd, SRTO_SNDSYN, async, "SRTO_SNDSYN", ex)
+        || !setSocketOption(fd, SRTO_SENDER, sender, "SRTO_SENDER", ex)
+        || !setSocketOption(fd, SRTO_CONNTIMEO, timeout_ms, "SRTO_CONNTIMEO", ex)) {
+        return false;
+    }
+
+    if (sender && !setSocketOption(fd, SRTO_PAYLOADSIZE, payload_size, "SRTO_PAYLOADSIZE", ex)) {
+        return false;
+    }
+
+    auto latency = static_cast<int>(getLatency());
+    if (latency > 0 && !setSocketOption(fd, SRTO_LATENCY, latency, "SRTO_LATENCY", ex)) {
+        return false;
+    }
+
+    if (!_url._streamid.empty()
+        && srt_setsockflag(fd, SRTO_STREAMID, _url._streamid.data(), static_cast<int>(_url._streamid.size())) == SRT_ERROR) {
+        auto error = srt_getlasterror(nullptr);
+        ex = makeSrtException("set SRTO_STREAMID", error);
+        return false;
+    }
+
+    auto passphrase = getPassphrase();
+    if (!passphrase.empty()
+        && srt_setsockflag(fd, SRTO_PASSPHRASE, passphrase.data(), static_cast<int>(passphrase.size())) == SRT_ERROR) {
+        auto error = srt_getlasterror(nullptr);
+        ex = makeSrtException("set SRTO_PASSPHRASE", error);
+        return false;
+    }
+    return true;
 }
 
 void SrtCaller::onConnect() {
-    //DebugL;
+    teardownSrt();
 
-    _socket = Socket::createSocket(_poller, false);
-    _socket->bindUdpSock(0, _url._addr.ss_family == AF_INET ? "0.0.0.0" : "::");
-    _socket->bindPeerAddr((struct sockaddr *)&_url._addr, 0, true);
+    auto &reactor = SrtEpollReactor::Instance();
+    if (!reactor.available()) {
+        onResult(SockException(Err_other, "libsrt reactor is unavailable"), false);
+        return;
+    }
+
+    try {
+        prepareReceiveSlots();
+    } catch (const exception &ex) {
+        onResult(SockException(Err_other, string("allocate srt receive slots failed: ") + ex.what()), false);
+        return;
+    }
+
+    auto fd = srt_create_socket();
+    if (fd == SRT_INVALID_SOCK) {
+        auto error = srt_getlasterror(nullptr);
+        onResult(makeSrtException("create srt socket", error), false);
+        return;
+    }
+
+    SockException configure_error;
+    if (!configureSocket(fd, configure_error)) {
+        srt_close(fd);
+        onResult(configure_error, false);
+        return;
+    }
+
+    const auto generation = _generation.fetch_add(1) + 1;
+    _connect_posted = false;
+    _terminal_posted = false;
+    _state = State::Connecting;
+    {
+        lock_guard<mutex> lock(_socket_mutex);
+        _socket = fd;
+        _registration_token = SrtEpollReactor::kInvalidRegistrationToken;
+    }
 
     weak_ptr<SrtCaller> weak_self = shared_from_this();
-    _socket->setOnRead([weak_self](const Buffer::Ptr &buf, struct sockaddr *addr, int addr_len) mutable {
-        auto strong_self = weak_self.lock();
-        if (!strong_self) {
+    auto token = reactor.registerSocket(fd, SRT_EPOLL_OUT | SRT_EPOLL_ERR,
+                                        [weak_self, generation](SRTSOCKET socket,
+                                                                SrtEpollReactor::RegistrationToken token,
+                                                                int events) {
+                                            auto strong_self = weak_self.lock();
+                                            if (strong_self) {
+                                                strong_self->onReactorEvent(socket, token, events, generation);
+                                            }
+                                        });
+    if (token == SrtEpollReactor::kInvalidRegistrationToken) {
+        {
+            lock_guard<mutex> lock(_socket_mutex);
+            if (_socket == fd) {
+                _socket = SRT_INVALID_SOCK;
+            }
+        }
+        srt_close(fd);
+        auto ex = SockException(Err_other, "register srt socket to reactor failed");
+        _terminal_posted = true;
+        handleError(ex, generation);
+        return;
+    }
+    {
+        lock_guard<mutex> lock(_socket_mutex);
+        _socket = fd;
+        _registration_token = token;
+    }
+
+    auto addr = reinterpret_cast<const sockaddr *>(&_url._addr);
+    auto result = srt_connect(fd, addr, SockUtil::get_sock_len(addr));
+    if (result == SRT_ERROR) {
+        auto error = srt_getlasterror(nullptr);
+        if (error != SRT_EASYNCSND && error != SRT_EASYNCRCV) {
+            _terminal_posted = true;
+            handleError(makeSrtException("connect srt socket", error), generation);
             return;
         }
-        strong_self->inputSockData((uint8_t*)buf->data(), buf->size(), addr);
-    });
-
-    doHandshake();
-}
-
-void SrtCaller::onResult(const SockException &ex) {
-    if (!ex) {
-        // 会话建立成功
     } else {
-        if (ex.getErrCode() == Err_shutdown) {
-            // 主动shutdown的，不触发回调
-            return;
-        }
-
-        if (_socket && _is_handleshake_finished) {
-            sendShutDown();
-        }
-        _is_handleshake_finished = false;
-        _handleshake_timer.reset();
-        _keeplive_timer.reset();
-        _announce_timer.reset();
-    }
-    return;
-}
-
-void SrtCaller::onHandShakeFinished() {
-    DebugL;
-    _is_handleshake_finished = true;
-    if (_handleshake_timer) {
-        _handleshake_timer.reset();
-    }
-    _handleshake_req = nullptr;
-
-    std::weak_ptr<SrtCaller> weak_self = std::static_pointer_cast<SrtCaller>(shared_from_this());
-    _keeplive_timer = std::make_shared<Timer>(0.2, [weak_self]()->bool{
-        auto strong_self = weak_self.lock();
-        if (!strong_self) {
-            return false;
-        }
-
-        //Keep-alive control packets are sent after a certain timeout from the last time any packet (Control or Data) was sent. 
-        //The default timeout for a keep-alive packet to be sent is 1 second.
-        if (strong_self->_send_ticker.elapsedTime() > 1000) {
-            strong_self->sendKeepLivePacket();
-        }
-        return true;
-    }, getPoller());
-
-    return;
-}
-
-void SrtCaller::onSRTData(DataPacket::Ptr pkt) {
-    InfoL;
-    if (!isPlayer()) {
-        WarnL << "this is not a player data ignore";
-        return;
+        onReactorEvent(fd, token, SRT_EPOLL_OUT, generation);
     }
 }
 
-void SrtCaller::onSendTSData(const Buffer::Ptr &buffer, bool flush) {
-    // TraceL;
-    //
-    DataPacket::Ptr pkt;
-    size_t payloadSize = getPayloadSize();
-    size_t size = buffer->size();
-    char *ptr = buffer->data();
-    char *end = buffer->data() + size;
-
-
-    while (ptr < end && size >= payloadSize) {
-        pkt = std::make_shared<DataPacket>();
-        pkt->f = 0;
-        pkt->packet_seq_number = _send_packet_seq_number & 0x7fffffff;
-        _send_packet_seq_number = (_send_packet_seq_number + 1) & 0x7fffffff;
-        pkt->PP = 3;
-        pkt->O = 0;
-        pkt->KK = 0;
-        pkt->R = 0;
-        pkt->msg_number = _send_msg_number++;
-        pkt->dst_socket_id = _peer_socket_id;
-        pkt->timestamp = DurationCountMicroseconds(SteadyClock::now() - _start_timestamp);
-
-        sendDataPacket(pkt, ptr, (int)payloadSize, flush);
-        ptr += payloadSize;
-        size -= payloadSize;
-    }
-
-    if (size > 0 && ptr < end) {
-        pkt = std::make_shared<DataPacket>();
-        pkt->f = 0;
-        pkt->packet_seq_number = _send_packet_seq_number & 0x7fffffff;
-        _send_packet_seq_number = (_send_packet_seq_number + 1) & 0x7fffffff;
-        pkt->PP = 3;
-        pkt->O = 0;
-        pkt->KK = 0;
-        pkt->R = 0;
-        pkt->msg_number = _send_msg_number++;
-        pkt->dst_socket_id = _peer_socket_id;
-        pkt->timestamp = DurationCountMicroseconds(SteadyClock::now() - _start_timestamp);
-        sendDataPacket(pkt, ptr, (int)size, flush);
-    }
-}
-
-void SrtCaller::inputSockData(uint8_t *buf, int len, struct sockaddr *addr) {
-    //TraceL << hexdump((void*)buf, len);
-
-    using srt_control_handler = void (SrtCaller::*)(uint8_t * buf, int len, struct sockaddr *addr);
-    static std::unordered_map<uint16_t, srt_control_handler> s_control_functions;
-    static onceToken token([]() {
-        s_control_functions.emplace(SRT::ControlPacket::HANDSHAKE, &SrtCaller::handleHandshake);
-        s_control_functions.emplace(SRT::ControlPacket::ACK, &SrtCaller::handleACK);
-        s_control_functions.emplace(SRT::ControlPacket::ACKACK, &SrtCaller::handleACKACK);
-        s_control_functions.emplace(SRT::ControlPacket::NAK, &SrtCaller::handleNAK);
-        s_control_functions.emplace(SRT::ControlPacket::DROPREQ, &SrtCaller::handleDropReq);
-        s_control_functions.emplace(SRT::ControlPacket::KEEPALIVE, &SrtCaller::handleKeeplive);
-        s_control_functions.emplace(SRT::ControlPacket::SHUTDOWN, &SrtCaller::handleShutDown);
-        s_control_functions.emplace(SRT::ControlPacket::PEERERROR, &SrtCaller::handlePeerError);
-        s_control_functions.emplace(SRT::ControlPacket::CONGESTIONWARNING, &SrtCaller::handleCongestionWarning);
-        s_control_functions.emplace(SRT::ControlPacket::USERDEFINEDTYPE, &SrtCaller::handleUserDefinedType);
-    });
-
-    _alive_ticker.resetTime();
-    _now = SteadyClock::now();
-
-    // 处理srt数据
-    if (DataPacket::isDataPacket(buf, len)) {
-        if (_is_handleshake_finished && isPlayer()) {
-            uint32_t socketId = DataPacket::getSocketID(buf, len);
-            if (socketId == _socket_id) {
-                _pkt_recv_rate_context->inputPacket(_now, len + UDP_HDR_SIZE);
-                handleDataPacket(buf, len, addr);
-                checkAndSendAckNak();
-            }
-        }
-    } else if (ControlPacket::isControlPacket(buf, len)) {
-            uint32_t socketId = ControlPacket::getSocketID(buf, len);
-            uint16_t type = ControlPacket::getControlType(buf, len);
-
-            auto it = s_control_functions.find(type);
-            if (it == s_control_functions.end()) {
-                WarnL << " not support type ignore: " << ControlPacket::getControlType(buf, len);
-                return;
-            } else {
-                (this->*(it->second))(buf, len, addr);
-            }
-
-            if (_is_handleshake_finished && isPlayer()){
-                checkAndSendAckNak();
-            }
-
-    } else {
-        // not reach
-        WarnL << "not reach this";
-    }
-}
-
-void SrtCaller::doHandshake() {
-    _alive_ticker.resetTime();
-    if (!_alive_timer) {
-        createTimerForCheckAlive();
-    }
-
-    if (!getPassphrase().empty()) {
-        _crypto = std::make_shared<SRT::Crypto>(getPassphrase());
-    }
- 
-    sendHandshakeInduction();
-    return;
-}
-
-void SrtCaller::sendHandshakeInduction() {
-    DebugL;
-    _induction_ts = SteadyClock::now();
-
-    SRT::HandshakePacket::Ptr req = std::make_shared<SRT::HandshakePacket>();
-    req->timestamp     = DurationCountMicroseconds(_induction_ts - _start_timestamp);
-    req->dst_socket_id = 0;
-
-    req->version                        = 4;
-    req->encryption_field               = 0;
-    req->extension_field                = 0x0002;
-    req->initial_packet_sequence_number = _init_seq_number;
-    req->mtu                            = _mtu;
-    req->max_flow_window_size           = _max_flow_window_size;
-    req->handshake_type                 = SRT::HandshakePacket::HS_TYPE_INDUCTION;
-    req->srt_socket_id                  = _socket_id;
-    req->syn_cookie                     = 0;
-
-    req->assignPeerIPBE(&_url._addr);
-    req->storeToData();
-    _handleshake_req = req;
-    sendControlPacket(req, true);
-
-    std::weak_ptr<SrtCaller> weak_self = std::static_pointer_cast<SrtCaller>(shared_from_this());
-    _handleshake_timer = std::make_shared<Timer>(0.2, [weak_self]()->bool{
-        auto strong_self = weak_self.lock();
-        if (!strong_self) {
-            return false;
-        }
-
-        if (strong_self->_is_handleshake_finished) {
-            return false;
-        }
-        strong_self->sendControlPacket(strong_self->_handleshake_req, true);
-        return true;
-    }, getPoller());
-
-    return;
-}
-
-void SrtCaller::sendHandshakeConclusion() {
-    DebugL;
- 
-    SRT::HandshakePacket::Ptr req = std::make_shared<SRT::HandshakePacket>();
-    req->timestamp     = DurationCountMicroseconds(_now - _start_timestamp);
-    req->dst_socket_id = 0;
-
-    req->version                         = 5;
-    req->encryption_field                = SRT::HandshakePacket::NO_ENCRYPTION;
-    req->extension_field                 = HandshakePacket::HS_EXT_FILED_HSREQ | HandshakePacket::HS_EXT_FILED_CONFIG;
-    if (_crypto) {
-        //The default value is 0 (no encryption advertised). 
-        //If neither peer advertises encryption, AES-128 is selected by default 
-        /* req->encryption_field = SRT::HandshakePacket::AES_128; */
-        req->extension_field |= HandshakePacket::HS_EXT_FILED_KMREQ;
-    }
-    req->initial_packet_sequence_number  = _init_seq_number;
-    req->mtu                             = _mtu;
-    req->max_flow_window_size            = _max_flow_window_size;
-    req->handshake_type                  = SRT::HandshakePacket::HS_TYPE_CONCLUSION;
-    req->srt_socket_id                   = _socket_id;
-    req->syn_cookie                      = _sync_cookie;
-
-    req->assignPeerIPBE(&_url._addr);
-
-    HSExtMessage::Ptr ext = std::make_shared<HSExtMessage>();
-    ext->extension_type = HSExt::SRT_CMD_HSREQ;
-    ext->srt_version = srtVersion(1, 5, 0);
-    ext->srt_flag = 0xbf;
-
-    // if set latency, use set value
-    _delay = getLatency();
-    if (0 == _delay) {
-        //The value of minimum TsbpdDelay is negotiated during the SRT handshake exchange and is equal to 120 milliseconds. 
-        //The recommended value of TsbpdDelay is 3-4 times RTT.
-        _delay = DurationCountMicroseconds(_now - _induction_ts) * getLatencyMul() / 1000;
-        if (_delay <= 120) {
-            _delay = 120;
-        }
-    }
-
-    ext->recv_tsbpd_delay = _delay;
-    ext->send_tsbpd_delay = _delay;
-    req->ext_list.push_back(std::move(ext));
-
-    HSExtStreamID::Ptr extStreamId = std::make_shared<HSExtStreamID>();
-    extStreamId->streamid = generateStreamId();
-    req->ext_list.push_back(std::move(extStreamId));
-
-    if (_crypto) {
-        HSExtKeyMaterial::Ptr keyMaterial = _crypto->generateKeyMaterialExt(HSExt::SRT_CMD_KMREQ);
-        req->ext_list.push_back(std::move(keyMaterial));
-    }
-
-    req->storeToData();
-    _handleshake_req = req;
-    sendControlPacket(req);
-
-    return;
-}
-
-void SrtCaller::sendACKPacket() {
-    uint32_t recv_rate = 0;
-
-    SRT::ACKPacket::Ptr pkt = std::make_shared<SRT::ACKPacket>();
-    pkt->dst_socket_id = _peer_socket_id;
-    pkt->timestamp = DurationCountMicroseconds(_now - _start_timestamp);
-    pkt->ack_number = ++_ack_number_count;
-    pkt->last_ack_pkt_seq_number = _recv_buf->getExpectedSeq();
-    pkt->rtt = _rtt;
-    pkt->rtt_variance = _rtt_variance;
-    pkt->available_buf_size = _recv_buf->getAvailableBufferSize();
-    pkt->pkt_recv_rate = _pkt_recv_rate_context->getPacketRecvRate(recv_rate);
-    pkt->estimated_link_capacity = _estimated_link_capacity_context->getEstimatedLinkCapacity();
-    pkt->recv_rate = recv_rate;
-    if(0){
-        TraceL<<pkt->pkt_recv_rate<<" pkt/s "<<recv_rate<<" byte/s "<<pkt->estimated_link_capacity<<" pkt/s (cap) "<<pkt->available_buf_size<<" available buf";
-        //TraceL<<_pkt_recv_rate_context->dump();
-        //TraceL<<"recv estimated:";
-        //TraceL<< _pkt_recv_rate_context->dump();
-        //TraceL<<"recv queue:";
-        //TraceL<<_recv_buf->dump();
-    }
-    if (pkt->available_buf_size < 2) {
-        pkt->available_buf_size = 2;
-    }
-    pkt->storeToData();
-    _ack_send_timestamp[pkt->ack_number] = _now;
-    _last_ack_pkt_seq = pkt->last_ack_pkt_seq_number;
-    sendControlPacket(pkt, true);
-    // TraceL<<"send  ack "<<pkt->dump();
-    // TraceL<<_recv_buf->dump();
-    return;
-}
-
-void SrtCaller::sendLightACKPacket() {
-    ACKPacket::Ptr pkt = std::make_shared<ACKPacket>();
-    pkt->dst_socket_id = _peer_socket_id;
-    pkt->timestamp = DurationCountMicroseconds(_now - _start_timestamp);
-    pkt->ack_number = 0;
-    pkt->last_ack_pkt_seq_number = _recv_buf->getExpectedSeq();
-    pkt->rtt = 0;
-    pkt->rtt_variance = 0;
-    pkt->available_buf_size = 0;
-    pkt->pkt_recv_rate = 0;
-    pkt->estimated_link_capacity = 0;
-    pkt->recv_rate = 0;
-    pkt->storeToData();
-    _last_ack_pkt_seq = pkt->last_ack_pkt_seq_number;
-    sendControlPacket(pkt, true);
-    TraceL << "send  ack " << pkt->dump();
-    return;
-}
-
-void SrtCaller::sendNAKPacket(std::list<SRT::PacketQueue::LostPair> &lost_list) {
-    SRT::NAKPacket::Ptr pkt = std::make_shared<SRT::NAKPacket>();
-    std::list<SRT::PacketQueue::LostPair> tmp;
-    auto size = SRT::NAKPacket::getCIFSize(lost_list);
-    size_t paylaod_size = getPayloadSize();
-    if (size > paylaod_size) {
-        WarnL << "loss report cif size " << size;
-        size_t num = paylaod_size / 8;
-
-        size_t msgNum = (lost_list.size() + num - 1) / num;
-        decltype(lost_list.begin()) cur, next;
-        for (size_t i = 0; i < msgNum; ++i) {
-            cur = lost_list.begin();
-            std::advance(cur, i * num);
-
-            if (i == msgNum - 1) {
-                next = lost_list.end();
-            } else {
-                next = lost_list.begin();
-                std::advance(next, (i + 1) * num);
-            }
-            tmp.assign(cur, next);
-            pkt->dst_socket_id = _peer_socket_id;
-            pkt->timestamp = DurationCountMicroseconds(_now - _start_timestamp);
-            pkt->lost_list = tmp;
-            pkt->storeToData();
-            sendControlPacket(pkt, true);
-        }
-
-    } else {
-        pkt->dst_socket_id = _peer_socket_id;
-        pkt->timestamp = DurationCountMicroseconds(_now - _start_timestamp);
-        pkt->lost_list = lost_list;
-        pkt->storeToData();
-        sendControlPacket(pkt, true);
-    }
-
-    // TraceL<<"send NAK "<<pkt->dump();
-    return;
-}
-
-void SrtCaller::sendMsgDropReq(uint32_t first, uint32_t last) {
-    MsgDropReqPacket::Ptr pkt = std::make_shared<MsgDropReqPacket>();
-    pkt->dst_socket_id = _peer_socket_id;
-    pkt->timestamp = DurationCountMicroseconds(_now - _start_timestamp);
-    pkt->first_pkt_seq_num = first;
-    pkt->last_pkt_seq_num = last;
-    pkt->storeToData();
-    sendControlPacket(pkt, true);
-    return;
-}
-
-void SrtCaller::sendKeepLivePacket() {
-    auto now = SteadyClock::now();
-    SRT::KeepLivePacket::Ptr req = std::make_shared<SRT::KeepLivePacket>();
-    req->timestamp = SRT::DurationCountMicroseconds(now - _start_timestamp);
-    req->dst_socket_id = _peer_socket_id;
-    req->storeToData();
-    sendControlPacket(req, true);
-    return;
-}
-
-void SrtCaller::sendShutDown() {
-    auto now = SteadyClock::now();
-    ShutDownPacket::Ptr pkt = std::make_shared<ShutDownPacket>();
-    pkt->dst_socket_id = _peer_socket_id;
-    pkt->timestamp = SRT::DurationCountMicroseconds(now - _start_timestamp);
-    pkt->storeToData();
-    sendControlPacket(pkt, true);
-    return;
-}
-
-void SrtCaller::tryAnnounceKeyMaterial() {
-    //TraceL;
-
-    if (!_crypto) {
+void SrtCaller::onReactorEvent(int32_t fd,
+                               SrtEpollReactor::RegistrationToken token,
+                               int events,
+                               uint64_t generation) {
+    if (_generation != generation || _terminal_posted) {
         return;
     }
 
-    auto pkt = _crypto->takeAwayAnnouncePacket();
-    if (!pkt) {
+    auto state = _state.load();
+    if (events & SRT_EPOLL_ERR) {
+        postError(makeSocketStateException(fd, state == State::Connected), generation);
         return;
     }
 
-    auto now = SteadyClock::now();
-    pkt->dst_socket_id = _peer_socket_id;
-    pkt->timestamp = SRT::DurationCountMicroseconds(now - _start_timestamp);
-    pkt->storeToData();
-    _announce_req = pkt;
-    sendControlPacket(pkt, true);
-
-    std::weak_ptr<SrtCaller> weak_self = std::static_pointer_cast<SrtCaller>(shared_from_this());
-    _announce_timer = std::make_shared<Timer>(0.2, [weak_self]()->bool{
-        auto strong_self = weak_self.lock();
-        if (!strong_self) {
-            return false;
+    if (state == State::Connecting && (events & SRT_EPOLL_OUT)) {
+        bool connected = false;
+        {
+            lock_guard<mutex> lock(_socket_mutex);
+            connected = _socket == fd && _generation == generation
+                        && srt_getsockstate(fd) == SRTS_CONNECTED;
         }
-        if (!strong_self->_announce_req) {
-            return false;
-        }
-
-        strong_self->sendControlPacket(strong_self->_announce_req, true);
-        return true;
-    }, getPoller());
-
-    return;
-}
-
-void SrtCaller::sendControlPacket(SRT::ControlPacket::Ptr pkt, bool flush) {
-    //TraceL;
-    sendPacket(pkt, flush);
-    return;
-}
-
-void SrtCaller::sendDataPacket(SRT::DataPacket::Ptr pkt, char *buf, int len, bool flush) {
-    auto data = buf;
-    auto size = len;
-    BufferLikeString::Ptr payload;
-    if (_crypto) {
-        payload = _crypto->encrypt(pkt, const_cast<char*>(buf), len);
-        if (!payload) {
-            WarnL << "encrypt pkt->packet_seq_number: " << pkt->packet_seq_number << ", timestamp: " << "pkt->timestamp " << " fail";
+        if (!connected || _connect_posted.exchange(true)) {
             return;
         }
 
-        data = payload->data();
-        size = payload->size();
-
-        tryAnnounceKeyMaterial();
-    }
-
-    pkt->storeToData((uint8_t *)data, size);
-    sendPacket(pkt, flush);
-    _send_buf->inputPacket(pkt);
-    return;
-}
-
-void SrtCaller::sendPacket(Buffer::Ptr pkt, bool flush) {
-    //TraceL << pkt->size();
-    auto tmp = _packet_pool.obtain2();
-    tmp->assign(pkt->data(), pkt->size());
-    _socket->send(std::move(tmp), nullptr, 0, flush);
-
-    _send_ticker.resetTime();
-    return;
-}
-
-void SrtCaller::handleHandshake(uint8_t *buf, int len, struct sockaddr *addr) {
-    //DebugL;
-    SRT::HandshakePacket pkt;
-    if(!pkt.loadFromData(buf, len)){
-        WarnL<< "is not vaild HandshakePacket";
-        return;
-    }
-
-    if (pkt.handshake_type == SRT::HandshakePacket::HS_TYPE_INDUCTION) {
-        handleHandshakeInduction(pkt, addr);
-    } else if (pkt.handshake_type == SRT::HandshakePacket::HS_TYPE_CONCLUSION) {
-        handleHandshakeConclusion(pkt, addr);
-    } else if (pkt.isReject()){
-        onResult(SockException(Err_other, StrPrinter << "handshake fail, reject resaon: " << pkt.handshake_type 
-                               << ", " << SRT::getRejectReason((SRT_REJECT_REASON)pkt.handshake_type)));
-        return;
-    } else {
-        WarnL << " not support handshake type = " << pkt.handshake_type;
-        WarnL << pkt.dump();
-    }
-    _ack_ticker.resetTime(_now);
-    _nak_ticker.resetTime(_now);
-    return;
-}
-
-void SrtCaller::handleHandshakeInduction(SRT::HandshakePacket &pkt, struct sockaddr *addr) {
-    DebugL;
-
-    if (!_handleshake_req) {
-        WarnL << "must Induction Phase for handleshake";
-        return;
-    }
-
-    if (_handleshake_req->handshake_type == HandshakePacket::HS_TYPE_CONCLUSION) {
-        WarnL << "should be Conclusion Phase for handleshake ";
-        return;
-    } else if (_handleshake_req->handshake_type != HandshakePacket::HS_TYPE_INDUCTION) {
-        WarnL <<"not reach this";
-        return;
-    }
-
-    // Induction Phase
-    if (pkt.version != 5) {
-        WarnL << "not support handleshake version: " << pkt.version;
-        return;
-    }
-
-    if (pkt.extension_field != 0x4A17) {
-        WarnL << "not match SRT MAGIC";
-        return;
-    }
-
-    if (pkt.dst_socket_id != _handleshake_req->srt_socket_id) {
-        WarnL << "not match _socket_id";
-        return;
-    }
-
-    // TODO: encryption_field
-
-    _sync_cookie = pkt.syn_cookie;
-
-    _mtu = std::min<uint32_t>(pkt.mtu, _mtu);
-    _max_flow_window_size = std::min<uint32_t>(pkt.max_flow_window_size, _max_flow_window_size);
-    sendHandshakeConclusion();
-    return;
-}
-
-void SrtCaller::handleHandshakeConclusion(SRT::HandshakePacket &pkt, struct sockaddr *addr) {
-    DebugL;
-
-    if (!_handleshake_req) {
-        WarnL << "must Conclusion Phase for handleshake ";
-        return;
-    }
-
-    if (_handleshake_req->handshake_type == HandshakePacket::HS_TYPE_INDUCTION) {
-        WarnL << "should be Conclusion Phase for handleshake ";
-        return;
-    } else if (_handleshake_req->handshake_type != HandshakePacket::HS_TYPE_CONCLUSION) {
-        WarnL <<"not reach this";
-        return;
-    }
-
-    // Conclusion Phase
-    if (pkt.version != 5) {
-        WarnL << "not support handleshake version: " << pkt.version;
-        return;
-    }
-
-    if (pkt.dst_socket_id != _handleshake_req->srt_socket_id) {
-        WarnL << "not match _socket_id";
-        return;
-    }
-
-    //  TODO: encryption_field
-
-    _peer_socket_id = pkt.srt_socket_id;
-
-    HSExtMessage::Ptr resp;
-    HSExtKeyMaterial::Ptr keyMaterial;
-
-    for (auto& ext : pkt.ext_list) {
-        if (!resp) {
-            resp = std::dynamic_pointer_cast<HSExtMessage>(ext);
+        auto interest = isPlayer() ? (SRT_EPOLL_IN | SRT_EPOLL_ERR) : SRT_EPOLL_ERR;
+        if (!updateSocketEvents(fd, token, generation, interest)) {
+            postError(SockException(Err_other, "update connected srt socket events failed"), generation);
+            return;
         }
-        if (!keyMaterial) {
-            keyMaterial = std::dynamic_pointer_cast<HSExtKeyMaterial>(ext);
-        }
+
+        weak_ptr<SrtCaller> weak_self = shared_from_this();
+        _poller->async([weak_self, generation]() {
+            auto strong_self = weak_self.lock();
+            if (strong_self) {
+                strong_self->handleConnected(generation);
+            }
+        });
+        return;
     }
 
-    if (resp) {
-        _delay = std::max<uint16_t>(_delay, resp->recv_tsbpd_delay);
-        //DebugL << "flag " << resp->srt_flag;
-        //DebugL << "recv_tsbpd_delay " << resp->recv_tsbpd_delay;
-        //DebugL << "send_tsbpd_delay " << resp->send_tsbpd_delay;
+    if (state != State::Connected) {
+        return;
     }
-
-    if (keyMaterial && _crypto) {
-        _crypto->loadFromKeyMaterial(keyMaterial);
+    if (isPlayer() && (events & SRT_EPOLL_IN)) {
+        drainReceive(fd, token, generation);
     }
-
-    if (isPlayer()) {
-        //The recommended threshold value is 1.25 times the SRT latency value.
-        _recv_buf = std::make_shared<PacketRecvQueue>(getPktBufSize(), _init_seq_number, _delay * 1250, resp->srt_flag);
-    } else {
-        //The recommended threshold value is 1.25 times the SRT latency value.
-        //Note that the SRT sender keeps packets for at least 1 second in case the latency is not high enough for a large RTT
-        _send_buf = std::make_shared<PacketSendQueue>(getPktBufSize(), std::min<uint32_t>((uint32_t)_delay * 1250, 1000000), resp->srt_flag);
+    if (!isPlayer() && (events & SRT_EPOLL_OUT)) {
+        drainSend(fd, token, generation);
     }
+}
 
+void SrtCaller::handleConnected(uint64_t generation) {
+    if (_generation != generation || _terminal_posted) {
+        return;
+    }
+    auto expected = State::Connecting;
+    if (!_state.compare_exchange_strong(expected, State::Connected)) {
+        return;
+    }
     onHandShakeFinished();
-    return;
 }
 
-void SrtCaller::handleACK(uint8_t *buf, int len, struct sockaddr *addr) {
-    // TraceL;
-    //Acknowledgement of Acknowledgement (ACKACK) control packets are sent to acknowledge the reception of a Full ACK
- 
-    if (!_is_handleshake_finished) {
-        return;
-    }
+void SrtCaller::onHandShakeFinished() {}
 
-    ACKPacket ack;
-    if (!ack.loadFromData(buf, len)) {
-        return;
-    }
-    ACKACKPacket::Ptr pkt = std::make_shared<ACKACKPacket>();
-    pkt->dst_socket_id = _peer_socket_id;
-    pkt->timestamp = DurationCountMicroseconds(_now - _start_timestamp);
-    pkt->ack_number = ack.ack_number;
-    pkt->storeToData();
-    if (_send_buf) {
-        _send_buf->drop(ack.last_ack_pkt_seq_number);
-    }
-    sendControlPacket(pkt, true);
-    // TraceL<<"ack number "<<ack.ack_number;
-    return;
+void SrtCaller::reportSrtError(const SockException &ex) {
+    postError(ex, _generation.load());
 }
 
-
-void SrtCaller::handleACKACK(uint8_t *buf, int len, struct sockaddr *addr) {
-    // TraceL;
-
-    if (!_is_handleshake_finished) {
+void SrtCaller::postError(const SockException &ex, uint64_t generation) {
+    if (_generation != generation || _terminal_posted.exchange(true)) {
         return;
     }
-    ACKACKPacket::Ptr pkt = std::make_shared<ACKACKPacket>();
-    pkt->loadFromData(buf, len);
+    weak_ptr<SrtCaller> weak_self = shared_from_this();
+    _poller->async([weak_self, ex, generation]() {
+        auto strong_self = weak_self.lock();
+        if (strong_self) {
+            strong_self->handleError(ex, generation);
+        }
+    });
+}
 
-    if(_ack_send_timestamp.find(pkt->ack_number) != _ack_send_timestamp.end()){
-        uint32_t rtt = DurationCountMicroseconds(_now - _ack_send_timestamp[pkt->ack_number]);
-        _rtt_variance = (3 * _rtt_variance + abs((long)_rtt - (long)rtt)) / 4;
-        _rtt = (7 * rtt + _rtt) / 8;
-        // TraceL<<" rtt:"<<_rtt<<" rtt variance:"<<_rtt_variance;
-        _ack_send_timestamp.erase(pkt->ack_number);
+void SrtCaller::handleError(const SockException &ex, uint64_t generation) {
+    if (_generation != generation) {
+        return;
+    }
+    auto state = _state.load();
+    if (state == State::Closing || state == State::Closed || state == State::Idle) {
+        return;
+    }
+    auto was_connected = state == State::Connected;
+    _state = State::Closing;
+    closeSocket();
+    clearQueues();
+    _state = State::Closed;
+    onResult(ex, was_connected);
+}
 
-        if(_last_recv_ackack_seq_num < pkt->ack_number){
-            _last_recv_ackack_seq_num = pkt->ack_number;
-        }else{
-            if((_last_recv_ackack_seq_num-pkt->ack_number)>(MAX_TS>>1)){
-                _last_recv_ackack_seq_num = pkt->ack_number;
+void SrtCaller::teardownSrt() {
+    if (_poller && !_poller->isCurrentThread()) {
+        _poller->sync([this]() { teardownSrt_l(); });
+        return;
+    }
+    teardownSrt_l();
+}
+
+void SrtCaller::teardownSrt_l() {
+    _terminal_posted = true;
+    _generation.fetch_add(1);
+    _state = State::Closing;
+    closeSocket();
+    clearQueues();
+    _state = State::Closed;
+}
+
+void SrtCaller::closeSocket() {
+    SRTSOCKET fd = SRT_INVALID_SOCK;
+    auto token = SrtEpollReactor::kInvalidRegistrationToken;
+    {
+        lock_guard<mutex> lock(_socket_mutex);
+        fd = static_cast<SRTSOCKET>(_socket);
+        token = _registration_token;
+        _socket = SRT_INVALID_SOCK;
+        _registration_token = SrtEpollReactor::kInvalidRegistrationToken;
+    }
+    if (fd == SRT_INVALID_SOCK) {
+        return;
+    }
+    SrtEpollReactor::Instance().unregisterSocket(fd, token);
+    srt_close(fd);
+}
+
+void SrtCaller::clearQueues() {
+    {
+        lock_guard<mutex> lock(_recv_mutex);
+        while (!_recv_queue.empty()) {
+            auto packet = std::move(_recv_queue.front());
+            _recv_queue.pop_front();
+            packet.buffer->setSize(0);
+            _recv_free_slots.emplace_back(std::move(packet.buffer));
+        }
+        _recv_drain_scheduled = false;
+        _recv_input_paused = false;
+    }
+    {
+        lock_guard<mutex> lock(_send_mutex);
+        _send_queue.clear();
+        _send_queue_bytes = 0;
+    }
+}
+
+bool SrtCaller::updateSocketEvents(int32_t fd,
+                                   SrtEpollReactor::RegistrationToken token,
+                                   uint64_t generation,
+                                   int events) {
+    {
+        lock_guard<mutex> lock(_socket_mutex);
+        if (_socket != fd || _generation != generation || _terminal_posted) {
+            return false;
+        }
+        if (_registration_token != SrtEpollReactor::kInvalidRegistrationToken
+            && _registration_token != token) {
+            return false;
+        }
+    }
+    return SrtEpollReactor::Instance().updateSocket(fd, token, events);
+}
+
+void SrtCaller::drainReceive(int32_t fd,
+                             SrtEpollReactor::RegistrationToken token,
+                             uint64_t generation) {
+    for (size_t count = 0; count < kMaxPacketsPerEvent; ++count) {
+        BufferRaw::Ptr buffer;
+        bool pause_failed = false;
+        {
+            lock_guard<mutex> lock(_recv_mutex);
+            if (_generation != generation || _terminal_posted || _state != State::Connected) {
+                return;
+            }
+            if (_recv_free_slots.empty()) {
+                if (!_recv_input_paused) {
+                    _recv_input_paused = true;
+                    pause_failed = !updateSocketEvents(fd, token, generation, SRT_EPOLL_ERR);
+                }
+            } else {
+                buffer = std::move(_recv_free_slots.front());
+                _recv_free_slots.pop_front();
             }
         }
+        if (!buffer) {
+            if (pause_failed && _generation == generation && !_terminal_posted) {
+                postError(SockException(Err_other, "pause srt readable event failed"), generation);
+            }
+            return;
+        }
 
-        if(_ack_send_timestamp.size()>1000){
-            // clear data
-            for(auto it = _ack_send_timestamp.begin(); it != _ack_send_timestamp.end();){
-                if(DurationCountMicroseconds(_now-it->second)>5e6){
-                    // 超过五秒没有ackack 丢弃
-                    it = _ack_send_timestamp.erase(it);
-                }else{
-                    it++;
+        buffer->setSize(0);
+        SRT_MSGCTRL control = srt_msgctrl_default;
+        int received = SRT_ERROR;
+        int error = SRT_SUCCESS;
+        bool transport_stale = false;
+        {
+            lock_guard<mutex> lock(_socket_mutex);
+            if (_socket != fd || _generation != generation || _state != State::Connected) {
+                transport_stale = true;
+            } else {
+                received = srt_recvmsg2(fd, buffer->data(), static_cast<int>(buffer->getCapacity()), &control);
+                if (received == SRT_ERROR) {
+                    error = srt_getlasterror(nullptr);
                 }
             }
         }
-
-    }
-    return;
-}
-
-void SrtCaller::handleNAK(uint8_t *buf, int len, struct sockaddr *addr) {
-    if (!_is_handleshake_finished) {
-        return;
-    }
-
-    if (isPlayer()) {
-        //player should not handle nak 
-        return;
-    }
-
-    //TraceL;
-    NAKPacket pkt;
-    pkt.loadFromData(buf, len);
-    bool empty = false;
-    bool flush = false;
-
-    for (auto& it : pkt.lost_list) {
-        if (pkt.lost_list.back() == it) {
-            flush = true;
-        }
-        empty = true;
-        auto re_list = _send_buf->findPacketBySeq(it.first, it.second - 1);
-        for (auto& pkt : re_list) {
-            pkt->R = 1;
-            pkt->storeToHeader();
-            sendPacket(pkt, flush);
-            empty = false;
-        }
-        if (empty) {
-            sendMsgDropReq(it.first, it.second - 1);
-        }
-    }
-    return;
-}
-
-void SrtCaller::handleDropReq(uint8_t *buf, int len, struct sockaddr *addr) {
-    if (!_is_handleshake_finished) {
-        return;
-    }
-
-    if (!isPlayer()) {
-        //pusher should not handle drop req
-        return;
-    }
-
-    MsgDropReqPacket pkt;
-    pkt.loadFromData(buf, len);
-    std::list<DataPacket::Ptr> list;
-    // TraceL<<"drop "<<pkt.first_pkt_seq_num<<" last "<<pkt.last_pkt_seq_num;
-    _recv_buf->drop(pkt.first_pkt_seq_num, pkt.last_pkt_seq_num, list);
-    //checkAndSendAckNak();
-    if (list.empty()) {
-        return;
-    }
-    // uint32_t max_seq = 0;
-    for (auto& data : list) {
-        // max_seq = data->packet_seq_number;
-        if (_last_pkt_seq + 1 != data->packet_seq_number) {
-            TraceL << "pkt lost " << _last_pkt_seq + 1 << "->" << data->packet_seq_number;
-        }
-        _last_pkt_seq = data->packet_seq_number;
-        onSRTData(std::move(data));
-    }
-    return;
-}
-
-void SrtCaller::handleKeeplive(uint8_t *buf, int len, struct sockaddr *addr) {
-    // TraceL;
-    return;
-}
-
-void SrtCaller::handleShutDown(uint8_t *buf, int len, struct sockaddr *addr) {
-    TraceL;
-    onResult(SockException(Err_other, "peer close connection"));
-    return;
-}
-
-void SrtCaller::handlePeerError(uint8_t *buf, int len, struct sockaddr *addr) {
-    TraceL;
-    return;
-}
-
-void SrtCaller::handleCongestionWarning(uint8_t *buf, int len, struct sockaddr *addr) {
-    TraceL;
-    return;
-}
-
-void SrtCaller::handleUserDefinedType(uint8_t *buf, int len, struct sockaddr *addr) {
-    /* TraceL; */
-
-    using srt_userd_defined_handler = void (SrtCaller::*)(uint8_t * buf, int len, struct sockaddr *addr);
-    static std::unordered_map<uint16_t /*sub_type*/, srt_userd_defined_handler> s_userd_defined_functions;
-    static onceToken token([]() {
-        s_userd_defined_functions.emplace(SRT::HSExt::SRT_CMD_KMREQ, &SrtCaller::handleKeyMaterialReqPacket);
-        s_userd_defined_functions.emplace(SRT::HSExt::SRT_CMD_KMRSP, &SrtCaller::handleKeyMaterialRspPacket);
-    });
-
-    uint16_t subtype = ControlPacket::getSubType(buf, len);
-    auto it = s_userd_defined_functions.find(subtype);
-    if (it == s_userd_defined_functions.end()) {
-        WarnL << " not support subtype in user defined msg ignore: " << subtype;
-        return;
-    } else {
-        (this->*(it->second))(buf, len, addr);
-    }
-
-    return;
-}
-
-void SrtCaller::handleKeyMaterialReqPacket(uint8_t *buf, int len, struct sockaddr *addr) {
-    /* TraceL; */
-
-    if (!_crypto) {
-        WarnL << " not enable crypto, ignore";
-        return;
-    }
-
-    KeyMaterialPacket::Ptr pkt = std::make_shared<KeyMaterialPacket>();
-    pkt->loadFromData(buf, len);
-    _crypto->loadFromKeyMaterial(pkt);
-
-    //rsp
-    pkt->sub_type = SRT::HSExt::SRT_CMD_KMRSP;
-    pkt->dst_socket_id = _peer_socket_id;
-    pkt->timestamp = DurationCountMicroseconds(_now - _start_timestamp);
-    pkt->storeToData();
-    sendControlPacket(pkt, true);
-    return;
-}
-
-void SrtCaller::handleKeyMaterialRspPacket(uint8_t *buf, int len, struct sockaddr *addr) {
-    /* TraceL; */
-    _announce_req = nullptr;
-    return;
-}
-
-void SrtCaller::handleDataPacket(uint8_t *buf, int len, struct sockaddr *addr) {
-    //TraceL;
-    DataPacket::Ptr pkt = std::make_shared<DataPacket>();
-    pkt->loadFromData(buf, len);
-
-    if (_crypto) {
-        auto payload = _crypto->decrypt(pkt, pkt->payloadData(), pkt->payloadSize());
-        if (!payload) {
-            WarnL << "decrypt pkt->packet_seq_number: " << pkt->packet_seq_number << ", timestamp: " << "pkt->timestamp " << " fail";
+        if (transport_stale) {
+            lock_guard<mutex> lock(_recv_mutex);
+            _recv_free_slots.emplace_back(std::move(buffer));
             return;
         }
 
-        pkt->reloadPayload((uint8_t*)payload->data(), payload->size());
-    }
-
-    _estimated_link_capacity_context->inputPacket(_now, pkt);
-
-    std::list<DataPacket::Ptr> list;
-    _recv_buf->inputPacket(pkt, list);
-    for (auto& data : list) {
-        if (_last_pkt_seq + 1 != data->packet_seq_number) {
-            TraceL << "pkt lost " << _last_pkt_seq + 1 << "->" << data->packet_seq_number;
-        }
-        _last_pkt_seq = data->packet_seq_number;
-        onSRTData(std::move(data));
-    }
-    return;
-}
-
-void SrtCaller::checkAndSendAckNak() {
-    //SRT Periodic NAK reports are sent with a period of (RTT + 4 * RTTVar) / 2 (so called NAKInterval), 
-    //with a 20 milliseconds floor
-    auto nak_interval = (_rtt + _rtt_variance * 4) / 2;
-    if (nak_interval <= 20 * 1000) {
-        nak_interval = 20 * 1000;
-    }
-    if (_nak_ticker.elapsedTime(_now) > nak_interval) {
-        auto lost = _recv_buf->getLostSeq();
-        if (!lost.empty()) {
-            sendNAKPacket(lost);
-        }
-        _nak_ticker.resetTime(_now);
-    }
-
-    //A Full ACK control packet is sent every 10 ms
-    if (_ack_ticker.elapsedTime(_now) > 10 * 1000) {
-        _light_ack_pkt_count = 0;
-        _ack_ticker.resetTime(_now);
-        // send a ack per 10 ms for receiver
-        if(_last_ack_pkt_seq != _recv_buf->getExpectedSeq()){
-            //TraceL<<"send a ack packet";
-            sendACKPacket();
-        } else{
-            //TraceL<<" ignore repeate ack packet";
-        }
-    } else {
-        //The recommendation is to send a Light ACK for every 64 packets received.
-        if (_light_ack_pkt_count >= 64) {
-            // for high bitrate stream send light ack
-            // TODO
-            sendLightACKPacket();
-            TraceL << "send light ack";
-        }
-        _light_ack_pkt_count = 0;
-    }
-    _light_ack_pkt_count++;
-    return;
-}
-
-void SrtCaller::createTimerForCheckAlive(){
-    std::weak_ptr<SrtCaller> weak_self = std::static_pointer_cast<SrtCaller>(shared_from_this());
-    auto timeoutSec = getTimeOutSec();
-    _alive_timer = std::make_shared<Timer>(
-         timeoutSec /2,
-        [weak_self,timeoutSec]() {
-            auto strong_self = weak_self.lock();
-            if (!strong_self) {
-                return false;
+        if (received == SRT_ERROR) {
+            {
+                lock_guard<mutex> lock(_recv_mutex);
+                _recv_free_slots.emplace_back(std::move(buffer));
             }
-            if (strong_self->_alive_ticker.elapsedTime() > timeoutSec * 1000) {
-                strong_self->onResult(SockException(Err_timeout, "Receive srt socket data timeout"));
-                return false;
+            if (error != SRT_EASYNCRCV) {
+                postError(makeSrtException("receive srt data", error), generation);
             }
-            return true;
-        }, getPoller());
+            return;
+        }
+        if (received == 0) {
+            {
+                lock_guard<mutex> lock(_recv_mutex);
+                _recv_free_slots.emplace_back(std::move(buffer));
+            }
+            postError(SockException(Err_eof, "srt peer closed the connection"), generation);
+            return;
+        }
 
-    return;
-}
+        buffer->setSize(static_cast<size_t>(received));
+        bool schedule = false;
+        bool stale = false;
+        pause_failed = false;
+        {
+            lock_guard<mutex> lock(_recv_mutex);
+            stale = _generation != generation || _terminal_posted || _state != State::Connected;
+            if (stale) {
+                buffer->setSize(0);
+                _recv_free_slots.emplace_back(std::move(buffer));
+            } else {
+                ReceivePacket packet;
+                packet.buffer = std::move(buffer);
+                packet.generation = generation;
+                _recv_queue.emplace_back(std::move(packet));
+                if (!_recv_drain_scheduled) {
+                    _recv_drain_scheduled = true;
+                    schedule = true;
+                }
+                if (_recv_free_slots.empty() && !_recv_input_paused) {
+                    _recv_input_paused = true;
+                    pause_failed = !updateSocketEvents(fd, token, generation, SRT_EPOLL_ERR);
+                }
+            }
+        }
+        if (stale) {
+            return;
+        }
+        if (pause_failed) {
+            postError(SockException(Err_other, "pause srt readable event failed"), generation);
+            return;
+        }
 
-int SrtCaller::getLatencyMul() {
-    GET_CONFIG(int, latencyMul, SRT::kLatencyMul);
-    if (latencyMul < 0) {
-        WarnL << "config srt " << kLatencyMul << " not vaild";
-        return 4;
+        {
+            lock_guard<mutex> lock(_stat_mutex);
+            _recv_speed += static_cast<size_t>(received);
+        }
+
+        if (schedule) {
+            weak_ptr<SrtCaller> weak_self = shared_from_this();
+            _poller->async([weak_self, generation]() {
+                auto strong_self = weak_self.lock();
+                if (strong_self) {
+                    strong_self->drainReceiveQueue(generation);
+                }
+            });
+        }
     }
-    return latencyMul;
 }
 
-int SrtCaller::getPktBufSize() {
-    GET_CONFIG(int, pktBufSize, SRT::kPktBufSize);
-    if (pktBufSize <= 0) {
-        WarnL << "config srt " << kPktBufSize << " not vaild";
-        return 8912;
+void SrtCaller::drainReceiveQueue(uint64_t generation) {
+    deque<ReceivePacket> pending;
+    {
+        lock_guard<mutex> lock(_recv_mutex);
+        if (_generation != generation || _terminal_posted || _state != State::Connected) {
+            return;
+        }
+        pending.swap(_recv_queue);
+        _recv_drain_scheduled = false;
     }
-    return pktBufSize;
-}
 
-float SrtCaller::getTimeOutSec() {
-    GET_CONFIG(uint32_t, timeout, SRT::kTimeOutSec);
-    if (timeout <= 0) {
-        WarnL << "config srt " << kTimeOutSec << " not vaild";
-        return 5.0f;
+    bool resume_failed = false;
+    for (auto &packet : pending) {
+        if (packet.generation == generation
+            && _generation == generation
+            && _state == State::Connected
+            && !_terminal_posted) {
+            onSRTData(packet.buffer);
+        }
+
+        packet.buffer->setSize(0);
+        lock_guard<mutex> lock(_recv_mutex);
+        _recv_free_slots.emplace_back(std::move(packet.buffer));
+        if (_recv_input_paused
+            && _generation == generation
+            && _state == State::Connected
+            && !_terminal_posted) {
+            SRTSOCKET fd;
+            SrtEpollReactor::RegistrationToken token;
+            {
+                lock_guard<mutex> socket_lock(_socket_mutex);
+                fd = static_cast<SRTSOCKET>(_socket);
+                token = _registration_token;
+            }
+            if (fd != SRT_INVALID_SOCK
+                && token != SrtEpollReactor::kInvalidRegistrationToken) {
+                _recv_input_paused = false;
+                resume_failed = !updateSocketEvents(
+                    fd, token, generation, SRT_EPOLL_IN | SRT_EPOLL_ERR);
+            }
+        }
     }
-    return (float)timeout;
-};
 
-std::string SrtCaller::generateStreamId() { 
-    return _url._streamid;
-};
-
-uint32_t SrtCaller::generateSocketId() {
-    // 生成一个 32 位的随机整数
-    std::random_device rd;
-    std::mt19937 mt(rd());
-    std::uniform_int_distribution<uint32_t> dist(0, UINT32_MAX);
-    uint32_t id = dist(mt);
-
-    return id;
+    if (resume_failed && _generation == generation && !_terminal_posted) {
+        postError(SockException(Err_other, "resume srt readable event failed"), generation);
+    }
 }
 
-int32_t SrtCaller::generateInitSeq() {
-    // 生成一个 32 位的随机整数
-    std::random_device rd;
-    std::mt19937 mt(rd());
-    std::uniform_int_distribution<uint32_t> dist(0, MAX_SEQ);
-    int32_t id = dist(mt);
-    return id;
+void SrtCaller::onSRTData(const Buffer::Ptr &) {
+    if (!isPlayer()) {
+        WarnL << "ignore received SRT data on pusher";
+    }
 }
 
-size_t SrtCaller::getPayloadSize() {
-    size_t ret = (_mtu - 28 - 16) / 188 * 188;
-    return ret;
+void SrtCaller::onSendTSData(const Buffer::Ptr &buffer, bool) {
+    const auto generation = _generation.load();
+    if (!buffer || !buffer->size() || _state != State::Connected || _terminal_posted) {
+        return;
+    }
+
+    bool overflow = false;
+    bool update_failed = false;
+    {
+        lock_guard<mutex> lock(_send_mutex);
+        if (_generation != generation || _state != State::Connected || _terminal_posted) {
+            return;
+        }
+        overflow = buffer->size() > kMaxQueueBytes - min(_send_queue_bytes, kMaxQueueBytes);
+        if (!overflow) {
+            for (size_t offset = 0; offset < buffer->size(); offset += kLivePayloadSize) {
+                SendPacket packet;
+                packet.buffer = buffer;
+                packet.offset = offset;
+                packet.size = min(kLivePayloadSize, buffer->size() - offset);
+                packet.generation = generation;
+                packet.packet_id = _next_send_packet_id++;
+                _send_queue.emplace_back(std::move(packet));
+            }
+            _send_queue_bytes += buffer->size();
+
+            int32_t fd;
+            SrtEpollReactor::RegistrationToken token;
+            {
+                lock_guard<mutex> socket_lock(_socket_mutex);
+                fd = _socket;
+                token = _registration_token;
+            }
+            if (fd != SRT_INVALID_SOCK
+                && token != SrtEpollReactor::kInvalidRegistrationToken) {
+                update_failed =
+                    !updateSocketEvents(fd, token, generation, SRT_EPOLL_OUT | SRT_EPOLL_ERR);
+            }
+        }
+    }
+
+    if (overflow) {
+        postError(SockException(Err_other, "srt send queue exceeded 8 MiB"), generation);
+        return;
+    }
+    if (update_failed
+        && _generation == generation
+        && _state == State::Connected
+        && !_terminal_posted) {
+        postError(SockException(Err_other, "enable srt writable event failed"), generation);
+    }
+}
+
+void SrtCaller::drainSend(int32_t fd,
+                          SrtEpollReactor::RegistrationToken token,
+                          uint64_t generation) {
+    for (size_t count = 0; count < kMaxPacketsPerEvent; ++count) {
+        SendPacket packet;
+        {
+            lock_guard<mutex> lock(_send_mutex);
+            if (_send_queue.empty() || _send_queue.front().generation != generation) {
+                break;
+            }
+            packet = _send_queue.front();
+        }
+
+        SRT_MSGCTRL control = srt_msgctrl_default;
+        int sent = SRT_ERROR;
+        int error = SRT_SUCCESS;
+        {
+            lock_guard<mutex> lock(_socket_mutex);
+            if (_socket != fd || _generation != generation || _state != State::Connected) {
+                return;
+            }
+            sent = srt_sendmsg2(fd, packet.buffer->data() + packet.offset, static_cast<int>(packet.size), &control);
+            if (sent == SRT_ERROR) {
+                error = srt_getlasterror(nullptr);
+            }
+        }
+
+        if (sent == SRT_ERROR) {
+            if (error != SRT_EASYNCSND) {
+                postError(makeSrtException("send srt data", error), generation);
+            }
+            return;
+        }
+        if (static_cast<size_t>(sent) != packet.size) {
+            postError(SockException(Err_other, "libsrt returned a partial live message"), generation);
+            return;
+        }
+
+        {
+            lock_guard<mutex> lock(_send_mutex);
+            if (!_send_queue.empty()
+                && _send_queue.front().generation == packet.generation
+                && _send_queue.front().packet_id == packet.packet_id) {
+                _send_queue_bytes -= _send_queue.front().size;
+                _send_queue.pop_front();
+            } else {
+                return;
+            }
+        }
+        {
+            lock_guard<mutex> lock(_stat_mutex);
+            _send_speed += static_cast<size_t>(sent);
+        }
+    }
+
+    bool update_failed = false;
+    {
+        lock_guard<mutex> lock(_send_mutex);
+        auto interest = _send_queue.empty() ? SRT_EPOLL_ERR : (SRT_EPOLL_OUT | SRT_EPOLL_ERR);
+        update_failed = !updateSocketEvents(fd, token, generation, interest);
+    }
+    if (update_failed
+        && _generation == generation
+        && _state == State::Connected
+        && !_terminal_posted) {
+        postError(SockException(Err_other, "update srt writable event failed"), generation);
+    }
 }
 
 size_t SrtCaller::getRecvSpeed() const {
-    return _socket ? _socket->getRecvSpeed() : 0;
+    lock_guard<mutex> lock(_stat_mutex);
+    return _recv_speed.getSpeed();
 }
 
 size_t SrtCaller::getRecvTotalBytes() const {
-    return _socket ? _socket->getRecvTotalBytes() : 0;
+    lock_guard<mutex> lock(_stat_mutex);
+    return _recv_speed.getTotalBytes();
 }
 
 size_t SrtCaller::getSendSpeed() const {
-    return _socket ? _socket->getSendSpeed() : 0;
+    lock_guard<mutex> lock(_stat_mutex);
+    return _send_speed.getSpeed();
 }
 
 size_t SrtCaller::getSendTotalBytes() const {
-    return _socket ? _socket->getSendTotalBytes() : 0;
+    lock_guard<mutex> lock(_stat_mutex);
+    return _send_speed.getTotalBytes();
 }
 
-} /* namespace mediakit */
+} // namespace mediakit

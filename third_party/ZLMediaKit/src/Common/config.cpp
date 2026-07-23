@@ -354,6 +354,7 @@ const string kRtspSpeed = "rtsp_speed";
 const string kSchema = "schema";
 const string kLatency = "latency";
 const string kPassPhrase = "passPhrase";
+const string kSrtTrackReadyTimeoutMS = "srt_track_ready_timeout_ms";
 const string kCustomHeader = "custom_header";
 } // namespace Client
 
