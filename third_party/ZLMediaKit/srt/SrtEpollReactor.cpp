@@ -22,6 +22,12 @@
 
 namespace mediakit {
 
+namespace {
+
+std::atomic<SrtEpollReactor *> g_reactor_instance { nullptr };
+
+} // namespace
+
 class SrtEpollReactor::Impl {
 public:
     using EventCallback = SrtEpollReactor::EventCallback;
@@ -241,10 +247,25 @@ SrtEpollReactor &SrtEpollReactor::Instance() {
     return instance;
 }
 
-SrtEpollReactor::SrtEpollReactor()
-    : _impl(new Impl()) {}
+bool SrtEpollReactor::isCreated() noexcept {
+    return g_reactor_instance.load(std::memory_order_acquire) != nullptr;
+}
 
-SrtEpollReactor::~SrtEpollReactor() = default;
+void SrtEpollReactor::shutdownIfCreated() {
+    auto *instance = g_reactor_instance.load(std::memory_order_acquire);
+    if (instance) {
+        instance->shutdown();
+    }
+}
+
+SrtEpollReactor::SrtEpollReactor()
+    : _impl(new Impl()) {
+    g_reactor_instance.store(this, std::memory_order_release);
+}
+
+SrtEpollReactor::~SrtEpollReactor() {
+    g_reactor_instance.store(nullptr, std::memory_order_release);
+}
 
 SrtEpollReactor::RegistrationToken SrtEpollReactor::registerSocket(SRTSOCKET fd, int events, EventCallback callback) {
     return _impl->registerSocket(fd, events, std::move(callback));

@@ -33,6 +33,8 @@ public:
     static constexpr RegistrationToken kInvalidRegistrationToken = 0;
 
     static SrtEpollReactor &Instance();
+    static bool isCreated() noexcept;
+    static void shutdownIfCreated();
 
     /**
      * Register a socket and its interested epoll events.
