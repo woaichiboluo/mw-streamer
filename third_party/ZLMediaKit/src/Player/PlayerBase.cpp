@@ -15,6 +15,9 @@
 #include "Rtmp/FlvPlayer.h"
 #include "Http/HlsPlayer.h"
 #include "Http/TsPlayerImp.h"
+#ifdef ENABLE_MP4
+#include "FilePlayerImp.h"
+#endif
 #ifdef ENABLE_SRT
 #include "../srt/SrtPlayerImp.h"
 #endif // ENABLE_SRT
@@ -44,6 +47,7 @@ PlayerBase::Ptr PlayerBase::createPlayer(const EventPoller::Ptr &in_poller, cons
     }
 
     string prefix = findSubString(url.data(), NULL, "://");
+    bool has_schema = url.find("://") != string::npos;
     auto pos = url.find('?');
     if (pos != string::npos) {
         // 去除？后面的字符串  [AUTO-TRANSLATED:0ccb41c2]
@@ -91,6 +95,12 @@ PlayerBase::Ptr PlayerBase::createPlayer(const EventPoller::Ptr &in_poller, cons
         return PlayerBase::Ptr(new SrtPlayerImp(poller), release_func);
     }
 #endif//ENABLE_SRT
+
+#ifdef ENABLE_MP4
+    if (!has_schema) {
+        return PlayerBase::Ptr(new FilePlayerImp(poller), release_func);
+    }
+#endif
     throw std::invalid_argument("not supported play schema:" + url_in);
 }
 

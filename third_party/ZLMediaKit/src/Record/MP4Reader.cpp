@@ -10,6 +10,7 @@
 
 #ifdef ENABLE_MP4
 
+#include <algorithm>
 #include "MP4Reader.h"
 #include "Common/config.h"
 #include "Thread/WorkThreadPool.h"
@@ -57,27 +58,30 @@ void MP4Reader::setup(const MediaTuple &tuple, const std::string &file_path, con
     _demuxer = std::make_shared<MultiMP4Demuxer>();
     _demuxer->openMP4(_file_path);
 
-    if (tuple.stream.empty()) {
-        return;
-    }
-
-    _muxer = std::make_shared<MultiMediaSourceMuxer>(tuple, _demuxer->getDurationMS() / 1000.0f, option);
     auto tracks = _demuxer->getTracks(false);
     if (tracks.empty()) {
         throw std::runtime_error(StrPrinter << "该mp4文件没有有效的track:" << _file_path);
     }
     for (auto &track : tracks) {
-        _muxer->addTrack(track);
         if (track->getTrackType() == TrackVideo) {
             _have_video = true;
         }
+    }
+
+    if (tuple.stream.empty()) {
+        return;
+    }
+
+    _muxer = std::make_shared<MultiMediaSourceMuxer>(tuple, _demuxer->getDurationMS() / 1000.0f, option);
+    for (auto &track : tracks) {
+        _muxer->addTrack(track);
     }
     // 添加完毕所有track，防止单track情况下最大等待3秒  [AUTO-TRANSLATED:445e3403]
     // After all tracks are added, prevent the maximum waiting time of 3 seconds in the case of a single track
     _muxer->addTrackCompleted();
 }
 
-bool MP4Reader::readSample() {
+bool MP4Reader::readSample(SockException &ex) {
     if (_paused) {
         // 确保暂停时，时间轴不走动  [AUTO-TRANSLATED:3d38dd31]
         // Ensure that the timeline does not move when paused
@@ -87,8 +91,14 @@ bool MP4Reader::readSample() {
 
     bool keyFrame = false;
     bool eof = false;
-    while (!eof && _last_dts < getCurrentStamp()) {
-        auto frame = _demuxer->readFrame(keyFrame, eof);
+    auto generation = _control_generation.load();
+    while (!eof && generation == _control_generation.load() && _last_dts < getCurrentStamp()) {
+        int read_error = 0;
+        auto frame = _demuxer->readFrame(keyFrame, eof, &read_error);
+        if (read_error) {
+            ex = SockException(Err_other, StrPrinter << "读取mp4文件数据失败:" << read_error);
+            return false;
+        }
         if (!frame) {
             continue;
         }
@@ -98,22 +108,30 @@ bool MP4Reader::readSample() {
         }
     }
 
+    if (generation != _control_generation.load()) {
+        return true;
+    }
+
     GET_CONFIG(bool, file_repeat, Record::kFileRepeat);
-    if (eof && (file_repeat || _file_repeat)) {
+    if (eof && (_file_repeat || (_use_global_repeat && file_repeat))) {
         // 需要从头开始看  [AUTO-TRANSLATED:5b563a35]
         // Need to start from the beginning
         seekTo(0);
         return true;
     }
 
+    if (eof) {
+        ex = SockException(Err_eof, "mp4文件播放完毕");
+    }
     return !eof;
 }
 
 bool MP4Reader::readNextSample() {
     bool keyFrame = false;
     bool eof = false;
-    auto frame = _demuxer->readFrame(keyFrame, eof);
-    if (!frame) {
+    int read_error = 0;
+    auto frame = _demuxer->readFrame(keyFrame, eof, &read_error);
+    if (read_error || !frame) {
         return false;
     }
     if (_muxer) {
@@ -124,12 +142,23 @@ bool MP4Reader::readNextSample() {
 }
 
 void MP4Reader::stopReadMP4() {
+    ++_control_generation;
+    lock_guard<recursive_mutex> lck(_mtx);
     _timer = nullptr;
 }
 
-void MP4Reader::startReadMP4(uint64_t sample_ms, bool ref_self, bool file_repeat) {
+void MP4Reader::setOnComplete(onComplete cb) {
+    lock_guard<recursive_mutex> lck(_mtx);
+    _on_complete = std::move(cb);
+}
+
+void MP4Reader::startReadMP4(uint64_t sample_ms, bool ref_self, bool file_repeat, bool use_global_repeat) {
+    ++_control_generation;
+    lock_guard<recursive_mutex> lck(_mtx);
     GET_CONFIG(uint32_t, sampleMS, Record::kSampleMS);
     setCurrentStamp(0);
+    _file_repeat = file_repeat;
+    _use_global_repeat = use_global_repeat;
     auto strong_self = shared_from_this();
     if (_muxer) {
         // 一直读到所有track就绪为止  [AUTO-TRANSLATED:410f9ecc]
@@ -146,8 +175,7 @@ void MP4Reader::startReadMP4(uint64_t sample_ms, bool ref_self, bool file_repeat
     // Start the timer
     if (ref_self) {
         _timer = std::make_shared<Timer>(timer_sec, [strong_self]() {
-            lock_guard<recursive_mutex> lck(strong_self->_mtx);
-            return strong_self->readSample();
+            return strong_self->onTick();
         }, _poller);
     } else {
         weak_ptr<MP4Reader> weak_self = strong_self;
@@ -156,20 +184,44 @@ void MP4Reader::startReadMP4(uint64_t sample_ms, bool ref_self, bool file_repeat
             if (!strong_self) {
                 return false;
             }
-            lock_guard<recursive_mutex> lck(strong_self->_mtx);
-            return strong_self->readSample();
+            return strong_self->onTick();
         }, _poller);
     }
-
-    _file_repeat = file_repeat;
 }
 
 const MultiMP4Demuxer::Ptr &MP4Reader::getDemuxer() const {
     return _demuxer;
 }
 
-uint32_t MP4Reader::getCurrentStamp() {
+bool MP4Reader::onTick() {
+    onComplete cb;
+    SockException ex;
+    bool continue_reading;
+    {
+        lock_guard<recursive_mutex> lck(_mtx);
+        continue_reading = readSample(ex);
+        if (!continue_reading) {
+            cb = std::move(_on_complete);
+        }
+    }
+    if (cb) {
+        cb(ex);
+    }
+    return continue_reading;
+}
+
+uint32_t MP4Reader::getCurrentStamp() const {
     return (uint32_t) (_seek_to + !_paused * _speed * _seek_ticker.elapsedTime());
+}
+
+uint64_t MP4Reader::getDurationMS() const {
+    lock_guard<recursive_mutex> lck(_mtx);
+    return _demuxer->getDurationMS();
+}
+
+uint32_t MP4Reader::getProgressMS() const {
+    lock_guard<recursive_mutex> lck(_mtx);
+    return (uint32_t)min<uint64_t>(getCurrentStamp(), _demuxer->getDurationMS());
 }
 
 void MP4Reader::setCurrentStamp(uint32_t new_stamp) {
@@ -187,24 +239,36 @@ void MP4Reader::setCurrentStamp(uint32_t new_stamp) {
 bool MP4Reader::seekTo(MediaSource &sender, uint32_t stamp) {
     // 拖动进度条后应该恢复播放  [AUTO-TRANSLATED:8a6d11f7]
     // Playback should resume after dragging the progress bar
-    pause(sender, false);
     TraceL << getOriginUrl(sender) << ",stamp:" << stamp;
     return seekTo(stamp);
 }
 
-bool MP4Reader::pause(MediaSource &sender, bool pause) {
-    if (_paused == pause) {
+bool MP4Reader::pause(MediaSource &sender, bool paused) {
+    TraceL << getOriginUrl(sender) << ",pause:" << paused;
+    return pause(paused);
+}
+
+bool MP4Reader::pause(bool paused) {
+    ++_control_generation;
+    lock_guard<recursive_mutex> lck(_mtx);
+    if (_paused == paused) {
         return true;
     }
     // _seek_ticker重新计时，不管是暂停还是seek都不影响总的播放进度  [AUTO-TRANSLATED:96051076]
     // _seek_ticker restarts the timer, whether it is paused or seek does not affect the total playback progress
     setCurrentStamp(getCurrentStamp());
-    _paused = pause;
-    TraceL << getOriginUrl(sender) << ",pause:" << pause;
+    _paused = paused;
     return true;
 }
 
 bool MP4Reader::speed(MediaSource &sender, float speed) {
+    TraceL << getOriginUrl(sender) << ",speed:" << speed;
+    return this->speed(speed);
+}
+
+bool MP4Reader::speed(float speed) {
+    ++_control_generation;
+    lock_guard<recursive_mutex> lck(_mtx);
     if (speed < 0.1 || speed > 20) {
         WarnL << "播放速度取值范围非法:" << speed;
         return false;
@@ -219,12 +283,16 @@ bool MP4Reader::speed(MediaSource &sender, float speed) {
         return true;
     }
     _speed = speed;
-    TraceL << getOriginUrl(sender) << ",speed:" << speed;
     return true;
 }
 
 bool MP4Reader::seekTo(uint32_t stamp_seek) {
+    auto generation = ++_control_generation;
     lock_guard<recursive_mutex> lck(_mtx);
+    if (_paused) {
+        setCurrentStamp(getCurrentStamp());
+        _paused = false;
+    }
     if (stamp_seek > _demuxer->getDurationMS()) {
         // 超过文件长度  [AUTO-TRANSLATED:b4361054]
         // Exceeds the file length
@@ -247,8 +315,12 @@ bool MP4Reader::seekTo(uint32_t stamp_seek) {
     // Search for the next keyframe
     bool keyFrame = false;
     bool eof = false;
-    while (!eof) {
-        auto frame = _demuxer->readFrame(keyFrame, eof);
+    while (!eof && generation == _control_generation.load()) {
+        int read_error = 0;
+        auto frame = _demuxer->readFrame(keyFrame, eof, &read_error, true);
+        if (read_error) {
+            return false;
+        }
         if (!frame) {
             // 文件读完了都未找到下一帧关键帧  [AUTO-TRANSLATED:49a8d3a7]
             // The file has been read but the next keyframe has not been found
@@ -270,7 +342,7 @@ bool MP4Reader::seekTo(uint32_t stamp_seek) {
 }
 
 bool MP4Reader::close(MediaSource &sender) {
-    _timer = nullptr;
+    stopReadMP4();
     WarnL << "close media: " << sender.getUrl();
     return true;
 }

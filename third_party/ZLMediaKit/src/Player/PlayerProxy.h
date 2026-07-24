@@ -59,6 +59,9 @@ class PlayerProxy
     , public std::enable_shared_from_this<PlayerProxy> {
 public:
     using Ptr = std::shared_ptr<PlayerProxy>;
+    using MediaPlayer::pause;
+    using MediaPlayer::seekTo;
+    using MediaPlayer::speed;
 
     // 如果retry_count<0,则一直重试播放；否则重试retry_count次数  [AUTO-TRANSLATED:5582d53c]
     // If retry_count < 0, then retry playing indefinitely; otherwise, retry retry_count times

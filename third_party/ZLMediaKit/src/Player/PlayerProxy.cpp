@@ -144,7 +144,7 @@ void PlayerProxy::play(const string &url) {
 
             InfoL << "play " << strongSelf->_pull_url << " success";
             strongSelf->_status = std::make_shared<std::string>("playing");
-        } else if (*piFailedCnt < strongSelf->_retry_count || strongSelf->_retry_count < 0) {
+        } else if (!strongSelf->isFinite() && (*piFailedCnt < strongSelf->_retry_count || strongSelf->_retry_count < 0)) {
             // 播放失败，延时重试播放  [AUTO-TRANSLATED:d7537c9c]
             // Play failed, retry playing with delay
             strongSelf->_on_disconnect();
@@ -160,7 +160,8 @@ void PlayerProxy::play(const string &url) {
         if (!strongSelf) {
             return;
         }
-        if (err) {
+        auto finite_eof = strongSelf->isFinite() && err.getErrCode() == Err_eof;
+        if (err && !finite_eof) {
             NOTICE_EMIT(BroadcastPlayerProxyFailedArgs, Broadcast::kBroadcastPlayerProxyFailed, *strongSelf, err);
         }
         if (strongSelf->_on_play) {
@@ -197,7 +198,7 @@ void PlayerProxy::play(const string &url) {
 
         // 播放异常中断，延时重试播放  [AUTO-TRANSLATED:fee316b2]
         // Play interrupted abnormally, retry playing with delay
-        if (*piFailedCnt < strongSelf->_retry_count || strongSelf->_retry_count < 0) {
+        if (!strongSelf->isFinite() && (*piFailedCnt < strongSelf->_retry_count || strongSelf->_retry_count < 0)) {
             strongSelf->_repull_count++;
             strongSelf->rePlay((*piFailedCnt)++);
         } else {
@@ -291,7 +292,7 @@ int PlayerProxy::totalReaderCount(MediaSource &sender) {
 }
 
 MediaOriginType PlayerProxy::getOriginType(MediaSource &sender) const {
-    return MediaOriginType::pull;
+    return isFinite() ? MediaOriginType::mp4_vod : MediaOriginType::pull;
 }
 
 string PlayerProxy::getOriginUrl(MediaSource &sender) const {

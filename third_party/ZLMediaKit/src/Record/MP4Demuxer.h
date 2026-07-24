@@ -59,15 +59,17 @@ public:
      * 读取一帧数据
      * @param keyFrame 是否为关键帧
      * @param eof 是否文件读取完毕
+     * @param error 读取错误码，0表示无错误
      * @return 帧数据,可能为空
      * Read a frame of data
      * @param keyFrame Whether it is a key frame
      * @param eof Whether the file has been read completely
+     * @param error Read error code, 0 means no error
      * @return Frame data, may be empty
      
      * [AUTO-TRANSLATED:adf550de]
      */
-    Frame::Ptr readFrame(bool &keyFrame, bool &eof);
+    Frame::Ptr readFrame(bool &keyFrame, bool &eof, int *error = nullptr);
 
     /**
      * 获取所有Track信息
@@ -134,9 +136,11 @@ public:
      * 读取一帧数据
      * @param keyFrame 是否为关键帧
      * @param eof 是否所有文件读取完毕
+     * @param error 读取错误码，0表示无错误
+     * @param key_frame_only 是否只派发关键帧或配置帧
      * @return 帧数据,可能为空
      */
-    Frame::Ptr readFrame(bool &keyFrame, bool &eof);
+    Frame::Ptr readFrame(bool &keyFrame, bool &eof, int *error = nullptr, bool key_frame_only = false);
 
     /**
      * 获取第一个文件所有Track信息

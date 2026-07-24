@@ -12,6 +12,7 @@
 #define SRC_MEDIAFILE_MEDIAREADER_H_
 #ifdef ENABLE_MP4
 
+#include <atomic>
 #include "MP4Demuxer.h"
 #include "Common/MultiMediaSourceMuxer.h"
 
@@ -20,6 +21,7 @@ namespace mediakit {
 class MP4Reader : public std::enable_shared_from_this<MP4Reader>, public MediaSourceEvent {
 public:
     using Ptr = std::shared_ptr<MP4Reader>;
+    using onComplete = std::function<void(const toolkit::SockException &)>;
 
     /**
      * 点播一个mp4文件，使之转换成MediaSource流媒体
@@ -44,14 +46,16 @@ public:
      * @param sample_ms 每次读取文件数据量，单位毫秒，置0时采用配置文件配置
      * @param ref_self 是否让定时器引用此对象本身，如果无其他对象引用本身，在不循环读文件时，读取文件结束后本对象将自动销毁
      * @param file_repeat 是否循环读取文件，如果配置文件设置为循环读文件，此参数无效
+     * @param use_global_repeat 是否采用全局循环播放配置
      * Start demultiplexing the MP4 file
      * @param sample_ms The amount of file data read each time, in milliseconds, set to 0 to use the configuration file configuration
      * @param ref_self Whether to let the timer reference this object itself, if there is no other object referencing itself, when not looping to read the file, after reading the file, this object will be automatically destroyed
      * @param file_repeat Whether to loop to read the file, if the configuration file is set to loop to read the file, this parameter is invalid
+     * @param use_global_repeat Whether to honor the global file repeat setting
      
      * [AUTO-TRANSLATED:2164a99d]
      */
-    void startReadMP4(uint64_t sample_ms = 0, bool ref_self = true,  bool file_repeat = false);
+    void startReadMP4(uint64_t sample_ms = 0, bool ref_self = true,  bool file_repeat = false, bool use_global_repeat = true);
 
     /**
      * 停止解复用MP4定时器
@@ -60,6 +64,15 @@ public:
      * [AUTO-TRANSLATED:45fb1ef7]
      */
     void stopReadMP4();
+
+    void setOnComplete(onComplete cb);
+
+    bool pause(bool paused);
+    bool speed(float speed);
+    bool seekTo(uint32_t stamp);
+
+    uint64_t getDurationMS() const;
+    uint32_t getProgressMS() const;
 
     /**
      * 获取mp4解复用器
@@ -81,25 +94,28 @@ private:
     std::string getOriginUrl(MediaSource &sender) const override;
     toolkit::EventPoller::Ptr getOwnerPoller(MediaSource &sender) override;
 
-    bool readSample();
+    bool readSample(toolkit::SockException &ex);
     bool readNextSample();
-    uint32_t getCurrentStamp();
+    bool onTick();
+    uint32_t getCurrentStamp() const;
     void setCurrentStamp(uint32_t stamp);
-    bool seekTo(uint32_t stamp_seek);
 
     void setup(const MediaTuple &tuple, const std::string &file_path, const ProtocolOption &option, toolkit::EventPoller::Ptr poller);
 
 private:
     bool _file_repeat = false;
+    bool _use_global_repeat = true;
     bool _have_video = false;
     bool _paused = false;
     float _speed = 1.0;
     uint32_t _last_dts = 0;
     uint32_t _seek_to = 0;
     std::string _file_path;
-    std::recursive_mutex _mtx;
+    std::atomic_uint64_t _control_generation { 0 };
+    mutable std::recursive_mutex _mtx;
     toolkit::Ticker _seek_ticker;
     toolkit::Timer::Ptr _timer;
+    onComplete _on_complete;
     MultiMP4Demuxer::Ptr _demuxer;
     MultiMediaSourceMuxer::Ptr _muxer;
     toolkit::EventPoller::Ptr _poller;

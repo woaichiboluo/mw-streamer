@@ -48,9 +48,9 @@ public:
 
     /**
      * 开始播放
-     * @param url 视频url，支持rtsp/rtmp
+     * @param url 网络视频url或本地MP4文件路径
      * Start playback
-     * @param url Video url, supports rtsp/rtmp
+     * @param url Network video URL or local MP4 file path
      
      * [AUTO-TRANSLATED:3871cbee]
      */
@@ -73,6 +73,12 @@ public:
      * [AUTO-TRANSLATED:f3de1631]
      */
     virtual float getDuration() const { return 0; };
+
+    /**
+     * 输入是否会自然结束
+     * Whether the input ends naturally
+     */
+    virtual bool isFinite() const { return false; }
 
     /**
      * 倍数播放
@@ -219,6 +225,10 @@ public:
 
     float getDuration() const override {
         return _delegate ? _delegate->getDuration() : Parent::getDuration();
+    }
+
+    bool isFinite() const override {
+        return _delegate ? _delegate->isFinite() : Parent::isFinite();
     }
 
     float getProgress() const override {

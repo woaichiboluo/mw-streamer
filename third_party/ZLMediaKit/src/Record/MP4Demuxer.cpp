@@ -29,7 +29,7 @@ void MP4Demuxer::openMP4(const string &file) {
     closeMP4();
 
     _mp4_file = std::make_shared<MP4FileDisk>();
-    _mp4_file->openFile(file.data(), "rb+");
+    _mp4_file->openFile(file.data(), "rb");
     _mov_reader = _mp4_file->createReader();
     getAllTracks();
     _duration_ms = mov_reader_getduration(_mov_reader.get());
@@ -100,9 +100,12 @@ struct Context {
     BufferRaw::Ptr buffer;
 };
 
-Frame::Ptr MP4Demuxer::readFrame(bool &keyFrame, bool &eof) {
+Frame::Ptr MP4Demuxer::readFrame(bool &keyFrame, bool &eof, int *error) {
     keyFrame = false;
     eof = false;
+    if (error) {
+        *error = 0;
+    }
 
     static mov_reader_onread2 mov_onalloc = [](void *param, uint32_t track_id, size_t bytes, int64_t pts, int64_t dts, int flags) -> void * {
         Context *ctx = (Context *) param;
@@ -132,6 +135,9 @@ Frame::Ptr MP4Demuxer::readFrame(bool &keyFrame, bool &eof) {
 
         default : {
             eof = true;
+            if (error) {
+                *error = ret;
+            }
             WarnL << "读取mp4文件数据失败:" << ret;
             return nullptr;
         }
@@ -243,13 +249,23 @@ int64_t MultiMP4Demuxer::seekTo(int64_t stamp_ms) {
     return _it->first + _it->second->seekTo(stamp_ms - _it->first);
 }
 
-Frame::Ptr MultiMP4Demuxer::readFrame(bool &keyFrame, bool &eof) {
+Frame::Ptr MultiMP4Demuxer::readFrame(bool &keyFrame, bool &eof, int *error, bool key_frame_only) {
+    if (error) {
+        *error = 0;
+    }
     for (;;) {
-        auto ret = _it->second->readFrame(keyFrame, eof);
+        int read_error = 0;
+        auto ret = _it->second->readFrame(keyFrame, eof, &read_error);
+        if (read_error) {
+            if (error) {
+                *error = read_error;
+            }
+            return nullptr;
+        }
         if (ret) {
             ret->setIndex(ret->getTrackType());
             auto it = _tracks.find(ret->getIndex());
-            if (it != _tracks.end()) {
+            if (it != _tracks.end() && (!key_frame_only || keyFrame || ret->keyFrame() || ret->configFrame())) {
                 auto ret2 = std::make_shared<FrameStamp>(ret);
                 ret2->setStamp(_it->first + ret->dts(), _it->first + ret->pts());
                 ret = std::move(ret2);
