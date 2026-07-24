@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "mw/init.hpp"
+#include "mw/init/init.hpp"
 
 extern "C" {
 #include <libavutil/log.h>

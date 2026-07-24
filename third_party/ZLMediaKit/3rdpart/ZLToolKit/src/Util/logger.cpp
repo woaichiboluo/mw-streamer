@@ -73,6 +73,7 @@ INSTANCE_IMP(Logger, exeName())
 
 Logger::Logger(const string &loggerName) {
     _logger_name = loggerName;
+    _module_name = exeName(false);
     _last_log = std::make_shared<LogContext>();
     _default_channel = std::make_shared<ConsoleChannel>("default", LTrace);
 
@@ -196,12 +197,8 @@ const string &LogContext::str() {
     return _content;
 }
 
-///////////////////AsyncLogWriter///////////////////
-
-static string s_module_name = exeName(false);
-
 LogContextCapture::LogContextCapture(Logger &logger, LogLevel level, const char *file, const char *function, int line, const char *flag) :
-        _ctx(new LogContext(level, file, function, line, s_module_name.c_str() ? s_module_name.c_str() : "", flag)), _logger(logger) {
+        _ctx(new LogContext(level, file, function, line, logger._module_name.c_str(), flag)), _logger(logger) {
 }
 
 LogContextCapture::LogContextCapture(const LogContextCapture &that) : _ctx(that._ctx), _logger(that._logger) {

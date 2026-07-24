@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "mw/init.hpp"
+#include "mw/init/init.hpp"
 #include "srt/SrtEpollReactor.h"
 
 TEST_CASE("shutdown does not create an unused SRT reactor",

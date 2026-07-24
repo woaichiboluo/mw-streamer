@@ -25,14 +25,16 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
 include(cmake/Dependencies.cmake)
 
-find_package(FFmpeg REQUIRED COMPONENTS AVUTIL)
+find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVUTIL)
 find_package(SRT REQUIRED)
 
 add_subdirectory(third_party/ZLMediaKit)
 
 add_library(mw_streamer STATIC
-    src/init.cpp
-    src/logging.cpp
+    src/convter/ZlmCodecParametersConvter.cpp
+    src/convter/ZlmPacketConvter.cpp
+    src/init/init.cpp
+    src/log/logging.cpp
 )
 add_library(mw::streamer ALIAS mw_streamer)
 
@@ -43,6 +45,8 @@ target_include_directories(mw_streamer
 
 target_link_libraries(mw_streamer
     PUBLIC
+        FFmpeg::avcodec
+        ZLMediaKit::MediaKit
         fmt::fmt
     PRIVATE
         FFmpeg::avutil

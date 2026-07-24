@@ -37,7 +37,7 @@ FFmpeg 日志，并在正文前分别增加 `[streamer]`、`[ZLM]`、`[SRT]` 和
 配置；异步日志默认关闭，彩色控制台与普通控制台不会同时创建。
 
 ```cpp
-#include <mw/init.hpp>
+#include <mw/init/init.hpp>
 
 int main() {
     using Log = mw::log::Module<mw::log::LogModule::Streamer>;

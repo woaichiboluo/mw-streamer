@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mw/logging.hpp"
+#include "mw/log/logging.hpp"
 
 namespace mw {
 

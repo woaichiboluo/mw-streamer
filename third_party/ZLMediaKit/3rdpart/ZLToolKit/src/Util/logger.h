@@ -47,6 +47,7 @@ void setLogger(Logger *logger);
 class Logger : public std::enable_shared_from_this<Logger>, public noncopyable {
 public:
     friend class AsyncLogWriter;
+    friend class LogContextCapture;
     using Ptr = std::shared_ptr<Logger>;
 
     /**
@@ -149,6 +150,7 @@ private:
 private:
     LogContextPtr _last_log;
     std::string _logger_name;
+    std::string _module_name;
     std::shared_ptr<LogWriter> _writer;
     std::shared_ptr<LogChannel> _default_channel;
     std::map<std::string, std::shared_ptr<LogChannel> > _channels;

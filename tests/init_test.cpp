@@ -1,4 +1,4 @@
-#include "mw/init.hpp"
+#include "mw/init/init.hpp"
 
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>

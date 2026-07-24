@@ -59,3 +59,41 @@ target_link_libraries(mw_file_player_tests
 )
 
 add_test(NAME mw_file_player_tests COMMAND mw_file_player_tests)
+
+add_executable(mw_zlm_packet_convter_tests
+    zlm_packet_convter_test.cpp
+)
+
+target_compile_definitions(mw_zlm_packet_convter_tests
+    PRIVATE
+        MW_ZLM_PACKET_CONVTER_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+)
+
+target_link_libraries(mw_zlm_packet_convter_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        FFmpeg::avcodec
+        FFmpeg::avutil
+        ZLMediaKit::MediaKit
+        ZLMediaKit::ext-codec
+        mw::streamer
+)
+
+add_test(
+    NAME mw_zlm_packet_convter_tests
+    COMMAND mw_zlm_packet_convter_tests
+)
+
+add_executable(mw_zlm_logger_lifecycle_tests
+    zlm_logger_lifecycle_test.cpp
+)
+
+target_link_libraries(mw_zlm_logger_lifecycle_tests
+    PRIVATE
+        ZLMediaKit::ToolKit
+)
+
+add_test(
+    NAME mw_zlm_logger_lifecycle_tests
+    COMMAND mw_zlm_logger_lifecycle_tests
+)
