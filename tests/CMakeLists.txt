@@ -135,6 +135,55 @@ add_test(
     COMMAND mw_packet_queue_tests
 )
 
+add_executable(mw_recording_target_tests
+    recording_target_test.cc
+)
+
+target_compile_definitions(mw_recording_target_tests
+    PRIVATE
+        MW_RECORDING_TARGET_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+)
+
+target_include_directories(mw_recording_target_tests
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+)
+
+target_link_libraries(mw_recording_target_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        mw::streamer
+        ZLMediaKit::MediaKit
+        ZLMediaKit::ext-codec
+)
+
+add_test(
+    NAME mw_recording_target_tests
+    COMMAND mw_recording_target_tests
+)
+
+add_executable(mw_output_session_tests
+    output_session_test.cc
+)
+
+target_compile_definitions(mw_output_session_tests
+    PRIVATE
+        MW_OUTPUT_SESSION_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+)
+
+target_link_libraries(mw_output_session_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        mw::streamer
+        ZLMediaKit::MediaKit
+        ZLMediaKit::ext-codec
+)
+
+add_test(
+    NAME mw_output_session_tests
+    COMMAND mw_output_session_tests
+)
+
 add_executable(mw_zlm_logger_lifecycle_tests
     zlm_logger_lifecycle_test.cc
 )

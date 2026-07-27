@@ -38,12 +38,16 @@ add_library(mw_streamer STATIC
     src/init/init.cc
     src/input/player_proxy.cc
     src/log/logging.cc
+    src/output/output_session.cc
+    src/output/recording_target.cc
 )
 add_library(mw::streamer ALIAS mw_streamer)
 
 target_include_directories(mw_streamer
     PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
 )
 
 target_link_libraries(mw_streamer
