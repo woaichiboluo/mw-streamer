@@ -6,8 +6,8 @@ class NullLogChannel : public toolkit::LogChannel {
  public:
   NullLogChannel() : LogChannel("null") {}
 
-  void write(const toolkit::Logger &,
-             const toolkit::LogContextPtr &) override {}
+  void write(const toolkit::Logger &, const toolkit::LogContextPtr &) override {
+  }
 };
 
 class EarlyLoggerUser {

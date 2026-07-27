@@ -1,4 +1,5 @@
-#pragma once
+#ifndef MW_STREAMER_INCLUDE_MW_INPUT_PLAYER_PROXY_H_
+#define MW_STREAMER_INCLUDE_MW_INPUT_PLAYER_PROXY_H_
 
 #include <chrono>
 #include <cstdint>
@@ -20,7 +21,7 @@ namespace toolkit {
 class EventPoller;
 }
 
-namespace mw::input {
+namespace mw::streamer::input {
 
 struct ReconnectPolicy {
   // Number of retries after the initial attempt. A negative value retries
@@ -32,25 +33,25 @@ struct ReconnectPolicy {
 };
 
 enum class PlayerState {
-  Idle,
-  Connecting,
-  Ready,
-  WaitingRetry,
-  Ended,
-  Failed,
-  Stopped,
+  kIdle,
+  kConnecting,
+  kReady,
+  kWaitingRetry,
+  kEnded,
+  kFailed,
+  kStopped,
 };
 
 enum class ControlResult {
-  Accepted,
-  InvalidState,
-  NotSupported,
-  InvalidArgument,
-  Failed,
+  kAccepted,
+  kInvalidState,
+  kNotSupported,
+  kInvalidArgument,
+  kFailed,
 };
 
 enum class TimelineResetReason {
-  Seek,
+  kSeek,
 };
 
 struct StreamInfo {
@@ -86,35 +87,37 @@ class PlayerProxy final {
   // Callback setters and control methods are serialized on the owner poller.
   // Callbacks are invoked on that poller. AVPacket ownership remains with the
   // proxy and is valid only for the duration of OnPacket.
-  void setOnPacket(OnPacket callback);
-  void setOnStreamsReady(OnStreamsReady callback);
-  void setOnState(OnState callback);
-  void setOnTimelineReset(OnTimelineReset callback);
+  void SetOnPacket(OnPacket callback);
+  void SetOnStreamsReady(OnStreamsReady callback);
+  void SetOnState(OnState callback);
+  void SetOnTimelineReset(OnTimelineReset callback);
 
   // One proxy manages one active URL. Start again only after stop completes or
   // the previous finite input reaches a terminal state.
-  void start(std::string url, toolkit::mINI options = {});
+  void Start(std::string url, toolkit::mINI options = {});
 
   // Playback controls are accepted only while a finite local input is Ready.
   // Completion reports that validation passed and the command was synchronously
   // submitted to ZLM. Seek and playback-rate changes resume a paused file.
-  void pause(bool paused, OnControlCompleted completed = {});
-  void seekTo(std::chrono::milliseconds position,
+  void Pause(bool paused, OnControlCompleted completed = {});
+  void SeekTo(std::chrono::milliseconds position,
               OnControlCompleted completed = {});
-  void setPlaybackRate(float rate, OnControlCompleted completed = {});
+  void SetPlaybackRate(float rate, OnControlCompleted completed = {});
 
   // Completion means retry tasks, Track delegates, converters, and the active
   // ZLM player attempt have all been released on the owner poller.
-  void stop(OnStopped on_stopped = {});
+  void Stop(OnStopped on_stopped = {});
 
   PlayerState state() const noexcept;
   std::uint64_t generation() const noexcept;
-  std::uint64_t reconnectCount() const noexcept;
-  std::shared_ptr<toolkit::EventPoller> getPoller() const;
+  std::uint64_t reconnect_count() const noexcept;
+  std::shared_ptr<toolkit::EventPoller> poller() const;
 
  private:
   class Impl;
   std::shared_ptr<Impl> impl_;
 };
 
-}  // namespace mw::input
+}  // namespace mw::streamer::input
+
+#endif  // MW_STREAMER_INCLUDE_MW_INPUT_PLAYER_PROXY_H_

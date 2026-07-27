@@ -31,12 +31,13 @@ find_package(SRT REQUIRED)
 add_subdirectory(third_party/ZLMediaKit)
 
 add_library(mw_streamer STATIC
-    src/cache/PacketQueue.cpp
-    src/convter/ZlmCodecParametersConvter.cpp
-    src/convter/ZlmPacketConvter.cpp
-    src/init/init.cpp
-    src/input/PlayerProxy.cpp
-    src/log/logging.cpp
+    src/cache/packet_queue.cc
+    src/converter/av_packet_to_zlm_frame_converter.cc
+    src/converter/zlm_codec_parameters_converter.cc
+    src/converter/zlm_packet_converter.cc
+    src/init/init.cc
+    src/input/player_proxy.cc
+    src/log/logging.cc
 )
 add_library(mw::streamer ALIAS mw_streamer)
 
@@ -53,6 +54,7 @@ target_link_libraries(mw_streamer
     PRIVATE
         FFmpeg::avutil
         SRT::SRT
+        ZLMediaKit::ext-codec
         ZLMediaKit::SRT
         ZLMediaKit::ToolKit
         spdlog::spdlog

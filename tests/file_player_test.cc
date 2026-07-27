@@ -19,21 +19,21 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mediakit::FilePlayerImp;
-using mediakit::MediaPlayer;
-using mediakit::PlayerBase;
-using mediakit::PlayerProxy;
 using mediakit::CodecAAC;
 using mediakit::CodecH264;
 using mediakit::CodecH265;
 using mediakit::CodecId;
+using mediakit::FilePlayerImp;
+using mediakit::MediaPlayer;
+using mediakit::PlayerBase;
+using mediakit::PlayerProxy;
 using toolkit::Err_eof;
 using toolkit::Err_other;
 using toolkit::Err_success;
 using toolkit::ErrCode;
 using toolkit::SockException;
 
-std::string samplePath(const std::string &name = "file_player.mp4") {
+std::string SamplePath(const std::string &name = "file_player.mp4") {
   return std::string(MW_FILE_PLAYER_TEST_DATA_DIR) + "/" + name;
 }
 
@@ -49,10 +49,8 @@ const std::vector<Sample> kSamples = {
     {"H.265 + AAC MP4", "h265_aac.mp4", CodecH265, true},
     {"H.264 video-only MP4", "h264_video.mp4", CodecH264, false},
     {"H.265 video-only MP4", "h265_video.mp4", CodecH265, false},
-    {"H.264 + AAC fragmented MP4", "h264_aac_fragmented.mp4", CodecH264,
-     true},
-    {"H.265 + AAC fragmented MP4", "h265_aac_fragmented.mp4", CodecH265,
-     true},
+    {"H.264 + AAC fragmented MP4", "h264_aac_fragmented.mp4", CodecH264, true},
+    {"H.265 + AAC fragmented MP4", "h265_aac_fragmented.mp4", CodecH265, true},
 };
 
 struct PlaybackObservation {
@@ -69,7 +67,7 @@ struct PlaybackObservation {
   std::chrono::steady_clock::duration elapsed{};
 };
 
-PlaybackObservation playToEnd(const std::string &path, float speed,
+PlaybackObservation PlayToEnd(const std::string &path, float speed,
                               std::chrono::milliseconds timeout = 5s) {
   MediaPlayer player;
   std::mutex mutex;
@@ -149,7 +147,7 @@ PlaybackObservation playToEnd(const std::string &path, float speed,
 }  // namespace
 
 TEST_CASE("plain MP4 path creates a finite file player") {
-  auto player = PlayerBase::createPlayer(nullptr, samplePath());
+  auto player = PlayerBase::createPlayer(nullptr, SamplePath());
 
   REQUIRE(std::dynamic_pointer_cast<FilePlayerImp>(player));
   CHECK(player->isFinite());
@@ -159,7 +157,7 @@ TEST_CASE("plain MP4 path creates a finite file player") {
 TEST_CASE("file player demuxes the supported MP4 sample matrix") {
   for (const auto &sample : kSamples) {
     DYNAMIC_SECTION(sample.name) {
-      auto observation = playToEnd(samplePath(sample.file), 20.0f);
+      auto observation = PlayToEnd(SamplePath(sample.file), 20.0f);
 
       REQUIRE(observation.play_called);
       REQUIRE(observation.play_result == Err_success);
@@ -167,9 +165,9 @@ TEST_CASE("file player demuxes the supported MP4 sample matrix") {
       CHECK(observation.shutdown_result == Err_eof);
       CHECK(observation.duration >= 1.9f);
       CHECK(observation.frame_count > 0);
-      CHECK((sample.video_codec == CodecH264 ? observation.h264_frame_count
-                                             : observation.h265_frame_count) >
-            0);
+      CHECK((sample.video_codec == CodecH264
+                 ? observation.h264_frame_count
+                 : observation.h265_frame_count) > 0);
       CHECK((observation.aac_frame_count > 0) == sample.has_audio);
       CHECK(std::count(observation.codecs.begin(), observation.codecs.end(),
                        sample.video_codec) == 1);
@@ -181,9 +179,9 @@ TEST_CASE("file player demuxes the supported MP4 sample matrix") {
 }
 
 TEST_CASE("file player speed controls MP4 demux pacing") {
-  auto normal = playToEnd(samplePath("h264_aac.mp4"), 1.0f);
-  auto double_speed = playToEnd(samplePath("h264_aac.mp4"), 2.0f);
-  auto twenty_speed = playToEnd(samplePath("h264_aac.mp4"), 20.0f);
+  auto normal = PlayToEnd(SamplePath("h264_aac.mp4"), 1.0f);
+  auto double_speed = PlayToEnd(SamplePath("h264_aac.mp4"), 2.0f);
+  auto twenty_speed = PlayToEnd(SamplePath("h264_aac.mp4"), 20.0f);
 
   REQUIRE(normal.finished);
   REQUIRE(double_speed.finished);
@@ -195,10 +193,8 @@ TEST_CASE("file player speed controls MP4 demux pacing") {
   CHECK(normal.elapsed > double_speed.elapsed + 300ms);
   CHECK(double_speed.elapsed > twenty_speed.elapsed + 250ms);
 
-  auto h265_normal =
-      playToEnd(samplePath("h265_aac_fragmented.mp4"), 1.0f);
-  auto h265_twenty =
-      playToEnd(samplePath("h265_aac_fragmented.mp4"), 20.0f);
+  auto h265_normal = PlayToEnd(SamplePath("h265_aac_fragmented.mp4"), 1.0f);
+  auto h265_twenty = PlayToEnd(SamplePath("h265_aac_fragmented.mp4"), 20.0f);
 
   REQUIRE(h265_normal.finished);
   REQUIRE(h265_twenty.finished);
@@ -256,7 +252,7 @@ TEST_CASE("file player publishes tracks before paced playback starts") {
     condition.notify_all();
   });
 
-  player.play(samplePath());
+  player.play(SamplePath());
 
   REQUIRE(play_result_called);
   REQUIRE(play_result == Err_success);
@@ -312,7 +308,7 @@ TEST_CASE("file player control interrupts a slow 20x batch between frames") {
     player.speed(20.0f);
   });
 
-  player.play(samplePath());
+  player.play(SamplePath());
   {
     std::unique_lock<std::mutex> lock(mutex);
     REQUIRE(
@@ -340,7 +336,7 @@ TEST_CASE("missing local MP4 reports a play error without throwing") {
     callback_called = true;
   });
 
-  CHECK_NOTHROW(player.play(samplePath() + ".missing"));
+  CHECK_NOTHROW(player.play(SamplePath() + ".missing"));
   REQUIRE(callback_called);
   CHECK(result == Err_other);
   CHECK(player.isFinite());
@@ -356,7 +352,7 @@ TEST_CASE("file proxy does not retry a failed finite input") {
   proxy->setOnClose([&](const SockException &) { ++close_count; });
   proxy->setOnDisconnect([&]() { ++disconnect_count; });
 
-  proxy->play(samplePath() + ".missing");
+  proxy->play(SamplePath() + ".missing");
 
   CHECK(close_count == 1);
   CHECK(disconnect_count == 0);
@@ -378,7 +374,7 @@ TEST_CASE("file proxy closes once at EOF without repulling") {
     condition.notify_all();
   });
 
-  proxy->play(samplePath());
+  proxy->play(SamplePath());
   proxy->speed(20.0f);
 
   {

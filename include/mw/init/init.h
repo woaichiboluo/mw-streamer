@@ -1,8 +1,9 @@
-#pragma once
+#ifndef MW_STREAMER_INCLUDE_MW_INIT_INIT_H_
+#define MW_STREAMER_INCLUDE_MW_INIT_INIT_H_
 
-#include "mw/log/logging.hpp"
+#include "mw/log/logging.h"
 
-namespace mw {
+namespace mw::streamer {
 
 struct InitConfig {
   log::LogConfig log;
@@ -11,13 +12,15 @@ struct InitConfig {
 // Initializes process-wide mw-streamer modules once. The first successful call
 // owns the configuration; later calls are no-ops. Streamer logging remains
 // available through its lazy default logger before this call.
-void init(const InitConfig& config = {});
+void Init(const InitConfig& config = {});
 
 // Must be called from the owning application thread after media sessions,
 // reconnect tasks, and their poller callbacks have stopped. Reinitialization
 // after shutdown is not supported.
-void shutdown() noexcept;
+void Shutdown() noexcept;
 
-bool initialized() noexcept;
+bool IsInitialized() noexcept;
 
-}  // namespace mw
+}  // namespace mw::streamer
+
+#endif  // MW_STREAMER_INCLUDE_MW_INIT_INIT_H_

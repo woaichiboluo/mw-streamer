@@ -14,44 +14,44 @@ extern "C" {
 }
 
 #include "Poller/EventPoller.h"
-#include "mw/input/PlayerProxy.h"
+#include "mw/input/player_proxy.h"
 
 namespace {
 
 using namespace std::chrono_literals;
-using mw::input::ControlResult;
-using mw::input::PlayerProxy;
-using mw::input::PlayerState;
-using mw::input::ReconnectPolicy;
-using mw::input::TimelineResetReason;
+using mw::streamer::input::ControlResult;
+using mw::streamer::input::PlayerProxy;
+using mw::streamer::input::PlayerState;
+using mw::streamer::input::ReconnectPolicy;
+using mw::streamer::input::TimelineResetReason;
 using toolkit::Err_eof;
 using toolkit::Err_other;
 using toolkit::ErrCode;
 using toolkit::SockException;
 
-std::string samplePath(const std::string& name = "h264_aac.mp4") {
+std::string SamplePath(const std::string& name = "h264_aac.mp4") {
   return std::string(MW_INPUT_PLAYER_PROXY_TEST_DATA_DIR) + "/" + name;
 }
 
-bool waitFor(std::condition_variable& condition, std::mutex& mutex,
+bool WaitFor(std::condition_variable& condition, std::mutex& mutex,
              const std::function<bool()>& predicate,
              std::chrono::milliseconds timeout = 5s) {
   std::unique_lock<std::mutex> lock(mutex);
   return condition.wait_for(lock, timeout, predicate);
 }
 
-void stopAndWait(const PlayerProxy::Ptr& proxy) {
+void StopAndWait(const PlayerProxy::Ptr& proxy) {
   std::mutex mutex;
   std::condition_variable condition;
   bool stopped = false;
-  proxy->stop([&]() {
+  proxy->Stop([&]() {
     {
       std::lock_guard<std::mutex> lock(mutex);
       stopped = true;
     }
     condition.notify_all();
   });
-  REQUIRE(waitFor(condition, mutex, [&]() { return stopped; }));
+  REQUIRE(WaitFor(condition, mutex, [&]() { return stopped; }));
 }
 
 }  // namespace
@@ -70,9 +70,9 @@ TEST_CASE(
   std::atomic_bool ended = false;
   std::atomic<ErrCode> end_reason = Err_other;
 
-  proxy->setOnStreamsReady(
+  proxy->SetOnStreamsReady(
       [&](std::uint64_t generation,
-          const std::vector<mw::input::StreamInfo>& streams) {
+          const std::vector<mw::streamer::input::StreamInfo>& streams) {
         if (generation != 1) {
           valid_packets = false;
         }
@@ -86,7 +86,7 @@ TEST_CASE(
           stream_types.emplace_back(stream.codec_parameters->codec_type);
         }
       });
-  proxy->setOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
+  proxy->SetOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
     if (generation != 1 || !packet || !packet->buf || !packet->data ||
         packet->size <= 0 || packet->dts == AV_NOPTS_VALUE ||
         packet->pts == AV_NOPTS_VALUE || packet->time_base.num != 1 ||
@@ -103,28 +103,28 @@ TEST_CASE(
     }
     return true;
   });
-  proxy->setOnState([&](std::uint64_t generation, PlayerState state,
+  proxy->SetOnState([&](std::uint64_t generation, PlayerState state,
                         const SockException& reason, bool will_retry) {
     if (generation != 1 || will_retry) {
       valid_packets = false;
     }
-    if (state == PlayerState::Ready) {
+    if (state == PlayerState::kReady) {
       ready = true;
     }
-    if (state == PlayerState::Ended) {
+    if (state == PlayerState::kEnded) {
       end_reason = reason.getErrCode();
       ended = true;
       condition.notify_all();
     }
   });
 
-  proxy->start(samplePath());
+  proxy->Start(SamplePath());
 
-  REQUIRE(waitFor(condition, mutex, [&]() { return ended.load(); }));
+  REQUIRE(WaitFor(condition, mutex, [&]() { return ended.load(); }));
   CHECK(ready);
   CHECK(end_reason == Err_eof);
   CHECK(proxy->generation() == 1);
-  CHECK(proxy->reconnectCount() == 0);
+  CHECK(proxy->reconnect_count() == 0);
   CHECK(valid_packets);
   CHECK(video_packets == 20);
   CHECK(audio_packets == 95);
@@ -132,7 +132,7 @@ TEST_CASE(
   CHECK(stream_types[0] == AVMEDIA_TYPE_VIDEO);
   CHECK(stream_types[1] == AVMEDIA_TYPE_AUDIO);
 
-  stopAndWait(proxy);
+  StopAndWait(proxy);
 }
 
 TEST_CASE("input player proxy does not retry a failed finite input") {
@@ -144,33 +144,33 @@ TEST_CASE("input player proxy does not retry a failed finite input") {
   std::atomic_size_t streams_ready = 0;
   std::atomic_size_t packets = 0;
 
-  proxy->setOnStreamsReady(
-      [&](std::uint64_t, const std::vector<mw::input::StreamInfo>&) {
+  proxy->SetOnStreamsReady(
+      [&](std::uint64_t, const std::vector<mw::streamer::input::StreamInfo>&) {
         ++streams_ready;
       });
-  proxy->setOnPacket([&](std::uint64_t, const AVPacket*) {
+  proxy->SetOnPacket([&](std::uint64_t, const AVPacket*) {
     ++packets;
     return true;
   });
-  proxy->setOnState([&](std::uint64_t, PlayerState state, const SockException&,
+  proxy->SetOnState([&](std::uint64_t, PlayerState state, const SockException&,
                         bool will_retry) {
     retried = retried || will_retry;
-    if (state == PlayerState::Failed) {
+    if (state == PlayerState::kFailed) {
       failed = true;
       condition.notify_all();
     }
   });
 
-  proxy->start(samplePath() + ".missing");
+  proxy->Start(SamplePath() + ".missing");
 
-  REQUIRE(waitFor(condition, mutex, [&]() { return failed.load(); }));
+  REQUIRE(WaitFor(condition, mutex, [&]() { return failed.load(); }));
   CHECK_FALSE(retried);
   CHECK(streams_ready == 0);
   CHECK(packets == 0);
   CHECK(proxy->generation() == 1);
-  CHECK(proxy->reconnectCount() == 0);
+  CHECK(proxy->reconnect_count() == 0);
 
-  stopAndWait(proxy);
+  StopAndWait(proxy);
 }
 
 TEST_CASE(
@@ -188,26 +188,26 @@ TEST_CASE(
   std::atomic_size_t waiting_retry = 0;
   std::atomic_bool failed = false;
 
-  proxy->setOnState([&](std::uint64_t, PlayerState state, const SockException&,
+  proxy->SetOnState([&](std::uint64_t, PlayerState state, const SockException&,
                         bool will_retry) {
-    if (state == PlayerState::WaitingRetry && will_retry) {
+    if (state == PlayerState::kWaitingRetry && will_retry) {
       ++waiting_retry;
     }
-    if (state == PlayerState::Failed) {
+    if (state == PlayerState::kFailed) {
       failed = true;
       condition.notify_all();
     }
   });
 
-  proxy->start("rtsp://127.0.0.1:1/mw-unreachable");
+  proxy->Start("rtsp://127.0.0.1:1/mw-unreachable");
 
-  REQUIRE(waitFor(
+  REQUIRE(WaitFor(
       condition, mutex, [&]() { return failed.load(); }, 3s));
   CHECK(waiting_retry == 1);
   CHECK(proxy->generation() == 2);
-  CHECK(proxy->reconnectCount() == 1);
+  CHECK(proxy->reconnect_count() == 1);
 
-  stopAndWait(proxy);
+  StopAndWait(proxy);
 }
 
 TEST_CASE("stopping input player proxy cancels a pending reconnect") {
@@ -222,24 +222,24 @@ TEST_CASE("stopping input player proxy cancels a pending reconnect") {
   std::condition_variable condition;
   std::atomic_bool waiting = false;
 
-  proxy->setOnState([&](std::uint64_t, PlayerState state, const SockException&,
+  proxy->SetOnState([&](std::uint64_t, PlayerState state, const SockException&,
                         bool will_retry) {
-    if (state == PlayerState::WaitingRetry && will_retry) {
+    if (state == PlayerState::kWaitingRetry && will_retry) {
       waiting = true;
       condition.notify_all();
     }
   });
-  proxy->start("rtsp://127.0.0.1:1/mw-stop-reconnect");
+  proxy->Start("rtsp://127.0.0.1:1/mw-stop-reconnect");
 
-  REQUIRE(waitFor(
+  REQUIRE(WaitFor(
       condition, mutex, [&]() { return waiting.load(); }, 3s));
   const auto generation_before_stop = proxy->generation();
-  stopAndWait(proxy);
+  StopAndWait(proxy);
   std::this_thread::sleep_for(2100ms);
 
-  CHECK(proxy->state() == PlayerState::Stopped);
+  CHECK(proxy->state() == PlayerState::kStopped);
   CHECK(proxy->generation() == generation_before_stop);
-  CHECK(proxy->reconnectCount() == 1);
+  CHECK(proxy->reconnect_count() == 1);
 }
 
 TEST_CASE("destroying input player proxy cleans up without user callbacks") {
@@ -255,20 +255,20 @@ TEST_CASE("destroying input player proxy cleans up without user callbacks") {
   std::atomic_size_t callback_count = 0;
   std::atomic_bool waiting = false;
 
-  proxy->setOnState([&](std::uint64_t, PlayerState state, const SockException&,
+  proxy->SetOnState([&](std::uint64_t, PlayerState state, const SockException&,
                         bool will_retry) {
     ++callback_count;
-    if (state == PlayerState::WaitingRetry && will_retry) {
+    if (state == PlayerState::kWaitingRetry && will_retry) {
       waiting = true;
       condition.notify_all();
     }
   });
-  proxy->start("rtsp://127.0.0.1:1/mw-destroy");
+  proxy->Start("rtsp://127.0.0.1:1/mw-destroy");
 
-  REQUIRE(waitFor(
+  REQUIRE(WaitFor(
       condition, mutex, [&]() { return waiting.load(); }, 3s));
   const auto count_before_destroy = callback_count.load();
-  auto poller = proxy->getPoller();
+  auto poller = proxy->poller();
   proxy.reset();
 
   bool barrier_reached = false;
@@ -282,7 +282,7 @@ TEST_CASE("destroying input player proxy cleans up without user callbacks") {
       },
       false);
 
-  REQUIRE(waitFor(condition, mutex, [&]() { return barrier_reached; }));
+  REQUIRE(WaitFor(condition, mutex, [&]() { return barrier_reached; }));
   CHECK(callback_count == count_before_destroy);
 }
 
@@ -296,60 +296,60 @@ TEST_CASE(
   std::atomic_bool pause_completed = false;
   std::atomic_bool resume_completed = false;
   std::atomic_bool callbacks_on_poller = true;
-  std::atomic<ControlResult> pause_result = ControlResult::Failed;
-  std::atomic<ControlResult> resume_result = ControlResult::Failed;
+  std::atomic<ControlResult> pause_result = ControlResult::kFailed;
+  std::atomic<ControlResult> resume_result = ControlResult::kFailed;
 
-  proxy->setOnPacket([&](std::uint64_t, const AVPacket*) {
+  proxy->SetOnPacket([&](std::uint64_t, const AVPacket*) {
     ++packet_count;
     condition.notify_all();
     return true;
   });
-  proxy->setOnState(
+  proxy->SetOnState(
       [&](std::uint64_t, PlayerState state, const SockException&, bool) {
-        if (state == PlayerState::Ready) {
+        if (state == PlayerState::kReady) {
           ready = true;
           condition.notify_all();
         }
       });
-  proxy->start(samplePath());
+  proxy->Start(SamplePath());
 
-  REQUIRE(waitFor(condition, mutex, [&]() { return ready.load(); }));
-  proxy->pause(true, [&](ControlResult result, std::uint64_t generation) {
+  REQUIRE(WaitFor(condition, mutex, [&]() { return ready.load(); }));
+  proxy->Pause(true, [&](ControlResult result, std::uint64_t generation) {
     pause_result = result;
     callbacks_on_poller =
-        callbacks_on_poller && proxy->getPoller()->isCurrentThread();
+        callbacks_on_poller && proxy->poller()->isCurrentThread();
     if (generation != 1) {
       callbacks_on_poller = false;
     }
     pause_completed = true;
     condition.notify_all();
   });
-  REQUIRE(waitFor(condition, mutex, [&]() { return pause_completed.load(); }));
+  REQUIRE(WaitFor(condition, mutex, [&]() { return pause_completed.load(); }));
 
   const auto paused_packet_count = packet_count.load();
   std::this_thread::sleep_for(400ms);
   CHECK(packet_count == paused_packet_count);
-  CHECK(pause_result == ControlResult::Accepted);
+  CHECK(pause_result == ControlResult::kAccepted);
   CHECK(proxy->generation() == 1);
 
-  proxy->pause(false, [&](ControlResult result, std::uint64_t generation) {
+  proxy->Pause(false, [&](ControlResult result, std::uint64_t generation) {
     resume_result = result;
     callbacks_on_poller =
-        callbacks_on_poller && proxy->getPoller()->isCurrentThread();
+        callbacks_on_poller && proxy->poller()->isCurrentThread();
     if (generation != 1) {
       callbacks_on_poller = false;
     }
     resume_completed = true;
     condition.notify_all();
   });
-  REQUIRE(waitFor(condition, mutex, [&]() { return resume_completed.load(); }));
-  REQUIRE(waitFor(condition, mutex,
+  REQUIRE(WaitFor(condition, mutex, [&]() { return resume_completed.load(); }));
+  REQUIRE(WaitFor(condition, mutex,
                   [&]() { return packet_count.load() > paused_packet_count; }));
-  CHECK(resume_result == ControlResult::Accepted);
+  CHECK(resume_result == ControlResult::kAccepted);
   CHECK(callbacks_on_poller);
   CHECK(proxy->generation() == 1);
 
-  stopAndWait(proxy);
+  StopAndWait(proxy);
 }
 
 TEST_CASE("file seek starts a clean timeline generation") {
@@ -365,18 +365,18 @@ TEST_CASE("file seek starts a clean timeline generation") {
   std::atomic_size_t generation_two_video_packets = 0;
   std::atomic<std::int64_t> first_video_dts = AV_NOPTS_VALUE;
   std::atomic_int first_video_flags = 0;
-  std::atomic<ControlResult> seek_result = ControlResult::Failed;
+  std::atomic<ControlResult> seek_result = ControlResult::kFailed;
 
-  proxy->setOnTimelineReset([&](std::uint64_t generation,
+  proxy->SetOnTimelineReset([&](std::uint64_t generation,
                                 TimelineResetReason reason,
                                 std::chrono::milliseconds position) {
-    if (generation != 2 || reason != TimelineResetReason::Seek ||
-        position != 1000ms || !proxy->getPoller()->isCurrentThread()) {
+    if (generation != 2 || reason != TimelineResetReason::kSeek ||
+        position != 1000ms || !proxy->poller()->isCurrentThread()) {
       valid_timeline = false;
     }
     reset_seen = true;
   });
-  proxy->setOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
+  proxy->SetOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
     if (seek_completed && generation != 2) {
       valid_timeline = false;
     }
@@ -394,13 +394,13 @@ TEST_CASE("file seek starts a clean timeline generation") {
     }
     return true;
   });
-  proxy->setOnState([&](std::uint64_t generation, PlayerState state,
+  proxy->SetOnState([&](std::uint64_t generation, PlayerState state,
                         const SockException& reason, bool) {
-    if (state == PlayerState::Ready) {
+    if (state == PlayerState::kReady) {
       ready = true;
       condition.notify_all();
     }
-    if (state == PlayerState::Ended) {
+    if (state == PlayerState::kEnded) {
       if (generation != 2 || reason.getErrCode() != Err_eof) {
         valid_timeline = false;
       }
@@ -408,41 +408,41 @@ TEST_CASE("file seek starts a clean timeline generation") {
       condition.notify_all();
     }
   });
-  proxy->start(samplePath());
+  proxy->Start(SamplePath());
 
-  REQUIRE(waitFor(condition, mutex, [&]() { return ready.load(); }));
-  proxy->pause(true, [&](ControlResult result, std::uint64_t) {
-    if (result != ControlResult::Accepted) {
+  REQUIRE(WaitFor(condition, mutex, [&]() { return ready.load(); }));
+  proxy->Pause(true, [&](ControlResult result, std::uint64_t) {
+    if (result != ControlResult::kAccepted) {
       valid_timeline = false;
     }
     paused = true;
     condition.notify_all();
   });
-  REQUIRE(waitFor(condition, mutex, [&]() { return paused.load(); }));
+  REQUIRE(WaitFor(condition, mutex, [&]() { return paused.load(); }));
 
-  proxy->seekTo(1000ms, [&](ControlResult result, std::uint64_t generation) {
+  proxy->SeekTo(1000ms, [&](ControlResult result, std::uint64_t generation) {
     seek_result = result;
-    if (generation != 2 || !proxy->getPoller()->isCurrentThread()) {
+    if (generation != 2 || !proxy->poller()->isCurrentThread()) {
       valid_timeline = false;
     }
     seek_completed = true;
     condition.notify_all();
   });
-  REQUIRE(waitFor(condition, mutex, [&]() { return seek_completed.load(); }));
-  proxy->setPlaybackRate(20.0f);
+  REQUIRE(WaitFor(condition, mutex, [&]() { return seek_completed.load(); }));
+  proxy->SetPlaybackRate(20.0f);
 
-  REQUIRE(waitFor(condition, mutex, [&]() { return ended.load(); }));
-  CHECK(seek_result == ControlResult::Accepted);
+  REQUIRE(WaitFor(condition, mutex, [&]() { return ended.load(); }));
+  CHECK(seek_result == ControlResult::kAccepted);
   CHECK(reset_seen);
   CHECK(valid_timeline);
   CHECK(proxy->generation() == 2);
-  CHECK(proxy->reconnectCount() == 0);
+  CHECK(proxy->reconnect_count() == 0);
   CHECK(generation_two_video_packets > 0);
   CHECK(first_video_dts >= 1000);
   CHECK(first_video_dts <= 1100);
   CHECK((first_video_flags.load() & AV_PKT_FLAG_KEY) != 0);
 
-  stopAndWait(proxy);
+  StopAndWait(proxy);
 }
 
 TEST_CASE("file playback rate changes pacing without changing generation") {
@@ -455,13 +455,13 @@ TEST_CASE("file playback rate changes pacing without changing generation") {
   std::atomic_bool rate_completed = false;
   std::atomic_bool ended = false;
   std::atomic_bool reset_seen = false;
-  std::atomic<ControlResult> rate_result = ControlResult::Failed;
+  std::atomic<ControlResult> rate_result = ControlResult::kFailed;
 
-  proxy->setOnTimelineReset(
+  proxy->SetOnTimelineReset(
       [&](std::uint64_t, TimelineResetReason, std::chrono::milliseconds) {
         reset_seen = true;
       });
-  proxy->setOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
+  proxy->SetOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
     if (generation == 1 && packet->stream_index == 0) {
       ++video_packets;
     } else if (generation == 1 && packet->stream_index == 1) {
@@ -469,42 +469,42 @@ TEST_CASE("file playback rate changes pacing without changing generation") {
     }
     return true;
   });
-  proxy->setOnState(
+  proxy->SetOnState(
       [&](std::uint64_t, PlayerState state, const SockException&, bool) {
-        if (state == PlayerState::Ready) {
+        if (state == PlayerState::kReady) {
           ready = true;
           condition.notify_all();
         }
-        if (state == PlayerState::Ended) {
+        if (state == PlayerState::kEnded) {
           ended = true;
           condition.notify_all();
         }
       });
-  proxy->start(samplePath());
+  proxy->Start(SamplePath());
 
-  REQUIRE(waitFor(condition, mutex, [&]() { return ready.load(); }));
+  REQUIRE(WaitFor(condition, mutex, [&]() { return ready.load(); }));
   const auto rate_started = std::chrono::steady_clock::now();
-  proxy->setPlaybackRate(
+  proxy->SetPlaybackRate(
       20.0f, [&](ControlResult result, std::uint64_t generation) {
         rate_result = result;
-        if (generation != 1 || !proxy->getPoller()->isCurrentThread()) {
-          rate_result = ControlResult::Failed;
+        if (generation != 1 || !proxy->poller()->isCurrentThread()) {
+          rate_result = ControlResult::kFailed;
         }
         rate_completed = true;
         condition.notify_all();
       });
-  REQUIRE(waitFor(condition, mutex, [&]() { return rate_completed.load(); }));
-  REQUIRE(waitFor(condition, mutex, [&]() { return ended.load(); }));
+  REQUIRE(WaitFor(condition, mutex, [&]() { return rate_completed.load(); }));
+  REQUIRE(WaitFor(condition, mutex, [&]() { return ended.load(); }));
   const auto elapsed = std::chrono::steady_clock::now() - rate_started;
 
-  CHECK(rate_result == ControlResult::Accepted);
+  CHECK(rate_result == ControlResult::kAccepted);
   CHECK(proxy->generation() == 1);
   CHECK_FALSE(reset_seen);
   CHECK(video_packets == 20);
   CHECK(audio_packets == 95);
   CHECK(elapsed < 1500ms);
 
-  stopAndWait(proxy);
+  StopAndWait(proxy);
 }
 
 TEST_CASE("playback controls reject invalid state and arguments") {
@@ -516,7 +516,7 @@ TEST_CASE("playback controls reject invalid state and arguments") {
 
   auto completed = [&](ControlResult result, std::uint64_t generation) {
     callbacks_on_poller =
-        callbacks_on_poller && proxy->getPoller()->isCurrentThread();
+        callbacks_on_poller && proxy->poller()->isCurrentThread();
     if (generation != 0) {
       callbacks_on_poller = false;
     }
@@ -527,20 +527,20 @@ TEST_CASE("playback controls reject invalid state and arguments") {
     condition.notify_all();
   };
 
-  proxy->pause(true, completed);
-  proxy->seekTo(1s, completed);
-  proxy->setPlaybackRate(2.0f, completed);
-  proxy->seekTo(-1ms, completed);
-  proxy->setPlaybackRate(std::numeric_limits<float>::infinity(), completed);
+  proxy->Pause(true, completed);
+  proxy->SeekTo(1s, completed);
+  proxy->SetPlaybackRate(2.0f, completed);
+  proxy->SeekTo(-1ms, completed);
+  proxy->SetPlaybackRate(std::numeric_limits<float>::infinity(), completed);
 
-  REQUIRE(waitFor(condition, mutex, [&]() { return results.size() == 5; }));
+  REQUIRE(WaitFor(condition, mutex, [&]() { return results.size() == 5; }));
   REQUIRE(results.size() == 5);
-  CHECK(results[0] == ControlResult::InvalidState);
-  CHECK(results[1] == ControlResult::InvalidState);
-  CHECK(results[2] == ControlResult::InvalidState);
-  CHECK(results[3] == ControlResult::InvalidArgument);
-  CHECK(results[4] == ControlResult::InvalidArgument);
+  CHECK(results[0] == ControlResult::kInvalidState);
+  CHECK(results[1] == ControlResult::kInvalidState);
+  CHECK(results[2] == ControlResult::kInvalidState);
+  CHECK(results[3] == ControlResult::kInvalidArgument);
+  CHECK(results[4] == ControlResult::kInvalidArgument);
   CHECK(callbacks_on_poller);
-  CHECK(proxy->state() == PlayerState::Idle);
+  CHECK(proxy->state() == PlayerState::kIdle);
   CHECK(proxy->generation() == 0);
 }

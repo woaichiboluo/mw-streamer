@@ -1,4 +1,4 @@
-#include "mw/init/init.hpp"
+#include "mw/init/init.h"
 
 #include <mutex>
 #include <optional>
@@ -6,22 +6,22 @@
 
 #include "srt/SrtEpollReactor.h"
 
-namespace mw {
+namespace mw::streamer {
 namespace {
 
 class Initializer final {
  public:
-  static Initializer& instance() {
+  static Initializer& Instance() {
     static Initializer initializer;
     return initializer;
   }
 
-  void init(const InitConfig& config) {
+  void Init(const InitConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (logging_) {
       return;
     }
-    if (srtReactorStopped()) {
+    if (IsSrtReactorStopped()) {
       throw std::logic_error(
           "mw-streamer cannot be initialized after the SRT reactor was "
           "stopped");
@@ -35,13 +35,13 @@ class Initializer final {
     }
   }
 
-  void shutdown() noexcept {
+  void Shutdown() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     mediakit::SrtEpollReactor::shutdownIfCreated();
     logging_.reset();
   }
 
-  bool initialized() const noexcept {
+  bool IsInitialized() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return logging_.has_value();
   }
@@ -49,7 +49,7 @@ class Initializer final {
  private:
   Initializer() = default;
 
-  static bool srtReactorStopped() noexcept {
+  static bool IsSrtReactorStopped() noexcept {
     return mediakit::SrtEpollReactor::isCreated() &&
            !mediakit::SrtEpollReactor::Instance().available();
   }
@@ -61,10 +61,12 @@ class Initializer final {
 
 }  // namespace
 
-void init(const InitConfig& config) { Initializer::instance().init(config); }
+void Init(const InitConfig& config) { Initializer::Instance().Init(config); }
 
-void shutdown() noexcept { Initializer::instance().shutdown(); }
+void Shutdown() noexcept { Initializer::Instance().Shutdown(); }
 
-bool initialized() noexcept { return Initializer::instance().initialized(); }
+bool IsInitialized() noexcept {
+  return Initializer::Instance().IsInitialized();
+}
 
-}  // namespace mw
+}  // namespace mw::streamer

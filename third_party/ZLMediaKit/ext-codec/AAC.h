@@ -17,6 +17,9 @@
 
 namespace mediakit{
 
+int dumpAacConfig(const std::string &config, size_t length, uint8_t *out,
+                  size_t out_size);
+
 /**
  * aac音频通道
  * AAC audio channel

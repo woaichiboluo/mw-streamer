@@ -1,4 +1,4 @@
-#include "mw/convter/ZlmCodecParametersConvter.h"
+#include "mw/converter/zlm_codec_parameters_converter.h"
 
 #include <climits>
 #include <cstdint>
@@ -11,12 +11,12 @@ extern "C" {
 #include <libavutil/mem.h>
 }
 
-namespace mw::convter {
+namespace mw::streamer::converter {
 namespace {
 
 constexpr AVRational kZlmTimeBase{1, 1000};
 
-AVCodecID getFFmpegCodecId(mediakit::CodecId codec) {
+AVCodecID GetFfmpegCodecId(mediakit::CodecId codec) {
   switch (codec) {
     case mediakit::CodecH264:
       return AV_CODEC_ID_H264;
@@ -41,8 +41,7 @@ AVCodecID getFFmpegCodecId(mediakit::CodecId codec) {
   }
 }
 
-std::vector<std::uint8_t> getExtraData(
-    const mediakit::Track::Ptr& track) {
+std::vector<std::uint8_t> GetExtraData(const mediakit::Track::Ptr& track) {
   std::vector<std::uint8_t> result;
   const auto codec = track->getCodecId();
   if (codec == mediakit::CodecH264 || codec == mediakit::CodecH265) {
@@ -66,7 +65,7 @@ std::vector<std::uint8_t> getExtraData(
   return result;
 }
 
-void setExtraData(AVCodecParameters* parameters,
+void SetExtraData(AVCodecParameters* parameters,
                   const std::vector<std::uint8_t>& extra_data) {
   if (extra_data.empty()) {
     return;
@@ -86,21 +85,21 @@ void setExtraData(AVCodecParameters* parameters,
 
 }  // namespace
 
-ZlmCodecParametersConvter::ZlmCodecParametersConvter(
+ZlmCodecParametersConverter::ZlmCodecParametersConverter(
     const mediakit::Track::Ptr& track) {
   if (!track) {
     throw std::invalid_argument("track不能为空");
   }
 
-  const auto codec_id = getFFmpegCodecId(track->getCodecId());
+  const auto codec_id = GetFfmpegCodecId(track->getCodecId());
   if (codec_id == AV_CODEC_ID_NONE) {
     throw std::invalid_argument("不支持的ZLM codec");
   }
 
-  codec_parameters_.reset(
-      avcodec_parameters_alloc(), [](AVCodecParameters* parameters) {
-        avcodec_parameters_free(&parameters);
-      });
+  codec_parameters_.reset(avcodec_parameters_alloc(),
+                          [](AVCodecParameters* parameters) {
+                            avcodec_parameters_free(&parameters);
+                          });
   if (!codec_parameters_) {
     throw std::bad_alloc();
   }
@@ -127,16 +126,16 @@ ZlmCodecParametersConvter::ZlmCodecParametersConvter(
     throw std::invalid_argument("不支持的ZLM track类型");
   }
 
-  setExtraData(codec_parameters_.get(), getExtraData(track));
+  SetExtraData(codec_parameters_.get(), GetExtraData(track));
 }
 
-const ZlmCodecParametersConvter::CodecParametersPtr&
-ZlmCodecParametersConvter::getCodecParameters() const {
+const ZlmCodecParametersConverter::CodecParametersPtr&
+ZlmCodecParametersConverter::codec_parameters() const {
   return codec_parameters_;
 }
 
-AVRational ZlmCodecParametersConvter::getTimeBase() const {
+AVRational ZlmCodecParametersConverter::time_base() const {
   return kZlmTimeBase;
 }
 
-}  // namespace mw::convter
+}  // namespace mw::streamer::converter

@@ -1,4 +1,4 @@
-#include "mw/cache/PacketQueue.h"
+#include "mw/cache/packet_queue.h"
 
 #include <algorithm>
 #include <atomic>
@@ -15,7 +15,7 @@ extern "C" {
 
 #include "Poller/EventPoller.h"
 
-namespace mw::cache {
+namespace mw::streamer::cache {
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -23,19 +23,19 @@ using PacketPtr = std::shared_ptr<AVPacket>;
 
 constexpr AVRational kComparisonTimeBase{1, AV_TIME_BASE};
 
-PacketPtr clonePacket(const AVPacket* packet) {
+PacketPtr ClonePacket(const AVPacket* packet) {
   return PacketPtr(av_packet_clone(packet),
                    [](AVPacket* owned) { av_packet_free(&owned); });
 }
 
-void validateCacheDuration(std::chrono::milliseconds duration) {
+void ValidateCacheDuration(std::chrono::milliseconds duration) {
   using namespace std::chrono_literals;
   if (duration < 1s || duration > 30s) {
     throw std::invalid_argument("cache_duration必须在1秒到30秒之间");
   }
 }
 
-void validateStreams(const std::vector<PacketStream>& streams) {
+void ValidateStreams(const std::vector<PacketStream>& streams) {
   std::size_t audio_count = 0;
   std::size_t video_count = 0;
 
@@ -74,86 +74,84 @@ class PacketQueue::Impl final
             std::chrono::duration_cast<std::chrono::microseconds>(
                 cache_duration)
                 .count()) {
-    validateCacheDuration(cache_duration);
+    ValidateCacheDuration(cache_duration);
   }
 
-  void setOnPacket(OnPacket callback) {
-    dispatch([self = shared_from_this(),
-              callback = std::move(callback)]() mutable {
-      self->on_packet_ = std::move(callback);
-    });
+  void SetOnPacket(OnPacket callback) {
+    Dispatch(
+        [self = shared_from_this(), callback = std::move(callback)]() mutable {
+          self->on_packet_ = std::move(callback);
+        });
   }
 
-  void setOnState(OnState callback) {
-    dispatch([self = shared_from_this(),
-              callback = std::move(callback)]() mutable {
-      self->on_state_ = std::move(callback);
-    });
+  void SetOnState(OnState callback) {
+    Dispatch(
+        [self = shared_from_this(), callback = std::move(callback)]() mutable {
+          self->on_state_ = std::move(callback);
+        });
   }
 
-  void setOnTimelineReset(OnTimelineReset callback) {
-    dispatch([self = shared_from_this(),
-              callback = std::move(callback)]() mutable {
-      self->on_timeline_reset_ = std::move(callback);
-    });
+  void SetOnTimelineReset(OnTimelineReset callback) {
+    Dispatch(
+        [self = shared_from_this(), callback = std::move(callback)]() mutable {
+          self->on_timeline_reset_ = std::move(callback);
+        });
   }
 
-  void setStreams(std::uint64_t generation,
-                  std::vector<PacketStream> streams) {
-    dispatch([self = shared_from_this(), generation,
+  void SetStreams(std::uint64_t generation, std::vector<PacketStream> streams) {
+    Dispatch([self = shared_from_this(), generation,
               streams = std::move(streams)]() mutable {
-      self->setStreamsOnPoller(generation, std::move(streams));
+      self->SetStreamsOnPoller(generation, std::move(streams));
     });
   }
 
-  bool input(std::uint64_t generation, const AVPacket* packet) {
+  bool Input(std::uint64_t generation, const AVPacket* packet) {
     if (disposing_.load(std::memory_order_acquire) || !packet ||
         packet->dts == AV_NOPTS_VALUE || packet->stream_index < 0 ||
         generation < this->generation() ||
-        state() == PacketQueueState::Stopped) {
+        state() == PacketQueueState::kStopped) {
       return false;
     }
 
-    auto owned = clonePacket(packet);
+    auto owned = ClonePacket(packet);
     if (!owned) {
       return false;
     }
 
-    dispatch([self = shared_from_this(), generation,
+    Dispatch([self = shared_from_this(), generation,
               packet = std::move(owned)]() mutable {
-      self->inputOnPoller(generation, std::move(packet));
+      self->InputOnPoller(generation, std::move(packet));
     });
     return true;
   }
 
-  void endInput(std::uint64_t generation) {
-    dispatch([self = shared_from_this(), generation]() {
-      self->endInputOnPoller(generation);
+  void EndInput(std::uint64_t generation) {
+    Dispatch([self = shared_from_this(), generation]() {
+      self->EndInputOnPoller(generation);
     });
   }
 
-  void pause(bool paused) {
-    dispatch([self = shared_from_this(), paused]() {
-      self->pauseOnPoller(paused);
+  void Pause(bool paused) {
+    Dispatch(
+        [self = shared_from_this(), paused]() { self->PauseOnPoller(paused); });
+  }
+
+  void SetPlaybackRate(double rate) {
+    Dispatch([self = shared_from_this(), rate]() {
+      self->SetPlaybackRateOnPoller(rate);
     });
   }
 
-  void setPlaybackRate(double rate) {
-    dispatch([self = shared_from_this(), rate]() {
-      self->setPlaybackRateOnPoller(rate);
-    });
+  void Stop() {
+    Dispatch([self = shared_from_this()]() { self->StopOnPoller(); });
   }
 
-  void stop() {
-    dispatch([self = shared_from_this()]() { self->stopOnPoller(); });
-  }
-
-  void dispose() {
+  void Dispose() {
     if (disposing_.exchange(true, std::memory_order_acq_rel)) {
       return;
     }
     if (poller_->isCurrentThread()) {
-      disposeOnPoller();
+      DisposeOnPoller();
       return;
     }
 
@@ -161,7 +159,7 @@ class PacketQueue::Impl final
     auto future = completed->get_future();
     poller_->async(
         [self = shared_from_this(), completed]() {
-          self->disposeOnPoller();
+          self->DisposeOnPoller();
           completed->set_value();
         },
         false);
@@ -176,11 +174,11 @@ class PacketQueue::Impl final
     return generation_.load(std::memory_order_relaxed);
   }
 
-  std::size_t packetCount() const noexcept {
+  std::size_t packet_count() const noexcept {
     return packet_count_.load(std::memory_order_relaxed);
   }
 
-  const std::shared_ptr<toolkit::EventPoller>& getPoller() const {
+  const std::shared_ptr<toolkit::EventPoller>& poller() const {
     return poller_;
   }
 
@@ -195,14 +193,14 @@ class PacketQueue::Impl final
     std::deque<CachedPacket> packets;
     std::int64_t latest_dts_us = AV_NOPTS_VALUE;
 
-    void clear() {
+    void Clear() {
       packets.clear();
       latest_dts_us = AV_NOPTS_VALUE;
     }
   };
 
   template <typename Func>
-  void dispatch(Func&& function) {
+  void Dispatch(Func&& function) {
     if (poller_->isCurrentThread()) {
       function();
       return;
@@ -210,7 +208,7 @@ class PacketQueue::Impl final
     poller_->async(std::forward<Func>(function), false);
   }
 
-  void setStreamsOnPoller(std::uint64_t generation,
+  void SetStreamsOnPoller(std::uint64_t generation,
                           std::vector<PacketStream> streams) {
     if (disposing_.load(std::memory_order_acquire) || generation == 0 ||
         generation < this->generation()) {
@@ -223,11 +221,10 @@ class PacketQueue::Impl final
     const bool timeline_changed =
         generation_initialized_ && generation != this->generation();
     const auto previous_epoch = output_epoch_;
-    resetTimelineOnPoller(generation);
+    ResetTimelineOnPoller(generation);
     const auto reset_epoch = previous_epoch + 1;
     if (disposing_.load(std::memory_order_acquire) ||
-        output_epoch_ != reset_epoch ||
-        state() != PacketQueueState::Filling ||
+        output_epoch_ != reset_epoch || state() != PacketQueueState::kFilling ||
         generation != this->generation()) {
       return;
     }
@@ -247,9 +244,9 @@ class PacketQueue::Impl final
     }
   }
 
-  void inputOnPoller(std::uint64_t generation, PacketPtr packet) {
+  void InputOnPoller(std::uint64_t generation, PacketPtr packet) {
     if (disposing_.load(std::memory_order_acquire) || !streams_configured_ ||
-        state() == PacketQueueState::Stopped ||
+        state() == PacketQueueState::kStopped ||
         generation < this->generation() ||
         (generation == this->generation() && input_ended_)) {
       return;
@@ -257,11 +254,11 @@ class PacketQueue::Impl final
 
     if (generation > this->generation()) {
       const auto previous_epoch = output_epoch_;
-      resetTimelineOnPoller(generation);
+      ResetTimelineOnPoller(generation);
       const auto reset_epoch = previous_epoch + 1;
       if (disposing_.load(std::memory_order_acquire) ||
           output_epoch_ != reset_epoch ||
-          state() != PacketQueueState::Filling ||
+          state() != PacketQueueState::kFilling ||
           generation != this->generation()) {
         return;
       }
@@ -271,20 +268,19 @@ class PacketQueue::Impl final
       }
       if (disposing_.load(std::memory_order_acquire) ||
           output_epoch_ != reset_epoch ||
-          state() != PacketQueueState::Filling ||
+          state() != PacketQueueState::kFilling ||
           generation != this->generation()) {
         return;
       }
     }
 
-    auto* track = findTrack(packet->stream_index);
+    auto* track = FindTrack(packet->stream_index);
     if (!track) {
       return;
     }
 
     const auto dts_us =
-        av_rescale_q(packet->dts, track->stream.time_base,
-                     kComparisonTimeBase);
+        av_rescale_q(packet->dts, track->stream.time_base, kComparisonTimeBase);
     if (track->latest_dts_us != AV_NOPTS_VALUE &&
         dts_us < track->latest_dts_us) {
       return;
@@ -292,90 +288,90 @@ class PacketQueue::Impl final
 
     track->latest_dts_us = dts_us;
     track->packets.push_back({std::move(packet), dts_us});
-    updatePacketCountOnPoller();
+    UpdatePacketCountOnPoller();
 
-    if (state() == PacketQueueState::Filling ||
-        state() == PacketQueueState::Starved) {
-      startOutputIfReadyOnPoller();
+    if (state() == PacketQueueState::kFilling ||
+        state() == PacketQueueState::kStarved) {
+      StartOutputIfReadyOnPoller();
     }
   }
 
-  void endInputOnPoller(std::uint64_t generation) {
+  void EndInputOnPoller(std::uint64_t generation) {
     if (disposing_.load(std::memory_order_acquire) || !streams_configured_ ||
         generation != this->generation() ||
-        state() == PacketQueueState::Stopped) {
+        state() == PacketQueueState::kStopped) {
       return;
     }
 
     input_ended_ = true;
-    if ((state() == PacketQueueState::Filling ||
-         state() == PacketQueueState::Starved) &&
-        nextPacket()) {
-      startOutputOnPoller();
+    if ((state() == PacketQueueState::kFilling ||
+         state() == PacketQueueState::kStarved) &&
+        NextPacket()) {
+      StartOutputOnPoller();
     }
   }
 
-  void pauseOnPoller(bool paused) {
+  void PauseOnPoller(bool paused) {
     if (disposing_.load(std::memory_order_acquire) ||
-        state() == PacketQueueState::Stopped ||
-        paused == (state() == PacketQueueState::Paused)) {
+        state() == PacketQueueState::kStopped ||
+        paused == (state() == PacketQueueState::kPaused)) {
       return;
     }
 
     if (paused) {
       resume_state_ = state();
-      if (state() == PacketQueueState::Playing) {
-        clock_media_us_ = mediaNowUs(Clock::now());
+      if (state() == PacketQueueState::kPlaying) {
+        clock_media_us_ = MediaNowUs(Clock::now());
         clock_wall_ = Clock::now();
       }
-      cancelOutputTaskOnPoller();
+      CancelOutputTaskOnPoller();
       ++output_epoch_;
-      notifyStateOnPoller(PacketQueueState::Paused);
+      NotifyStateOnPoller(PacketQueueState::kPaused);
       return;
     }
 
-    if (resume_state_ == PacketQueueState::Playing && nextPacket()) {
+    if (resume_state_ == PacketQueueState::kPlaying && NextPacket()) {
       const auto output_epoch = output_epoch_;
       clock_wall_ = Clock::now();
-      notifyStateOnPoller(PacketQueueState::Playing);
+      NotifyStateOnPoller(PacketQueueState::kPlaying);
       if (output_epoch == output_epoch_ &&
-          state() == PacketQueueState::Playing) {
-        scheduleNextPacketOnPoller();
+          state() == PacketQueueState::kPlaying) {
+        ScheduleNextPacketOnPoller();
       }
       return;
     }
 
-    if (input_ended_ && nextPacket()) {
-      startOutputOnPoller();
+    if (input_ended_ && NextPacket()) {
+      StartOutputOnPoller();
     } else {
       const auto output_epoch = output_epoch_;
-      notifyStateOnPoller(PacketQueueState::Filling);
+      NotifyStateOnPoller(PacketQueueState::kFilling);
       if (output_epoch == output_epoch_ &&
-          state() == PacketQueueState::Filling) {
-        startOutputIfReadyOnPoller();
+          state() == PacketQueueState::kFilling) {
+        StartOutputIfReadyOnPoller();
       }
     }
   }
 
-  void setPlaybackRateOnPoller(double rate) {
+  void SetPlaybackRateOnPoller(double rate) {
     if (disposing_.load(std::memory_order_acquire) ||
-        state() == PacketQueueState::Stopped || playback_rate_ == rate) {
+        state() == PacketQueueState::kStopped || playback_rate_ == rate) {
       return;
     }
 
-    if (state() == PacketQueueState::Playing) {
-      clock_media_us_ = mediaNowUs(Clock::now());
+    if (state() == PacketQueueState::kPlaying) {
+      clock_media_us_ = MediaNowUs(Clock::now());
       clock_wall_ = Clock::now();
-      cancelOutputTaskOnPoller();
+      CancelOutputTaskOnPoller();
       ++output_epoch_;
       playback_rate_ = rate;
-      scheduleNextPacketOnPoller();
+      ScheduleNextPacketOnPoller();
       return;
     }
     playback_rate_ = rate;
   }
 
-  TrackQueue* findTrack(int stream_index) {
+  TrackQueue* FindTrack(int stream_index) {
     if (audio_.stream.stream_index == stream_index) {
       return &audio_;
     }
@@ -385,43 +381,42 @@ class PacketQueue::Impl final
     return nullptr;
   }
 
-  bool trackReady(const TrackQueue& track) const {
+  bool TrackReady(const TrackQueue& track) const {
     return track.packets.size() >= 2 &&
            track.packets.back().dts_us - track.packets.front().dts_us >=
                cache_duration_us_;
   }
 
-  void startOutputIfReadyOnPoller() {
-    if (!trackReady(audio_) || !trackReady(video_)) {
-      notifyStateOnPoller(PacketQueueState::Filling);
+  void StartOutputIfReadyOnPoller() {
+    if (!TrackReady(audio_) || !TrackReady(video_)) {
+      NotifyStateOnPoller(PacketQueueState::kFilling);
       return;
     }
 
-    startOutputOnPoller();
+    StartOutputOnPoller();
   }
 
-  void startOutputOnPoller() {
-    const auto* next = nextPacket();
+  void StartOutputOnPoller() {
+    const auto* next = NextPacket();
     if (!next) {
-      notifyStateOnPoller(PacketQueueState::Starved);
+      NotifyStateOnPoller(PacketQueueState::kStarved);
       return;
     }
 
     clock_media_us_ = next->dts_us;
     clock_wall_ = Clock::now();
     const auto output_epoch = output_epoch_;
-    notifyStateOnPoller(PacketQueueState::Playing);
+    NotifyStateOnPoller(PacketQueueState::kPlaying);
     if (output_epoch == output_epoch_ &&
-        state() == PacketQueueState::Playing) {
-      scheduleNextPacketOnPoller();
+        state() == PacketQueueState::kPlaying) {
+      ScheduleNextPacketOnPoller();
     }
   }
 
-  const CachedPacket* nextPacket() const {
+  const CachedPacket* NextPacket() const {
     if (audio_.packets.empty()) {
-      return input_ended_ && !video_.packets.empty()
-                 ? &video_.packets.front()
-                 : nullptr;
+      return input_ended_ && !video_.packets.empty() ? &video_.packets.front()
+                                                     : nullptr;
     }
     if (video_.packets.empty()) {
       return input_ended_ ? &audio_.packets.front() : nullptr;
@@ -436,7 +431,7 @@ class PacketQueue::Impl final
                                                                    : &video;
   }
 
-  TrackQueue& nextTrack() {
+  TrackQueue& NextTrack() {
     if (audio_.packets.empty()) {
       return video_;
     }
@@ -453,25 +448,25 @@ class PacketQueue::Impl final
                                                                    : video_;
   }
 
-  std::int64_t mediaNowUs(Clock::time_point now) const {
+  std::int64_t MediaNowUs(Clock::time_point now) const {
     const auto elapsed_us =
         std::chrono::duration_cast<std::chrono::microseconds>(now - clock_wall_)
             .count();
-    return clock_media_us_ + static_cast<std::int64_t>(
-                                 std::llround(elapsed_us * playback_rate_));
+    return clock_media_us_ +
+           static_cast<std::int64_t>(std::llround(elapsed_us * playback_rate_));
   }
 
-  void scheduleNextPacketOnPoller() {
-    cancelOutputTaskOnPoller();
+  void ScheduleNextPacketOnPoller() {
+    CancelOutputTaskOnPoller();
 
-    const auto* next = nextPacket();
+    const auto* next = NextPacket();
     if (!next) {
-      notifyStateOnPoller(PacketQueueState::Starved);
+      NotifyStateOnPoller(PacketQueueState::kStarved);
       return;
     }
 
     const auto remaining_us =
-        std::max<std::int64_t>(0, next->dts_us - mediaNowUs(Clock::now()));
+        std::max<std::int64_t>(0, next->dts_us - MediaNowUs(Clock::now()));
     const auto remaining_wall_us =
         static_cast<std::int64_t>(std::ceil(remaining_us / playback_rate_));
     const auto delay_ms = std::max<std::uint64_t>(
@@ -482,98 +477,96 @@ class PacketQueue::Impl final
       if (auto self = weak_self.lock();
           self && !self->disposing_.load(std::memory_order_acquire) &&
           output_epoch == self->output_epoch_ &&
-          self->state() == PacketQueueState::Playing) {
-        self->outputDuePacketsOnPoller();
+          self->state() == PacketQueueState::kPlaying) {
+        self->OutputDuePacketsOnPoller();
       }
       return std::uint64_t{0};
     });
   }
 
-  void outputDuePacketsOnPoller() {
+  void OutputDuePacketsOnPoller() {
     output_task_.reset();
     const auto output_epoch = output_epoch_;
     const auto output_generation = generation();
-    const auto media_now_us = mediaNowUs(Clock::now());
+    const auto media_now_us = MediaNowUs(Clock::now());
 
-    while (const auto* next = nextPacket()) {
+    while (const auto* next = NextPacket()) {
       if (next->dts_us > media_now_us) {
         break;
       }
 
-      auto& track = nextTrack();
+      auto& track = NextTrack();
       auto cached = std::move(track.packets.front());
       track.packets.pop_front();
-      updatePacketCountOnPoller();
+      UpdatePacketCountOnPoller();
 
-      if (on_packet_ &&
-          !disposing_.load(std::memory_order_acquire)) {
+      if (on_packet_ && !disposing_.load(std::memory_order_acquire)) {
         auto callback = on_packet_;
         callback(output_generation, cached.packet.get());
       }
       if (disposing_.load(std::memory_order_acquire) ||
-          output_epoch != output_epoch_ ||
-          output_generation != generation() ||
-          state() != PacketQueueState::Playing) {
+          output_epoch != output_epoch_ || output_generation != generation() ||
+          state() != PacketQueueState::kPlaying) {
         return;
       }
     }
 
-    if (state() != PacketQueueState::Playing) {
+    if (state() != PacketQueueState::kPlaying) {
       return;
     }
-    if (nextPacket()) {
-      scheduleNextPacketOnPoller();
+    if (NextPacket()) {
+      ScheduleNextPacketOnPoller();
     } else {
-      notifyStateOnPoller(PacketQueueState::Starved);
+      NotifyStateOnPoller(PacketQueueState::kStarved);
     }
   }
 
-  void resetTimelineOnPoller(std::uint64_t generation) {
-    cancelOutputTaskOnPoller();
+  void ResetTimelineOnPoller(std::uint64_t generation) {
+    CancelOutputTaskOnPoller();
     ++output_epoch_;
-    audio_.clear();
-    video_.clear();
+    audio_.Clear();
+    video_.Clear();
     packet_count_.store(0, std::memory_order_relaxed);
     generation_.store(generation, std::memory_order_relaxed);
     generation_initialized_ = true;
     clock_media_us_ = 0;
     clock_wall_ = {};
     input_ended_ = false;
-    resume_state_ = PacketQueueState::Filling;
-    notifyStateOnPoller(PacketQueueState::Filling);
+    resume_state_ = PacketQueueState::kFilling;
+    NotifyStateOnPoller(PacketQueueState::kFilling);
   }
 
-  void cancelOutputTaskOnPoller() {
+  void CancelOutputTaskOnPoller() {
     if (output_task_) {
       output_task_->cancel();
       output_task_.reset();
     }
   }
 
-  void updatePacketCountOnPoller() {
+  void UpdatePacketCountOnPoller() {
     packet_count_.store(audio_.packets.size() + video_.packets.size(),
                         std::memory_order_relaxed);
   }
 
-  void stopOnPoller() {
-    cancelOutputTaskOnPoller();
+  void StopOnPoller() {
+    CancelOutputTaskOnPoller();
     ++output_epoch_;
-    audio_.clear();
-    video_.clear();
+    audio_.Clear();
+    video_.Clear();
     packet_count_.store(0, std::memory_order_relaxed);
     streams_configured_ = false;
     input_ended_ = false;
-    notifyStateOnPoller(PacketQueueState::Stopped);
+    NotifyStateOnPoller(PacketQueueState::kStopped);
   }
 
-  void disposeOnPoller() {
+  void DisposeOnPoller() {
     on_packet_ = nullptr;
     on_state_ = nullptr;
     on_timeline_reset_ = nullptr;
-    stopOnPoller();
+    StopOnPoller();
   }
 
-  void notifyStateOnPoller(PacketQueueState new_state) {
+  void NotifyStateOnPoller(PacketQueueState new_state) {
     if (state() == new_state) {
       return;
     }
@@ -596,13 +589,13 @@ class PacketQueue::Impl final
   bool generation_initialized_ = false;
   bool streams_configured_ = false;
   bool input_ended_ = false;
-  PacketQueueState resume_state_ = PacketQueueState::Filling;
+  PacketQueueState resume_state_ = PacketQueueState::kFilling;
 
   OnPacket on_packet_;
   OnState on_state_;
   OnTimelineReset on_timeline_reset_;
 
-  std::atomic<PacketQueueState> state_{PacketQueueState::Filling};
+  std::atomic<PacketQueueState> state_{PacketQueueState::kFilling};
   std::atomic<std::uint64_t> generation_{0};
   std::atomic<std::size_t> packet_count_{0};
   std::atomic_bool disposing_{false};
@@ -614,46 +607,46 @@ PacketQueue::PacketQueue(std::chrono::milliseconds cache_duration,
 
 PacketQueue::~PacketQueue() {
   if (impl_) {
-    impl_->dispose();
+    impl_->Dispose();
   }
 }
 
-void PacketQueue::setOnPacket(OnPacket callback) {
-  impl_->setOnPacket(std::move(callback));
+void PacketQueue::SetOnPacket(OnPacket callback) {
+  impl_->SetOnPacket(std::move(callback));
 }
 
-void PacketQueue::setOnState(OnState callback) {
-  impl_->setOnState(std::move(callback));
+void PacketQueue::SetOnState(OnState callback) {
+  impl_->SetOnState(std::move(callback));
 }
 
-void PacketQueue::setOnTimelineReset(OnTimelineReset callback) {
-  impl_->setOnTimelineReset(std::move(callback));
+void PacketQueue::SetOnTimelineReset(OnTimelineReset callback) {
+  impl_->SetOnTimelineReset(std::move(callback));
 }
 
-void PacketQueue::setStreams(std::uint64_t generation,
+void PacketQueue::SetStreams(std::uint64_t generation,
                              std::vector<PacketStream> streams) {
-  validateStreams(streams);
-  impl_->setStreams(generation, std::move(streams));
+  ValidateStreams(streams);
+  impl_->SetStreams(generation, std::move(streams));
 }
 
-bool PacketQueue::input(std::uint64_t generation, const AVPacket* packet) {
-  return impl_->input(generation, packet);
+bool PacketQueue::Input(std::uint64_t generation, const AVPacket* packet) {
+  return impl_->Input(generation, packet);
 }
 
-void PacketQueue::endInput(std::uint64_t generation) {
-  impl_->endInput(generation);
+void PacketQueue::EndInput(std::uint64_t generation) {
+  impl_->EndInput(generation);
 }
 
-void PacketQueue::pause(bool paused) { impl_->pause(paused); }
+void PacketQueue::Pause(bool paused) { impl_->Pause(paused); }
 
-void PacketQueue::setPlaybackRate(double rate) {
+void PacketQueue::SetPlaybackRate(double rate) {
   if (!std::isfinite(rate) || rate < 0.1 || rate > 20.0) {
     throw std::invalid_argument("rate必须在0.1到20之间");
   }
-  impl_->setPlaybackRate(rate);
+  impl_->SetPlaybackRate(rate);
 }
 
-void PacketQueue::stop() { impl_->stop(); }
+void PacketQueue::Stop() { impl_->Stop(); }
 
 PacketQueueState PacketQueue::state() const noexcept { return impl_->state(); }
 
@@ -661,12 +654,12 @@ std::uint64_t PacketQueue::generation() const noexcept {
   return impl_->generation();
 }
 
-std::size_t PacketQueue::packetCount() const noexcept {
-  return impl_->packetCount();
+std::size_t PacketQueue::packet_count() const noexcept {
+  return impl_->packet_count();
 }
 
-std::shared_ptr<toolkit::EventPoller> PacketQueue::getPoller() const {
-  return impl_->getPoller();
+std::shared_ptr<toolkit::EventPoller> PacketQueue::poller() const {
+  return impl_->poller();
 }
 
-}  // namespace mw::cache
+}  // namespace mw::streamer::cache

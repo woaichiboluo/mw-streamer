@@ -1,4 +1,4 @@
-#include "mw/input/PlayerProxy.h"
+#include "mw/input/player_proxy.h"
 
 #include <algorithm>
 #include <cmath>
@@ -10,13 +10,13 @@
 #include "Extension/Track.h"
 #include "Player/MediaPlayer.h"
 #include "Poller/EventPoller.h"
-#include "mw/convter/ZlmCodecParametersConvter.h"
-#include "mw/convter/ZlmPacketConvter.h"
+#include "mw/converter/zlm_codec_parameters_converter.h"
+#include "mw/converter/zlm_packet_converter.h"
 
-namespace mw::input {
+namespace mw::streamer::input {
 namespace {
 
-void validatePolicy(const ReconnectPolicy& policy) {
+void ValidatePolicy(const ReconnectPolicy& policy) {
   if (policy.max_retries < -1) {
     throw std::invalid_argument("max_retries不能小于-1");
   }
@@ -41,10 +41,10 @@ class PlayerProxy::Impl final
       : poller_(poller ? std::move(poller)
                        : toolkit::EventPollerPool::Instance().getPoller()),
         reconnect_policy_(reconnect_policy) {
-    validatePolicy(reconnect_policy_);
+    ValidatePolicy(reconnect_policy_);
   }
 
-  void setOnPacket(OnPacket callback) {
+  void SetOnPacket(OnPacket callback) {
     auto self = shared_from_this();
     poller_->async(
         [self, callback = std::move(callback)]() mutable {
@@ -53,7 +53,7 @@ class PlayerProxy::Impl final
         false);
   }
 
-  void setOnStreamsReady(OnStreamsReady callback) {
+  void SetOnStreamsReady(OnStreamsReady callback) {
     auto self = shared_from_this();
     poller_->async(
         [self, callback = std::move(callback)]() mutable {
@@ -62,7 +62,7 @@ class PlayerProxy::Impl final
         false);
   }
 
-  void setOnState(OnState callback) {
+  void SetOnState(OnState callback) {
     auto self = shared_from_this();
     poller_->async(
         [self, callback = std::move(callback)]() mutable {
@@ -71,7 +71,7 @@ class PlayerProxy::Impl final
         false);
   }
 
-  void setOnTimelineReset(OnTimelineReset callback) {
+  void SetOnTimelineReset(OnTimelineReset callback) {
     auto self = shared_from_this();
     poller_->async(
         [self, callback = std::move(callback)]() mutable {
@@ -80,55 +80,55 @@ class PlayerProxy::Impl final
         false);
   }
 
-  void start(std::string url, toolkit::mINI options) {
+  void Start(std::string url, toolkit::mINI options) {
     auto self = shared_from_this();
     poller_->async(
         [self, url = std::move(url), options = std::move(options)]() mutable {
-          self->startOnPoller(std::move(url), std::move(options));
+          self->StartOnPoller(std::move(url), std::move(options));
         },
         false);
   }
 
-  void pause(bool paused, OnControlCompleted completed) {
+  void Pause(bool paused, OnControlCompleted completed) {
     auto self = shared_from_this();
     poller_->async(
         [self, paused, completed = std::move(completed)]() mutable {
-          self->pauseOnPoller(paused, std::move(completed));
+          self->PauseOnPoller(paused, std::move(completed));
         },
         false);
   }
 
-  void seekTo(std::chrono::milliseconds position,
+  void SeekTo(std::chrono::milliseconds position,
               OnControlCompleted completed) {
     auto self = shared_from_this();
     poller_->async(
         [self, position, completed = std::move(completed)]() mutable {
-          self->seekToOnPoller(position, std::move(completed));
+          self->SeekToOnPoller(position, std::move(completed));
         },
         false);
   }
 
-  void setPlaybackRate(float rate, OnControlCompleted completed) {
+  void SetPlaybackRate(float rate, OnControlCompleted completed) {
     auto self = shared_from_this();
     poller_->async(
         [self, rate, completed = std::move(completed)]() mutable {
-          self->setPlaybackRateOnPoller(rate, std::move(completed));
+          self->SetPlaybackRateOnPoller(rate, std::move(completed));
         },
         false);
   }
 
-  void stop(OnStopped on_stopped) {
+  void Stop(OnStopped on_stopped) {
     auto self = shared_from_this();
     poller_->async(
         [self, on_stopped = std::move(on_stopped)]() mutable {
-          self->stopOnPoller(std::move(on_stopped));
+          self->StopOnPoller(std::move(on_stopped));
         },
         false);
   }
 
-  void dispose() {
+  void Dispose() {
     auto self = shared_from_this();
-    poller_->async([self]() { self->disposeOnPoller(); }, false);
+    poller_->async([self]() { self->DisposeOnPoller(); }, false);
   }
 
   PlayerState state() const noexcept {
@@ -139,11 +139,11 @@ class PlayerProxy::Impl final
     return generation_.load(std::memory_order_relaxed);
   }
 
-  std::uint64_t reconnectCount() const noexcept {
+  std::uint64_t reconnect_count() const noexcept {
     return reconnect_count_.load(std::memory_order_relaxed);
   }
 
-  const std::shared_ptr<toolkit::EventPoller>& getPoller() const {
+  const std::shared_ptr<toolkit::EventPoller>& poller() const {
     return poller_;
   }
 
@@ -151,7 +151,7 @@ class PlayerProxy::Impl final
   struct Binding {
     mediakit::Track::Ptr track;
     mediakit::FrameWriterInterface* delegate = nullptr;
-    convter::ZlmPacketConvter::Ptr packet_converter;
+    converter::ZlmPacketConverter::Ptr packet_converter;
   };
 
   struct Attempt {
@@ -165,18 +165,18 @@ class PlayerProxy::Impl final
     std::vector<Binding> bindings;
   };
 
-  void cancelRetryOnPoller() {
+  void CancelRetryOnPoller() {
     if (retry_task_) {
       retry_task_->cancel();
       retry_task_.reset();
     }
   }
 
-  void startOnPoller(std::string url, toolkit::mINI options) {
+  void StartOnPoller(std::string url, toolkit::mINI options) {
     const auto current = state();
-    if (current != PlayerState::Idle && current != PlayerState::Ended &&
-        current != PlayerState::Failed && current != PlayerState::Stopped) {
-      notifyStateOnPoller(
+    if (current != PlayerState::kIdle && current != PlayerState::kEnded &&
+        current != PlayerState::kFailed && current != PlayerState::kStopped) {
+      NotifyStateOnPoller(
           generation(), current,
           toolkit::SockException(toolkit::Err_other,
                                  "PlayerProxy已有活动的输入，请先停止当前输入"),
@@ -184,19 +184,19 @@ class PlayerProxy::Impl final
       return;
     }
 
-    cancelRetryOnPoller();
-    teardownAttemptOnPoller();
+    CancelRetryOnPoller();
+    TeardownAttemptOnPoller();
     url_ = std::move(url);
     options_ = std::move(options);
     consecutive_failures_ = 0;
-    beginAttemptOnPoller();
+    BeginAttemptOnPoller();
   }
 
-  void beginAttemptOnPoller() {
-    cancelRetryOnPoller();
+  void BeginAttemptOnPoller() {
+    CancelRetryOnPoller();
 
     auto attempt = std::make_shared<Attempt>();
-    attempt->generation.store(nextGenerationOnPoller(),
+    attempt->generation.store(NextGenerationOnPoller(),
                               std::memory_order_release);
     attempt->player = std::make_shared<mediakit::MediaPlayer>(poller_);
     attempt_ = attempt;
@@ -223,7 +223,7 @@ class PlayerProxy::Impl final
           self->poller_->async(
               [weak_self, current_attempt, ex]() {
                 if (auto locked = weak_self.lock()) {
-                  locked->handlePlayResultOnPoller(current_attempt, ex);
+                  locked->HandlePlayResultOnPoller(current_attempt, ex);
                 }
               },
               !ex);
@@ -244,14 +244,14 @@ class PlayerProxy::Impl final
           self->poller_->async(
               [weak_self, current_attempt, ex]() {
                 if (auto locked = weak_self.lock()) {
-                  locked->handleShutdownOnPoller(current_attempt, ex);
+                  locked->HandleShutdownOnPoller(current_attempt, ex);
                 }
               },
               false);
         });
 
-    notifyStateOnPoller(attemptGeneration(attempt), PlayerState::Connecting, {},
-                        false);
+    NotifyStateOnPoller(AttemptGeneration(attempt), PlayerState::kConnecting,
+                        {}, false);
 
     try {
       attempt->player->play(url_);
@@ -261,27 +261,27 @@ class PlayerProxy::Impl final
       poller_->async(
           [weak_self, attempt, error]() {
             if (auto self = weak_self.lock()) {
-              self->handleSynchronousFailureOnPoller(attempt, error);
+              self->HandleSynchronousFailureOnPoller(attempt, error);
             }
           },
           false);
     }
   }
 
-  bool isCurrentAttempt(const std::shared_ptr<Attempt>& attempt) const {
+  bool IsCurrentAttempt(const std::shared_ptr<Attempt>& attempt) const {
     return attempt_ == attempt;
   }
 
-  static std::uint64_t attemptGeneration(
+  static std::uint64_t AttemptGeneration(
       const std::shared_ptr<Attempt>& attempt) {
     return attempt ? attempt->generation.load(std::memory_order_acquire) : 0;
   }
 
-  std::uint64_t nextGenerationOnPoller() {
+  std::uint64_t NextGenerationOnPoller() {
     return generation_.fetch_add(1, std::memory_order_relaxed) + 1;
   }
 
-  void completeControlOnPoller(OnControlCompleted completed,
+  void CompleteControlOnPoller(OnControlCompleted completed,
                                ControlResult result,
                                std::uint64_t result_generation) {
     if (completed) {
@@ -289,31 +289,32 @@ class PlayerProxy::Impl final
     }
   }
 
-  std::shared_ptr<Attempt> controllableAttemptOnPoller(
+  std::shared_ptr<Attempt> ControllableAttemptOnPoller(
       OnControlCompleted& completed) {
     auto attempt = attempt_;
-    if (state() != PlayerState::Ready || !attempt || !attempt->player ||
+    if (state() != PlayerState::kReady || !attempt || !attempt->player ||
         !attempt->active.load(std::memory_order_acquire)) {
-      completeControlOnPoller(std::move(completed), ControlResult::InvalidState,
-                              generation());
+      CompleteControlOnPoller(std::move(completed),
+                              ControlResult::kInvalidState, generation());
       return nullptr;
     }
     if (!attempt->finite.load(std::memory_order_acquire)) {
-      completeControlOnPoller(std::move(completed), ControlResult::NotSupported,
-                              attemptGeneration(attempt));
+      CompleteControlOnPoller(std::move(completed),
+                              ControlResult::kNotSupported,
+                              AttemptGeneration(attempt));
       return nullptr;
     }
     return attempt;
   }
 
-  void pauseOnPoller(bool paused, OnControlCompleted completed) {
-    auto attempt = controllableAttemptOnPoller(completed);
+  void PauseOnPoller(bool paused, OnControlCompleted completed) {
+    auto attempt = ControllableAttemptOnPoller(completed);
     if (!attempt) {
       return;
     }
     if (attempt->paused == paused) {
-      completeControlOnPoller(std::move(completed), ControlResult::Accepted,
-                              attemptGeneration(attempt));
+      CompleteControlOnPoller(std::move(completed), ControlResult::kAccepted,
+                              AttemptGeneration(attempt));
       return;
     }
 
@@ -325,8 +326,8 @@ class PlayerProxy::Impl final
       attempt->player->pause(paused);
     } catch (const std::exception&) {
       attempt->accepting_frames.store(was_accepting, std::memory_order_release);
-      completeControlOnPoller(std::move(completed), ControlResult::Failed,
-                              attemptGeneration(attempt));
+      CompleteControlOnPoller(std::move(completed), ControlResult::kFailed,
+                              AttemptGeneration(attempt));
       return;
     }
 
@@ -334,35 +335,36 @@ class PlayerProxy::Impl final
     if (!paused) {
       attempt->accepting_frames.store(true, std::memory_order_release);
     }
-    completeControlOnPoller(std::move(completed), ControlResult::Accepted,
-                            attemptGeneration(attempt));
+    CompleteControlOnPoller(std::move(completed), ControlResult::kAccepted,
+                            AttemptGeneration(attempt));
   }
 
-  void seekToOnPoller(std::chrono::milliseconds position,
+  void SeekToOnPoller(std::chrono::milliseconds position,
                       OnControlCompleted completed) {
     if (position.count() < 0) {
-      completeControlOnPoller(std::move(completed),
-                              ControlResult::InvalidArgument, generation());
+      CompleteControlOnPoller(std::move(completed),
+                              ControlResult::kInvalidArgument, generation());
       return;
     }
 
-    auto attempt = controllableAttemptOnPoller(completed);
+    auto attempt = ControllableAttemptOnPoller(completed);
     if (!attempt) {
       return;
     }
 
     const auto duration = attempt->player->getDuration();
     if (duration <= 0) {
-      completeControlOnPoller(std::move(completed), ControlResult::NotSupported,
-                              attemptGeneration(attempt));
+      CompleteControlOnPoller(std::move(completed),
+                              ControlResult::kNotSupported,
+                              AttemptGeneration(attempt));
       return;
     }
     const auto duration_ms = static_cast<std::int64_t>(
         std::llround(static_cast<double>(duration) * 1000.0));
     if (position.count() > duration_ms) {
-      completeControlOnPoller(std::move(completed),
-                              ControlResult::InvalidArgument,
-                              attemptGeneration(attempt));
+      CompleteControlOnPoller(std::move(completed),
+                              ControlResult::kInvalidArgument,
+                              AttemptGeneration(attempt));
       return;
     }
 
@@ -375,16 +377,16 @@ class PlayerProxy::Impl final
     } catch (const std::exception&) {
       attempt->accepting_frames.store(!attempt->paused,
                                       std::memory_order_release);
-      completeControlOnPoller(std::move(completed), ControlResult::Failed,
-                              attemptGeneration(attempt));
+      CompleteControlOnPoller(std::move(completed), ControlResult::kFailed,
+                              AttemptGeneration(attempt));
       return;
     }
 
-    resetBindingsOnPoller(attempt);
-    const auto new_generation = nextGenerationOnPoller();
+    ResetBindingsOnPoller(attempt);
+    const auto new_generation = NextGenerationOnPoller();
     attempt->generation.store(new_generation, std::memory_order_release);
     if (on_timeline_reset_) {
-      on_timeline_reset_(new_generation, TimelineResetReason::Seek, position);
+      on_timeline_reset_(new_generation, TimelineResetReason::kSeek, position);
     }
 
     attempt->accepting_frames.store(true, std::memory_order_release);
@@ -398,24 +400,24 @@ class PlayerProxy::Impl final
     } catch (const std::exception&) {
       attempt->accepting_frames.store(false, std::memory_order_release);
       attempt->paused = true;
-      completeControlOnPoller(std::move(completed), ControlResult::Failed,
+      CompleteControlOnPoller(std::move(completed), ControlResult::kFailed,
                               new_generation);
       return;
     }
 
     attempt->paused = false;
-    completeControlOnPoller(std::move(completed), ControlResult::Accepted,
+    CompleteControlOnPoller(std::move(completed), ControlResult::kAccepted,
                             new_generation);
   }
 
-  void setPlaybackRateOnPoller(float rate, OnControlCompleted completed) {
+  void SetPlaybackRateOnPoller(float rate, OnControlCompleted completed) {
     if (!std::isfinite(rate) || rate < 0.1f || rate > 20.0f) {
-      completeControlOnPoller(std::move(completed),
-                              ControlResult::InvalidArgument, generation());
+      CompleteControlOnPoller(std::move(completed),
+                              ControlResult::kInvalidArgument, generation());
       return;
     }
 
-    auto attempt = controllableAttemptOnPoller(completed);
+    auto attempt = ControllableAttemptOnPoller(completed);
     if (!attempt) {
       return;
     }
@@ -423,8 +425,8 @@ class PlayerProxy::Impl final
     try {
       attempt->player->speed(rate);
     } catch (const std::exception&) {
-      completeControlOnPoller(std::move(completed), ControlResult::Failed,
-                              attemptGeneration(attempt));
+      CompleteControlOnPoller(std::move(completed), ControlResult::kFailed,
+                              AttemptGeneration(attempt));
       return;
     }
 
@@ -433,17 +435,17 @@ class PlayerProxy::Impl final
       attempt->accepting_frames.store(true, std::memory_order_release);
       attempt->paused = false;
     }
-    completeControlOnPoller(std::move(completed), ControlResult::Accepted,
-                            attemptGeneration(attempt));
+    CompleteControlOnPoller(std::move(completed), ControlResult::kAccepted,
+                            AttemptGeneration(attempt));
   }
 
-  void handlePlayResultOnPoller(const std::shared_ptr<Attempt>& attempt,
+  void HandlePlayResultOnPoller(const std::shared_ptr<Attempt>& attempt,
                                 const toolkit::SockException& ex) {
-    if (!isCurrentAttempt(attempt)) {
+    if (!IsCurrentAttempt(attempt)) {
       return;
     }
     if (ex) {
-      handleAttemptFailureOnPoller(attempt, ex);
+      HandleAttemptFailureOnPoller(attempt, ex);
       return;
     }
     if (!attempt->active.load(std::memory_order_acquire)) {
@@ -453,7 +455,7 @@ class PlayerProxy::Impl final
     attempt->finite.store(attempt->player->isFinite(),
                           std::memory_order_release);
     try {
-      bindTracksOnPoller(attempt);
+      BindTracksOnPoller(attempt);
     } catch (const std::exception& bind_error) {
       attempt->active.store(false, std::memory_order_release);
       const toolkit::SockException error(toolkit::Err_other, bind_error.what());
@@ -461,78 +463,78 @@ class PlayerProxy::Impl final
       poller_->async(
           [weak_self, attempt, error]() {
             if (auto self = weak_self.lock()) {
-              self->handleBindingFailureOnPoller(attempt, error);
+              self->HandleBindingFailureOnPoller(attempt, error);
             }
           },
           false);
       return;
     }
 
-    cancelRetryOnPoller();
+    CancelRetryOnPoller();
     consecutive_failures_ = 0;
-    notifyStateOnPoller(attemptGeneration(attempt), PlayerState::Ready, {},
+    NotifyStateOnPoller(AttemptGeneration(attempt), PlayerState::kReady, {},
                         false);
   }
 
-  void handleSynchronousFailureOnPoller(const std::shared_ptr<Attempt>& attempt,
+  void HandleSynchronousFailureOnPoller(const std::shared_ptr<Attempt>& attempt,
                                         const toolkit::SockException& ex) {
-    if (!isCurrentAttempt(attempt)) {
+    if (!IsCurrentAttempt(attempt)) {
       return;
     }
-    handleAttemptFailureOnPoller(attempt, ex);
+    HandleAttemptFailureOnPoller(attempt, ex);
   }
 
-  void handleBindingFailureOnPoller(const std::shared_ptr<Attempt>& attempt,
+  void HandleBindingFailureOnPoller(const std::shared_ptr<Attempt>& attempt,
                                     const toolkit::SockException& ex) {
-    if (!isCurrentAttempt(attempt)) {
+    if (!IsCurrentAttempt(attempt)) {
       return;
     }
-    teardownAttemptOnPoller();
-    notifyStateOnPoller(attemptGeneration(attempt), PlayerState::Failed, ex,
+    TeardownAttemptOnPoller();
+    NotifyStateOnPoller(AttemptGeneration(attempt), PlayerState::kFailed, ex,
                         false);
   }
 
-  void handleShutdownOnPoller(const std::shared_ptr<Attempt>& attempt,
+  void HandleShutdownOnPoller(const std::shared_ptr<Attempt>& attempt,
                               const toolkit::SockException& ex) {
-    if (!isCurrentAttempt(attempt)) {
+    if (!IsCurrentAttempt(attempt)) {
       return;
     }
 
     if (attempt->finite.load(std::memory_order_acquire) &&
         ex.getErrCode() == toolkit::Err_eof) {
-      flushBindingsOnPoller(attempt);
-      teardownAttemptOnPoller();
-      notifyStateOnPoller(attemptGeneration(attempt), PlayerState::Ended, ex,
+      FlushBindingsOnPoller(attempt);
+      TeardownAttemptOnPoller();
+      NotifyStateOnPoller(AttemptGeneration(attempt), PlayerState::kEnded, ex,
                           false);
       return;
     }
 
-    handleAttemptFailureOnPoller(attempt, ex);
+    HandleAttemptFailureOnPoller(attempt, ex);
   }
 
-  void handleAttemptFailureOnPoller(const std::shared_ptr<Attempt>& attempt,
+  void HandleAttemptFailureOnPoller(const std::shared_ptr<Attempt>& attempt,
                                     const toolkit::SockException& ex) {
-    if (!isCurrentAttempt(attempt)) {
+    if (!IsCurrentAttempt(attempt)) {
       return;
     }
 
     const bool finite = attempt->player && attempt->player->isFinite();
-    teardownAttemptOnPoller();
+    TeardownAttemptOnPoller();
 
-    if (!finite && canRetry()) {
-      scheduleRetryOnPoller(attemptGeneration(attempt), ex);
+    if (!finite && CanRetry()) {
+      ScheduleRetryOnPoller(AttemptGeneration(attempt), ex);
       return;
     }
-    notifyStateOnPoller(attemptGeneration(attempt), PlayerState::Failed, ex,
+    NotifyStateOnPoller(AttemptGeneration(attempt), PlayerState::kFailed, ex,
                         false);
   }
 
-  bool canRetry() const {
+  bool CanRetry() const {
     return reconnect_policy_.max_retries < 0 ||
            consecutive_failures_ < reconnect_policy_.max_retries;
   }
 
-  void scheduleRetryOnPoller(std::uint64_t failed_generation,
+  void ScheduleRetryOnPoller(std::uint64_t failed_generation,
                              const toolkit::SockException& ex) {
     const auto scaled_delay =
         reconnect_policy_.delay_step * consecutive_failures_;
@@ -542,19 +544,20 @@ class PlayerProxy::Impl final
     ++consecutive_failures_;
     reconnect_count_.fetch_add(1, std::memory_order_relaxed);
 
-    notifyStateOnPoller(failed_generation, PlayerState::WaitingRetry, ex, true);
+    NotifyStateOnPoller(failed_generation, PlayerState::kWaitingRetry, ex,
+                        true);
 
     std::weak_ptr<Impl> weak_self = shared_from_this();
     retry_task_ = poller_->doDelayTask(
         static_cast<std::uint64_t>(delay.count()), [weak_self]() {
           if (auto self = weak_self.lock()) {
-            self->beginAttemptOnPoller();
+            self->BeginAttemptOnPoller();
           }
           return std::uint64_t{0};
         });
   }
 
-  void bindTracksOnPoller(const std::shared_ptr<Attempt>& attempt) {
+  void BindTracksOnPoller(const std::shared_ptr<Attempt>& attempt) {
     auto tracks = attempt->player->getTracks(true);
     if (tracks.empty()) {
       throw std::runtime_error("ZLM播放成功但没有已就绪Track");
@@ -575,19 +578,19 @@ class PlayerProxy::Impl final
     int stream_index = 0;
     for (const auto& track : tracks) {
       auto codec_parameters =
-          std::make_shared<convter::ZlmCodecParametersConvter>(track);
+          std::make_shared<converter::ZlmCodecParametersConverter>(track);
       auto packet_converter =
-          std::make_shared<convter::ZlmPacketConvter>(track, stream_index);
+          std::make_shared<converter::ZlmPacketConverter>(track, stream_index);
 
-      packet_converter->setOnPacket(
+      packet_converter->SetOnPacket(
           [weak_self, weak_attempt](const AVPacket* packet) {
             auto self = weak_self.lock();
             auto current_attempt = weak_attempt.lock();
             if (!self || !current_attempt ||
-                !self->isCurrentAttempt(current_attempt) ||
+                !self->IsCurrentAttempt(current_attempt) ||
                 !current_attempt->accepting_frames.load(
                     std::memory_order_acquire) ||
-                self->state() != PlayerState::Ready) {
+                self->state() != PlayerState::kReady) {
               return false;
             }
             const auto generation =
@@ -597,8 +600,8 @@ class PlayerProxy::Impl final
 
       StreamInfo stream;
       stream.stream_index = stream_index;
-      stream.codec_parameters = codec_parameters->getCodecParameters();
-      stream.time_base = codec_parameters->getTimeBase();
+      stream.codec_parameters = codec_parameters->codec_parameters();
+      stream.time_base = codec_parameters->time_base();
       streams.emplace_back(std::move(stream));
 
       Binding binding;
@@ -610,7 +613,7 @@ class PlayerProxy::Impl final
 
     attempt->bindings = std::move(bindings);
     if (on_streams_ready_) {
-      on_streams_ready_(attemptGeneration(attempt), streams);
+      on_streams_ready_(AttemptGeneration(attempt), streams);
     }
 
     for (std::size_t index = 0; index < attempt->bindings.size(); ++index) {
@@ -634,7 +637,7 @@ class PlayerProxy::Impl final
                 [weak_self, current_attempt, control_epoch, stream_index,
                  frame]() {
                   if (auto locked = weak_self.lock()) {
-                    locked->inputFrameOnPoller(current_attempt, stream_index,
+                    locked->InputFrameOnPoller(current_attempt, stream_index,
                                                control_epoch, frame);
                   }
                 },
@@ -644,52 +647,52 @@ class PlayerProxy::Impl final
     }
   }
 
-  void inputFrameOnPoller(const std::shared_ptr<Attempt>& attempt,
+  void InputFrameOnPoller(const std::shared_ptr<Attempt>& attempt,
                           int stream_index, std::uint64_t control_epoch,
                           const mediakit::Frame::Ptr& frame) {
-    if (!isCurrentAttempt(attempt) ||
+    if (!IsCurrentAttempt(attempt) ||
         !attempt->active.load(std::memory_order_acquire) ||
         !attempt->accepting_frames.load(std::memory_order_acquire) ||
         control_epoch !=
             attempt->control_epoch.load(std::memory_order_acquire) ||
-        state() != PlayerState::Ready || stream_index < 0 ||
+        state() != PlayerState::kReady || stream_index < 0 ||
         static_cast<std::size_t>(stream_index) >= attempt->bindings.size()) {
       return;
     }
-    attempt->bindings[stream_index].packet_converter->inputFrame(frame);
+    attempt->bindings[stream_index].packet_converter->InputFrame(frame);
   }
 
-  void flushBindingsOnPoller(const std::shared_ptr<Attempt>& attempt) {
+  void FlushBindingsOnPoller(const std::shared_ptr<Attempt>& attempt) {
     for (auto& binding : attempt->bindings) {
-      binding.packet_converter->flush();
+      binding.packet_converter->Flush();
     }
   }
 
-  void resetBindingsOnPoller(const std::shared_ptr<Attempt>& attempt) {
+  void ResetBindingsOnPoller(const std::shared_ptr<Attempt>& attempt) {
     for (auto& binding : attempt->bindings) {
-      binding.packet_converter->reset();
+      binding.packet_converter->Reset();
     }
   }
 
-  void detachBindingsOnPoller(const std::shared_ptr<Attempt>& attempt) {
+  void DetachBindingsOnPoller(const std::shared_ptr<Attempt>& attempt) {
     for (auto& binding : attempt->bindings) {
       if (binding.track && binding.delegate) {
         binding.track->delDelegate(binding.delegate);
         binding.delegate = nullptr;
       }
     }
-    resetBindingsOnPoller(attempt);
+    ResetBindingsOnPoller(attempt);
     attempt->bindings.clear();
   }
 
-  void teardownAttemptOnPoller() {
+  void TeardownAttemptOnPoller() {
     auto attempt = std::move(attempt_);
     if (!attempt) {
       return;
     }
 
     attempt->active.store(false, std::memory_order_release);
-    detachBindingsOnPoller(attempt);
+    DetachBindingsOnPoller(attempt);
 
     if (attempt->player) {
       attempt->player->setOnPlayResult(nullptr);
@@ -700,12 +703,12 @@ class PlayerProxy::Impl final
     }
   }
 
-  void stopOnPoller(OnStopped on_stopped) {
-    cancelRetryOnPoller();
-    teardownAttemptOnPoller();
+  void StopOnPoller(OnStopped on_stopped) {
+    CancelRetryOnPoller();
+    TeardownAttemptOnPoller();
     consecutive_failures_ = 0;
-    notifyStateOnPoller(
-        generation(), PlayerState::Stopped,
+    NotifyStateOnPoller(
+        generation(), PlayerState::kStopped,
         toolkit::SockException(toolkit::Err_shutdown, "PlayerProxy主动停止"),
         false);
     if (on_stopped) {
@@ -713,18 +716,18 @@ class PlayerProxy::Impl final
     }
   }
 
-  void disposeOnPoller() {
-    cancelRetryOnPoller();
+  void DisposeOnPoller() {
+    CancelRetryOnPoller();
     on_packet_ = nullptr;
     on_streams_ready_ = nullptr;
     on_state_ = nullptr;
     on_timeline_reset_ = nullptr;
-    teardownAttemptOnPoller();
+    TeardownAttemptOnPoller();
     consecutive_failures_ = 0;
-    state_.store(PlayerState::Stopped, std::memory_order_relaxed);
+    state_.store(PlayerState::kStopped, std::memory_order_relaxed);
   }
 
-  void notifyStateOnPoller(std::uint64_t event_generation,
+  void NotifyStateOnPoller(std::uint64_t event_generation,
                            PlayerState new_state,
                            const toolkit::SockException& reason,
                            bool will_retry) {
@@ -746,7 +749,7 @@ class PlayerProxy::Impl final
   OnState on_state_;
   OnTimelineReset on_timeline_reset_;
 
-  std::atomic<PlayerState> state_{PlayerState::Idle};
+  std::atomic<PlayerState> state_{PlayerState::kIdle};
   std::atomic<std::uint64_t> generation_{0};
   std::atomic<std::uint64_t> reconnect_count_{0};
   int consecutive_failures_ = 0;
@@ -758,45 +761,45 @@ PlayerProxy::PlayerProxy(std::shared_ptr<toolkit::EventPoller> poller,
 
 PlayerProxy::~PlayerProxy() {
   if (impl_) {
-    impl_->dispose();
+    impl_->Dispose();
   }
 }
 
-void PlayerProxy::setOnPacket(OnPacket callback) {
-  impl_->setOnPacket(std::move(callback));
+void PlayerProxy::SetOnPacket(OnPacket callback) {
+  impl_->SetOnPacket(std::move(callback));
 }
 
-void PlayerProxy::setOnStreamsReady(OnStreamsReady callback) {
-  impl_->setOnStreamsReady(std::move(callback));
+void PlayerProxy::SetOnStreamsReady(OnStreamsReady callback) {
+  impl_->SetOnStreamsReady(std::move(callback));
 }
 
-void PlayerProxy::setOnState(OnState callback) {
-  impl_->setOnState(std::move(callback));
+void PlayerProxy::SetOnState(OnState callback) {
+  impl_->SetOnState(std::move(callback));
 }
 
-void PlayerProxy::setOnTimelineReset(OnTimelineReset callback) {
-  impl_->setOnTimelineReset(std::move(callback));
+void PlayerProxy::SetOnTimelineReset(OnTimelineReset callback) {
+  impl_->SetOnTimelineReset(std::move(callback));
 }
 
-void PlayerProxy::start(std::string url, toolkit::mINI options) {
-  impl_->start(std::move(url), std::move(options));
+void PlayerProxy::Start(std::string url, toolkit::mINI options) {
+  impl_->Start(std::move(url), std::move(options));
 }
 
-void PlayerProxy::pause(bool paused, OnControlCompleted completed) {
-  impl_->pause(paused, std::move(completed));
+void PlayerProxy::Pause(bool paused, OnControlCompleted completed) {
+  impl_->Pause(paused, std::move(completed));
 }
 
-void PlayerProxy::seekTo(std::chrono::milliseconds position,
+void PlayerProxy::SeekTo(std::chrono::milliseconds position,
                          OnControlCompleted completed) {
-  impl_->seekTo(position, std::move(completed));
+  impl_->SeekTo(position, std::move(completed));
 }
 
-void PlayerProxy::setPlaybackRate(float rate, OnControlCompleted completed) {
-  impl_->setPlaybackRate(rate, std::move(completed));
+void PlayerProxy::SetPlaybackRate(float rate, OnControlCompleted completed) {
+  impl_->SetPlaybackRate(rate, std::move(completed));
 }
 
-void PlayerProxy::stop(OnStopped on_stopped) {
-  impl_->stop(std::move(on_stopped));
+void PlayerProxy::Stop(OnStopped on_stopped) {
+  impl_->Stop(std::move(on_stopped));
 }
 
 PlayerState PlayerProxy::state() const noexcept { return impl_->state(); }
@@ -805,12 +808,12 @@ std::uint64_t PlayerProxy::generation() const noexcept {
   return impl_->generation();
 }
 
-std::uint64_t PlayerProxy::reconnectCount() const noexcept {
-  return impl_->reconnectCount();
+std::uint64_t PlayerProxy::reconnect_count() const noexcept {
+  return impl_->reconnect_count();
 }
 
-std::shared_ptr<toolkit::EventPoller> PlayerProxy::getPoller() const {
-  return impl_->getPoller();
+std::shared_ptr<toolkit::EventPoller> PlayerProxy::poller() const {
+  return impl_->poller();
 }
 
-}  // namespace mw::input
+}  // namespace mw::streamer::input

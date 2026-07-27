@@ -16,26 +16,25 @@ extern "C" {
 }
 
 #include "Poller/EventPoller.h"
-#include "mw/cache/PacketQueue.h"
-#include "mw/input/PlayerProxy.h"
+#include "mw/cache/packet_queue.h"
+#include "mw/input/player_proxy.h"
 
 namespace {
 
 using namespace std::chrono_literals;
-using mw::cache::PacketQueue;
-using mw::cache::PacketQueueState;
-using mw::cache::PacketStream;
-using mw::input::PlayerProxy;
-using mw::input::PlayerState;
+using mw::streamer::cache::PacketQueue;
+using mw::streamer::cache::PacketQueueState;
+using mw::streamer::cache::PacketStream;
+using mw::streamer::input::PlayerProxy;
+using mw::streamer::input::PlayerState;
 
-struct AVPacketDeleter {
+struct AvPacketDeleter {
   void operator()(AVPacket* packet) const { av_packet_free(&packet); }
 };
 
-using PacketPtr = std::unique_ptr<AVPacket, AVPacketDeleter>;
+using PacketPtr = std::unique_ptr<AVPacket, AvPacketDeleter>;
 
-PacketPtr makePacket(int stream_index, std::int64_t dts,
-                     AVRational time_base) {
+PacketPtr MakePacket(int stream_index, std::int64_t dts, AVRational time_base) {
   PacketPtr packet(av_packet_alloc());
   if (!packet || av_new_packet(packet.get(), 4) < 0) {
     throw std::runtime_error("测试AVPacket分配失败");
@@ -48,21 +47,21 @@ PacketPtr makePacket(int stream_index, std::int64_t dts,
   return packet;
 }
 
-std::vector<PacketStream> millisecondStreams() {
+std::vector<PacketStream> MillisecondStreams() {
   return {
       {0, AVMEDIA_TYPE_VIDEO, {1, 1000}},
       {1, AVMEDIA_TYPE_AUDIO, {1, 1000}},
   };
 }
 
-bool waitFor(std::condition_variable& condition, std::mutex& mutex,
+bool WaitFor(std::condition_variable& condition, std::mutex& mutex,
              const std::function<bool()>& predicate,
              std::chrono::milliseconds timeout = 5s) {
   std::unique_lock<std::mutex> lock(mutex);
   return condition.wait_for(lock, timeout, predicate);
 }
 
-void runOnPollerAndWait(const std::shared_ptr<toolkit::EventPoller>& poller,
+void RunOnPollerAndWait(const std::shared_ptr<toolkit::EventPoller>& poller,
                         std::function<void()> task) {
   std::mutex mutex;
   std::condition_variable condition;
@@ -77,23 +76,22 @@ void runOnPollerAndWait(const std::shared_ptr<toolkit::EventPoller>& poller,
         condition.notify_all();
       },
       false);
-  REQUIRE(waitFor(condition, mutex, [&]() { return completed; }));
+  REQUIRE(WaitFor(condition, mutex, [&]() { return completed; }));
 }
 
-bool feed(PacketQueue& queue, std::uint64_t generation, int stream_index,
+bool Feed(PacketQueue& queue, std::uint64_t generation, int stream_index,
           std::int64_t dts, AVRational time_base = {1, 1000}) {
-  auto packet = makePacket(stream_index, dts, time_base);
-  return queue.input(generation, packet.get());
+  auto packet = MakePacket(stream_index, dts, time_base);
+  return queue.Input(generation, packet.get());
 }
 
-void stopAndWait(const PacketQueue::Ptr& queue) {
-  queue->stop();
-  runOnPollerAndWait(queue->getPoller(), []() {});
+void StopAndWait(const PacketQueue::Ptr& queue) {
+  queue->Stop();
+  RunOnPollerAndWait(queue->poller(), []() {});
 }
 
-std::string samplePath() {
-  return std::string(MW_PACKET_QUEUE_TEST_DATA_DIR) +
-         "/packet_queue_8s.mp4";
+std::string SamplePath() {
+  return std::string(MW_PACKET_QUEUE_TEST_DATA_DIR) + "/packet_queue_8s.mp4";
 }
 
 }  // namespace
@@ -106,44 +104,43 @@ TEST_CASE("packet queue waits for both audio and video prebuffer") {
   std::atomic_bool valid_payload = true;
   std::atomic_bool callback_on_poller = true;
 
-  queue->setOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
+  queue->SetOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
     if (generation != 1 || !packet || packet->size != 4 ||
         packet->data[0] != packet->stream_index + 1) {
       valid_payload = false;
     }
     callback_on_poller =
-        callback_on_poller && queue->getPoller()->isCurrentThread();
+        callback_on_poller && queue->poller()->isCurrentThread();
     ++output_count;
     condition.notify_all();
   });
 
   bool accepted = true;
-  runOnPollerAndWait(queue->getPoller(), [&]() {
-    queue->setStreams(1, millisecondStreams());
+  RunOnPollerAndWait(queue->poller(), [&]() {
+    queue->SetStreams(1, MillisecondStreams());
     for (std::int64_t dts = 0; dts <= 1200; dts += 100) {
-      accepted = accepted && feed(*queue, 1, 0, dts);
+      accepted = accepted && Feed(*queue, 1, 0, dts);
     }
     for (std::int64_t dts = 0; dts <= 900; dts += 100) {
-      accepted = accepted && feed(*queue, 1, 1, dts);
+      accepted = accepted && Feed(*queue, 1, 1, dts);
     }
   });
 
   std::this_thread::sleep_for(150ms);
   CHECK(output_count == 0);
-  CHECK(queue->state() == PacketQueueState::Filling);
+  CHECK(queue->state() == PacketQueueState::kFilling);
 
-  runOnPollerAndWait(queue->getPoller(), [&]() {
-    accepted = accepted && feed(*queue, 1, 1, 1000);
+  RunOnPollerAndWait(queue->poller(), [&]() {
+    accepted = accepted && Feed(*queue, 1, 1, 1000);
   });
 
-  REQUIRE(waitFor(condition, mutex,
-                  [&]() { return output_count.load() > 0; }));
+  REQUIRE(WaitFor(condition, mutex, [&]() { return output_count.load() > 0; }));
   CHECK(accepted);
   CHECK(valid_payload);
   CHECK(callback_on_poller);
   CHECK(queue->generation() == 1);
 
-  stopAndWait(queue);
+  StopAndWait(queue);
 }
 
 TEST_CASE("packet queue self drives cached packets and stops when empty") {
@@ -154,7 +151,7 @@ TEST_CASE("packet queue self drives cached packets and stops when empty") {
   std::chrono::steady_clock::time_point first_output;
   std::chrono::steady_clock::time_point last_output;
 
-  queue->setOnPacket([&](std::uint64_t, const AVPacket*) {
+  queue->SetOnPacket([&](std::uint64_t, const AVPacket*) {
     const auto now = std::chrono::steady_clock::now();
     {
       std::lock_guard<std::mutex> lock(mutex);
@@ -167,18 +164,18 @@ TEST_CASE("packet queue self drives cached packets and stops when empty") {
     condition.notify_all();
   });
 
-  runOnPollerAndWait(queue->getPoller(), [&]() {
-    queue->setStreams(1, millisecondStreams());
+  RunOnPollerAndWait(queue->poller(), [&]() {
+    queue->SetStreams(1, MillisecondStreams());
     for (std::int64_t dts = 0; dts <= 1400; dts += 100) {
-      feed(*queue, 1, 0, dts);
-      feed(*queue, 1, 1, dts);
+      Feed(*queue, 1, 0, dts);
+      Feed(*queue, 1, 1, dts);
     }
-    queue->endInput(1);
+    queue->EndInput(1);
   });
 
-  REQUIRE(waitFor(condition, mutex,
-                  [&]() { return output_count.load() == 30; }, 3s));
-  runOnPollerAndWait(queue->getPoller(), []() {});
+  REQUIRE(WaitFor(
+      condition, mutex, [&]() { return output_count.load() == 30; }, 3s));
+  RunOnPollerAndWait(queue->poller(), []() {});
 
   std::chrono::milliseconds output_span;
   {
@@ -188,13 +185,13 @@ TEST_CASE("packet queue self drives cached packets and stops when empty") {
   }
   CHECK(output_span >= 1250ms);
   CHECK(output_span < 2200ms);
-  CHECK(queue->packetCount() == 0);
-  CHECK(queue->state() == PacketQueueState::Starved);
+  CHECK(queue->packet_count() == 0);
+  CHECK(queue->state() == PacketQueueState::kStarved);
 
   std::this_thread::sleep_for(300ms);
   CHECK(output_count == 30);
 
-  stopAndWait(queue);
+  StopAndWait(queue);
 }
 
 TEST_CASE("packet queue interleaves normalized DTS without rewriting packets") {
@@ -210,7 +207,7 @@ TEST_CASE("packet queue interleaves normalized DTS without rewriting packets") {
   };
   std::vector<Output> outputs;
 
-  queue->setOnPacket([&](std::uint64_t, const AVPacket* packet) {
+  queue->SetOnPacket([&](std::uint64_t, const AVPacket* packet) {
     const auto dts_us =
         av_rescale_q(packet->dts, packet->time_base, AV_TIME_BASE_Q);
     {
@@ -223,22 +220,21 @@ TEST_CASE("packet queue interleaves normalized DTS without rewriting packets") {
 
   const AVRational video_time_base{1, 1000};
   const AVRational audio_time_base{1, 48000};
-  runOnPollerAndWait(queue->getPoller(), [&]() {
-    queue->setStreams(
-        1, {{0, AVMEDIA_TYPE_VIDEO, video_time_base},
-            {1, AVMEDIA_TYPE_AUDIO, audio_time_base}});
+  RunOnPollerAndWait(queue->poller(), [&]() {
+    queue->SetStreams(1, {{0, AVMEDIA_TYPE_VIDEO, video_time_base},
+                          {1, AVMEDIA_TYPE_AUDIO, audio_time_base}});
 
     for (std::int64_t index = 0; index <= 12; ++index) {
-      feed(*queue, 1, 0, 10 + index * 100, video_time_base);
+      Feed(*queue, 1, 0, 10 + index * 100, video_time_base);
     }
     for (std::int64_t index = 0; index <= 30; ++index) {
-      feed(*queue, 1, 1, index * 1920, audio_time_base);
+      Feed(*queue, 1, 1, index * 1920, audio_time_base);
     }
-    queue->endInput(1);
+    queue->EndInput(1);
   });
 
-  REQUIRE(waitFor(condition, mutex, [&]() { return outputs.size() == 44; },
-                  3s));
+  REQUIRE(WaitFor(
+      condition, mutex, [&]() { return outputs.size() == 44; }, 3s));
 
   std::vector<Output> snapshot;
   {
@@ -262,7 +258,7 @@ TEST_CASE("packet queue interleaves normalized DTS without rewriting packets") {
     }
   }
 
-  stopAndWait(queue);
+  StopAndWait(queue);
 }
 
 TEST_CASE("new generation atomically clears the old packet timeline") {
@@ -276,14 +272,14 @@ TEST_CASE("new generation atomically clears the old packet timeline") {
   std::atomic_bool old_packet_after_reset = false;
   std::atomic_bool reset_cleared_packets = false;
 
-  queue->setOnTimelineReset([&](std::uint64_t generation) {
+  queue->SetOnTimelineReset([&](std::uint64_t generation) {
     if (generation == 2) {
-      reset_cleared_packets = queue->packetCount() == 0;
+      reset_cleared_packets = queue->packet_count() == 0;
       reset_seen = true;
       ++timeline_resets;
     }
   });
-  queue->setOnPacket([&](std::uint64_t generation, const AVPacket*) {
+  queue->SetOnPacket([&](std::uint64_t generation, const AVPacket*) {
     if (generation == 1) {
       if (reset_seen) {
         old_packet_after_reset = true;
@@ -295,31 +291,31 @@ TEST_CASE("new generation atomically clears the old packet timeline") {
     condition.notify_all();
   });
 
-  runOnPollerAndWait(queue->getPoller(), [&]() {
-    queue->setStreams(1, millisecondStreams());
+  RunOnPollerAndWait(queue->poller(), [&]() {
+    queue->SetStreams(1, MillisecondStreams());
     for (std::int64_t dts = 0; dts <= 2000; dts += 100) {
-      feed(*queue, 1, 0, dts);
-      feed(*queue, 1, 1, dts);
+      Feed(*queue, 1, 0, dts);
+      Feed(*queue, 1, 1, dts);
     }
   });
-  REQUIRE(waitFor(condition, mutex,
+  REQUIRE(WaitFor(condition, mutex,
                   [&]() { return generation_one_outputs.load() >= 4; }));
 
-  runOnPollerAndWait(queue->getPoller(), [&]() {
-    feed(*queue, 2, 0, 0);
-    feed(*queue, 1, 0, 2100);
-    feed(*queue, 2, 1, 0);
+  RunOnPollerAndWait(queue->poller(), [&]() {
+    Feed(*queue, 2, 0, 0);
+    Feed(*queue, 1, 0, 2100);
+    Feed(*queue, 2, 1, 0);
     for (std::int64_t dts = 100; dts <= 1200; dts += 100) {
-      feed(*queue, 2, 0, dts);
-      feed(*queue, 2, 1, dts);
+      Feed(*queue, 2, 0, dts);
+      Feed(*queue, 2, 1, dts);
     }
-    queue->endInput(2);
+    queue->EndInput(2);
   });
 
-  REQUIRE(waitFor(condition, mutex,
-                  [&]() { return generation_two_outputs.load() == 26; },
-                  3s));
-  runOnPollerAndWait(queue->getPoller(), []() {});
+  REQUIRE(WaitFor(
+      condition, mutex, [&]() { return generation_two_outputs.load() == 26; },
+      3s));
+  RunOnPollerAndWait(queue->poller(), []() {});
 
   CHECK(reset_seen);
   CHECK(reset_cleared_packets);
@@ -327,35 +323,31 @@ TEST_CASE("new generation atomically clears the old packet timeline") {
   CHECK_FALSE(old_packet_after_reset);
   CHECK(generation_one_outputs < 42);
   CHECK(queue->generation() == 2);
-  CHECK(queue->packetCount() == 0);
-  CHECK(queue->state() == PacketQueueState::Starved);
+  CHECK(queue->packet_count() == 0);
+  CHECK(queue->state() == PacketQueueState::kStarved);
 
-  stopAndWait(queue);
+  StopAndWait(queue);
 }
 
 TEST_CASE("packet queue validates its fixed audio video contract") {
-  CHECK_THROWS_AS(std::make_shared<PacketQueue>(999ms),
-                  std::invalid_argument);
+  CHECK_THROWS_AS(std::make_shared<PacketQueue>(999ms), std::invalid_argument);
   CHECK_THROWS_AS(std::make_shared<PacketQueue>(30001ms),
                   std::invalid_argument);
 
   auto queue = std::make_shared<PacketQueue>(1s);
-  CHECK_THROWS_AS(
-      queue->setStreams(1, {{0, AVMEDIA_TYPE_VIDEO, {1, 1000}}}),
-      std::invalid_argument);
-  CHECK_THROWS_AS(
-      queue->setStreams(
-          1, {{0, AVMEDIA_TYPE_VIDEO, {1, 1000}},
-              {0, AVMEDIA_TYPE_AUDIO, {1, 1000}}}),
-      std::invalid_argument);
-  runOnPollerAndWait(queue->getPoller(), [&]() {
-    queue->setStreams(1, millisecondStreams());
-    feed(*queue, 1, 0, 0);
-    feed(*queue, 1, 1, 0);
-    queue->setStreams(1, millisecondStreams());
+  CHECK_THROWS_AS(queue->SetStreams(1, {{0, AVMEDIA_TYPE_VIDEO, {1, 1000}}}),
+                  std::invalid_argument);
+  CHECK_THROWS_AS(queue->SetStreams(1, {{0, AVMEDIA_TYPE_VIDEO, {1, 1000}},
+                                        {0, AVMEDIA_TYPE_AUDIO, {1, 1000}}}),
+                  std::invalid_argument);
+  RunOnPollerAndWait(queue->poller(), [&]() {
+    queue->SetStreams(1, MillisecondStreams());
+    Feed(*queue, 1, 0, 0);
+    Feed(*queue, 1, 1, 0);
+    queue->SetStreams(1, MillisecondStreams());
   });
-  CHECK(queue->packetCount() == 2);
-  stopAndWait(queue);
+  CHECK(queue->packet_count() == 2);
+  StopAndWait(queue);
 }
 
 TEST_CASE("packet queue pause and rate control its output clock") {
@@ -364,43 +356,44 @@ TEST_CASE("packet queue pause and rate control its output clock") {
   std::condition_variable condition;
   std::atomic_size_t output_count = 0;
 
-  queue->setPlaybackRate(4.0);
-  queue->setOnPacket([&](std::uint64_t, const AVPacket*) {
+  queue->SetPlaybackRate(4.0);
+  queue->SetOnPacket([&](std::uint64_t, const AVPacket*) {
     ++output_count;
     condition.notify_all();
   });
-  runOnPollerAndWait(queue->getPoller(), [&]() {
-    queue->setStreams(1, millisecondStreams());
+  RunOnPollerAndWait(queue->poller(), [&]() {
+    queue->SetStreams(1, MillisecondStreams());
     for (std::int64_t dts = 0; dts <= 2000; dts += 100) {
-      feed(*queue, 1, 0, dts);
-      feed(*queue, 1, 1, dts);
+      Feed(*queue, 1, 0, dts);
+      Feed(*queue, 1, 1, dts);
     }
-    queue->endInput(1);
+    queue->EndInput(1);
   });
 
-  REQUIRE(waitFor(condition, mutex,
-                  [&]() { return output_count.load() >= 4; }));
-  queue->pause(true);
-  runOnPollerAndWait(queue->getPoller(), []() {});
+  REQUIRE(
+      WaitFor(condition, mutex, [&]() { return output_count.load() >= 4; }));
+  queue->Pause(true);
+  RunOnPollerAndWait(queue->poller(), []() {});
   const auto paused_count = output_count.load();
 
   std::this_thread::sleep_for(250ms);
   CHECK(output_count == paused_count);
-  CHECK(queue->state() == PacketQueueState::Paused);
+  CHECK(queue->state() == PacketQueueState::kPaused);
 
-  queue->setPlaybackRate(10.0);
-  queue->pause(false);
-  REQUIRE(waitFor(condition, mutex,
-                  [&]() { return output_count.load() == 42; }, 2s));
-  runOnPollerAndWait(queue->getPoller(), []() {});
-  CHECK(queue->state() == PacketQueueState::Starved);
-  CHECK_THROWS_AS(queue->setPlaybackRate(0.0), std::invalid_argument);
-  CHECK_THROWS_AS(queue->setPlaybackRate(21.0), std::invalid_argument);
+  queue->SetPlaybackRate(10.0);
+  queue->Pause(false);
+  REQUIRE(WaitFor(
+      condition, mutex, [&]() { return output_count.load() == 42; }, 2s));
+  RunOnPollerAndWait(queue->poller(), []() {});
+  CHECK(queue->state() == PacketQueueState::kStarved);
+  CHECK_THROWS_AS(queue->SetPlaybackRate(0.0), std::invalid_argument);
+  CHECK_THROWS_AS(queue->SetPlaybackRate(21.0), std::invalid_argument);
 
-  stopAndWait(queue);
+  StopAndWait(queue);
 }
 
-TEST_CASE("packet queue survives callback reentrancy and synchronous disposal") {
+TEST_CASE(
+    "packet queue survives callback reentrancy and synchronous disposal") {
   SECTION("OnPacket can stop the queue") {
     auto queue = std::make_shared<PacketQueue>(1s);
     std::mutex mutex;
@@ -408,79 +401,78 @@ TEST_CASE("packet queue survives callback reentrancy and synchronous disposal") 
     std::atomic_size_t output_count = 0;
     std::weak_ptr<PacketQueue> weak_queue = queue;
 
-    queue->setOnPacket([&](std::uint64_t, const AVPacket*) {
+    queue->SetOnPacket([&](std::uint64_t, const AVPacket*) {
       if (++output_count == 1) {
         if (auto locked = weak_queue.lock()) {
-          locked->stop();
+          locked->Stop();
         }
       }
       condition.notify_all();
     });
-    runOnPollerAndWait(queue->getPoller(), [&]() {
-      queue->setStreams(1, millisecondStreams());
+    RunOnPollerAndWait(queue->poller(), [&]() {
+      queue->SetStreams(1, MillisecondStreams());
       for (std::int64_t dts = 0; dts <= 1400; dts += 100) {
-        feed(*queue, 1, 0, dts);
-        feed(*queue, 1, 1, dts);
+        Feed(*queue, 1, 0, dts);
+        Feed(*queue, 1, 1, dts);
       }
-      queue->endInput(1);
+      queue->EndInput(1);
     });
 
-    REQUIRE(waitFor(condition, mutex,
-                    [&]() { return output_count.load() == 1; }));
-    runOnPollerAndWait(queue->getPoller(), []() {});
-    CHECK(queue->state() == PacketQueueState::Stopped);
-    CHECK(queue->packetCount() == 0);
+    REQUIRE(
+        WaitFor(condition, mutex, [&]() { return output_count.load() == 1; }));
+    RunOnPollerAndWait(queue->poller(), []() {});
+    CHECK(queue->state() == PacketQueueState::kStopped);
+    CHECK(queue->packet_count() == 0);
     std::this_thread::sleep_for(200ms);
     CHECK(output_count == 1);
   }
 
   SECTION("destruction suppresses all pending callbacks") {
     auto queue = std::make_shared<PacketQueue>(1s);
-    auto poller = queue->getPoller();
+    auto poller = queue->poller();
     std::atomic_size_t output_count = 0;
 
-    queue->setOnPacket(
-        [&](std::uint64_t, const AVPacket*) { ++output_count; });
-    runOnPollerAndWait(poller, [&]() {
-      queue->setStreams(1, millisecondStreams());
+    queue->SetOnPacket([&](std::uint64_t, const AVPacket*) { ++output_count; });
+    RunOnPollerAndWait(poller, [&]() {
+      queue->SetStreams(1, MillisecondStreams());
       for (std::int64_t dts = 0; dts <= 3000; dts += 100) {
-        feed(*queue, 1, 0, dts);
-        feed(*queue, 1, 1, dts);
+        Feed(*queue, 1, 0, dts);
+        Feed(*queue, 1, 1, dts);
       }
-      queue->endInput(1);
+      queue->EndInput(1);
     });
 
     queue.reset();
     const auto count_after_destruction = output_count.load();
-    runOnPollerAndWait(poller, []() {});
+    RunOnPollerAndWait(poller, []() {});
     std::this_thread::sleep_for(200ms);
     CHECK(output_count == count_after_destruction);
   }
 
   SECTION("the last owner can be released inside OnPacket") {
     auto queue = std::make_shared<PacketQueue>(1s);
-    auto poller = queue->getPoller();
+    auto poller = queue->poller();
     std::mutex mutex;
     std::condition_variable condition;
     std::atomic_bool callback_completed = false;
 
-    queue->setOnPacket([&](std::uint64_t, const AVPacket*) {
+    queue->SetOnPacket([&](std::uint64_t, const AVPacket*) {
       queue.reset();
       callback_completed = true;
       condition.notify_all();
     });
-    runOnPollerAndWait(poller, [&]() {
-      queue->setStreams(1, millisecondStreams());
+    RunOnPollerAndWait(poller, [&]() {
+      queue->SetStreams(1, MillisecondStreams());
       for (std::int64_t dts = 0; dts <= 1400; dts += 100) {
-        feed(*queue, 1, 0, dts);
-        feed(*queue, 1, 1, dts);
+        Feed(*queue, 1, 0, dts);
+        Feed(*queue, 1, 1, dts);
       }
-      queue->endInput(1);
+      queue->EndInput(1);
     });
 
-    REQUIRE(waitFor(condition, mutex,
-                    [&]() { return callback_completed.load(); }));
-    runOnPollerAndWait(poller, []() {});
+    REQUIRE(
+        WaitFor(condition, mutex, [&]() { return callback_completed.load(); }));
+    RunOnPollerAndWait(poller, []() {});
     CHECK_FALSE(queue);
   }
 }
@@ -498,7 +490,7 @@ TEST_CASE("player proxy feeds and fully drains an eight second packet queue") {
   std::atomic_bool input_ended = false;
   std::atomic_bool callbacks_on_poller = true;
 
-  queue->setOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
+  queue->SetOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
     callbacks_on_poller =
         callbacks_on_poller && generation == 1 && poller->isCurrentThread();
     {
@@ -513,41 +505,42 @@ TEST_CASE("player proxy feeds and fully drains an eight second packet queue") {
     }
     condition.notify_all();
   });
-  proxy->setOnStreamsReady(
+  proxy->SetOnStreamsReady(
       [&](std::uint64_t generation,
-          const std::vector<mw::input::StreamInfo>& streams) {
+          const std::vector<mw::streamer::input::StreamInfo>& streams) {
         std::vector<PacketStream> packet_streams;
         for (const auto& stream : streams) {
-          packet_streams.push_back(
-              {stream.stream_index, stream.codec_parameters->codec_type,
-               stream.time_base});
+          packet_streams.push_back({stream.stream_index,
+                                    stream.codec_parameters->codec_type,
+                                    stream.time_base});
         }
-        queue->setStreams(generation, std::move(packet_streams));
+        queue->SetStreams(generation, std::move(packet_streams));
       });
-  proxy->setOnPacket(
-      [&](std::uint64_t generation, const AVPacket* packet) {
-        return queue->input(generation, packet);
-      });
-  proxy->setOnState(
-      [&](std::uint64_t generation, PlayerState state,
-          const toolkit::SockException&, bool) {
-        if (state == PlayerState::Ended) {
-          queue->endInput(generation);
-          output_at_input_eof = video_packets.load() + audio_packets.load();
-          input_ended = true;
-          condition.notify_all();
-        }
-      });
+  proxy->SetOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
+    return queue->Input(generation, packet);
+  });
+  proxy->SetOnState([&](std::uint64_t generation, PlayerState state,
+                        const toolkit::SockException&, bool) {
+    if (state == PlayerState::kEnded) {
+      queue->EndInput(generation);
+      output_at_input_eof = video_packets.load() + audio_packets.load();
+      input_ended = true;
+      condition.notify_all();
+    }
+  });
 
-  proxy->start(samplePath());
+  proxy->Start(SamplePath());
 
-  REQUIRE(waitFor(condition, mutex, [&]() { return input_ended.load(); }, 12s));
+  REQUIRE(WaitFor(
+      condition, mutex, [&]() { return input_ended.load(); }, 12s));
   CHECK(output_at_input_eof < 456);
-  REQUIRE(waitFor(
+  REQUIRE(WaitFor(
       condition, mutex,
-      [&]() { return video_packets.load() == 80 && audio_packets.load() == 376; },
+      [&]() {
+        return video_packets.load() == 80 && audio_packets.load() == 376;
+      },
       12s));
-  runOnPollerAndWait(poller, []() {});
+  RunOnPollerAndWait(poller, []() {});
 
   std::vector<std::int64_t> dts_snapshot;
   {
@@ -559,20 +552,20 @@ TEST_CASE("player proxy feeds and fully drains an eight second packet queue") {
     CHECK(dts_snapshot[index - 1] <= dts_snapshot[index]);
   }
   CHECK(callbacks_on_poller);
-  CHECK(queue->state() == PacketQueueState::Starved);
-  CHECK(queue->packetCount() == 0);
+  CHECK(queue->state() == PacketQueueState::kStarved);
+  CHECK(queue->packet_count() == 0);
 
-  stopAndWait(queue);
+  StopAndWait(queue);
 
   std::mutex stop_mutex;
   std::condition_variable stop_condition;
   bool stopped = false;
-  proxy->stop([&]() {
+  proxy->Stop([&]() {
     {
       std::lock_guard<std::mutex> lock(stop_mutex);
       stopped = true;
     }
     stop_condition.notify_all();
   });
-  REQUIRE(waitFor(stop_condition, stop_mutex, [&]() { return stopped; }));
+  REQUIRE(WaitFor(stop_condition, stop_mutex, [&]() { return stopped; }));
 }

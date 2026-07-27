@@ -13,10 +13,10 @@ extern "C" {
 #include <libavutil/error.h>
 }
 
-#include "mw/convter/ZlmCodecParametersConvter.h"
-#include "mw/convter/ZlmPacketConvter.h"
 #include "Extension/Factory.h"
 #include "Record/MP4Demuxer.h"
+#include "mw/converter/zlm_codec_parameters_converter.h"
+#include "mw/converter/zlm_packet_converter.h"
 
 namespace {
 
@@ -30,10 +30,10 @@ using mediakit::Frame;
 using mediakit::FrameWriterInterface;
 using mediakit::MP4Demuxer;
 using mediakit::Track;
-using mw::convter::ZlmCodecParametersConvter;
-using mw::convter::ZlmPacketConvter;
+using mw::streamer::converter::ZlmCodecParametersConverter;
+using mw::streamer::converter::ZlmPacketConverter;
 
-AVCodecID expectedCodecId(CodecId codec) {
+AVCodecID ExpectedCodecId(CodecId codec) {
   switch (codec) {
     case CodecH264:
       return AV_CODEC_ID_H264;
@@ -84,42 +84,41 @@ class TestDecoder {
     REQUIRE(frame_);
   }
 
-  bool inputPacket(const AVPacket* packet) {
+  bool InputPacket(const AVPacket* packet) {
     for (;;) {
       const auto result = avcodec_send_packet(context_.get(), packet);
       if (result == AVERROR(EAGAIN)) {
-        if (!receiveFrames()) {
+        if (!ReceiveFrames()) {
           return false;
         }
         continue;
       }
-      return result >= 0 && receiveFrames();
+      return result >= 0 && ReceiveFrames();
     }
   }
 
-  bool flush() {
+  bool Flush() {
     for (;;) {
       const auto result = avcodec_send_packet(context_.get(), nullptr);
       if (result == AVERROR(EAGAIN)) {
-        if (!receiveFrames()) {
+        if (!ReceiveFrames()) {
           return false;
         }
         continue;
       }
-      return (result >= 0 || result == AVERROR_EOF) && receiveFrames();
+      return (result >= 0 || result == AVERROR_EOF) && ReceiveFrames();
     }
   }
 
-  void reset() { avcodec_flush_buffers(context_.get()); }
+  void Reset() { avcodec_flush_buffers(context_.get()); }
 
-  std::size_t decodedFrameCount() const { return decoded_frame_count_; }
+  std::size_t decoded_frame_count() const { return decoded_frame_count_; }
 
  private:
-  bool receiveFrames() {
+  bool ReceiveFrames() {
     for (;;) {
       av_frame_unref(frame_.get());
-      const auto result =
-          avcodec_receive_frame(context_.get(), frame_.get());
+      const auto result = avcodec_receive_frame(context_.get(), frame_.get());
       if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) {
         return true;
       }
@@ -135,7 +134,7 @@ class TestDecoder {
   std::size_t decoded_frame_count_ = 0;
 };
 
-bool startsWithAnnexB(const AVPacket* packet) {
+bool StartsWithAnnexB(const AVPacket* packet) {
   if (packet->size >= 4 && packet->data[0] == 0 && packet->data[1] == 0 &&
       packet->data[2] == 0 && packet->data[3] == 1) {
     return true;
@@ -144,7 +143,7 @@ bool startsWithAnnexB(const AVPacket* packet) {
          packet->data[2] == 1;
 }
 
-bool hasZeroPadding(const AVPacket* packet) {
+bool HasZeroPadding(const AVPacket* packet) {
   for (int i = 0; i < AV_INPUT_BUFFER_PADDING_SIZE; ++i) {
     if (packet->data[packet->size + i] != 0) {
       return false;
@@ -153,8 +152,8 @@ bool hasZeroPadding(const AVPacket* packet) {
   return true;
 }
 
-std::string samplePath(const std::string& name) {
-  return std::string(MW_ZLM_PACKET_CONVTER_TEST_DATA_DIR) + "/" + name;
+std::string SamplePath(const std::string& name) {
+  return std::string(MW_ZLM_PACKET_CONVERTER_TEST_DATA_DIR) + "/" + name;
 }
 
 struct Binding {
@@ -167,27 +166,27 @@ struct Binding {
   std::vector<std::uint8_t> retained_payload;
   Track::Ptr track;
   FrameWriterInterface* delegate = nullptr;
-  ZlmCodecParametersConvter::Ptr codec_parameters_convter;
-  ZlmPacketConvter::Ptr packet_convter;
+  ZlmCodecParametersConverter::Ptr codec_parameters_converter;
+  ZlmPacketConverter::Ptr packet_converter;
   std::unique_ptr<TestDecoder> decoder;
 };
 
-std::shared_ptr<Binding> makeBinding(const Track::Ptr& track,
+std::shared_ptr<Binding> MakeBinding(const Track::Ptr& track,
                                      int stream_index) {
   auto binding = std::make_shared<Binding>();
   binding->codec = track->getCodecId();
   binding->stream_index = stream_index;
   binding->track = track;
-  binding->codec_parameters_convter =
-      std::make_shared<ZlmCodecParametersConvter>(track);
-  binding->packet_convter =
-      std::make_shared<ZlmPacketConvter>(track, stream_index);
+  binding->codec_parameters_converter =
+      std::make_shared<ZlmCodecParametersConverter>(track);
+  binding->packet_converter =
+      std::make_shared<ZlmPacketConverter>(track, stream_index);
   binding->decoder = std::make_unique<TestDecoder>(
-      binding->codec_parameters_convter->getCodecParameters().get(),
-      binding->codec_parameters_convter->getTimeBase());
+      binding->codec_parameters_converter->codec_parameters().get(),
+      binding->codec_parameters_converter->time_base());
 
   std::weak_ptr<Binding> weak_binding = binding;
-  binding->packet_convter->setOnPacket(
+  binding->packet_converter->SetOnPacket(
       [weak_binding](const AVPacket* packet) {
         auto binding = weak_binding.lock();
         if (!binding) {
@@ -196,15 +195,14 @@ std::shared_ptr<Binding> makeBinding(const Track::Ptr& track,
         if (!packet || !packet->buf || !packet->data || packet->size <= 0 ||
             packet->stream_index != binding->stream_index ||
             packet->time_base.num != 1 || packet->time_base.den != 1000 ||
-            packet->dts == AV_NOPTS_VALUE ||
-            packet->pts == AV_NOPTS_VALUE || !hasZeroPadding(packet)) {
+            packet->dts == AV_NOPTS_VALUE || packet->pts == AV_NOPTS_VALUE ||
+            !HasZeroPadding(packet)) {
           binding->valid_packets = false;
           return false;
         }
 
-        if ((binding->codec == CodecH264 ||
-             binding->codec == CodecH265) &&
-            !startsWithAnnexB(packet)) {
+        if ((binding->codec == CodecH264 || binding->codec == CodecH265) &&
+            !StartsWithAnnexB(packet)) {
           binding->valid_packets = false;
           return false;
         }
@@ -222,7 +220,7 @@ std::shared_ptr<Binding> makeBinding(const Track::Ptr& track,
             return false;
           }
         }
-        return binding->decoder->inputPacket(packet);
+        return binding->decoder->InputPacket(packet);
       });
   return binding;
 }
@@ -243,14 +241,14 @@ const std::vector<Mp4Sample> kMp4Samples = {
     {"h265_aac_fragmented.mp4", CodecH265, true, false},
 };
 
-std::uint32_t readLittleEndian32(const std::uint8_t* data) {
+std::uint32_t ReadLittleEndian32(const std::uint8_t* data) {
   return static_cast<std::uint32_t>(data[0]) |
          (static_cast<std::uint32_t>(data[1]) << 8) |
          (static_cast<std::uint32_t>(data[2]) << 16) |
          (static_cast<std::uint32_t>(data[3]) << 24);
 }
 
-std::uint64_t readLittleEndian64(const std::uint8_t* data) {
+std::uint64_t ReadLittleEndian64(const std::uint8_t* data) {
   std::uint64_t value = 0;
   for (int i = 7; i >= 0; --i) {
     value = (value << 8) | data[i];
@@ -258,7 +256,7 @@ std::uint64_t readLittleEndian64(const std::uint8_t* data) {
   return value;
 }
 
-std::vector<std::uint8_t> readFile(const std::string& path) {
+std::vector<std::uint8_t> ReadFile(const std::string& path) {
   std::ifstream input(path, std::ios::binary);
   REQUIRE(input);
   return {std::istreambuf_iterator<char>(input),
@@ -282,7 +280,7 @@ TEST_CASE("ZLM MP4 frames become owned decodable AVPackets") {
   for (const auto& sample : kMp4Samples) {
     DYNAMIC_SECTION(sample.file) {
       MP4Demuxer demuxer;
-      demuxer.openMP4(samplePath(sample.file));
+      demuxer.openMP4(SamplePath(sample.file));
 
       auto tracks = demuxer.getTracks(false);
       REQUIRE(tracks.size() == (sample.has_audio ? 2 : 1));
@@ -292,11 +290,11 @@ TEST_CASE("ZLM MP4 frames become owned decodable AVPackets") {
       bool found_audio = false;
       int stream_index = 0;
       for (const auto& track : tracks) {
-        auto binding = makeBinding(track, stream_index++);
+        auto binding = MakeBinding(track, stream_index++);
         const auto& parameters =
-            binding->codec_parameters_convter->getCodecParameters();
+            binding->codec_parameters_converter->codec_parameters();
         REQUIRE(parameters);
-        CHECK(parameters->codec_id == expectedCodecId(binding->codec));
+        CHECK(parameters->codec_id == ExpectedCodecId(binding->codec));
         CHECK(parameters->extradata_size > 0);
         if (track->getTrackType() == mediakit::TrackVideo) {
           CHECK(parameters->codec_type == AVMEDIA_TYPE_VIDEO);
@@ -310,10 +308,10 @@ TEST_CASE("ZLM MP4 frames become owned decodable AVPackets") {
         found_video |= binding->codec == sample.video_codec;
         found_audio |= binding->codec == CodecAAC;
         bindings.emplace(track->getIndex(), binding);
-        binding->delegate = track->addDelegate(
-            [packet_convter =
-                 binding->packet_convter](const Frame::Ptr& frame) {
-              return packet_convter->inputFrame(frame);
+        binding->delegate =
+            track->addDelegate([packet_converter = binding->packet_converter](
+                                   const Frame::Ptr& frame) {
+              return packet_converter->InputFrame(frame);
             });
       }
 
@@ -332,10 +330,10 @@ TEST_CASE("ZLM MP4 frames become owned decodable AVPackets") {
           ++video_input_count;
           if (video_input_count == 10) {
             auto& binding = bindings.at(frame->getIndex());
-            REQUIRE(binding->packet_convter->flush());
-            binding->decoder->flush();
-            binding->packet_convter->reset();
-            binding->decoder->reset();
+            REQUIRE(binding->packet_converter->Flush());
+            binding->decoder->Flush();
+            binding->packet_converter->Reset();
+            binding->decoder->Reset();
             reset_done = true;
           }
         }
@@ -344,15 +342,15 @@ TEST_CASE("ZLM MP4 frames become owned decodable AVPackets") {
 
       for (const auto& entry : bindings) {
         auto& binding = entry.second;
-        REQUIRE(binding->packet_convter->flush());
-        REQUIRE(binding->decoder->flush());
+        REQUIRE(binding->packet_converter->Flush());
+        REQUIRE(binding->decoder->Flush());
         CHECK(binding->valid_packets);
         CHECK(binding->packet_count > 0);
-        CHECK(binding->decoder->decodedFrameCount() > 0);
+        CHECK(binding->decoder->decoded_frame_count() > 0);
         if (binding->codec == sample.video_codec) {
           CHECK(binding->packet_count == 20);
           CHECK(binding->key_packet_count > 0);
-          CHECK(binding->decoder->decodedFrameCount() == 20);
+          CHECK(binding->decoder->decoded_frame_count() == 20);
           REQUIRE(binding->retained_packet);
           CHECK(binding->retained_packet->flags & AV_PKT_FLAG_KEY);
         }
@@ -368,7 +366,7 @@ TEST_CASE("ZLM MP4 frames become owned decodable AVPackets") {
       demuxer.closeMP4();
       for (const auto& entry : bindings) {
         auto& binding = entry.second;
-        binding->packet_convter.reset();
+        binding->packet_converter.reset();
         REQUIRE(binding->retained_packet);
         CHECK(binding->retained_packet->buf);
         CHECK(binding->retained_payload ==
@@ -383,28 +381,28 @@ TEST_CASE("ZLM MP4 frames become owned decodable AVPackets") {
 TEST_CASE("VP8 and VP9 packets preserve payload and decode through callbacks") {
   for (const auto& sample : kIvfSamples) {
     DYNAMIC_SECTION(sample.file) {
-      auto file = readFile(samplePath(sample.file));
+      auto file = ReadFile(SamplePath(sample.file));
       REQUIRE(file.size() >= 32);
       REQUIRE(std::equal(file.begin(), file.begin() + 4, "DKIF"));
       REQUIRE(std::equal(file.begin() + 8, file.begin() + 12, sample.fourcc));
 
-      const auto rate = readLittleEndian32(file.data() + 16);
-      const auto scale = readLittleEndian32(file.data() + 20);
+      const auto rate = ReadLittleEndian32(file.data() + 16);
+      const auto scale = ReadLittleEndian32(file.data() + 20);
       REQUIRE(rate > 0);
       REQUIRE(scale > 0);
 
       auto track = mediakit::Factory::getTrackByCodecId(sample.codec);
       REQUIRE(track);
-      auto binding = makeBinding(track, 0);
+      auto binding = MakeBinding(track, 0);
       const auto& parameters =
-          binding->codec_parameters_convter->getCodecParameters();
+          binding->codec_parameters_converter->codec_parameters();
       REQUIRE(parameters);
       CHECK(parameters->codec_type == AVMEDIA_TYPE_VIDEO);
-      CHECK(parameters->codec_id == expectedCodecId(sample.codec));
+      CHECK(parameters->codec_id == ExpectedCodecId(sample.codec));
 
       const std::vector<std::uint8_t>* expected_payload = nullptr;
       std::weak_ptr<Binding> weak_binding = binding;
-      binding->packet_convter->setOnPacket(
+      binding->packet_converter->SetOnPacket(
           [weak_binding, &expected_payload](const AVPacket* packet) {
             auto binding = weak_binding.lock();
             if (!binding) {
@@ -415,7 +413,7 @@ TEST_CASE("VP8 and VP9 packets preserve payload and decode through callbacks") {
                 !std::equal(packet->data, packet->data + packet->size,
                             expected_payload->begin()) ||
                 packet->time_base.num != 1 || packet->time_base.den != 1000 ||
-                !hasZeroPadding(packet)) {
+                !HasZeroPadding(packet)) {
               binding->valid_packets = false;
               return false;
             }
@@ -428,14 +426,14 @@ TEST_CASE("VP8 and VP9 packets preserve payload and decode through callbacks") {
                                                packet->data + packet->size);
               binding->retained_packet.reset(av_packet_clone(packet));
             }
-            return binding->decoder->inputPacket(packet);
+            return binding->decoder->InputPacket(packet);
           });
 
       std::size_t offset = 32;
       while (offset < file.size()) {
         REQUIRE(file.size() - offset >= 12);
-        const auto frame_size = readLittleEndian32(file.data() + offset);
-        const auto timestamp = readLittleEndian64(file.data() + offset + 4);
+        const auto frame_size = ReadLittleEndian32(file.data() + offset);
+        const auto timestamp = ReadLittleEndian64(file.data() + offset + 4);
         offset += 12;
         REQUIRE(file.size() - offset >= frame_size);
 
@@ -447,20 +445,20 @@ TEST_CASE("VP8 and VP9 packets preserve payload and decode through callbacks") {
             sample.codec, reinterpret_cast<const char*>(payload.data()),
             payload.size(), timestamp_ms, timestamp_ms);
         REQUIRE(frame);
-        REQUIRE(binding->packet_convter->inputFrame(frame));
+        REQUIRE(binding->packet_converter->InputFrame(frame));
         offset += frame_size;
       }
 
       REQUIRE(offset == file.size());
-      REQUIRE(binding->packet_convter->flush());
-      REQUIRE(binding->decoder->flush());
+      REQUIRE(binding->packet_converter->Flush());
+      REQUIRE(binding->decoder->Flush());
 
       CHECK(binding->valid_packets);
       CHECK(binding->packet_count == 10);
       CHECK(binding->key_packet_count > 0);
-      CHECK(binding->decoder->decodedFrameCount() == 10);
+      CHECK(binding->decoder->decoded_frame_count() == 10);
 
-      binding->packet_convter.reset();
+      binding->packet_converter.reset();
       REQUIRE(binding->retained_packet);
       CHECK(binding->retained_packet->buf);
       CHECK(binding->retained_payload ==

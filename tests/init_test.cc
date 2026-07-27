@@ -1,4 +1,4 @@
-#include "mw/init/init.hpp"
+#include "mw/init/init.h"
 
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
@@ -18,7 +18,8 @@ extern "C" {
 
 namespace {
 
-using StreamerLog = mw::log::Module<mw::log::LogModule::Streamer>;
+using StreamerLog =
+    mw::streamer::log::Module<mw::streamer::log::LogModule::kStreamer>;
 
 class TemporaryLogFile {
  public:
@@ -36,7 +37,7 @@ class TemporaryLogFile {
 
   const std::filesystem::path& path() const noexcept { return path_; }
 
-  std::string read() const {
+  std::string Read() const {
     std::ifstream stream(path_);
     std::ostringstream content;
     content << stream.rdbuf();
@@ -47,12 +48,12 @@ class TemporaryLogFile {
   std::filesystem::path path_;
 };
 
-mw::InitConfig fileInitConfig(const std::filesystem::path& path) {
-  mw::InitConfig config;
+mw::streamer::InitConfig MakeFileInitConfig(const std::filesystem::path& path) {
+  mw::streamer::InitConfig config;
   config.log.console.enabled = false;
   config.log.rotating_file.enabled = true;
   config.log.rotating_file.path = path.string();
-  config.log.rotating_file.level = mw::log::LogLevel::Trace;
+  config.log.rotating_file.level = mw::streamer::log::LogLevel::kTrace;
   config.log.rotating_file.max_file_size = 1024 * 1024;
   config.log.rotating_file.max_files = 1;
   return config;
@@ -60,36 +61,39 @@ mw::InitConfig fileInitConfig(const std::filesystem::path& path) {
 
 }  // namespace
 
-TEST_CASE("init has a one-time process lifecycle", "[init][logging][lifecycle]") {
-  CHECK_FALSE(mw::initialized());
-  CHECK(mw::log::detail::shouldLog(mw::log::LogModule::Streamer,
-                                   mw::log::LogLevel::Info));
-  CHECK_FALSE(mw::log::detail::shouldLog(mw::log::LogModule::Streamer,
-                                         mw::log::LogLevel::Debug));
-  StreamerLog::info("default logger is available");
+TEST_CASE("init has a one-time process lifecycle",
+          "[init][logging][lifecycle]") {
+  CHECK_FALSE(mw::streamer::IsInitialized());
+  CHECK(mw::streamer::log::detail::ShouldLog(
+      mw::streamer::log::LogModule::kStreamer,
+      mw::streamer::log::LogLevel::kInfo));
+  CHECK_FALSE(mw::streamer::log::detail::ShouldLog(
+      mw::streamer::log::LogModule::kStreamer,
+      mw::streamer::log::LogLevel::kDebug));
+  StreamerLog::Info("default logger is available");
 
-  mw::InitConfig invalid_config;
+  mw::streamer::InitConfig invalid_config;
   invalid_config.log.console.enabled = false;
-  CHECK_THROWS_AS(mw::init(invalid_config), std::invalid_argument);
-  CHECK_FALSE(mw::initialized());
+  CHECK_THROWS_AS(mw::streamer::Init(invalid_config), std::invalid_argument);
+  CHECK_FALSE(mw::streamer::IsInitialized());
 
   TemporaryLogFile file;
-  auto config = fileInitConfig(file.path());
-  config.log.modules.streamer = mw::log::LogLevel::Debug;
-  config.log.modules.zlm = mw::log::LogLevel::Info;
-  config.log.modules.ffmpeg = mw::log::LogLevel::Info;
+  auto config = MakeFileInitConfig(file.path());
+  config.log.modules.streamer = mw::streamer::log::LogLevel::kDebug;
+  config.log.modules.zlm = mw::streamer::log::LogLevel::kInfo;
+  config.log.modules.ffmpeg = mw::streamer::log::LogLevel::kInfo;
   config.log.async.enabled = true;
   config.log.async.queue_size = 128;
-  config.log.async.overflow = mw::log::OverflowPolicy::Block;
+  config.log.async.overflow = mw::streamer::log::OverflowPolicy::kBlock;
 
-  mw::init(config);
-  CHECK(mw::initialized());
+  mw::streamer::Init(config);
+  CHECK(mw::streamer::IsInitialized());
 
   // The first successful configuration wins. Later calls do not validate or
   // replace it.
-  CHECK_NOTHROW(mw::init(invalid_config));
+  CHECK_NOTHROW(mw::streamer::Init(invalid_config));
 
-  StreamerLog::info("configured async message");
+  StreamerLog::Info("configured async message");
   InfoL << "zlm init bridge message";
   av_log(nullptr, AV_LOG_INFO, "ffmpeg init bridge message\n");
   std::atomic<bool> started{false};
@@ -97,7 +101,7 @@ TEST_CASE("init has a one-time process lifecycle", "[init][logging][lifecycle]")
   std::thread writer([&]() {
     started = true;
     while (!stop.load()) {
-      StreamerLog::debug("concurrent shutdown message");
+      StreamerLog::Debug("concurrent shutdown message");
       std::this_thread::yield();
     }
   });
@@ -105,17 +109,18 @@ TEST_CASE("init has a one-time process lifecycle", "[init][logging][lifecycle]")
   while (!started.load()) {
     std::this_thread::yield();
   }
-  mw::shutdown();
+  mw::streamer::Shutdown();
   stop = true;
   writer.join();
 
-  CHECK_FALSE(mw::initialized());
-  CHECK_NOTHROW(mw::shutdown());
-  CHECK_THROWS_AS(mw::init(config), std::logic_error);
-  CHECK(mw::log::detail::shouldLog(mw::log::LogModule::Streamer,
-                                   mw::log::LogLevel::Info));
+  CHECK_FALSE(mw::streamer::IsInitialized());
+  CHECK_NOTHROW(mw::streamer::Shutdown());
+  CHECK_THROWS_AS(mw::streamer::Init(config), std::logic_error);
+  CHECK(mw::streamer::log::detail::ShouldLog(
+      mw::streamer::log::LogModule::kStreamer,
+      mw::streamer::log::LogLevel::kInfo));
 
-  const auto content = file.read();
+  const auto content = file.Read();
   CHECK(content.find("[streamer] configured async message") !=
         std::string::npos);
   CHECK(content.find("[ZLM] zlm init bridge message") != std::string::npos);
