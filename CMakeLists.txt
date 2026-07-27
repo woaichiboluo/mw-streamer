@@ -31,9 +31,11 @@ find_package(SRT REQUIRED)
 add_subdirectory(third_party/ZLMediaKit)
 
 add_library(mw_streamer STATIC
+    src/cache/PacketQueue.cpp
     src/convter/ZlmCodecParametersConvter.cpp
     src/convter/ZlmPacketConvter.cpp
     src/init/init.cpp
+    src/input/PlayerProxy.cpp
     src/log/logging.cpp
 )
 add_library(mw::streamer ALIAS mw_streamer)

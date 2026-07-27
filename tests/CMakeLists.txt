@@ -84,6 +84,56 @@ add_test(
     COMMAND mw_zlm_packet_convter_tests
 )
 
+add_executable(mw_input_player_proxy_tests
+    input_player_proxy_test.cpp
+)
+
+target_compile_definitions(mw_input_player_proxy_tests
+    PRIVATE
+        MW_INPUT_PLAYER_PROXY_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+)
+
+target_link_libraries(mw_input_player_proxy_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        FFmpeg::avcodec
+        FFmpeg::avutil
+        mw::streamer
+        ZLMediaKit::MediaKit
+        ZLMediaKit::SRT
+        ZLMediaKit::ext-codec
+)
+
+add_test(
+    NAME mw_input_player_proxy_tests
+    COMMAND mw_input_player_proxy_tests
+)
+
+add_executable(mw_packet_queue_tests
+    packet_queue_test.cpp
+)
+
+target_compile_definitions(mw_packet_queue_tests
+    PRIVATE
+        MW_PACKET_QUEUE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+)
+
+target_link_libraries(mw_packet_queue_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        FFmpeg::avcodec
+        FFmpeg::avutil
+        mw::streamer
+        ZLMediaKit::MediaKit
+        ZLMediaKit::SRT
+        ZLMediaKit::ext-codec
+)
+
+add_test(
+    NAME mw_packet_queue_tests
+    COMMAND mw_packet_queue_tests
+)
+
 add_executable(mw_zlm_logger_lifecycle_tests
     zlm_logger_lifecycle_test.cpp
 )
