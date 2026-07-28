@@ -1,0 +1,15 @@
+[tools]
+ffmpeg = "/absolute/path/to/ffmpeg"
+ffprobe = "/absolute/path/to/ffprobe"
+mediamtx = "/absolute/path/to/mediamtx"
+
+[media]
+directory = "/absolute/path/to/media"
+
+[tests]
+cache_duration_ms = 1000
+cache_durations_ms = [1000, 5000, 15000, 30000]
+startup_timeout_seconds = 15.0
+stability_seconds = 10.0
+stall_timeout_seconds = 3.0
+reconnect_timeout_seconds = 20.0

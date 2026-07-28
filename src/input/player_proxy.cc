@@ -204,6 +204,10 @@ class PlayerProxy::Impl final
     for (const auto& option : options_) {
       (*attempt->player)[option.first] = option.second;
     }
+    // PlayerProxy must preserve the source track set. ZLM enables synthetic
+    // silent AAC globally by default, which turns video-only inputs into
+    // audio-video inputs.
+    (*attempt->player)[mediakit::Protocol::kAddMuteAudio] = false;
     // Codec parameters and config frames must be complete before converters
     // and Track delegates are built.
     (*attempt->player)[mediakit::Client::kWaitTrackReady] = true;

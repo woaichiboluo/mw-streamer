@@ -56,8 +56,9 @@ class PacketQueue final {
   void SetOnState(OnState callback);
   void SetOnTimelineReset(OnTimelineReset callback);
 
-  // One audio stream and one video stream are required. Calling SetStreams
-  // with a newer generation atomically clears the previous timeline.
+  // One audio stream, one video stream, or one of each is required. Calling
+  // SetStreams with a newer generation atomically clears the previous
+  // timeline.
   void SetStreams(std::uint64_t generation, std::vector<PacketStream> streams);
 
   // The packet is cloned before this method returns. Invalid packets, unknown
@@ -67,7 +68,7 @@ class PacketQueue final {
   bool Input(std::uint64_t generation, const AVPacket* packet);
 
   // Marks the generation as having no more input. Cached packets keep playing,
-  // including the unmatched tail of either track.
+  // including the unmatched tail of any configured track.
   void EndInput(std::uint64_t generation);
 
   // Playback controls affect only cached output. Callers controlling a

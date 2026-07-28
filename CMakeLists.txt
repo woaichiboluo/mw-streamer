@@ -25,7 +25,7 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
 include(cmake/Dependencies.cmake)
 
-find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVUTIL)
+find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVUTIL SWRESAMPLE)
 find_package(SRT REQUIRED)
 
 add_subdirectory(third_party/ZLMediaKit)
@@ -53,16 +53,27 @@ target_include_directories(mw_streamer
 target_link_libraries(mw_streamer
     PUBLIC
         FFmpeg::avcodec
+        FFmpeg::avutil
         ZLMediaKit::MediaKit
+        ZLMediaKit::ToolKit
         fmt::fmt
     PRIVATE
-        FFmpeg::avutil
         SRT::SRT
         ZLMediaKit::ext-codec
         ZLMediaKit::SRT
-        ZLMediaKit::ToolKit
         spdlog::spdlog
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(mw_streamer
+        PRIVATE
+            "-Wl,--push-state,--no-as-needed"
+            FFmpeg::swresample
+            "-Wl,--pop-state"
+    )
+else()
+    target_link_libraries(mw_streamer PRIVATE FFmpeg::swresample)
+endif()
 
 if(BUILD_TESTING)
     add_subdirectory(tests)

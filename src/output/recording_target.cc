@@ -1,9 +1,9 @@
 #include "output/recording_target.h"
 
+#include <fmt/chrono.h>
+
 #include <cstdint>
 #include <ctime>
-#include <iomanip>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -38,10 +38,7 @@ std::string FormatStartTime(std::chrono::system_clock::time_point start_time) {
           start_time.time_since_epoch())
           .count() %
       1000;
-  std::ostringstream stream;
-  stream << std::put_time(&local_time, "%Y%m%d_%H%M%S_") << std::setfill('0')
-         << std::setw(3) << milliseconds;
-  return stream.str();
+  return fmt::format("{:%Y%m%d_%H%M%S}_{:03}", local_time, milliseconds);
 }
 
 void ValidateRequestedPath(const std::filesystem::path& requested_path,

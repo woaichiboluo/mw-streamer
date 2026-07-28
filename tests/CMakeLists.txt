@@ -6,7 +6,6 @@ target_link_libraries(mw_logging_tests
     PRIVATE
         Catch2::Catch2WithMain
         FFmpeg::avutil
-        ZLMediaKit::SRT
         ZLMediaKit::ToolKit
         mw::streamer
 )
@@ -97,12 +96,9 @@ target_compile_definitions(mw_input_player_proxy_tests
 target_link_libraries(mw_input_player_proxy_tests
     PRIVATE
         Catch2::Catch2WithMain
-        FFmpeg::avcodec
         FFmpeg::avutil
+        ZLMediaKit::ToolKit
         mw::streamer
-        ZLMediaKit::MediaKit
-        ZLMediaKit::SRT
-        ZLMediaKit::ext-codec
 )
 
 add_test(
@@ -124,10 +120,8 @@ target_link_libraries(mw_packet_queue_tests
         Catch2::Catch2WithMain
         FFmpeg::avcodec
         FFmpeg::avutil
+        ZLMediaKit::ToolKit
         mw::streamer
-        ZLMediaKit::MediaKit
-        ZLMediaKit::SRT
-        ZLMediaKit::ext-codec
 )
 
 add_test(
@@ -174,9 +168,10 @@ target_compile_definitions(mw_output_session_tests
 target_link_libraries(mw_output_session_tests
     PRIVATE
         Catch2::Catch2WithMain
-        mw::streamer
+        FFmpeg::avcodec
         ZLMediaKit::MediaKit
         ZLMediaKit::ext-codec
+        mw::streamer
 )
 
 add_test(
@@ -197,3 +192,5 @@ add_test(
     NAME mw_zlm_logger_lifecycle_tests
     COMMAND mw_zlm_logger_lifecycle_tests
 )
+
+add_subdirectory(e2e)

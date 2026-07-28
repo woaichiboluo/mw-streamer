@@ -622,8 +622,7 @@ void RtspPlayer::onRtpPacket(const char *data, size_t len) {
     uint8_t interleaved = data[1];
     if (interleaved % 2 == 0) {
         CHECK(len > RtpPacket::kRtpHeaderSize + RtpPacket::kRtpTcpHeaderSize);
-        RtpHeader *header = (RtpHeader *)(data + RtpPacket::kRtpTcpHeaderSize);
-        trackIdx = getTrackIndexByPT(header->pt);
+        trackIdx = getTrackIndexByInterleaved(interleaved);
         if (trackIdx == -1) {
             return;
         }

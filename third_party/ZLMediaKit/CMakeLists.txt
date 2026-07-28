@@ -291,3 +291,12 @@ add_subdirectory(src)
 add_subdirectory(ext-codec)
 
 add_subdirectory(srt)
+
+# MediaKit registers codec plugins from ext-codec and constructs SRT
+# players/pushers, while both adapter libraries also depend on MediaKit.
+# Model the static-library cycle so CMake can repeat the component in the
+# platform-specific link order instead of requiring every consumer to do so.
+target_link_libraries(zlmediakit
+  PRIVATE
+    ZLMediaKit::ext-codec
+    ZLMediaKit::SRT)

@@ -39,6 +39,10 @@ void ValidateStreams(const std::vector<PacketStream>& streams) {
   std::size_t audio_count = 0;
   std::size_t video_count = 0;
 
+  if (streams.empty()) {
+    throw std::invalid_argument("PacketQueue至少需要一路音频或视频");
+  }
+
   for (const auto& stream : streams) {
     if (stream.stream_index < 0 || stream.time_base.num <= 0 ||
         stream.time_base.den <= 0) {
@@ -53,10 +57,11 @@ void ValidateStreams(const std::vector<PacketStream>& streams) {
     }
   }
 
-  if (audio_count != 1 || video_count != 1 || streams.size() != 2) {
-    throw std::invalid_argument("PacketQueue需要且仅支持一路音频和一路视频");
+  if (audio_count > 1 || video_count > 1) {
+    throw std::invalid_argument("PacketQueue最多支持一路音频和一路视频");
   }
-  if (streams[0].stream_index == streams[1].stream_index) {
+  if (streams.size() == 2 &&
+      streams[0].stream_index == streams[1].stream_index) {
     throw std::invalid_argument("音频和视频stream_index不能相同");
   }
 }
@@ -193,9 +198,16 @@ class PacketQueue::Impl final
     std::deque<CachedPacket> packets;
     std::int64_t latest_dts_us = AV_NOPTS_VALUE;
 
+    bool configured() const { return stream.stream_index >= 0; }
+
     void Clear() {
       packets.clear();
       latest_dts_us = AV_NOPTS_VALUE;
+    }
+
+    void Reset() {
+      stream = {};
+      Clear();
     }
   };
 
@@ -220,6 +232,9 @@ class PacketQueue::Impl final
 
     const bool timeline_changed =
         generation_initialized_ && generation != this->generation();
+    streams_configured_ = false;
+    audio_.Reset();
+    video_.Reset();
     const auto previous_epoch = output_epoch_;
     ResetTimelineOnPoller(generation);
     const auto reset_epoch = previous_epoch + 1;
@@ -372,10 +387,10 @@ class PacketQueue::Impl final
   }
 
   TrackQueue* FindTrack(int stream_index) {
-    if (audio_.stream.stream_index == stream_index) {
+    if (audio_.configured() && audio_.stream.stream_index == stream_index) {
       return &audio_;
     }
-    if (video_.stream.stream_index == stream_index) {
+    if (video_.configured() && video_.stream.stream_index == stream_index) {
       return &video_;
     }
     return nullptr;
@@ -388,7 +403,8 @@ class PacketQueue::Impl final
   }
 
   void StartOutputIfReadyOnPoller() {
-    if (!TrackReady(audio_) || !TrackReady(video_)) {
+    if ((audio_.configured() && !TrackReady(audio_)) ||
+        (video_.configured() && !TrackReady(video_))) {
       NotifyStateOnPoller(PacketQueueState::kFilling);
       return;
     }
@@ -414,6 +430,12 @@ class PacketQueue::Impl final
   }
 
   const CachedPacket* NextPacket() const {
+    if (!audio_.configured()) {
+      return video_.packets.empty() ? nullptr : &video_.packets.front();
+    }
+    if (!video_.configured()) {
+      return audio_.packets.empty() ? nullptr : &audio_.packets.front();
+    }
     if (audio_.packets.empty()) {
       return input_ended_ && !video_.packets.empty() ? &video_.packets.front()
                                                      : nullptr;
@@ -432,6 +454,12 @@ class PacketQueue::Impl final
   }
 
   TrackQueue& NextTrack() {
+    if (!audio_.configured()) {
+      return video_;
+    }
+    if (!video_.configured()) {
+      return audio_;
+    }
     if (audio_.packets.empty()) {
       return video_;
     }
@@ -551,8 +579,8 @@ class PacketQueue::Impl final
   void StopOnPoller() {
     CancelOutputTaskOnPoller();
     ++output_epoch_;
-    audio_.Clear();
-    video_.Clear();
+    audio_.Reset();
+    video_.Reset();
     packet_count_.store(0, std::memory_order_relaxed);
     streams_configured_ = false;
     input_ended_ = false;

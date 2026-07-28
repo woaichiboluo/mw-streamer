@@ -1,5 +1,6 @@
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -139,6 +140,122 @@ TEST_CASE("packet queue waits for both audio and video prebuffer") {
   CHECK(valid_payload);
   CHECK(callback_on_poller);
   CHECK(queue->generation() == 1);
+
+  StopAndWait(queue);
+}
+
+TEST_CASE("packet queue honors representative cache durations") {
+  const auto cache_duration = GENERATE(1s, 5s, 15s, 30s);
+  const auto cache_duration_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(cache_duration)
+          .count();
+  std::vector<PacketStream> streams;
+
+  SECTION("audio only") { streams = {{3, AVMEDIA_TYPE_AUDIO, {1, 1000}}}; }
+  SECTION("video only") { streams = {{7, AVMEDIA_TYPE_VIDEO, {1, 1000}}}; }
+  SECTION("audio and video") { streams = MillisecondStreams(); }
+
+  auto queue = std::make_shared<PacketQueue>(cache_duration);
+  std::mutex mutex;
+  std::condition_variable condition;
+  std::atomic_size_t output_count = 0;
+
+  queue->SetPlaybackRate(20.0);
+  queue->SetOnPacket([&](std::uint64_t, const AVPacket*) {
+    ++output_count;
+    condition.notify_all();
+  });
+
+  RunOnPollerAndWait(queue->poller(), [&]() {
+    queue->SetStreams(1, streams);
+    for (std::int64_t dts = 0; dts < cache_duration_ms; dts += 100) {
+      for (const auto& stream : streams) {
+        Feed(*queue, 1, stream.stream_index, dts);
+      }
+    }
+  });
+
+  CHECK(output_count == 0);
+  CHECK(queue->state() == PacketQueueState::kFilling);
+
+  RunOnPollerAndWait(queue->poller(), [&]() {
+    for (const auto& stream : streams) {
+      Feed(*queue, 1, stream.stream_index, cache_duration_ms);
+    }
+    queue->EndInput(1);
+  });
+
+  const auto expected_packets =
+      static_cast<std::size_t>((cache_duration_ms / 100 + 1) * streams.size());
+  REQUIRE(WaitFor(condition, mutex,
+                  [&]() { return output_count.load() == expected_packets; }));
+  CHECK(queue->state() == PacketQueueState::kStarved);
+
+  StopAndWait(queue);
+}
+
+TEST_CASE("packet queue buffers and drains a single configured track") {
+  AVMediaType media_type = AVMEDIA_TYPE_UNKNOWN;
+  int stream_index = -1;
+
+  SECTION("audio only") {
+    media_type = AVMEDIA_TYPE_AUDIO;
+    stream_index = 3;
+  }
+  SECTION("video only") {
+    media_type = AVMEDIA_TYPE_VIDEO;
+    stream_index = 7;
+  }
+
+  auto queue = std::make_shared<PacketQueue>(1s);
+  std::mutex mutex;
+  std::condition_variable condition;
+  std::vector<std::int64_t> output_dts;
+  std::atomic_bool output_matches_stream = true;
+
+  queue->SetPlaybackRate(20.0);
+  queue->SetOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
+    output_matches_stream = output_matches_stream && generation == 1 &&
+                            packet->stream_index == stream_index;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      output_dts.push_back(packet->dts);
+    }
+    condition.notify_all();
+  });
+
+  RunOnPollerAndWait(queue->poller(), [&]() {
+    queue->SetStreams(1, {{stream_index, media_type, {1, 1000}}});
+    for (std::int64_t dts = 0; dts <= 900; dts += 100) {
+      Feed(*queue, 1, stream_index, dts);
+    }
+  });
+
+  CHECK(output_dts.empty());
+  CHECK(queue->state() == PacketQueueState::kFilling);
+
+  RunOnPollerAndWait(queue->poller(), [&]() {
+    for (std::int64_t dts = 1000; dts <= 1200; dts += 100) {
+      Feed(*queue, 1, stream_index, dts);
+    }
+    queue->EndInput(1);
+  });
+
+  REQUIRE(WaitFor(condition, mutex, [&]() { return output_dts.size() == 13; }));
+  RunOnPollerAndWait(queue->poller(), []() {});
+
+  std::vector<std::int64_t> output_snapshot;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    output_snapshot = output_dts;
+  }
+  CHECK(output_matches_stream);
+  REQUIRE(output_snapshot.size() == 13);
+  for (std::size_t index = 0; index < output_snapshot.size(); ++index) {
+    CHECK(output_snapshot[index] == static_cast<std::int64_t>(index) * 100);
+  }
+  CHECK(queue->packet_count() == 0);
+  CHECK(queue->state() == PacketQueueState::kStarved);
 
   StopAndWait(queue);
 }
@@ -329,24 +446,83 @@ TEST_CASE("new generation atomically clears the old packet timeline") {
   StopAndWait(queue);
 }
 
-TEST_CASE("packet queue validates its fixed audio video contract") {
+TEST_CASE("packet queue validates its supported stream combinations") {
   CHECK_THROWS_AS(std::make_shared<PacketQueue>(999ms), std::invalid_argument);
   CHECK_THROWS_AS(std::make_shared<PacketQueue>(30001ms),
                   std::invalid_argument);
 
   auto queue = std::make_shared<PacketQueue>(1s);
-  CHECK_THROWS_AS(queue->SetStreams(1, {{0, AVMEDIA_TYPE_VIDEO, {1, 1000}}}),
+  CHECK_THROWS_AS(queue->SetStreams(1, {}), std::invalid_argument);
+  CHECK_NOTHROW(queue->SetStreams(1, {{0, AVMEDIA_TYPE_VIDEO, {1, 1000}}}));
+  CHECK_NOTHROW(queue->SetStreams(2, {{1, AVMEDIA_TYPE_AUDIO, {1, 1000}}}));
+  CHECK_NOTHROW(queue->SetStreams(3, MillisecondStreams()));
+  CHECK_THROWS_AS(queue->SetStreams(4, {{0, AVMEDIA_TYPE_VIDEO, {1, 1000}},
+                                        {1, AVMEDIA_TYPE_VIDEO, {1, 1000}}}),
+                  std::invalid_argument);
+  CHECK_THROWS_AS(queue->SetStreams(4, {{0, AVMEDIA_TYPE_AUDIO, {1, 1000}},
+                                        {1, AVMEDIA_TYPE_AUDIO, {1, 1000}}}),
                   std::invalid_argument);
   CHECK_THROWS_AS(queue->SetStreams(1, {{0, AVMEDIA_TYPE_VIDEO, {1, 1000}},
                                         {0, AVMEDIA_TYPE_AUDIO, {1, 1000}}}),
                   std::invalid_argument);
+  CHECK_THROWS_AS(queue->SetStreams(1, {{0, AVMEDIA_TYPE_DATA, {1, 1000}}}),
+                  std::invalid_argument);
+  RunOnPollerAndWait(queue->poller(), [&]() {
+    queue->SetStreams(4, MillisecondStreams());
+    Feed(*queue, 4, 0, 0);
+    Feed(*queue, 4, 1, 0);
+    queue->SetStreams(4, MillisecondStreams());
+  });
+  CHECK(queue->packet_count() == 2);
+  StopAndWait(queue);
+}
+
+TEST_CASE("new generation replaces the configured track set") {
+  auto queue = std::make_shared<PacketQueue>(1s);
+  std::mutex mutex;
+  std::condition_variable condition;
+  std::vector<int> output_stream_indexes;
+
+  queue->SetPlaybackRate(20.0);
+  queue->SetOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
+    if (generation == 2) {
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        output_stream_indexes.push_back(packet->stream_index);
+      }
+      condition.notify_all();
+    }
+  });
+
   RunOnPollerAndWait(queue->poller(), [&]() {
     queue->SetStreams(1, MillisecondStreams());
     Feed(*queue, 1, 0, 0);
     Feed(*queue, 1, 1, 0);
-    queue->SetStreams(1, MillisecondStreams());
+
+    queue->SetStreams(2, {{5, AVMEDIA_TYPE_AUDIO, {1, 1000}}});
+    Feed(*queue, 2, 0, 0);
+    for (std::int64_t dts = 0; dts <= 1000; dts += 100) {
+      Feed(*queue, 2, 5, dts);
+    }
+    queue->EndInput(2);
   });
-  CHECK(queue->packet_count() == 2);
+
+  REQUIRE(WaitFor(condition, mutex,
+                  [&]() { return output_stream_indexes.size() == 11; }));
+  RunOnPollerAndWait(queue->poller(), []() {});
+
+  std::vector<int> output_snapshot;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    output_snapshot = output_stream_indexes;
+  }
+  REQUIRE(output_snapshot.size() == 11);
+  for (const auto stream_index : output_snapshot) {
+    CHECK(stream_index == 5);
+  }
+  CHECK(queue->packet_count() == 0);
+  CHECK(queue->state() == PacketQueueState::kStarved);
+
   StopAndWait(queue);
 }
 

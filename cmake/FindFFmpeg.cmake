@@ -105,6 +105,7 @@ foreach(_requested_component IN LISTS FFmpeg_FIND_COMPONENTS)
     ${_component}_INCLUDE_DIR
     NAMES ${_header_name}
     HINTS
+      ${FFMPEG_INCLUDE_DIRS}
       ${PC_${_component}_INCLUDEDIR}
       ${PC_${_component}_INCLUDE_DIRS}
     PATH_SUFFIXES ffmpeg
@@ -113,6 +114,7 @@ foreach(_requested_component IN LISTS FFmpeg_FIND_COMPONENTS)
     ${_component}_LIBRARY
     NAMES ${_library_name}
     HINTS
+      ${FFMPEG_LIBRARY_DIRS}
       ${PC_${_component}_LIBDIR}
       ${PC_${_component}_LIBRARY_DIRS}
   )

@@ -66,5 +66,12 @@ vcpkg_installed/
 
 # Cache
 .cache/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+
+# Local end-to-end test configuration and artifacts
+tests/e2e/e2e.local.toml
+tests/e2e/artifacts/
 AGENTS.md
 build*

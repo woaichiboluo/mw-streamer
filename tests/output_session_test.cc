@@ -135,6 +135,8 @@ TEST_CASE("OutputSession隔离网络失败并同时生成fMP4和HLS-fMP4") {
     converters.emplace(binding.track->getIndex(), binding.converter);
   }
 
+  std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+
   bool eof = false;
   std::size_t frame_count = 0;
   while (!eof) {

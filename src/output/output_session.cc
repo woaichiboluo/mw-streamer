@@ -211,6 +211,7 @@ mediakit::MediaTuple MakeMediaTuple() {
 
 class OutputSession::Impl final
     : public mediakit::MultiMediaSourceMuxer::Listener,
+      public mediakit::MediaSourceEvent,
       public std::enable_shared_from_this<OutputSession::Impl> {
  public:
   Impl(OutputConfig config, std::shared_ptr<toolkit::EventPoller> poller)
@@ -358,7 +359,10 @@ class OutputSession::Impl final
         MakeProtocolOption(network_targets_, config_.streams.size());
     muxer_ =
         std::make_shared<mediakit::MultiMediaSourceMuxer>(tuple_, 0.0F, option);
+    muxer_->setTrackReadyTimeoutMS(0);
+    muxer_->setMediaListener(shared_from_this());
     muxer_->setTrackListener(shared_from_this());
+    pusher_started_.resize(network_targets_.size(), false);
 
     for (const auto& stream : config_.streams) {
       if (!muxer_->addTrack(CreateTrack(stream))) {
@@ -460,18 +464,23 @@ class OutputSession::Impl final
     }
   }
 
-  void StartPushersOnPoller() {
+  void StartPushersOnPoller(const std::string& registered_schema = {}) {
     if (state_ != State::kOpen || !muxer_) {
       return;
     }
 
-    for (const auto& target : network_targets_) {
+    for (std::size_t index = 0; index < network_targets_.size(); ++index) {
+      if (pusher_started_[index]) {
+        continue;
+      }
+      const auto& target = network_targets_[index];
       const auto schema = GetMediaSourceSchema(target.protocol);
+      if (!registered_schema.empty() && registered_schema != schema) {
+        continue;
+      }
       auto source = mediakit::MediaSource::find(schema, tuple_.vhost,
                                                 tuple_.app, tuple_.stream);
       if (!source) {
-        log::Module<log::LogModule::kStreamer>::Error(
-            "ZLM未生成{} MediaSource，无法启动推流：{}", schema, target.url);
         continue;
       }
 
@@ -492,6 +501,7 @@ class OutputSession::Impl final
             });
         pusher->publish(target.url);
         pushers_.push_back(std::move(pusher));
+        pusher_started_[index] = true;
       } catch (const std::exception& error) {
         log::Module<log::LogModule::kStreamer>::Error(
             "创建ZLM推流目标失败，已停止该目标：{}，{}", target.url,
@@ -538,15 +548,29 @@ class OutputSession::Impl final
     pending_recording_frames_.clear();
 
     if (!network_targets_.empty()) {
-      std::weak_ptr<Impl> weak_self = shared_from_this();
-      poller_->async(
-          [weak_self]() {
-            if (auto self = weak_self.lock()) {
-              self->StartPushersOnPoller();
-            }
-          },
-          false);
+      StartPushersOnPoller();
     }
+  }
+
+  void onRegist(mediakit::MediaSource& sender, bool regist) override {
+    if (!regist || !mediakit::equalMediaTuple(sender.getMediaTuple(), tuple_)) {
+      return;
+    }
+
+    const auto schema = sender.getSchema();
+    if (poller_->isCurrentThread()) {
+      StartPushersOnPoller(schema);
+      return;
+    }
+
+    std::weak_ptr<Impl> weak_self = shared_from_this();
+    poller_->async(
+        [weak_self, schema]() {
+          if (auto self = weak_self.lock()) {
+            self->StartPushersOnPoller(schema);
+          }
+        },
+        false);
   }
 
   OutputConfig config_;
@@ -561,6 +585,7 @@ class OutputSession::Impl final
   std::unordered_map<int, ConverterBinding> converters_;
   mediakit::MultiMediaSourceMuxer::Ptr muxer_;
   std::vector<mediakit::PusherProxy::Ptr> pushers_;
+  std::vector<bool> pusher_started_;
   std::vector<std::unique_ptr<Fmp4FileTarget>> fmp4_targets_;
   std::vector<std::unique_ptr<HlsFmp4FileTarget>> hls_targets_;
   bool recordings_initialized_ = false;
