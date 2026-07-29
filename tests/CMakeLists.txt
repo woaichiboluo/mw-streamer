@@ -12,6 +12,37 @@ add_test(
     COMMAND mw_processor_c_api_tests
 )
 
+add_executable(mw_frame_adapter_tests
+    frame_adapter_test.cc
+)
+
+target_link_libraries(mw_frame_adapter_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        mw::streamer
+)
+
+add_test(
+    NAME mw_frame_adapter_tests
+    COMMAND mw_frame_adapter_tests
+)
+
+add_executable(mw_processor_handler_tests
+    processor_handler_test.cc
+)
+
+target_link_libraries(mw_processor_handler_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        CUDA::cuda_driver
+        mw::streamer
+)
+
+add_test(
+    NAME mw_processor_handler_tests
+    COMMAND mw_processor_handler_tests
+)
+
 add_executable(mw_decoder_config_tests
     decoder_config_test.cc
 )

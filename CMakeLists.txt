@@ -50,6 +50,8 @@ add_library(mw_streamer STATIC
     src/log/logging.cc
     src/output/output_session.cc
     src/output/recording_target.cc
+    src/processor/frame_adapter.cc
+    src/processor/processor_handler.cc
     src/resampler/audio_resampler.cc
 )
 add_library(mw::streamer ALIAS mw_streamer)

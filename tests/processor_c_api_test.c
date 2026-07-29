@@ -7,6 +7,7 @@ typedef struct TestProcessor {
   uint32_t start_calls;
   uint32_t video_calls;
   uint32_t audio_calls;
+  uint32_t boundary_calls;
   uint32_t update_calls;
   uint32_t stop_calls;
 } TestProcessor;
@@ -17,7 +18,7 @@ static MwStreamerProcessorStartResult OnStart(
   if (!request->source_info->has_video || !request->source_info->has_audio ||
       request->source_info->video.codec != kMwStreamerCodecH264 ||
       request->source_info->audio.codec != kMwStreamerCodecAac ||
-      request->config->output_width != 1920 ||
+      request->mode != kStreaming || request->config->output_width != 1920 ||
       strcmp(request->config->config, "initial") != 0 ||
       request->execution->type != kMwStreamerExecutionCuda) {
     return kMwStreamerProcessorStartFailed;
@@ -29,7 +30,9 @@ static MwStreamerProcessorStartResult OnStart(
 static void ProcessVideo(const MwStreamerVideoProcessRequest* request,
                          void* user_context) {
   TestProcessor* processor = user_context;
-  if (request->input->buffer.width == 3840 && request->output.width == 1920 &&
+  if (request->input->buffer.width == 3840 && request->output->width == 1920 &&
+      request->input->buffer.storage_type == kMwStreamerVideoStorageLinear &&
+      request->input->buffer.storage.linear.plane_count == 2 &&
       request->input->timestamp.pts == 9000 &&
       request->execution->type == kMwStreamerExecutionCuda) {
     ++processor->video_calls;
@@ -42,13 +45,21 @@ static void ProcessAudio(const MwStreamerAudioProcessRequest* request,
   const size_t sample_count =
       request->input->channel_count * request->input->samples_per_channel;
   for (size_t index = 0; index < sample_count; ++index) {
-    request->output.data[index] = request->input->data[index];
+    request->output->data[index] = request->input->data[index];
   }
   if (request->input->sample_rate == 48000 &&
-      request->output.channel_count == request->input->channel_count &&
-      request->output.samples_per_channel ==
+      request->output->channel_count == request->input->channel_count &&
+      request->output->samples_per_channel ==
           request->input->samples_per_channel) {
     ++processor->audio_calls;
+  }
+}
+
+static void OnBoundary(MwStreamerProcessorBoundaryReason reason,
+                       void* user_context) {
+  TestProcessor* processor = user_context;
+  if (reason == kMwStreamerProcessorEndOfInput) {
+    ++processor->boundary_calls;
   }
 }
 
@@ -71,6 +82,7 @@ int main(void) {
       .on_start = OnStart,
       .process_video = ProcessVideo,
       .process_audio = ProcessAudio,
+      .on_boundary = OnBoundary,
       .update_config = UpdateConfig,
       .on_stop = OnStop,
   };
@@ -87,7 +99,6 @@ int main(void) {
               .codec = kMwStreamerCodecH264,
               .width = 3840,
               .height = 2160,
-              .pixel_format = kMwStreamerVideoPixelFormatNv12,
               .frame_rate = {.num = 25, .den = 1},
               .time_base = {.num = 1, .den = 90000},
           },
@@ -100,22 +111,46 @@ int main(void) {
           },
   };
   const MwStreamerVideoPlaneView input_planes[] = {
-      {.address = 1, .stride = 4096},
-      {.address = 2, .stride = 4096},
+      {.address = 1,
+       .stride_bytes = 4096,
+       .row_bytes = 3840,
+       .row_count = 2160},
+      {.address = 2,
+       .stride_bytes = 4096,
+       .row_bytes = 3840,
+       .row_count = 1080},
   };
   const MwStreamerVideoPlaneView output_planes[] = {
-      {.address = 3, .stride = 2048},
-      {.address = 4, .stride = 2048},
+      {.address = 3,
+       .stride_bytes = 2048,
+       .row_bytes = 1920,
+       .row_count = 1080},
+      {.address = 4, .stride_bytes = 2048, .row_bytes = 1920, .row_count = 540},
   };
   const MwStreamerVideoFrameView video_input = {
       .buffer =
           {
               .memory_type = kMwStreamerMemoryCuda,
+              .storage_type = kMwStreamerVideoStorageLinear,
               .pixel_format = kMwStreamerVideoPixelFormatNv12,
               .width = 3840,
               .height = 2160,
-              .planes = input_planes,
-              .plane_count = 2,
+              .storage =
+                  {
+                      .linear =
+                          {
+                              .planes = input_planes,
+                              .plane_count = 2,
+                          },
+                  },
+          },
+      .color =
+          {
+              .range = kMwStreamerColorRangeLimited,
+              .space = kMwStreamerColorSpaceBt709,
+              .primaries = kMwStreamerColorPrimariesBt709,
+              .transfer = kMwStreamerColorTransferBt709,
+              .chroma_location = kMwStreamerChromaLocationLeft,
           },
       .timestamp =
           {
@@ -129,6 +164,7 @@ int main(void) {
       .native_handle = (uintptr_t)5,
   };
   const MwStreamerProcessorStartRequest start_request = {
+      .mode = kStreaming,
       .source_info = &source_info,
       .config = &config,
       .execution = &execution,
@@ -141,13 +177,20 @@ int main(void) {
   const MwStreamerVideoProcessRequest video_request = {
       .input = &video_input,
       .output =
-          {
+          &(MwStreamerVideoBufferView){
               .memory_type = kMwStreamerMemoryCuda,
+              .storage_type = kMwStreamerVideoStorageLinear,
               .pixel_format = kMwStreamerVideoPixelFormatNv12,
               .width = config.output_width,
               .height = config.output_height,
-              .planes = output_planes,
-              .plane_count = 2,
+              .storage =
+                  {
+                      .linear =
+                          {
+                              .planes = output_planes,
+                              .plane_count = 2,
+                          },
+                  },
           },
       .execution = &execution,
   };
@@ -170,7 +213,7 @@ int main(void) {
   const MwStreamerAudioProcessRequest audio_request = {
       .input = &audio_input,
       .output =
-          {
+          &(MwStreamerAudioBufferView){
               .data = audio_output_data,
               .channel_count = 2,
               .samples_per_channel = 2,
@@ -178,12 +221,13 @@ int main(void) {
   };
   callbacks.process_audio(&audio_request, callbacks.user_context);
 
+  callbacks.on_boundary(kMwStreamerProcessorEndOfInput, callbacks.user_context);
   callbacks.update_config("updated", callbacks.user_context);
   callbacks.on_stop(callbacks.user_context);
 
   if (processor.start_calls != 1 || processor.video_calls != 1 ||
-      processor.audio_calls != 1 || processor.update_calls != 1 ||
-      processor.stop_calls != 1) {
+      processor.audio_calls != 1 || processor.boundary_calls != 1 ||
+      processor.update_calls != 1 || processor.stop_calls != 1) {
     return 1;
   }
   if (memcmp(audio_input_data, audio_output_data, sizeof(audio_input_data)) !=

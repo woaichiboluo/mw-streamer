@@ -21,6 +21,7 @@ extern "C" {
 #include "mw/converter/zlm_codec_parameters_converter.h"
 #include "mw/converter/zlm_packet_converter.h"
 #include "mw/decoder/video_decoder.h"
+#include "mw/processor/frame_adapter.h"
 
 namespace {
 
@@ -38,6 +39,7 @@ using mw::streamer::decoder::VideoDecoderConfig;
 using mw::streamer::ffmpeg::CodecParameters;
 using mw::streamer::ffmpeg::Packet;
 using mw::streamer::ffmpeg::StreamInfo;
+using mw::streamer::processor::VideoFrameAdapter;
 using namespace std::chrono_literals;
 
 struct VideoSample {
@@ -131,6 +133,14 @@ TEST_CASE("software video decoder decodes drains and flushes an H264 stream") {
         frame->pts < previous_pts) {
       valid_frames = false;
     }
+    try {
+      const VideoFrameAdapter adapter(decoded_frame);
+      if (adapter.view().buffer.memory_type != kMwStreamerMemoryHost) {
+        valid_frames = false;
+      }
+    } catch (const std::exception&) {
+      valid_frames = false;
+    }
     previous_pts = frame->pts;
     ++decoded_frames;
   });
@@ -185,6 +195,16 @@ TEST_CASE("CUDA video decoder emits CUDA frames on the configured device") {
         frames_context->sw_format != AV_PIX_FMT_NV12) {
       valid_frames = false;
       return;
+    }
+    try {
+      const VideoFrameAdapter adapter(decoded_frame);
+      if (adapter.view().buffer.memory_type != kMwStreamerMemoryCuda ||
+          adapter.view().buffer.pixel_format !=
+              kMwStreamerVideoPixelFormatNv12) {
+        valid_frames = false;
+      }
+    } catch (const std::exception&) {
+      valid_frames = false;
     }
     ++decoded_frames;
   });

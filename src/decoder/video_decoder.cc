@@ -208,6 +208,7 @@ class VideoDecoder::Impl final {
         return frame_count;
       }
       ffmpeg::ThrowIfError(result, "接收视频解码帧");
+      frame_->time_base = stream_info_.time_base;
       ValidateFrame();
       ++frame_count;
       if (on_frame_) {

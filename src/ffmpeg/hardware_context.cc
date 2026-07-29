@@ -248,7 +248,15 @@ HardwareContext::CurrentScope HardwareContext::MakeCurrent() const {
   if (!context_) {
     throw std::logic_error("不能使用已移动的HardwareContext");
   }
-  return CurrentScope(context_);
+  return MakeCurrent(context_);
+}
+
+HardwareContext::CurrentScope HardwareContext::MakeCurrent(
+    const AVBufferRef* context) {
+  if (!context) {
+    throw std::invalid_argument("不能切换到空硬件上下文");
+  }
+  return CurrentScope(context);
 }
 
 }  // namespace mw::streamer::ffmpeg

@@ -49,6 +49,9 @@ class HardwareContext final {
   // Makes this device's CUDA context current on the calling thread. The scope
   // must be destroyed on the same thread on which it was created.
   CurrentScope MakeCurrent() const;
+  // Makes a borrowed FFmpeg CUDA device context current without taking
+  // ownership of its underlying device.
+  static CurrentScope MakeCurrent(const AVBufferRef* context);
 
  private:
   HardwareContext(AVBufferRef* context, int device_index);
