@@ -3,39 +3,74 @@ from __future__ import annotations
 import pytest
 
 from mw_e2e.events import assert_packet_flow, read_events, wait_for_event
-from mw_e2e.ffmpeg import MediaProbe
-from mw_e2e.mediamtx import MediaEnvironment
-from mw_e2e.models import E2EConfig, PublishedMedia
+from mw_e2e.ffmpeg import MediaProbe, MediaPublisher
+from mw_e2e.mediamtx import allocate_tcp_port, allocate_udp_port
+from mw_e2e.models import E2EConfig, MediaAsset
 from mw_e2e.runner import Runner
+
+
+def assert_clean_video_start(probe: MediaProbe) -> None:
+    log = probe.process.log_path.read_text(encoding="utf-8", errors="replace")
+    decoder_errors = (
+        "PPS changed between slices",
+        "Skipping invalid undecodable NALU",
+        "Could not find ref with POC",
+    )
+    found = [error for error in decoder_errors if error in log]
+    assert not found, f"输出视频不是从可解码边界开始: {found}"
 
 
 @pytest.mark.cache
 @pytest.mark.stability
 def test_cache_duration(
     cache_duration_ms: int,
-    published_media: PublishedMedia,
+    media_asset: MediaAsset,
     e2e_config: E2EConfig,
-    media_environment: MediaEnvironment,
     runner_path,
     artifact_directory,
 ) -> None:
     settings = e2e_config.tests
     cache_duration_seconds = cache_duration_ms / 1000.0
-    sink = media_environment.sinks["rtsp"]
-    output_path = f"{published_media.path}-cache-{cache_duration_ms}"
+    input_port = allocate_udp_port()
+    input_url = f"srt://127.0.0.1:{input_port}?mode=caller"
+    publish_url = (
+        f"srt://127.0.0.1:{input_port}"
+        "?mode=listener&pkt_size=1316"
+    )
+    output_url = f"rtsp://127.0.0.1:{allocate_tcp_port()}/cache"
+    publisher = MediaPublisher(
+        e2e_config,
+        media_asset,
+        publish_url,
+        artifact_directory,
+    )
     runner = Runner(
         e2e_config,
         runner_path,
-        media_environment.source.read_url("srt", published_media.path),
-        [sink.publish_url("rtsp", output_path)],
+        input_url,
+        [output_url],
         cache_duration_seconds
         + settings.startup_timeout_seconds * 2
         + settings.stability_seconds,
         artifact_directory,
         cache_duration_ms=cache_duration_ms,
     )
+    probe = MediaProbe(
+        e2e_config,
+        "rtsp",
+        output_url,
+        media_asset,
+        settings.stability_seconds,
+        artifact_directory,
+        "probe-cache",
+        listen=True,
+        listen_timeout_seconds=(
+            cache_duration_seconds + settings.startup_timeout_seconds * 2
+        ),
+    )
+    publisher.start()
+    probe.start()
     runner.start()
-    probe = None
     try:
         streams_ready = wait_for_event(
             runner.process,
@@ -52,32 +87,31 @@ def test_cache_duration(
             and event.get("generation") == streams_ready.get("generation"),
         )
         buffered_ms = int(playing["ts_ms"]) - int(streams_ready["ts_ms"])
-        assert buffered_ms >= cache_duration_ms - 250, (
-            f"PacketQueue 过早开始输出: {buffered_ms}ms < "
-            f"{cache_duration_ms - 250}ms"
-        )
+        if cache_duration_ms == 0:
+            assert buffered_ms <= 500, (
+                f"PacketQueue 0 缓存输出延迟过大: {buffered_ms}ms > 500ms"
+            )
+        else:
+            assert buffered_ms >= cache_duration_ms - 250, (
+                f"PacketQueue 过早开始输出: {buffered_ms}ms < "
+                f"{cache_duration_ms - 250}ms"
+            )
 
-        sink.wait_for_path(output_path, settings.startup_timeout_seconds)
-        probe = MediaProbe(
-            e2e_config,
-            "rtsp",
-            sink.read_url("rtsp", output_path),
-            published_media.asset,
-            settings.stability_seconds,
-            artifact_directory,
-            "probe-cache",
+        probe.wait(
+            cache_duration_seconds
+            + settings.startup_timeout_seconds * 2
+            + settings.stability_seconds
         )
-        probe.start()
-        probe.wait(settings.startup_timeout_seconds + settings.stability_seconds)
+        assert_clean_video_start(probe)
         runner.interrupt_and_wait(settings.startup_timeout_seconds)
     finally:
-        if probe is not None:
-            probe.stop()
+        probe.stop()
         runner.stop()
+        publisher.stop()
 
     assert_packet_flow(
         read_events(runner.events_path),
-        has_audio=published_media.asset.has_audio,
-        has_video=published_media.asset.has_video,
+        has_audio=media_asset.has_audio,
+        has_video=media_asset.has_video,
         stall_timeout_seconds=settings.stall_timeout_seconds,
     )

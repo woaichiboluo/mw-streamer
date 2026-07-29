@@ -7,18 +7,15 @@
 #include <memory>
 #include <vector>
 
-extern "C" {
-#include <libavcodec/packet.h>
-}
-
 #include "Extension/Track.h"
+#include "mw/ffmpeg/packet.h"
 
 namespace mw::streamer::converter {
 
 class ZlmPacketConverter {
  public:
   using Ptr = std::shared_ptr<ZlmPacketConverter>;
-  using OnPacket = std::function<bool(const AVPacket* packet)>;
+  using OnPacket = std::function<bool(const ffmpeg::Packet& packet)>;
 
   ZlmPacketConverter(const mediakit::Track::Ptr& track, int stream_index);
 

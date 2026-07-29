@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from .models import E2EConfig, MediaAsset
@@ -60,7 +61,17 @@ class MediaProbe:
         duration_seconds: float,
         artifact_directory: Path,
         name: str,
+        *,
+        listen: bool = False,
+        listen_timeout_seconds: float | None = None,
     ) -> None:
+        if listen and protocol != "rtsp":
+            raise ValueError("只有RTSP探针支持监听模式")
+        if listen and (
+            listen_timeout_seconds is None or listen_timeout_seconds <= 0
+        ):
+            raise ValueError("RTSP监听探针必须提供正数超时")
+
         self.progress_path = artifact_directory / f"{name}.progress"
         command = [
             str(config.tools.ffmpeg),
@@ -75,6 +86,15 @@ class MediaProbe:
         ]
         if protocol == "rtsp":
             command.extend(["-rtsp_transport", "tcp"])
+        if listen:
+            command.extend(
+                [
+                    "-rtsp_flags",
+                    "listen",
+                    "-listen_timeout",
+                    str(math.ceil(listen_timeout_seconds)),
+                ]
+            )
         command.extend(["-i", input_url, "-t", str(duration_seconds)])
         if asset.has_video:
             command.extend(["-map", "0:v:0"])

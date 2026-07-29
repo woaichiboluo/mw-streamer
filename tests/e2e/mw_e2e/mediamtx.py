@@ -29,6 +29,14 @@ def _free_port(socket_type: socket.SocketKind) -> int:
             return port
 
 
+def allocate_tcp_port() -> int:
+    return _free_port(socket.SOCK_STREAM)
+
+
+def allocate_udp_port() -> int:
+    return _free_port(socket.SOCK_DGRAM)
+
+
 @dataclass(frozen=True)
 class ServerPorts:
     api: int

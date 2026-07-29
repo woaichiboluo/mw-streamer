@@ -1,3 +1,17 @@
+add_executable(mw_processor_c_api_tests
+    processor_c_api_test.c
+)
+
+target_include_directories(mw_processor_c_api_tests
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+)
+
+add_test(
+    NAME mw_processor_c_api_tests
+    COMMAND mw_processor_c_api_tests
+)
+
 add_executable(mw_logging_tests
     logging_test.cc
 )
@@ -84,6 +98,43 @@ add_test(
     COMMAND mw_zlm_packet_converter_tests
 )
 
+add_executable(mw_audio_decoder_tests
+    audio_decoder_test.cc
+)
+
+target_compile_definitions(mw_audio_decoder_tests
+    PRIVATE
+        MW_AUDIO_DECODER_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+)
+
+target_link_libraries(mw_audio_decoder_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        ZLMediaKit::MediaKit
+        ZLMediaKit::ext-codec
+        mw::streamer
+)
+
+add_test(
+    NAME mw_audio_decoder_tests
+    COMMAND mw_audio_decoder_tests
+)
+
+add_executable(mw_ffmpeg_types_tests
+    ffmpeg_types_test.cc
+)
+
+target_link_libraries(mw_ffmpeg_types_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        mw::streamer
+)
+
+add_test(
+    NAME mw_ffmpeg_types_tests
+    COMMAND mw_ffmpeg_types_tests
+)
+
 add_executable(mw_input_player_proxy_tests
     input_player_proxy_test.cc
 )
@@ -136,11 +187,6 @@ add_executable(mw_recording_target_tests
 target_compile_definitions(mw_recording_target_tests
     PRIVATE
         MW_RECORDING_TARGET_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
-)
-
-target_include_directories(mw_recording_target_tests
-    PRIVATE
-        "${PROJECT_SOURCE_DIR}/src"
 )
 
 target_link_libraries(mw_recording_target_tests

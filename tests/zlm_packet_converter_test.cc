@@ -4,6 +4,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -17,6 +18,9 @@ extern "C" {
 #include "Record/MP4Demuxer.h"
 #include "mw/converter/zlm_codec_parameters_converter.h"
 #include "mw/converter/zlm_packet_converter.h"
+#include "mw/ffmpeg/codec_context.h"
+#include "mw/ffmpeg/frame.h"
+#include "mw/ffmpeg/packet.h"
 
 namespace {
 
@@ -32,6 +36,17 @@ using mediakit::MP4Demuxer;
 using mediakit::Track;
 using mw::streamer::converter::ZlmCodecParametersConverter;
 using mw::streamer::converter::ZlmPacketConverter;
+using mw::streamer::ffmpeg::CodecContext;
+using mw::streamer::ffmpeg::CodecParameters;
+using FfmpegFrame = mw::streamer::ffmpeg::Frame;
+using mw::streamer::ffmpeg::Packet;
+
+const AVCodec* FindDecoder(const CodecParameters& parameters) {
+  REQUIRE(parameters.get());
+  const auto* codec = avcodec_find_decoder(parameters.get()->codec_id);
+  REQUIRE(codec);
+  return codec;
+}
 
 AVCodecID ExpectedCodecId(CodecId codec) {
   switch (codec) {
@@ -50,43 +65,20 @@ AVCodecID ExpectedCodecId(CodecId codec) {
   }
 }
 
-struct PacketDeleter {
-  void operator()(AVPacket* packet) const { av_packet_free(&packet); }
-};
-
-using PacketPtr = std::unique_ptr<AVPacket, PacketDeleter>;
-
-struct CodecContextDeleter {
-  void operator()(AVCodecContext* context) const {
-    avcodec_free_context(&context);
-  }
-};
-
-struct FrameDeleter {
-  void operator()(AVFrame* frame) const { av_frame_free(&frame); }
-};
-
 class TestDecoder {
  public:
-  TestDecoder(const AVCodecParameters* parameters, AVRational time_base) {
-    REQUIRE(parameters);
-    const auto* codec = avcodec_find_decoder(parameters->codec_id);
-    REQUIRE(codec);
-
-    context_.reset(avcodec_alloc_context3(codec));
-    REQUIRE(context_);
-    REQUIRE(avcodec_parameters_to_context(context_.get(), parameters) >= 0);
-    context_->pkt_timebase = time_base;
-    context_->thread_count = 1;
-    REQUIRE(avcodec_open2(context_.get(), codec, nullptr) >= 0);
-
-    frame_.reset(av_frame_alloc());
-    REQUIRE(frame_);
+  TestDecoder(const CodecParameters& parameters, AVRational time_base)
+      : context_(FindDecoder(parameters)) {
+    REQUIRE(avcodec_parameters_to_context(context_.get(), parameters.get()) >=
+            0);
+    context_.get()->pkt_timebase = time_base;
+    context_.get()->thread_count = 1;
+    REQUIRE(avcodec_open2(context_.get(), context_.get()->codec, nullptr) >= 0);
   }
 
-  bool InputPacket(const AVPacket* packet) {
+  bool InputPacket(const Packet& packet) {
     for (;;) {
-      const auto result = avcodec_send_packet(context_.get(), packet);
+      const auto result = avcodec_send_packet(context_.get(), packet.get());
       if (result == AVERROR(EAGAIN)) {
         if (!ReceiveFrames()) {
           return false;
@@ -110,14 +102,14 @@ class TestDecoder {
     }
   }
 
-  void Reset() { avcodec_flush_buffers(context_.get()); }
+  void Reset() { context_.FlushBuffers(); }
 
   std::size_t decoded_frame_count() const { return decoded_frame_count_; }
 
  private:
   bool ReceiveFrames() {
     for (;;) {
-      av_frame_unref(frame_.get());
+      frame_.Unref();
       const auto result = avcodec_receive_frame(context_.get(), frame_.get());
       if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) {
         return true;
@@ -129,12 +121,12 @@ class TestDecoder {
     }
   }
 
-  std::unique_ptr<AVCodecContext, CodecContextDeleter> context_;
-  std::unique_ptr<AVFrame, FrameDeleter> frame_;
+  CodecContext context_;
+  FfmpegFrame frame_;
   std::size_t decoded_frame_count_ = 0;
 };
 
-bool StartsWithAnnexB(const AVPacket* packet) {
+bool StartsWithAnnexB(const Packet& packet) {
   if (packet->size >= 4 && packet->data[0] == 0 && packet->data[1] == 0 &&
       packet->data[2] == 0 && packet->data[3] == 1) {
     return true;
@@ -143,7 +135,7 @@ bool StartsWithAnnexB(const AVPacket* packet) {
          packet->data[2] == 1;
 }
 
-bool HasZeroPadding(const AVPacket* packet) {
+bool HasZeroPadding(const Packet& packet) {
   for (int i = 0; i < AV_INPUT_BUFFER_PADDING_SIZE; ++i) {
     if (packet->data[packet->size + i] != 0) {
       return false;
@@ -162,7 +154,7 @@ struct Binding {
   bool valid_packets = true;
   std::size_t packet_count = 0;
   std::size_t key_packet_count = 0;
-  PacketPtr retained_packet;
+  std::optional<Packet> retained_packet;
   std::vector<std::uint8_t> retained_payload;
   Track::Ptr track;
   FrameWriterInterface* delegate = nullptr;
@@ -182,46 +174,41 @@ std::shared_ptr<Binding> MakeBinding(const Track::Ptr& track,
   binding->packet_converter =
       std::make_shared<ZlmPacketConverter>(track, stream_index);
   binding->decoder = std::make_unique<TestDecoder>(
-      binding->codec_parameters_converter->codec_parameters().get(),
+      binding->codec_parameters_converter->codec_parameters(),
       binding->codec_parameters_converter->time_base());
 
   std::weak_ptr<Binding> weak_binding = binding;
-  binding->packet_converter->SetOnPacket(
-      [weak_binding](const AVPacket* packet) {
-        auto binding = weak_binding.lock();
-        if (!binding) {
-          return false;
-        }
-        if (!packet || !packet->buf || !packet->data || packet->size <= 0 ||
-            packet->stream_index != binding->stream_index ||
-            packet->time_base.num != 1 || packet->time_base.den != 1000 ||
-            packet->dts == AV_NOPTS_VALUE || packet->pts == AV_NOPTS_VALUE ||
-            !HasZeroPadding(packet)) {
-          binding->valid_packets = false;
-          return false;
-        }
+  binding->packet_converter->SetOnPacket([weak_binding](const Packet& packet) {
+    auto binding = weak_binding.lock();
+    if (!binding) {
+      return false;
+    }
+    if (!packet.get() || !packet->buf || !packet->data || packet->size <= 0 ||
+        packet->stream_index != binding->stream_index ||
+        packet->time_base.num != 1 || packet->time_base.den != 1000 ||
+        packet->dts == AV_NOPTS_VALUE || packet->pts == AV_NOPTS_VALUE ||
+        !HasZeroPadding(packet)) {
+      binding->valid_packets = false;
+      return false;
+    }
 
-        if ((binding->codec == CodecH264 || binding->codec == CodecH265) &&
-            !StartsWithAnnexB(packet)) {
-          binding->valid_packets = false;
-          return false;
-        }
+    if ((binding->codec == CodecH264 || binding->codec == CodecH265) &&
+        !StartsWithAnnexB(packet)) {
+      binding->valid_packets = false;
+      return false;
+    }
 
-        ++binding->packet_count;
-        if (packet->flags & AV_PKT_FLAG_KEY) {
-          ++binding->key_packet_count;
-        }
-        if (!binding->retained_packet) {
-          binding->retained_payload.assign(packet->data,
-                                           packet->data + packet->size);
-          binding->retained_packet.reset(av_packet_clone(packet));
-          if (!binding->retained_packet) {
-            binding->valid_packets = false;
-            return false;
-          }
-        }
-        return binding->decoder->InputPacket(packet);
-      });
+    ++binding->packet_count;
+    if (packet->flags & AV_PKT_FLAG_KEY) {
+      ++binding->key_packet_count;
+    }
+    if (!binding->retained_packet) {
+      binding->retained_payload.assign(packet->data,
+                                       packet->data + packet->size);
+      binding->retained_packet = packet;
+    }
+    return binding->decoder->InputPacket(packet);
+  });
   return binding;
 }
 
@@ -293,17 +280,17 @@ TEST_CASE("ZLM MP4 frames become owned decodable AVPackets") {
         auto binding = MakeBinding(track, stream_index++);
         const auto& parameters =
             binding->codec_parameters_converter->codec_parameters();
-        REQUIRE(parameters);
-        CHECK(parameters->codec_id == ExpectedCodecId(binding->codec));
-        CHECK(parameters->extradata_size > 0);
+        REQUIRE(parameters.get());
+        CHECK(parameters.get()->codec_id == ExpectedCodecId(binding->codec));
+        CHECK(parameters.get()->extradata_size > 0);
         if (track->getTrackType() == mediakit::TrackVideo) {
-          CHECK(parameters->codec_type == AVMEDIA_TYPE_VIDEO);
-          CHECK(parameters->width > 0);
-          CHECK(parameters->height > 0);
+          CHECK(parameters.get()->codec_type == AVMEDIA_TYPE_VIDEO);
+          CHECK(parameters.get()->width > 0);
+          CHECK(parameters.get()->height > 0);
         } else {
-          CHECK(parameters->codec_type == AVMEDIA_TYPE_AUDIO);
-          CHECK(parameters->sample_rate > 0);
-          CHECK(parameters->ch_layout.nb_channels > 0);
+          CHECK(parameters.get()->codec_type == AVMEDIA_TYPE_AUDIO);
+          CHECK(parameters.get()->sample_rate > 0);
+          CHECK(parameters.get()->ch_layout.nb_channels > 0);
         }
         found_video |= binding->codec == sample.video_codec;
         found_audio |= binding->codec == CodecAAC;
@@ -352,7 +339,7 @@ TEST_CASE("ZLM MP4 frames become owned decodable AVPackets") {
           CHECK(binding->key_packet_count > 0);
           CHECK(binding->decoder->decoded_frame_count() == 20);
           REQUIRE(binding->retained_packet);
-          CHECK(binding->retained_packet->flags & AV_PKT_FLAG_KEY);
+          CHECK(binding->retained_packet->get()->flags & AV_PKT_FLAG_KEY);
         }
       }
 
@@ -368,11 +355,12 @@ TEST_CASE("ZLM MP4 frames become owned decodable AVPackets") {
         auto& binding = entry.second;
         binding->packet_converter.reset();
         REQUIRE(binding->retained_packet);
-        CHECK(binding->retained_packet->buf);
+        CHECK(binding->retained_packet->get()->buf);
         CHECK(binding->retained_payload ==
-              std::vector<std::uint8_t>(binding->retained_packet->data,
-                                        binding->retained_packet->data +
-                                            binding->retained_packet->size));
+              std::vector<std::uint8_t>(
+                  binding->retained_packet->get()->data,
+                  binding->retained_packet->get()->data +
+                      binding->retained_packet->get()->size));
       }
     }
   }
@@ -396,19 +384,19 @@ TEST_CASE("VP8 and VP9 packets preserve payload and decode through callbacks") {
       auto binding = MakeBinding(track, 0);
       const auto& parameters =
           binding->codec_parameters_converter->codec_parameters();
-      REQUIRE(parameters);
-      CHECK(parameters->codec_type == AVMEDIA_TYPE_VIDEO);
-      CHECK(parameters->codec_id == ExpectedCodecId(sample.codec));
+      REQUIRE(parameters.get());
+      CHECK(parameters.get()->codec_type == AVMEDIA_TYPE_VIDEO);
+      CHECK(parameters.get()->codec_id == ExpectedCodecId(sample.codec));
 
       const std::vector<std::uint8_t>* expected_payload = nullptr;
       std::weak_ptr<Binding> weak_binding = binding;
       binding->packet_converter->SetOnPacket(
-          [weak_binding, &expected_payload](const AVPacket* packet) {
+          [weak_binding, &expected_payload](const Packet& packet) {
             auto binding = weak_binding.lock();
             if (!binding) {
               return false;
             }
-            if (!packet || !packet->buf || !expected_payload ||
+            if (!packet.get() || !packet->buf || !expected_payload ||
                 packet->size != static_cast<int>(expected_payload->size()) ||
                 !std::equal(packet->data, packet->data + packet->size,
                             expected_payload->begin()) ||
@@ -424,7 +412,7 @@ TEST_CASE("VP8 and VP9 packets preserve payload and decode through callbacks") {
             if (!binding->retained_packet) {
               binding->retained_payload.assign(packet->data,
                                                packet->data + packet->size);
-              binding->retained_packet.reset(av_packet_clone(packet));
+              binding->retained_packet = packet;
             }
             return binding->decoder->InputPacket(packet);
           });
@@ -460,11 +448,52 @@ TEST_CASE("VP8 and VP9 packets preserve payload and decode through callbacks") {
 
       binding->packet_converter.reset();
       REQUIRE(binding->retained_packet);
-      CHECK(binding->retained_packet->buf);
-      CHECK(binding->retained_payload ==
-            std::vector<std::uint8_t>(binding->retained_packet->data,
-                                      binding->retained_packet->data +
-                                          binding->retained_packet->size));
+      CHECK(binding->retained_packet->get()->buf);
+      CHECK(
+          binding->retained_payload ==
+          std::vector<std::uint8_t>(binding->retained_packet->get()->data,
+                                    binding->retained_packet->get()->data +
+                                        binding->retained_packet->get()->size));
     }
   }
+}
+
+TEST_CASE("H264复合AU按NAL拆分后保留关键帧语义") {
+  auto track = mediakit::Factory::getTrackByCodecId(CodecH264);
+  REQUIRE(track);
+
+  ZlmPacketConverter converter(track, 0);
+  std::vector<Packet> packets;
+  converter.SetOnPacket([&packets](const Packet& packet) {
+    packets.push_back(packet.Clone());
+    return true;
+  });
+
+  std::vector<std::uint8_t> key_access_unit = {
+      0x00, 0x00, 0x00, 0x01, 0x09, 0xF0, 0x00, 0x00, 0x00, 0x01, 0x65, 0x80,
+  };
+  auto key_frame = mediakit::Factory::getFrameFromPtr(
+      CodecH264, reinterpret_cast<const char*>(key_access_unit.data()),
+      key_access_unit.size(), 0, 0);
+  REQUIRE(key_frame);
+  REQUIRE_FALSE(key_frame->keyFrame());
+  REQUIRE(converter.InputFrame(key_frame));
+
+  std::vector<std::uint8_t> predicted_access_unit = {
+      0x00, 0x00, 0x00, 0x01, 0x09, 0xF0, 0x00, 0x00, 0x00, 0x01, 0x41, 0x80,
+  };
+  auto predicted_frame = mediakit::Factory::getFrameFromPtr(
+      CodecH264, reinterpret_cast<const char*>(predicted_access_unit.data()),
+      predicted_access_unit.size(), 40, 40);
+  REQUIRE(predicted_frame);
+  REQUIRE(converter.InputFrame(predicted_frame));
+  REQUIRE(converter.Flush());
+
+  REQUIRE(packets.size() == 2);
+  CHECK(packets[0].get()->flags & AV_PKT_FLAG_KEY);
+  CHECK_FALSE(packets[1].get()->flags & AV_PKT_FLAG_KEY);
+  CHECK(std::vector<std::uint8_t>(
+            packets[0].get()->data,
+            packets[0].get()->data + packets[0].get()->size) ==
+        key_access_unit);
 }

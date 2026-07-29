@@ -32,11 +32,12 @@ using namespace std::chrono_literals;
 using mw::streamer::cache::PacketQueue;
 using mw::streamer::cache::PacketQueueState;
 using mw::streamer::cache::PacketStream;
+using mw::streamer::ffmpeg::Packet;
+using mw::streamer::ffmpeg::StreamInfo;
 using mw::streamer::input::PlayerProxy;
 using mw::streamer::input::PlayerState;
 using mw::streamer::output::OutputConfig;
 using mw::streamer::output::OutputSession;
-using mw::streamer::output::OutputStreamInfo;
 
 std::atomic_bool g_stop_requested = false;
 
@@ -140,11 +141,13 @@ std::string RequireValue(int argc, char* argv[], int& index) {
 }
 
 std::chrono::milliseconds ParseMilliseconds(const std::string& value,
-                                            const char* option) {
+                                            const char* option,
+                                            std::int64_t minimum) {
   std::size_t parsed = 0;
   const auto number = std::stoll(value, &parsed);
-  if (parsed != value.size() || number <= 0) {
-    throw std::invalid_argument(std::string(option) + "必须为正整数");
+  if (parsed != value.size() || number < minimum) {
+    throw std::invalid_argument(
+        fmt::format("{}必须为不小于{}的整数", option, minimum));
   }
   return std::chrono::milliseconds(number);
 }
@@ -161,10 +164,10 @@ Arguments ParseArguments(int argc, char* argv[]) {
       arguments.events_path = RequireValue(argc, argv, index);
     } else if (option == "--cache-ms") {
       arguments.cache_duration =
-          ParseMilliseconds(RequireValue(argc, argv, index), "--cache-ms");
+          ParseMilliseconds(RequireValue(argc, argv, index), "--cache-ms", 0);
     } else if (option == "--duration-ms") {
       arguments.duration =
-          ParseMilliseconds(RequireValue(argc, argv, index), "--duration-ms");
+          ParseMilliseconds(RequireValue(argc, argv, index), "--duration-ms", 1);
     } else {
       throw std::invalid_argument("未知参数: " + option);
     }
@@ -210,7 +213,7 @@ int Run(const Arguments& arguments) {
     events.Write("timeline_reset",
                  {{"generation", std::to_string(generation)}});
   });
-  queue->SetOnPacket([&](std::uint64_t, const AVPacket* packet) {
+  queue->SetOnPacket([&](std::uint64_t, const Packet& packet) {
     ++total_packets;
     if (packet->stream_index ==
         audio_stream_index.load(std::memory_order_relaxed)) {
@@ -227,9 +230,9 @@ int Run(const Arguments& arguments) {
 
   player->SetOnStreamsReady(
       [&](std::uint64_t generation,
-          const std::vector<mw::streamer::input::StreamInfo>& streams) {
+          const std::vector<StreamInfo>& streams) {
         std::vector<PacketStream> packet_streams;
-        std::vector<OutputStreamInfo> output_streams;
+        std::vector<StreamInfo> output_streams;
         packet_streams.reserve(streams.size());
         output_streams.reserve(streams.size());
         audio_stream_index.store(-1, std::memory_order_relaxed);
@@ -240,7 +243,7 @@ int Run(const Arguments& arguments) {
         packet_generation.store(generation, std::memory_order_relaxed);
 
         for (const auto& stream : streams) {
-          const auto media_type = stream.codec_parameters->codec_type;
+          const auto media_type = stream.codec_parameters.get()->codec_type;
           packet_streams.push_back(
               {stream.stream_index, media_type, stream.time_base});
           output_streams.push_back(
@@ -257,7 +260,8 @@ int Run(const Arguments& arguments) {
                         {"stream_index", std::to_string(stream.stream_index)},
                         {"media_type", ToString(media_type)},
                         {"codec_id",
-                         std::to_string(stream.codec_parameters->codec_id)}});
+                         std::to_string(
+                             stream.codec_parameters.get()->codec_id)}});
         }
 
         queue->SetStreams(generation, std::move(packet_streams));
@@ -275,7 +279,7 @@ int Run(const Arguments& arguments) {
                      {{"generation", std::to_string(generation)},
                       {"stream_count", std::to_string(streams.size())}});
       });
-  player->SetOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
+  player->SetOnPacket([&](std::uint64_t generation, const Packet& packet) {
     return queue->Input(generation, packet);
   });
   player->SetOnState([&](std::uint64_t generation, PlayerState state,

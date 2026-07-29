@@ -2,7 +2,7 @@
 
 本目录使用真实的 FFmpeg、MediaMTX 和媒体文件验证以下能力：
 
-- `1s / 5s / 15s / 30s` PacketQueue 缓存边界与代表值；
+- `0s / 1s / 5s / 15s / 30s` PacketQueue 缓存边界与代表值；
 - RTSP、RTMP、SRT 稳定拉流；
 - 输入连接被服务端主动断开后的自动重连；
 - RTSP、RTMP、SRT 稳定推流；

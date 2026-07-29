@@ -19,6 +19,7 @@ extern "C" {
 namespace {
 
 using namespace std::chrono_literals;
+using mw::streamer::ffmpeg::Packet;
 using mw::streamer::input::ControlResult;
 using mw::streamer::input::PlayerProxy;
 using mw::streamer::input::PlayerState;
@@ -72,22 +73,22 @@ TEST_CASE(
 
   proxy->SetOnStreamsReady(
       [&](std::uint64_t generation,
-          const std::vector<mw::streamer::input::StreamInfo>& streams) {
+          const std::vector<mw::streamer::ffmpeg::StreamInfo>& streams) {
         if (generation != 1) {
           valid_packets = false;
         }
         std::lock_guard<std::mutex> lock(mutex);
         for (const auto& stream : streams) {
-          if (!stream.codec_parameters || stream.stream_index < 0 ||
+          if (!stream.codec_parameters.get() || stream.stream_index < 0 ||
               stream.time_base.num != 1 || stream.time_base.den != 1000) {
             valid_packets = false;
             continue;
           }
-          stream_types.emplace_back(stream.codec_parameters->codec_type);
+          stream_types.emplace_back(stream.codec_parameters.get()->codec_type);
         }
       });
-  proxy->SetOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
-    if (generation != 1 || !packet || !packet->buf || !packet->data ||
+  proxy->SetOnPacket([&](std::uint64_t generation, const Packet& packet) {
+    if (generation != 1 || !packet.get() || !packet->buf || !packet->data ||
         packet->size <= 0 || packet->dts == AV_NOPTS_VALUE ||
         packet->pts == AV_NOPTS_VALUE || packet->time_base.num != 1 ||
         packet->time_base.den != 1000) {
@@ -145,10 +146,10 @@ TEST_CASE("input player proxy does not retry a failed finite input") {
   std::atomic_size_t packets = 0;
 
   proxy->SetOnStreamsReady(
-      [&](std::uint64_t, const std::vector<mw::streamer::input::StreamInfo>&) {
+      [&](std::uint64_t, const std::vector<mw::streamer::ffmpeg::StreamInfo>&) {
         ++streams_ready;
       });
-  proxy->SetOnPacket([&](std::uint64_t, const AVPacket*) {
+  proxy->SetOnPacket([&](std::uint64_t, const Packet&) {
     ++packets;
     return true;
   });
@@ -299,7 +300,7 @@ TEST_CASE(
   std::atomic<ControlResult> pause_result = ControlResult::kFailed;
   std::atomic<ControlResult> resume_result = ControlResult::kFailed;
 
-  proxy->SetOnPacket([&](std::uint64_t, const AVPacket*) {
+  proxy->SetOnPacket([&](std::uint64_t, const Packet&) {
     ++packet_count;
     condition.notify_all();
     return true;
@@ -376,7 +377,7 @@ TEST_CASE("file seek starts a clean timeline generation") {
     }
     reset_seen = true;
   });
-  proxy->SetOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
+  proxy->SetOnPacket([&](std::uint64_t generation, const Packet& packet) {
     if (seek_completed && generation != 2) {
       valid_timeline = false;
     }
@@ -461,7 +462,7 @@ TEST_CASE("file playback rate changes pacing without changing generation") {
       [&](std::uint64_t, TimelineResetReason, std::chrono::milliseconds) {
         reset_seen = true;
       });
-  proxy->SetOnPacket([&](std::uint64_t generation, const AVPacket* packet) {
+  proxy->SetOnPacket([&](std::uint64_t generation, const Packet& packet) {
     if (generation == 1 && packet->stream_index == 0) {
       ++video_packets;
     } else if (generation == 1 && packet->stream_index == 1) {

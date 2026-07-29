@@ -30,7 +30,7 @@ extern "C" {
 #include "Pusher/PusherProxy.h"
 #include "mw/converter/av_packet_to_zlm_frame_converter.h"
 #include "mw/log/logging.h"
-#include "output/recording_target.h"
+#include "mw/output/recording_target.h"
 
 namespace mw::streamer::output {
 namespace {
@@ -120,8 +120,8 @@ void ApplyExtraData(const AVCodecParameters& parameters,
   }
 }
 
-mediakit::Track::Ptr CreateTrack(const OutputStreamInfo& stream) {
-  const auto& parameters = *stream.codec_parameters;
+mediakit::Track::Ptr CreateTrack(const ffmpeg::StreamInfo& stream) {
+  const auto& parameters = *stream.codec_parameters.get();
   const auto codec_id = GetZlmCodecId(parameters.codec_id);
   if (codec_id == mediakit::CodecInvalid) {
     throw std::invalid_argument("输出流包含不支持的codec");
@@ -235,30 +235,26 @@ class OutputSession::Impl final
     }
   }
 
-  void Write(const AVPacket* packet) {
-    if (!packet) {
-      return;
-    }
+  void Write(const ffmpeg::Packet& packet) {
     if (poller_->isCurrentThread()) {
-      WriteOnPoller(packet);
+      try {
+        WriteOnPoller(packet);
+      } catch (const std::exception& error) {
+        log::Module<log::LogModule::kStreamer>::Error(
+            "引用输出AVPacket失败，数据包已丢弃：{}", error.what());
+      }
       return;
     }
 
-    auto owned_packet = std::shared_ptr<AVPacket>(
-        av_packet_clone(packet),
-        [](AVPacket* value) { av_packet_free(&value); });
-    if (!owned_packet) {
+    try {
+      auto self = shared_from_this();
+      poller_->async(
+          [self, packet]() mutable { self->WriteOnPoller(std::move(packet)); },
+          false);
+    } catch (const std::exception& error) {
       log::Module<log::LogModule::kStreamer>::Error(
-          "复制输出AVPacket失败，数据包已丢弃");
-      return;
+          "引用输出AVPacket失败，数据包已丢弃：{}", error.what());
     }
-
-    auto self = shared_from_this();
-    poller_->async(
-        [self, owned_packet = std::move(owned_packet)]() {
-          self->WriteOnPoller(owned_packet.get());
-        },
-        false);
   }
 
   void Close() noexcept {
@@ -280,8 +276,8 @@ class OutputSession::Impl final
   struct ConverterBinding {
     converter::AvPacketToZlmFrameConverter converter;
 
-    explicit ConverterBinding(const OutputStreamInfo& stream)
-        : converter(*stream.codec_parameters, stream.time_base,
+    explicit ConverterBinding(const ffmpeg::StreamInfo& stream)
+        : converter(stream.codec_parameters, stream.time_base,
                     stream.stream_index) {}
   };
 
@@ -295,19 +291,9 @@ class OutputSession::Impl final
 
     std::unordered_set<int> stream_indexes;
     for (const auto& stream : config_.streams) {
-      if (stream.stream_index < 0 || !stream.codec_parameters) {
-        throw std::invalid_argument("输出流参数无效");
-      }
+      stream.Validate();
       if (!stream_indexes.emplace(stream.stream_index).second) {
         throw std::invalid_argument("输出流stream_index重复");
-      }
-      if (stream.time_base.num <= 0 || stream.time_base.den <= 0) {
-        throw std::invalid_argument("输出流time_base必须为正数");
-      }
-      const auto& parameters = *stream.codec_parameters;
-      if (parameters.extradata_size < 0 ||
-          (parameters.extradata_size > 0 && !parameters.extradata)) {
-        throw std::invalid_argument("输出流codec extradata无效");
       }
     }
 
@@ -349,6 +335,13 @@ class OutputSession::Impl final
       throw std::logic_error("OutputSession只能打开一次");
     }
     ValidateConfigOnPoller();
+    has_video_ =
+        std::any_of(config_.streams.begin(), config_.streams.end(),
+                    [](const ffmpeg::StreamInfo& stream) {
+                      return stream.codec_parameters.get()->codec_type ==
+                             AVMEDIA_TYPE_VIDEO;
+                    });
+    output_started_ = !has_video_;
 
     for (const auto& stream : config_.streams) {
       converters_.try_emplace(stream.stream_index, stream);
@@ -374,39 +367,80 @@ class OutputSession::Impl final
     state_ = State::kOpen;
   }
 
-  void WriteOnPoller(const AVPacket* packet) noexcept {
-    if (state_ != State::kOpen || !packet) {
+  void WriteOnPoller(ffmpeg::Packet packet) noexcept {
+    const auto* raw_packet = packet.get();
+    if (state_ != State::kOpen || !raw_packet) {
       return;
     }
-    const auto binding = converters_.find(packet->stream_index);
+    const auto binding = converters_.find(raw_packet->stream_index);
     if (binding == converters_.end()) {
       return;
     }
 
     try {
-      auto frame = binding->second.converter.Convert(packet);
-      if (!frame) {
+      auto frames = binding->second.converter.Convert(std::move(packet));
+      if (frames.empty()) {
         return;
       }
 
-      const bool awaiting_recordings =
-          !recordings_initialized_ &&
-          (!fmp4_paths_.empty() || !hls_paths_.empty());
-      if (awaiting_recordings) {
-        pending_recording_frames_.push_back(
-            mediakit::Frame::getCacheAbleFrame(frame));
+      const bool contains_video_frame =
+          frames.front()->getTrackType() == mediakit::TrackVideo;
+      const bool contains_video_key_frame =
+          contains_video_frame &&
+          std::any_of(frames.begin(), frames.end(),
+                      [](const auto& frame) { return frame->keyFrame(); });
+      if (has_video_ && !output_started_) {
+        if (!contains_video_key_frame) {
+          for (const auto& frame : frames) {
+            if (frame->getTrackType() == mediakit::TrackVideo &&
+                frame->configFrame()) {
+              pending_video_config_frames_.push_back(
+                  mediakit::Frame::getCacheAbleFrame(frame));
+            }
+          }
+          return;
+        }
+        frames.insert(frames.begin(), pending_video_config_frames_.begin(),
+                      pending_video_config_frames_.end());
+        pending_video_config_frames_.clear();
+        output_started_ = true;
       }
 
-      if (muxer_) {
-        try {
-          muxer_->inputFrame(frame);
-        } catch (const std::exception& error) {
-          log::Module<log::LogModule::kStreamer>::Error(
-              "ZLM输出Muxer写入失败：{}", error.what());
+      for (const auto& frame : frames) {
+        const bool awaiting_recordings =
+            !recordings_initialized_ &&
+            (!fmp4_paths_.empty() || !hls_paths_.empty());
+        if (awaiting_recordings) {
+          pending_recording_frames_.push_back(
+              mediakit::Frame::getCacheAbleFrame(frame));
+        }
+
+        if (muxer_) {
+          try {
+            muxer_->inputFrame(frame);
+          } catch (const std::exception& error) {
+            log::Module<log::LogModule::kStreamer>::Error(
+                "ZLM输出Muxer写入失败：{}", error.what());
+          }
+        }
+        if (!awaiting_recordings) {
+          WriteRecordingsOnPoller(frame);
         }
       }
-      if (!awaiting_recordings) {
-        WriteRecordingsOnPoller(frame);
+      // ZLM的协议包缓存会在下一个视频AU到来时提交前一个关键AU。
+      // 只在提交完成后启动Pusher，避免从未包含关键帧的GOP缓存中途加入。
+      if (contains_video_frame && !schemas_with_pending_key_.empty()) {
+        ready_schemas_.insert(schemas_with_pending_key_.begin(),
+                              schemas_with_pending_key_.end());
+        schemas_with_pending_key_.clear();
+        StartPushersOnPoller();
+      }
+      if (contains_video_key_frame) {
+        for (const auto& schema : registered_schemas_) {
+          if (ready_schemas_.find(schema) == ready_schemas_.end()) {
+            schemas_with_pending_key_.insert(schema);
+          }
+        }
       }
     } catch (const std::exception& error) {
       log::Module<log::LogModule::kStreamer>::Error("处理输出AVPacket失败：{}",
@@ -478,6 +512,9 @@ class OutputSession::Impl final
       if (!registered_schema.empty() && registered_schema != schema) {
         continue;
       }
+      if (ready_schemas_.find(schema) == ready_schemas_.end()) {
+        continue;
+      }
       auto source = mediakit::MediaSource::find(schema, tuple_.vhost,
                                                 tuple_.app, tuple_.stream);
       if (!source) {
@@ -534,6 +571,10 @@ class OutputSession::Impl final
     CloseRecordingListOnPoller(hls_targets_, "HLS-fMP4");
     muxer_.reset();
     converters_.clear();
+    pending_video_config_frames_.clear();
+    registered_schemas_.clear();
+    schemas_with_pending_key_.clear();
+    ready_schemas_.clear();
   }
 
   void onAllTrackReady() override {
@@ -559,6 +600,10 @@ class OutputSession::Impl final
 
     const auto schema = sender.getSchema();
     if (poller_->isCurrentThread()) {
+      registered_schemas_.insert(schema);
+      if (!has_video_) {
+        ready_schemas_.insert(schema);
+      }
       StartPushersOnPoller(schema);
       return;
     }
@@ -567,6 +612,10 @@ class OutputSession::Impl final
     poller_->async(
         [weak_self, schema]() {
           if (auto self = weak_self.lock()) {
+            self->registered_schemas_.insert(schema);
+            if (!self->has_video_) {
+              self->ready_schemas_.insert(schema);
+            }
             self->StartPushersOnPoller(schema);
           }
         },
@@ -590,6 +639,12 @@ class OutputSession::Impl final
   std::vector<std::unique_ptr<HlsFmp4FileTarget>> hls_targets_;
   bool recordings_initialized_ = false;
   std::vector<mediakit::Frame::Ptr> pending_recording_frames_;
+  std::vector<mediakit::Frame::Ptr> pending_video_config_frames_;
+  std::unordered_set<std::string> registered_schemas_;
+  std::unordered_set<std::string> schemas_with_pending_key_;
+  std::unordered_set<std::string> ready_schemas_;
+  bool has_video_ = false;
+  bool output_started_ = false;
 };
 
 OutputSession::OutputSession(OutputConfig config,
@@ -600,7 +655,9 @@ OutputSession::~OutputSession() { Close(); }
 
 void OutputSession::Open() { impl_->Open(); }
 
-void OutputSession::Write(const AVPacket* packet) { impl_->Write(packet); }
+void OutputSession::Write(const ffmpeg::Packet& packet) {
+  impl_->Write(packet);
+}
 
 void OutputSession::Close() noexcept { impl_->Close(); }
 

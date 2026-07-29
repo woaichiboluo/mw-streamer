@@ -5,11 +5,8 @@
 #include <string>
 #include <vector>
 
-extern "C" {
-#include <libavcodec/codec_par.h>
-#include <libavcodec/packet.h>
-#include <libavutil/rational.h>
-}
+#include "mw/ffmpeg/packet.h"
+#include "mw/ffmpeg/stream_info.h"
 
 namespace toolkit {
 class EventPoller;
@@ -17,14 +14,8 @@ class EventPoller;
 
 namespace mw::streamer::output {
 
-struct OutputStreamInfo {
-  int stream_index = -1;
-  std::shared_ptr<AVCodecParameters> codec_parameters;
-  AVRational time_base{0, 1};
-};
-
 struct OutputConfig {
-  std::vector<OutputStreamInfo> streams;
+  std::vector<ffmpeg::StreamInfo> streams;
   // RTMP, RTSP, and SRT URLs are network targets. Paths ending in .mp4 and
   // .m3u8 are fragmented MP4 and HLS-fMP4 recording targets respectively.
   std::vector<std::string> targets;
@@ -42,14 +33,15 @@ class OutputSession final {
   OutputSession(const OutputSession&) = delete;
   OutputSession& operator=(const OutputSession&) = delete;
 
-  // Open validates configuration synchronously. Protocol publishing starts
-  // after ZLM has received enough frames to make every Track ready.
+  // Open validates configuration synchronously. Video output discards packets
+  // before the first key frame; protocol publishing starts after every Track
+  // is ready from that decodable boundary.
   void Open();
 
-  // Write takes no ownership of packet. Calls made off the owner poller clone
-  // the packet before queuing it. Runtime target failures are logged and do not
-  // propagate to the input, cache, or other output targets.
-  void Write(const AVPacket* packet);
+  // Write borrows packet for the call and retains one reference for queued
+  // processing. Runtime target failures are logged and do not propagate to the
+  // input, cache, or other output targets.
+  void Write(const ffmpeg::Packet& packet);
 
   // Close stops all pushers and finalizes every recording target. The session
   // cannot be opened again after Close.

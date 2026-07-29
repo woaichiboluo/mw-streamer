@@ -36,19 +36,21 @@ def _require_positive_number(table: dict[str, Any], key: str) -> float:
     return float(value)
 
 
+def _is_valid_cache_duration(value: object) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and (value == 0 or 1000 <= value <= 30000)
+    )
+
+
 def _require_cache_durations(table: dict[str, Any]) -> tuple[int, ...]:
     values = table.get("cache_durations_ms")
     if not isinstance(values, list) or not values:
         raise ConfigurationError("cache_durations_ms 必须是非空整数数组")
-    if any(
-        not isinstance(value, int)
-        or isinstance(value, bool)
-        or value < 1000
-        or value > 30000
-        for value in values
-    ):
+    if any(not _is_valid_cache_duration(value) for value in values):
         raise ConfigurationError(
-            "cache_durations_ms 的每个值必须是 1000 到 30000 的整数"
+            "cache_durations_ms 的每个值必须为 0，或 1000 到 30000 的整数"
         )
     if len(set(values)) != len(values):
         raise ConfigurationError("cache_durations_ms 不能包含重复值")
@@ -87,13 +89,10 @@ def load_config(path: str) -> E2EConfig:
         raise ConfigurationError(f"媒体目录不存在: {media_directory}")
 
     cache_duration_ms = tests_table.get("cache_duration_ms")
-    if (
-        not isinstance(cache_duration_ms, int)
-        or isinstance(cache_duration_ms, bool)
-        or cache_duration_ms < 1000
-        or cache_duration_ms > 30000
-    ):
-        raise ConfigurationError("cache_duration_ms 必须是 1000 到 30000 的整数")
+    if not _is_valid_cache_duration(cache_duration_ms):
+        raise ConfigurationError(
+            "cache_duration_ms 必须为 0，或 1000 到 30000 的整数"
+        )
 
     return E2EConfig(
         tools=tools,

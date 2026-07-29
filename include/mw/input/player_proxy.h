@@ -8,14 +8,10 @@
 #include <string>
 #include <vector>
 
-extern "C" {
-#include <libavcodec/codec_par.h>
-#include <libavcodec/packet.h>
-#include <libavutil/rational.h>
-}
-
 #include "Network/Socket.h"
 #include "Util/mini.h"
+#include "mw/ffmpeg/packet.h"
+#include "mw/ffmpeg/stream_info.h"
 
 namespace toolkit {
 class EventPoller;
@@ -54,19 +50,14 @@ enum class TimelineResetReason {
   kSeek,
 };
 
-struct StreamInfo {
-  int stream_index = -1;
-  std::shared_ptr<AVCodecParameters> codec_parameters;
-  AVRational time_base{0, 1};
-};
-
 class PlayerProxy final {
  public:
   using Ptr = std::shared_ptr<PlayerProxy>;
-  using OnPacket =
-      std::function<bool(std::uint64_t generation, const AVPacket* packet)>;
-  using OnStreamsReady = std::function<void(
-      std::uint64_t generation, const std::vector<StreamInfo>& streams)>;
+  using OnPacket = std::function<bool(std::uint64_t generation,
+                                      const ffmpeg::Packet& packet)>;
+  using OnStreamsReady =
+      std::function<void(std::uint64_t generation,
+                         const std::vector<ffmpeg::StreamInfo>& streams)>;
   using OnState = std::function<void(
       std::uint64_t generation, PlayerState state,
       const toolkit::SockException& reason, bool will_retry)>;
@@ -85,8 +76,9 @@ class PlayerProxy final {
   PlayerProxy& operator=(const PlayerProxy&) = delete;
 
   // Callback setters and control methods are serialized on the owner poller.
-  // Callbacks are invoked on that poller. AVPacket ownership remains with the
-  // proxy and is valid only for the duration of OnPacket.
+  // Callbacks are invoked on that poller. Packet ownership remains with the
+  // proxy and is valid only for the duration of OnPacket. Copy or call Ref to
+  // retain a packet after the callback.
   void SetOnPacket(OnPacket callback);
   void SetOnStreamsReady(OnStreamsReady callback);
   void SetOnState(OnState callback);

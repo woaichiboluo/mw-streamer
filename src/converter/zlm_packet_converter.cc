@@ -5,14 +5,13 @@
 #include <stdexcept>
 #include <utility>
 
+#include "ext-codec/H264.h"
+#include "ext-codec/H265.h"
+
 namespace mw::streamer::converter {
 namespace {
 
 constexpr AVRational kZlmTimeBase{1, 1000};
-
-struct AvPacketDeleter {
-  void operator()(AVPacket* packet) const { av_packet_free(&packet); }
-};
 
 }  // namespace
 
@@ -65,8 +64,33 @@ bool ZlmPacketConverter::InputFrame(const mediakit::Frame::Ptr& frame) {
     }
   }
 
-  const auto accepted = merger_.inputFrame(frame, std::move(on_merged));
-  return accepted && last_output_result_;
+  bool accepted = true;
+  bool found_nal = false;
+  mediakit::splitH264(
+      frame->data(), frame->size(), frame->prefixSize(),
+      [&](const char* data, size_t size, size_t prefix_size) {
+        found_nal = true;
+        if (!accepted || size <= prefix_size) {
+          accepted = false;
+          return;
+        }
+
+        mediakit::Frame::Ptr nal;
+        if (codec_id_ == mediakit::CodecH264) {
+          using H264Frame =
+              mediakit::FrameInternal<mediakit::H264FrameNoCacheAble>;
+          nal = std::make_shared<H264Frame>(frame, const_cast<char*>(data),
+                                            size, prefix_size);
+        } else {
+          using H265Frame =
+              mediakit::FrameInternal<mediakit::H265FrameNoCacheAble>;
+          nal = std::make_shared<H265Frame>(frame, const_cast<char*>(data),
+                                            size, prefix_size);
+        }
+
+        accepted = merger_.inputFrame(nal, on_merged) && last_output_result_;
+      });
+  return found_nal && accepted;
 }
 
 bool ZlmPacketConverter::Flush() {
@@ -88,22 +112,22 @@ bool ZlmPacketConverter::EmitPacket(const char* data, size_t size,
     return false;
   }
 
-  std::unique_ptr<AVPacket, AvPacketDeleter> packet(av_packet_alloc());
-  if (!packet || av_new_packet(packet.get(), static_cast<int>(size)) < 0) {
+  ffmpeg::Packet packet;
+  if (av_new_packet(packet.get(), static_cast<int>(size)) < 0) {
     return false;
   }
 
-  std::memcpy(packet->data, data, size);
-  packet->dts = static_cast<std::int64_t>(dts);
-  packet->pts = static_cast<std::int64_t>(pts);
-  packet->stream_index = stream_index_;
-  packet->time_base = kZlmTimeBase;
-  packet->pos = -1;
+  std::memcpy(packet.get()->data, data, size);
+  packet.get()->dts = static_cast<std::int64_t>(dts);
+  packet.get()->pts = static_cast<std::int64_t>(pts);
+  packet.get()->stream_index = stream_index_;
+  packet.get()->time_base = kZlmTimeBase;
+  packet.get()->pos = -1;
   if (key_frame) {
-    packet->flags |= AV_PKT_FLAG_KEY;
+    packet.get()->flags |= AV_PKT_FLAG_KEY;
   }
 
-  return on_packet_(packet.get());
+  return on_packet_(packet);
 }
 
 }  // namespace mw::streamer::converter

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <deque>
+#include <exception>
 #include <future>
 #include <stdexcept>
 #include <utility>
@@ -19,19 +20,13 @@ namespace mw::streamer::cache {
 namespace {
 
 using Clock = std::chrono::steady_clock;
-using PacketPtr = std::shared_ptr<AVPacket>;
 
 constexpr AVRational kComparisonTimeBase{1, AV_TIME_BASE};
 
-PacketPtr ClonePacket(const AVPacket* packet) {
-  return PacketPtr(av_packet_clone(packet),
-                   [](AVPacket* owned) { av_packet_free(&owned); });
-}
-
 void ValidateCacheDuration(std::chrono::milliseconds duration) {
   using namespace std::chrono_literals;
-  if (duration < 1s || duration > 30s) {
-    throw std::invalid_argument("cache_duration必须在1秒到30秒之间");
+  if (duration != 0ms && (duration < 1s || duration > 30s)) {
+    throw std::invalid_argument("cache_duration必须为0，或在1秒到30秒之间");
   }
 }
 
@@ -110,23 +105,24 @@ class PacketQueue::Impl final
     });
   }
 
-  bool Input(std::uint64_t generation, const AVPacket* packet) {
-    if (disposing_.load(std::memory_order_acquire) || !packet ||
-        packet->dts == AV_NOPTS_VALUE || packet->stream_index < 0 ||
+  bool Input(std::uint64_t generation, const ffmpeg::Packet& packet) {
+    const auto* raw_packet = packet.get();
+    if (disposing_.load(std::memory_order_acquire) || !raw_packet ||
+        raw_packet->dts == AV_NOPTS_VALUE || raw_packet->stream_index < 0 ||
         generation < this->generation() ||
         state() == PacketQueueState::kStopped) {
       return false;
     }
 
-    auto owned = ClonePacket(packet);
-    if (!owned) {
+    try {
+      auto owned = packet.Ref();
+      Dispatch([self = shared_from_this(), generation,
+                packet = std::move(owned)]() mutable {
+        self->InputOnPoller(generation, std::move(packet));
+      });
+    } catch (const std::exception&) {
       return false;
     }
-
-    Dispatch([self = shared_from_this(), generation,
-              packet = std::move(owned)]() mutable {
-      self->InputOnPoller(generation, std::move(packet));
-    });
     return true;
   }
 
@@ -189,7 +185,7 @@ class PacketQueue::Impl final
 
  private:
   struct CachedPacket {
-    PacketPtr packet;
+    ffmpeg::Packet packet;
     std::int64_t dts_us = AV_NOPTS_VALUE;
   };
 
@@ -259,7 +255,7 @@ class PacketQueue::Impl final
     }
   }
 
-  void InputOnPoller(std::uint64_t generation, PacketPtr packet) {
+  void InputOnPoller(std::uint64_t generation, ffmpeg::Packet packet) {
     if (disposing_.load(std::memory_order_acquire) || !streams_configured_ ||
         state() == PacketQueueState::kStopped ||
         generation < this->generation() ||
@@ -289,19 +285,40 @@ class PacketQueue::Impl final
       }
     }
 
-    auto* track = FindTrack(packet->stream_index);
+    const auto* raw_packet = packet.get();
+    auto* track = FindTrack(raw_packet->stream_index);
     if (!track) {
       return;
     }
 
-    const auto dts_us =
-        av_rescale_q(packet->dts, track->stream.time_base, kComparisonTimeBase);
+    const auto dts_us = av_rescale_q(raw_packet->dts, track->stream.time_base,
+                                     kComparisonTimeBase);
     if (track->latest_dts_us != AV_NOPTS_VALUE &&
         dts_us < track->latest_dts_us) {
       return;
     }
 
     track->latest_dts_us = dts_us;
+
+    if (IsImmediateForwarding()) {
+      if (state() == PacketQueueState::kPaused) {
+        return;
+      }
+
+      const auto output_epoch = output_epoch_;
+      NotifyStateOnPoller(PacketQueueState::kPlaying);
+      if (disposing_.load(std::memory_order_acquire) ||
+          output_epoch != output_epoch_ || generation != this->generation() ||
+          state() != PacketQueueState::kPlaying) {
+        return;
+      }
+      if (on_packet_) {
+        auto callback = on_packet_;
+        callback(generation, packet);
+      }
+      return;
+    }
+
     track->packets.push_back({std::move(packet), dts_us});
     UpdatePacketCountOnPoller();
 
@@ -319,6 +336,11 @@ class PacketQueue::Impl final
     }
 
     input_ended_ = true;
+    if (IsImmediateForwarding()) {
+      NotifyStateOnPoller(PacketQueueState::kStarved);
+      return;
+    }
+
     if ((state() == PacketQueueState::kFilling ||
          state() == PacketQueueState::kStarved) &&
         NextPacket()) {
@@ -330,6 +352,21 @@ class PacketQueue::Impl final
     if (disposing_.load(std::memory_order_acquire) ||
         state() == PacketQueueState::kStopped ||
         paused == (state() == PacketQueueState::kPaused)) {
+      return;
+    }
+
+    if (IsImmediateForwarding()) {
+      if (paused) {
+        resume_state_ = state();
+        ++output_epoch_;
+        NotifyStateOnPoller(PacketQueueState::kPaused);
+      } else if (input_ended_) {
+        NotifyStateOnPoller(PacketQueueState::kStarved);
+      } else {
+        NotifyStateOnPoller(resume_state_ == PacketQueueState::kPlaying
+                                ? PacketQueueState::kPlaying
+                                : PacketQueueState::kFilling);
+      }
       return;
     }
 
@@ -374,6 +411,11 @@ class PacketQueue::Impl final
       return;
     }
 
+    if (IsImmediateForwarding()) {
+      playback_rate_ = rate;
+      return;
+    }
+
     if (state() == PacketQueueState::kPlaying) {
       clock_media_us_ = MediaNowUs(Clock::now());
       clock_wall_ = Clock::now();
@@ -395,6 +437,8 @@ class PacketQueue::Impl final
     }
     return nullptr;
   }
+
+  bool IsImmediateForwarding() const { return cache_duration_us_ == 0; }
 
   bool TrackReady(const TrackQueue& track) const {
     return track.packets.size() >= 2 &&
@@ -449,8 +493,9 @@ class PacketQueue::Impl final
     if (audio.dts_us != video.dts_us) {
       return audio.dts_us < video.dts_us ? &audio : &video;
     }
-    return audio.packet->stream_index < video.packet->stream_index ? &audio
-                                                                   : &video;
+    return audio.packet.get()->stream_index < video.packet.get()->stream_index
+               ? &audio
+               : &video;
   }
 
   TrackQueue& NextTrack() {
@@ -472,8 +517,9 @@ class PacketQueue::Impl final
     if (audio.dts_us != video.dts_us) {
       return audio.dts_us < video.dts_us ? audio_ : video_;
     }
-    return audio.packet->stream_index < video.packet->stream_index ? audio_
-                                                                   : video_;
+    return audio.packet.get()->stream_index < video.packet.get()->stream_index
+               ? audio_
+               : video_;
   }
 
   std::int64_t MediaNowUs(Clock::time_point now) const {
@@ -530,7 +576,7 @@ class PacketQueue::Impl final
 
       if (on_packet_ && !disposing_.load(std::memory_order_acquire)) {
         auto callback = on_packet_;
-        callback(output_generation, cached.packet.get());
+        callback(output_generation, cached.packet);
       }
       if (disposing_.load(std::memory_order_acquire) ||
           output_epoch != output_epoch_ || output_generation != generation() ||
@@ -657,7 +703,8 @@ void PacketQueue::SetStreams(std::uint64_t generation,
   impl_->SetStreams(generation, std::move(streams));
 }
 
-bool PacketQueue::Input(std::uint64_t generation, const AVPacket* packet) {
+bool PacketQueue::Input(std::uint64_t generation,
+                        const ffmpeg::Packet& packet) {
   return impl_->Input(generation, packet);
 }
 

@@ -3,14 +3,15 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 extern "C" {
-#include <libavcodec/codec_par.h>
-#include <libavcodec/packet.h>
 #include <libavutil/rational.h>
 }
 
 #include "Extension/Frame.h"
+#include "mw/ffmpeg/codec_parameters.h"
+#include "mw/ffmpeg/packet.h"
 
 namespace mw::streamer::converter {
 
@@ -18,12 +19,13 @@ class AvPacketToZlmFrameConverter final {
  public:
   using Ptr = std::shared_ptr<AvPacketToZlmFrameConverter>;
 
-  AvPacketToZlmFrameConverter(const AVCodecParameters& codec_parameters,
+  AvPacketToZlmFrameConverter(const ffmpeg::CodecParameters& codec_parameters,
                               AVRational time_base, int stream_index);
 
-  // The returned frame owns or references its payload independently of packet.
-  // H264/H265 packets must use Annex-B framing.
-  mediakit::Frame::Ptr Convert(const AVPacket* packet) const;
+  // Takes ownership of packet's reference. The returned frames keep the
+  // payload alive. H264/H265 packets must use Annex-B framing and produce one
+  // ZLM Frame per NAL unit.
+  std::vector<mediakit::Frame::Ptr> Convert(ffmpeg::Packet packet) const;
 
  private:
   mediakit::CodecId codec_id_;

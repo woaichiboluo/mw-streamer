@@ -96,41 +96,33 @@ ZlmCodecParametersConverter::ZlmCodecParametersConverter(
     throw std::invalid_argument("不支持的ZLM codec");
   }
 
-  codec_parameters_.reset(avcodec_parameters_alloc(),
-                          [](AVCodecParameters* parameters) {
-                            avcodec_parameters_free(&parameters);
-                          });
-  if (!codec_parameters_) {
-    throw std::bad_alloc();
-  }
-
-  codec_parameters_->codec_id = codec_id;
-  codec_parameters_->bit_rate = track->getBitRate();
+  auto* parameters = codec_parameters_.get();
+  parameters->codec_id = codec_id;
+  parameters->bit_rate = track->getBitRate();
 
   if (track->getTrackType() == mediakit::TrackVideo) {
     auto video = std::static_pointer_cast<mediakit::VideoTrack>(track);
-    codec_parameters_->codec_type = AVMEDIA_TYPE_VIDEO;
-    codec_parameters_->width = video->getVideoWidth();
-    codec_parameters_->height = video->getVideoHeight();
+    parameters->codec_type = AVMEDIA_TYPE_VIDEO;
+    parameters->width = video->getVideoWidth();
+    parameters->height = video->getVideoHeight();
     if (video->getVideoFps() > 0) {
-      codec_parameters_->framerate = av_d2q(video->getVideoFps(), 100000);
+      parameters->framerate = av_d2q(video->getVideoFps(), 100000);
     }
   } else if (track->getTrackType() == mediakit::TrackAudio) {
     auto audio = std::static_pointer_cast<mediakit::AudioTrack>(track);
-    codec_parameters_->codec_type = AVMEDIA_TYPE_AUDIO;
-    codec_parameters_->sample_rate = audio->getAudioSampleRate();
-    codec_parameters_->bits_per_raw_sample = audio->getAudioSampleBit();
-    av_channel_layout_default(&codec_parameters_->ch_layout,
-                              audio->getAudioChannel());
+    parameters->codec_type = AVMEDIA_TYPE_AUDIO;
+    parameters->sample_rate = audio->getAudioSampleRate();
+    parameters->bits_per_raw_sample = audio->getAudioSampleBit();
+    av_channel_layout_default(&parameters->ch_layout, audio->getAudioChannel());
   } else {
     throw std::invalid_argument("不支持的ZLM track类型");
   }
 
-  SetExtraData(codec_parameters_.get(), GetExtraData(track));
+  SetExtraData(parameters, GetExtraData(track));
 }
 
-const ZlmCodecParametersConverter::CodecParametersPtr&
-ZlmCodecParametersConverter::codec_parameters() const {
+const ffmpeg::CodecParameters& ZlmCodecParametersConverter::codec_parameters()
+    const {
   return codec_parameters_;
 }
 

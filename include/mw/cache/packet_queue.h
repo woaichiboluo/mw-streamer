@@ -9,10 +9,11 @@
 #include <vector>
 
 extern "C" {
-#include <libavcodec/packet.h>
 #include <libavutil/avutil.h>
 #include <libavutil/rational.h>
 }
+
+#include "mw/ffmpeg/packet.h"
 
 namespace toolkit {
 class EventPoller;
@@ -37,12 +38,14 @@ struct PacketStream {
 class PacketQueue final {
  public:
   using Ptr = std::shared_ptr<PacketQueue>;
-  using OnPacket =
-      std::function<void(std::uint64_t generation, const AVPacket* packet)>;
+  using OnPacket = std::function<void(std::uint64_t generation,
+                                      const ffmpeg::Packet& packet)>;
   using OnState =
       std::function<void(std::uint64_t generation, PacketQueueState state)>;
   using OnTimelineReset = std::function<void(std::uint64_t generation)>;
 
+  // A zero duration enables immediate forwarding. Other supported durations
+  // are from one to thirty seconds, inclusive.
   explicit PacketQueue(std::chrono::milliseconds cache_duration,
                        std::shared_ptr<toolkit::EventPoller> poller = nullptr);
   ~PacketQueue();
@@ -50,8 +53,9 @@ class PacketQueue final {
   PacketQueue(const PacketQueue&) = delete;
   PacketQueue& operator=(const PacketQueue&) = delete;
 
-  // All callbacks are serialized on the owner poller. AVPacket ownership
-  // remains with the queue and is valid only for the duration of OnPacket.
+  // All callbacks are serialized on the owner poller. Packet ownership remains
+  // with the queue and is valid only for OnPacket. Copy or call Ref to retain
+  // it.
   void SetOnPacket(OnPacket callback);
   void SetOnState(OnState callback);
   void SetOnTimelineReset(OnTimelineReset callback);
@@ -61,18 +65,19 @@ class PacketQueue final {
   // timeline.
   void SetStreams(std::uint64_t generation, std::vector<PacketStream> streams);
 
-  // The packet is cloned before this method returns. Invalid packets, unknown
-  // streams, decreasing per-stream DTS, and stale generations are discarded.
-  // The return value reports synchronous validation and clone success; Poller
-  // side timeline validation may still discard a queued packet.
-  bool Input(std::uint64_t generation, const AVPacket* packet);
+  // The packet is referenced before this method returns. Invalid packets,
+  // unknown streams, decreasing per-stream DTS, and stale generations are
+  // discarded. The return value reports synchronous validation and reference
+  // success; Poller side timeline validation may still discard a queued packet.
+  bool Input(std::uint64_t generation, const ffmpeg::Packet& packet);
 
   // Marks the generation as having no more input. Cached packets keep playing,
   // including the unmatched tail of any configured track.
   void EndInput(std::uint64_t generation);
 
-  // Playback controls affect only cached output. Callers controlling a
-  // PlayerProxy should apply the same pause and rate to both components.
+  // Callers controlling a PlayerProxy should apply the same pause and rate to
+  // both components. Immediate-forwarding mode drops packets received while
+  // paused instead of buffering them, and playback rate does not pace packets.
   void Pause(bool paused);
   void SetPlaybackRate(double rate);
 

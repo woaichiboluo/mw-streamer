@@ -8,7 +8,7 @@ directory = "/absolute/path/to/media"
 
 [tests]
 cache_duration_ms = 1000
-cache_durations_ms = [1000, 5000, 15000, 30000]
+cache_durations_ms = [0, 1000, 5000, 15000, 30000]
 startup_timeout_seconds = 15.0
 stability_seconds = 10.0
 stall_timeout_seconds = 3.0

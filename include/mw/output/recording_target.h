@@ -1,5 +1,5 @@
-#ifndef MW_STREAMER_SRC_OUTPUT_RECORDING_TARGET_H_
-#define MW_STREAMER_SRC_OUTPUT_RECORDING_TARGET_H_
+#ifndef MW_STREAMER_INCLUDE_MW_OUTPUT_RECORDING_TARGET_H_
+#define MW_STREAMER_INCLUDE_MW_OUTPUT_RECORDING_TARGET_H_
 
 #include <chrono>
 #include <filesystem>
@@ -61,4 +61,4 @@ class HlsFmp4FileTarget final {
 
 }  // namespace mw::streamer::output
 
-#endif  // MW_STREAMER_SRC_OUTPUT_RECORDING_TARGET_H_
+#endif  // MW_STREAMER_INCLUDE_MW_OUTPUT_RECORDING_TARGET_H_

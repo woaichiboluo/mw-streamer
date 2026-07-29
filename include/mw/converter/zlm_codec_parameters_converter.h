@@ -4,26 +4,25 @@
 #include <memory>
 
 extern "C" {
-#include <libavcodec/codec_par.h>
 #include <libavutil/rational.h>
 }
 
 #include "Extension/Track.h"
+#include "mw/ffmpeg/stream_info.h"
 
 namespace mw::streamer::converter {
 
 class ZlmCodecParametersConverter {
  public:
   using Ptr = std::shared_ptr<ZlmCodecParametersConverter>;
-  using CodecParametersPtr = std::shared_ptr<AVCodecParameters>;
 
   explicit ZlmCodecParametersConverter(const mediakit::Track::Ptr& track);
 
-  const CodecParametersPtr& codec_parameters() const;
+  const ffmpeg::CodecParameters& codec_parameters() const;
   AVRational time_base() const;
 
  private:
-  CodecParametersPtr codec_parameters_;
+  ffmpeg::CodecParameters codec_parameters_;
 };
 
 }  // namespace mw::streamer::converter

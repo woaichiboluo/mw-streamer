@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 #include <cstring>
-#include <memory>
+#include <utility>
 #include <vector>
 
 extern "C" {
@@ -9,33 +9,30 @@ extern "C" {
 }
 
 #include "mw/converter/av_packet_to_zlm_frame_converter.h"
+#include "mw/ffmpeg/codec_parameters.h"
+#include "mw/ffmpeg/packet.h"
 
 namespace {
 
 using mw::streamer::converter::AvPacketToZlmFrameConverter;
+using mw::streamer::ffmpeg::CodecParameters;
+using mw::streamer::ffmpeg::Packet;
 
-struct PacketDeleter {
-  void operator()(AVPacket* packet) const { av_packet_free(&packet); }
-};
-
-using PacketPtr = std::unique_ptr<AVPacket, PacketDeleter>;
-
-PacketPtr MakePacket(const std::vector<std::uint8_t>& payload, int stream_index,
-                     std::int64_t dts, std::int64_t pts, int flags = 0) {
-  PacketPtr packet(av_packet_alloc());
-  REQUIRE(packet);
+Packet MakePacket(const std::vector<std::uint8_t>& payload, int stream_index,
+                  std::int64_t dts, std::int64_t pts, int flags = 0) {
+  Packet packet;
   REQUIRE(av_new_packet(packet.get(), static_cast<int>(payload.size())) >= 0);
-  std::memcpy(packet->data, payload.data(), payload.size());
-  packet->stream_index = stream_index;
-  packet->dts = dts;
-  packet->pts = pts;
-  packet->flags = flags;
+  std::memcpy(packet.get()->data, payload.data(), payload.size());
+  packet.get()->stream_index = stream_index;
+  packet.get()->dts = dts;
+  packet.get()->pts = pts;
+  packet.get()->flags = flags;
   return packet;
 }
 
-AVCodecParameters MakeCodecParameters(AVCodecID codec_id) {
-  AVCodecParameters parameters{};
-  parameters.codec_id = codec_id;
+CodecParameters MakeCodecParameters(AVCodecID codec_id) {
+  CodecParameters parameters;
+  parameters.get()->codec_id = codec_id;
   return parameters;
 }
 
@@ -48,10 +45,11 @@ TEST_CASE("AVPacket转换为可缓存的H264 ZLM Frame") {
                                           0x65, 0x88, 0x84};
 
   auto packet = MakePacket(payload, 3, 90000, 94500, AV_PKT_FLAG_KEY);
-  auto frame = converter.Convert(packet.get());
-  REQUIRE(frame);
+  auto frames = converter.Convert(packet);
+  REQUIRE(frames.size() == 1);
+  auto frame = frames.front();
 
-  packet.reset();
+  packet = Packet();
   CHECK(frame->getCodecId() == mediakit::CodecH264);
   CHECK(frame->getIndex() == 3);
   CHECK(frame->dts() == 1000);
@@ -63,6 +61,24 @@ TEST_CASE("AVPacket转换为可缓存的H264 ZLM Frame") {
   CHECK(std::memcmp(frame->data(), payload.data(), payload.size()) == 0);
 }
 
+TEST_CASE("AVPacket转换器移动接管Packet且不增加Buffer引用") {
+  auto parameters = MakeCodecParameters(AV_CODEC_ID_H264);
+  AvPacketToZlmFrameConverter converter(parameters, AVRational{1, 1000}, 0);
+  const std::vector<std::uint8_t> payload{0x00, 0x00, 0x00, 0x01, 0x65};
+  auto packet = MakePacket(payload, 0, 0, 0, AV_PKT_FLAG_KEY);
+  auto* buffer = packet.get()->buf;
+  REQUIRE(buffer);
+  REQUIRE(av_buffer_get_ref_count(buffer) == 1);
+
+  auto frames = converter.Convert(std::move(packet));
+
+  CHECK(packet.get() == nullptr);
+  REQUIRE(frames.size() == 1);
+  CHECK(av_buffer_get_ref_count(buffer) == 1);
+  CHECK(std::memcmp(frames.front()->data(), payload.data(), payload.size()) ==
+        0);
+}
+
 TEST_CASE("AVPacket转换为H265 ZLM Frame") {
   auto parameters = MakeCodecParameters(AV_CODEC_ID_HEVC);
   AvPacketToZlmFrameConverter converter(parameters, AVRational{1, 1000}, 0);
@@ -70,9 +86,10 @@ TEST_CASE("AVPacket转换为H265 ZLM Frame") {
                                           0x26, 0x01, 0x88};
   auto packet = MakePacket(payload, 0, 25, 40, AV_PKT_FLAG_KEY);
 
-  auto frame = converter.Convert(packet.get());
+  auto frames = converter.Convert(packet);
 
-  REQUIRE(frame);
+  REQUIRE(frames.size() == 1);
+  const auto& frame = frames.front();
   CHECK(frame->getCodecId() == mediakit::CodecH265);
   CHECK(frame->getIndex() == 0);
   CHECK(frame->dts() == 25);
@@ -84,15 +101,19 @@ TEST_CASE("AVPacket转换为H265 ZLM Frame") {
 TEST_CASE("裸AAC AVPacket使用ASC生成ADTS ZLM Frame") {
   auto parameters = MakeCodecParameters(AV_CODEC_ID_AAC);
   const std::uint8_t aac_config[]{0x12, 0x10};
-  parameters.extradata = const_cast<std::uint8_t*>(aac_config);
-  parameters.extradata_size = sizeof(aac_config);
+  AVCodecParameters source{};
+  source.codec_id = AV_CODEC_ID_AAC;
+  source.extradata = const_cast<std::uint8_t*>(aac_config);
+  source.extradata_size = sizeof(aac_config);
+  parameters = CodecParameters(source);
   AvPacketToZlmFrameConverter converter(parameters, AVRational{1, 48000}, 1);
   const std::vector<std::uint8_t> payload{0x21, 0x10, 0x56, 0xe5};
   auto packet = MakePacket(payload, 1, 48000, 48000);
 
-  auto frame = converter.Convert(packet.get());
+  auto frames = converter.Convert(packet);
 
-  REQUIRE(frame);
+  REQUIRE(frames.size() == 1);
+  const auto& frame = frames.front();
   CHECK(frame->getCodecId() == mediakit::CodecAAC);
   CHECK(frame->getIndex() == 1);
   CHECK(frame->dts() == 1000);
@@ -111,9 +132,10 @@ TEST_CASE("已有ADTS的AAC AVPacket不会重复添加头部") {
                                           0xfc, 0x21, 0x10, 0x56, 0xe5};
   auto packet = MakePacket(payload, 1, 1000, 1000);
 
-  auto frame = converter.Convert(packet.get());
+  auto frames = converter.Convert(packet);
 
-  REQUIRE(frame);
+  REQUIRE(frames.size() == 1);
+  const auto& frame = frames.front();
   CHECK(frame->prefixSize() == 7);
   REQUIRE(frame->size() == payload.size());
   CHECK(std::memcmp(frame->data(), payload.data(), payload.size()) == 0);
@@ -125,18 +147,61 @@ TEST_CASE("AVPacket转换器拒绝错误的流和时间戳") {
   const std::vector<std::uint8_t> payload{0x00, 0x00, 0x00, 0x01, 0x65};
 
   auto wrong_stream = MakePacket(payload, 1, 0, 0);
-  CHECK_FALSE(converter.Convert(wrong_stream.get()));
+  CHECK(converter.Convert(wrong_stream).empty());
 
   auto missing_timestamp =
       MakePacket(payload, 0, AV_NOPTS_VALUE, AV_NOPTS_VALUE);
-  CHECK_FALSE(converter.Convert(missing_timestamp.get()));
+  CHECK(converter.Convert(missing_timestamp).empty());
 
   auto negative_timestamp = MakePacket(payload, 0, -1, -1);
-  CHECK_FALSE(converter.Convert(negative_timestamp.get()));
+  CHECK(converter.Convert(negative_timestamp).empty());
 
   auto avcc_packet = MakePacket({0x00, 0x00, 0x00, 0x01, 0x65}, 0, 0, 0);
-  avcc_packet->data[3] = 0x02;
-  CHECK_FALSE(converter.Convert(avcc_packet.get()));
+  avcc_packet.get()->data[3] = 0x02;
+  CHECK(converter.Convert(avcc_packet).empty());
+}
+
+TEST_CASE("H264和H265 AVPacket按Annex-B NALU拆分为多个ZLM Frame") {
+  SECTION("H264") {
+    auto parameters = MakeCodecParameters(AV_CODEC_ID_H264);
+    AvPacketToZlmFrameConverter converter(parameters, AVRational{1, 1000}, 0);
+    const std::vector<std::uint8_t> payload{
+        0x00, 0x00, 0x00, 0x01, 0x09, 0xf0, 0x00,
+        0x00, 0x00, 0x01, 0x65, 0x88, 0x84,
+    };
+    auto packet = MakePacket(payload, 0, 25, 40, AV_PKT_FLAG_KEY);
+
+    auto frames = converter.Convert(packet);
+
+    REQUIRE(frames.size() == 2);
+    CHECK_FALSE(frames[0]->keyFrame());
+    CHECK(frames[1]->keyFrame());
+    CHECK(frames[0]->prefixSize() == 4);
+    CHECK(frames[1]->prefixSize() == 4);
+    CHECK(frames[0]->size() == 6);
+    CHECK(frames[1]->size() == 7);
+  }
+
+  SECTION("H265") {
+    auto parameters = MakeCodecParameters(AV_CODEC_ID_HEVC);
+    AvPacketToZlmFrameConverter converter(parameters, AVRational{1, 1000}, 0);
+    const std::vector<std::uint8_t> payload{
+        0x00, 0x00, 0x00, 0x01, 0x46, 0x01, 0x50, 0x00, 0x00, 0x00, 0x01,
+        0x26, 0x01, 0x80, 0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0x00,
+    };
+    auto packet = MakePacket(payload, 0, 25, 40, AV_PKT_FLAG_KEY);
+
+    auto frames = converter.Convert(packet);
+
+    REQUIRE(frames.size() == 3);
+    CHECK_FALSE(frames[0]->keyFrame());
+    CHECK(frames[1]->keyFrame());
+    CHECK_FALSE(frames[2]->keyFrame());
+    for (const auto& frame : frames) {
+      CHECK(frame->prefixSize() == 4);
+      CHECK(frame->size() == 7);
+    }
+  }
 }
 
 TEST_CASE("AVPacket转换器校验固定流参数") {

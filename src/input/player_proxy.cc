@@ -571,7 +571,7 @@ class PlayerProxy::Impl final
                 return left->getIndex() < right->getIndex();
               });
 
-    std::vector<StreamInfo> streams;
+    std::vector<ffmpeg::StreamInfo> streams;
     std::vector<Binding> bindings;
     streams.reserve(tracks.size());
     bindings.reserve(tracks.size());
@@ -587,7 +587,7 @@ class PlayerProxy::Impl final
           std::make_shared<converter::ZlmPacketConverter>(track, stream_index);
 
       packet_converter->SetOnPacket(
-          [weak_self, weak_attempt](const AVPacket* packet) {
+          [weak_self, weak_attempt](const ffmpeg::Packet& packet) {
             auto self = weak_self.lock();
             auto current_attempt = weak_attempt.lock();
             if (!self || !current_attempt ||
@@ -602,7 +602,7 @@ class PlayerProxy::Impl final
             return !self->on_packet_ || self->on_packet_(generation, packet);
           });
 
-      StreamInfo stream;
+      ffmpeg::StreamInfo stream;
       stream.stream_index = stream_index;
       stream.codec_parameters = codec_parameters->codec_parameters();
       stream.time_base = codec_parameters->time_base();
@@ -637,9 +637,10 @@ class PlayerProxy::Impl final
                     std::memory_order_acquire)) {
               return false;
             }
+            auto cached_frame = mediakit::Frame::getCacheAbleFrame(frame);
             self->poller_->async(
                 [weak_self, current_attempt, control_epoch, stream_index,
-                 frame]() {
+                 frame = std::move(cached_frame)]() {
                   if (auto locked = weak_self.lock()) {
                     locked->InputFrameOnPoller(current_attempt, stream_index,
                                                control_epoch, frame);

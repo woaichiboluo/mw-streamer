@@ -26,6 +26,8 @@ namespace {
 
 using mw::streamer::converter::ZlmCodecParametersConverter;
 using mw::streamer::converter::ZlmPacketConverter;
+using mw::streamer::ffmpeg::CodecParameters;
+using mw::streamer::ffmpeg::Packet;
 using mw::streamer::output::OutputConfig;
 using mw::streamer::output::OutputSession;
 
@@ -77,7 +79,7 @@ std::vector<Binding> MakeBindings(
   int stream_index = 0;
   for (const auto& track : tracks) {
     auto converter = std::make_shared<ZlmPacketConverter>(track, stream_index);
-    converter->SetOnPacket([&output](const AVPacket* packet) {
+    converter->SetOnPacket([&output](const Packet& packet) {
       output.Write(packet);
       return true;
     });
@@ -175,12 +177,9 @@ TEST_CASE("OutputSession隔离网络失败并同时生成fMP4和HLS-fMP4") {
 }
 
 TEST_CASE("OutputSession同步拒绝无目标和未知网络协议") {
-  auto parameters = std::shared_ptr<AVCodecParameters>(
-      avcodec_parameters_alloc(),
-      [](AVCodecParameters* value) { avcodec_parameters_free(&value); });
-  REQUIRE(parameters);
-  parameters->codec_type = AVMEDIA_TYPE_VIDEO;
-  parameters->codec_id = AV_CODEC_ID_H264;
+  CodecParameters parameters;
+  parameters.get()->codec_type = AVMEDIA_TYPE_VIDEO;
+  parameters.get()->codec_id = AV_CODEC_ID_H264;
 
   OutputConfig no_target;
   no_target.streams.push_back({0, parameters, AVRational{1, 1000}});
