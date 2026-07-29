@@ -76,7 +76,7 @@ class TestDecoder {
     REQUIRE(avcodec_open2(context_.get(), context_.get()->codec, nullptr) >= 0);
   }
 
-  bool InputPacket(const Packet& packet) {
+  bool Decode(const Packet& packet) {
     for (;;) {
       const auto result = avcodec_send_packet(context_.get(), packet.get());
       if (result == AVERROR(EAGAIN)) {
@@ -89,7 +89,7 @@ class TestDecoder {
     }
   }
 
-  bool Flush() {
+  bool Drain() {
     for (;;) {
       const auto result = avcodec_send_packet(context_.get(), nullptr);
       if (result == AVERROR(EAGAIN)) {
@@ -102,7 +102,7 @@ class TestDecoder {
     }
   }
 
-  void Reset() { context_.FlushBuffers(); }
+  void Flush() { context_.FlushBuffers(); }
 
   std::size_t decoded_frame_count() const { return decoded_frame_count_; }
 
@@ -207,7 +207,7 @@ std::shared_ptr<Binding> MakeBinding(const Track::Ptr& track,
                                        packet->data + packet->size);
       binding->retained_packet = packet;
     }
-    return binding->decoder->InputPacket(packet);
+    return binding->decoder->Decode(packet);
   });
   return binding;
 }
@@ -318,9 +318,9 @@ TEST_CASE("ZLM MP4 frames become owned decodable AVPackets") {
           if (video_input_count == 10) {
             auto& binding = bindings.at(frame->getIndex());
             REQUIRE(binding->packet_converter->Flush());
-            binding->decoder->Flush();
+            binding->decoder->Drain();
             binding->packet_converter->Reset();
-            binding->decoder->Reset();
+            binding->decoder->Flush();
             reset_done = true;
           }
         }
@@ -330,7 +330,7 @@ TEST_CASE("ZLM MP4 frames become owned decodable AVPackets") {
       for (const auto& entry : bindings) {
         auto& binding = entry.second;
         REQUIRE(binding->packet_converter->Flush());
-        REQUIRE(binding->decoder->Flush());
+        REQUIRE(binding->decoder->Drain());
         CHECK(binding->valid_packets);
         CHECK(binding->packet_count > 0);
         CHECK(binding->decoder->decoded_frame_count() > 0);
@@ -414,7 +414,7 @@ TEST_CASE("VP8 and VP9 packets preserve payload and decode through callbacks") {
                                                packet->data + packet->size);
               binding->retained_packet = packet;
             }
-            return binding->decoder->InputPacket(packet);
+            return binding->decoder->Decode(packet);
           });
 
       std::size_t offset = 32;
@@ -439,7 +439,7 @@ TEST_CASE("VP8 and VP9 packets preserve payload and decode through callbacks") {
 
       REQUIRE(offset == file.size());
       REQUIRE(binding->packet_converter->Flush());
-      REQUIRE(binding->decoder->Flush());
+      REQUIRE(binding->decoder->Drain());
 
       CHECK(binding->valid_packets);
       CHECK(binding->packet_count == 10);

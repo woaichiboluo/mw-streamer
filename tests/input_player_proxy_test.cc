@@ -174,6 +174,75 @@ TEST_CASE("input player proxy does not retry a failed finite input") {
   StopAndWait(proxy);
 }
 
+TEST_CASE("explicit restart establishes a new stream description baseline") {
+  auto proxy = std::make_shared<PlayerProxy>();
+  std::mutex mutex;
+  std::condition_variable condition;
+  std::atomic_size_t streams_ready = 0;
+  std::atomic_size_t ended = 0;
+  std::atomic<AVCodecID> first_video_codec = AV_CODEC_ID_NONE;
+  std::atomic<AVCodecID> second_video_codec = AV_CODEC_ID_NONE;
+  std::atomic_bool valid_streams = true;
+
+  proxy->SetOnStreamsReady(
+      [&](std::uint64_t generation,
+          const std::vector<mw::streamer::ffmpeg::StreamInfo>& streams) {
+        if (generation == 1) {
+          if (streams.size() != 2) {
+            valid_streams = false;
+          }
+          for (const auto& stream : streams) {
+            if (stream.codec_parameters.get()->codec_type ==
+                AVMEDIA_TYPE_VIDEO) {
+              first_video_codec = stream.codec_parameters.get()->codec_id;
+            }
+          }
+        } else if (generation == 2) {
+          if (streams.size() != 1 ||
+              streams.front().codec_parameters.get()->codec_type !=
+                  AVMEDIA_TYPE_VIDEO) {
+            valid_streams = false;
+          } else {
+            second_video_codec =
+                streams.front().codec_parameters.get()->codec_id;
+          }
+        } else {
+          valid_streams = false;
+        }
+        ++streams_ready;
+      });
+  proxy->SetOnPacket([](std::uint64_t, const Packet&) { return true; });
+  proxy->SetOnState([&](std::uint64_t generation, PlayerState state,
+                        const SockException&, bool will_retry) {
+    if (will_retry) {
+      valid_streams = false;
+    }
+    if (state != PlayerState::kEnded) {
+      return;
+    }
+    ++ended;
+    if (generation == 1) {
+      proxy->Start(SamplePath("h265_video.mp4"));
+    } else if (generation == 2) {
+      condition.notify_all();
+    } else {
+      valid_streams = false;
+    }
+  });
+
+  proxy->Start(SamplePath());
+
+  REQUIRE(WaitFor(
+      condition, mutex, [&]() { return ended.load() == 2; }, 8s));
+  CHECK(valid_streams);
+  CHECK(streams_ready == 2);
+  CHECK(first_video_codec == AV_CODEC_ID_H264);
+  CHECK(second_video_codec == AV_CODEC_ID_HEVC);
+  CHECK(proxy->generation() == 2);
+
+  StopAndWait(proxy);
+}
+
 TEST_CASE(
     "input player proxy retries a failed live input with the configured "
     "budget") {

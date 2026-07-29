@@ -162,6 +162,8 @@ TEST_CASE("zero-duration packet queue forwards packets immediately") {
   bool forwarded_synchronously = true;
   bool queue_stayed_empty = true;
   bool callback_on_poller = true;
+  std::size_t generation_end_count = 0;
+  std::size_t output_count_at_generation_end = 0;
 
   queue->SetOnPacket([&](std::uint64_t generation, const Packet& packet) {
     callback_on_poller = callback_on_poller && generation == 1 &&
@@ -170,6 +172,12 @@ TEST_CASE("zero-duration packet queue forwards packets immediately") {
       return;
     }
     outputs.emplace_back(packet->stream_index, packet->dts);
+  });
+  queue->SetOnGenerationEnd([&](std::uint64_t generation) {
+    callback_on_poller = callback_on_poller && generation == 1 &&
+                         queue->poller()->isCurrentThread();
+    ++generation_end_count;
+    output_count_at_generation_end = outputs.size();
   });
 
   RunOnPollerAndWait(queue->poller(), [&]() {
@@ -189,10 +197,14 @@ TEST_CASE("zero-duration packet queue forwards packets immediately") {
   CHECK(callback_on_poller);
   CHECK(queue->state() == PacketQueueState::kPlaying);
 
-  queue->EndInput(1);
-  RunOnPollerAndWait(queue->poller(), []() {});
+  RunOnPollerAndWait(queue->poller(), [&]() {
+    queue->EndInput(1);
+    queue->EndInput(1);
+  });
   CHECK(queue->state() == PacketQueueState::kStarved);
   CHECK(queue->packet_count() == 0);
+  CHECK(generation_end_count == 1);
+  CHECK(output_count_at_generation_end == inputs.size());
 
   StopAndWait(queue);
 }
@@ -504,6 +516,7 @@ TEST_CASE("new generation atomically clears the old packet timeline") {
   std::atomic_bool reset_seen = false;
   std::atomic_bool old_packet_after_reset = false;
   std::atomic_bool reset_cleared_packets = false;
+  std::vector<std::uint64_t> ended_generations;
 
   queue->SetOnTimelineReset([&](std::uint64_t generation) {
     if (generation == 2) {
@@ -522,6 +535,9 @@ TEST_CASE("new generation atomically clears the old packet timeline") {
       ++generation_two_outputs;
     }
     condition.notify_all();
+  });
+  queue->SetOnGenerationEnd([&](std::uint64_t generation) {
+    ended_generations.push_back(generation);
   });
 
   RunOnPollerAndWait(queue->poller(), [&]() {
@@ -555,6 +571,7 @@ TEST_CASE("new generation atomically clears the old packet timeline") {
   CHECK(timeline_resets == 1);
   CHECK_FALSE(old_packet_after_reset);
   CHECK(generation_one_outputs < 42);
+  CHECK(ended_generations == std::vector<std::uint64_t>{2});
   CHECK(queue->generation() == 2);
   CHECK(queue->packet_count() == 0);
   CHECK(queue->state() == PacketQueueState::kStarved);

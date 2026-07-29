@@ -43,6 +43,7 @@ class PacketQueue final {
   using OnState =
       std::function<void(std::uint64_t generation, PacketQueueState state)>;
   using OnTimelineReset = std::function<void(std::uint64_t generation)>;
+  using OnGenerationEnd = std::function<void(std::uint64_t generation)>;
 
   // A zero duration enables immediate forwarding. Other supported durations
   // are from one to thirty seconds, inclusive.
@@ -58,7 +59,13 @@ class PacketQueue final {
   // it.
   void SetOnPacket(OnPacket callback);
   void SetOnState(OnState callback);
+  // Called when a newer generation atomically discards the previous timeline.
+  // Downstream timeline-local state should be flushed here.
   void SetOnTimelineReset(OnTimelineReset callback);
+  // Called exactly once after EndInput when every cached packet in that
+  // generation has been delivered. Replacing a generation does not emit this
+  // callback for the discarded generation. Downstream decoders may drain here.
+  void SetOnGenerationEnd(OnGenerationEnd callback);
 
   // One audio stream, one video stream, or one of each is required. Calling
   // SetStreams with a newer generation atomically clears the previous

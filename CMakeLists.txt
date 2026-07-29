@@ -26,6 +26,7 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 include(cmake/Dependencies.cmake)
 
 find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVUTIL SWRESAMPLE)
+find_package(CUDAToolkit REQUIRED)
 find_package(SRT REQUIRED)
 
 add_subdirectory(third_party/ZLMediaKit)
@@ -35,11 +36,13 @@ add_library(mw_streamer STATIC
     src/converter/av_packet_to_zlm_frame_converter.cc
     src/converter/zlm_codec_parameters_converter.cc
     src/converter/zlm_packet_converter.cc
-    src/ffmpeg/audio_decoder.cc
+    src/decoder/audio_decoder.cc
+    src/decoder/video_decoder.cc
     src/ffmpeg/codec_context.cc
     src/ffmpeg/codec_parameters.cc
     src/ffmpeg/error.cc
     src/ffmpeg/frame.cc
+    src/ffmpeg/hardware_context.cc
     src/ffmpeg/packet.cc
     src/ffmpeg/stream_info.cc
     src/init/init.cc
@@ -47,6 +50,7 @@ add_library(mw_streamer STATIC
     src/log/logging.cc
     src/output/output_session.cc
     src/output/recording_target.cc
+    src/resampler/audio_resampler.cc
 )
 add_library(mw::streamer ALIAS mw_streamer)
 
@@ -66,6 +70,7 @@ target_link_libraries(mw_streamer
         fmt::fmt
     PRIVATE
         SRT::SRT
+        CUDA::cuda_driver
         ZLMediaKit::ext-codec
         ZLMediaKit::SRT
         spdlog::spdlog

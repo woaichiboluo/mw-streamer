@@ -1,4 +1,4 @@
-#include "mw/ffmpeg/audio_decoder.h"
+#include "mw/decoder/audio_decoder.h"
 
 #include <cerrno>
 #include <cstddef>
@@ -14,19 +14,31 @@ extern "C" {
 #include "mw/ffmpeg/codec_context.h"
 #include "mw/ffmpeg/error.h"
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer::decoder {
 namespace {
 
-const AVCodec* FindAudioDecoder(const StreamInfo& stream_info) {
+const AVCodec* FindAudioDecoder(const ffmpeg::StreamInfo& stream_info,
+                                const AudioDecoderConfig& config) {
   stream_info.Validate();
   const auto* parameters = stream_info.codec_parameters.get();
   if (parameters->codec_type != AVMEDIA_TYPE_AUDIO) {
     throw std::invalid_argument("AudioDecoder只接受音频流");
   }
-  const auto* codec = avcodec_find_decoder(parameters->codec_id);
+
+  const auto* codec =
+      config.decoder_name.empty()
+          ? avcodec_find_decoder(parameters->codec_id)
+          : avcodec_find_decoder_by_name(config.decoder_name.c_str());
   if (!codec) {
+    throw std::invalid_argument(fmt::format(
+        "找不到音频解码器: codec_id={}, decoder_name={}",
+        static_cast<int>(parameters->codec_id), config.decoder_name));
+  }
+  if (codec->type != AVMEDIA_TYPE_AUDIO || codec->id != parameters->codec_id) {
     throw std::invalid_argument(
-        fmt::format("找不到音频解码器: codec_id={}",
+        fmt::format("音频解码器与输入编码不匹配: decoder_name={}, "
+                    "decoder_codec_id={}, input_codec_id={}",
+                    codec->name, static_cast<int>(codec->id),
                     static_cast<int>(parameters->codec_id)));
   }
   return codec;
@@ -36,27 +48,29 @@ const AVCodec* FindAudioDecoder(const StreamInfo& stream_info) {
 
 class AudioDecoder::Impl final {
  public:
-  explicit Impl(StreamInfo stream_info)
+  Impl(ffmpeg::StreamInfo stream_info, AudioDecoderConfig config)
       : stream_info_(std::move(stream_info)),
-        context_(FindAudioDecoder(stream_info_)) {
+        config_(std::move(config)),
+        context_(FindAudioDecoder(stream_info_, config_)) {
     const auto* codec = context_.get()->codec;
-    ThrowIfError(avcodec_parameters_to_context(
-                     context_.get(), stream_info_.codec_parameters.get()),
-                 "复制音频解码参数");
+    ffmpeg::ThrowIfError(
+        avcodec_parameters_to_context(context_.get(),
+                                      stream_info_.codec_parameters.get()),
+        "复制音频解码参数");
     context_.get()->pkt_timebase = stream_info_.time_base;
-    ThrowIfError(avcodec_open2(context_.get(), codec, nullptr),
-                 "打开音频解码器");
+    ffmpeg::ThrowIfError(avcodec_open2(context_.get(), codec, nullptr),
+                         "打开音频解码器");
   }
 
   void SetOnFrame(OnFrame callback) { on_frame_ = std::move(callback); }
 
-  void Decode(const Packet& packet) {
+  void Decode(const ffmpeg::Packet& packet) {
     const auto* raw_packet = packet.get();
     if (!raw_packet || raw_packet->stream_index != stream_info_.stream_index) {
       throw std::invalid_argument("音频AVPacket为空或stream_index不匹配");
     }
     if (drained_) {
-      throw std::logic_error("AudioDecoder已Drain，必须Reset后才能继续解码");
+      throw std::logic_error("AudioDecoder已Drain，必须Flush后才能继续解码");
     }
 
     SendPacket(raw_packet);
@@ -76,7 +90,7 @@ class AudioDecoder::Impl final {
         continue;
       }
       if (result != AVERROR_EOF) {
-        ThrowIfError(result, "提交音频解码结束标记");
+        ffmpeg::ThrowIfError(result, "提交音频解码结束标记");
       }
       break;
     }
@@ -85,13 +99,17 @@ class AudioDecoder::Impl final {
     drained_ = true;
   }
 
-  void Reset() {
+  void Flush() {
     context_.FlushBuffers();
     frame_.Unref();
     drained_ = false;
   }
 
-  const StreamInfo& stream_info() const noexcept { return stream_info_; }
+  const ffmpeg::StreamInfo& stream_info() const noexcept {
+    return stream_info_;
+  }
+
+  const AudioDecoderConfig& config() const noexcept { return config_; }
 
  private:
   void SendPacket(const AVPacket* packet) {
@@ -103,7 +121,7 @@ class AudioDecoder::Impl final {
         }
         continue;
       }
-      ThrowIfError(result, "提交音频压缩包");
+      ffmpeg::ThrowIfError(result, "提交音频压缩包");
       break;
     }
     ReceiveFrames();
@@ -117,7 +135,7 @@ class AudioDecoder::Impl final {
       if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) {
         return frame_count;
       }
-      ThrowIfError(result, "接收音频解码帧");
+      ffmpeg::ThrowIfError(result, "接收音频解码帧");
       ++frame_count;
       if (on_frame_) {
         on_frame_(frame_);
@@ -125,15 +143,18 @@ class AudioDecoder::Impl final {
     }
   }
 
-  StreamInfo stream_info_;
-  CodecContext context_;
-  Frame frame_;
+  ffmpeg::StreamInfo stream_info_;
+  AudioDecoderConfig config_;
+  ffmpeg::CodecContext context_;
+  ffmpeg::Frame frame_;
   OnFrame on_frame_;
   bool drained_ = false;
 };
 
-AudioDecoder::AudioDecoder(StreamInfo stream_info)
-    : impl_(std::make_unique<Impl>(std::move(stream_info))) {}
+AudioDecoder::AudioDecoder(ffmpeg::StreamInfo stream_info,
+                           AudioDecoderConfig config)
+    : impl_(std::make_unique<Impl>(std::move(stream_info), std::move(config))) {
+}
 
 AudioDecoder::~AudioDecoder() = default;
 
@@ -141,14 +162,20 @@ void AudioDecoder::SetOnFrame(OnFrame callback) {
   impl_->SetOnFrame(std::move(callback));
 }
 
-void AudioDecoder::Decode(const Packet& packet) { impl_->Decode(packet); }
+void AudioDecoder::Decode(const ffmpeg::Packet& packet) {
+  impl_->Decode(packet);
+}
 
 void AudioDecoder::Drain() { impl_->Drain(); }
 
-void AudioDecoder::Reset() { impl_->Reset(); }
+void AudioDecoder::Flush() { impl_->Flush(); }
 
-const StreamInfo& AudioDecoder::stream_info() const noexcept {
+const ffmpeg::StreamInfo& AudioDecoder::stream_info() const noexcept {
   return impl_->stream_info();
 }
 
-}  // namespace mw::streamer::ffmpeg
+const AudioDecoderConfig& AudioDecoder::config() const noexcept {
+  return impl_->config();
+}
+
+}  // namespace mw::streamer::decoder

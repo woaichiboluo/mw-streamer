@@ -431,18 +431,24 @@ bool H264Track::inputFrame_l(const Frame::Ptr &frame) {
         // AUD帧丢弃
         return false;
     }
-    bool ret = true;
+    bool was_ready = ready();
+    bool config_changed = false;
+    bool is_config = false;
     switch (type) {
         case H264Frame::NAL_SPS: {
-            _sps = string(frame->data() + frame->prefixSize(), frame->size() - frame->prefixSize());
+            auto sps = string(frame->data() + frame->prefixSize(), frame->size() - frame->prefixSize());
+            config_changed = _sps != sps;
+            _sps = std::move(sps);
             _latest_is_sps = true;
-            ret = VideoTrack::inputFrame(frame);
+            is_config = true;
             break;
         }
         case H264Frame::NAL_PPS: {
-            _pps = string(frame->data() + frame->prefixSize(), frame->size() - frame->prefixSize());
+            auto pps = string(frame->data() + frame->prefixSize(), frame->size() - frame->prefixSize());
+            config_changed = _pps != pps;
+            _pps = std::move(pps);
             _latest_is_pps = true;
-            ret = VideoTrack::inputFrame(frame);
+            is_config = true;
             break;
         }
         default:
@@ -462,14 +468,13 @@ bool H264Track::inputFrame_l(const Frame::Ptr &frame) {
                 _latest_is_pps = false;
                 _latest_is_sps = false;
             }
-            ret = VideoTrack::inputFrame(frame);
             break;
     }
 
-    if (_width == 0 && ready()) {
+    if (is_config && ready() && (config_changed || !was_ready)) {
         update();
     }
-    return ret;
+    return VideoTrack::inputFrame(frame);
 }
 
 void H264Track::insertConfigFrame(const Frame::Ptr &frame) {

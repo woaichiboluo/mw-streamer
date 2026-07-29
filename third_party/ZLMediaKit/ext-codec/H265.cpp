@@ -357,24 +357,32 @@ bool H265Track::inputFrame(const Frame::Ptr &frame) {
 
 bool H265Track::inputFrame_l(const Frame::Ptr &frame) {
     int type = H265_TYPE(frame->data()[frame->prefixSize()]);
-    bool ret = true;
+    bool was_ready = ready();
+    bool config_changed = false;
+    bool is_config = false;
     switch (type) {
         case H265Frame::NAL_VPS: {
-            _vps = string(frame->data() + frame->prefixSize(), frame->size() - frame->prefixSize());
+            auto vps = string(frame->data() + frame->prefixSize(), frame->size() - frame->prefixSize());
+            config_changed = _vps != vps;
+            _vps = std::move(vps);
             _latest_is_config_frame = true;
-            ret = VideoTrack::inputFrame(frame);
+            is_config = true;
             break;
         }
         case H265Frame::NAL_SPS: {
-            _sps = string(frame->data() + frame->prefixSize(), frame->size() - frame->prefixSize());
+            auto sps = string(frame->data() + frame->prefixSize(), frame->size() - frame->prefixSize());
+            config_changed = _sps != sps;
+            _sps = std::move(sps);
             _latest_is_config_frame = true;
-            ret = VideoTrack::inputFrame(frame);
+            is_config = true;
             break;
         }
         case H265Frame::NAL_PPS: {
-            _pps = string(frame->data() + frame->prefixSize(), frame->size() - frame->prefixSize());
+            auto pps = string(frame->data() + frame->prefixSize(), frame->size() - frame->prefixSize());
+            config_changed = _pps != pps;
+            _pps = std::move(pps);
             _latest_is_config_frame = true;
-            ret = VideoTrack::inputFrame(frame);
+            is_config = true;
             break;
         }
         default: {
@@ -385,14 +393,14 @@ bool H265Track::inputFrame_l(const Frame::Ptr &frame) {
             if (!frame->dropAble()) {
                 _latest_is_config_frame = false;
             }
-            ret = VideoTrack::inputFrame(frame);
             break;
         }
     }
-    if (_width == 0 && ready()) {
+
+    if (is_config && ready() && (config_changed || !was_ready)) {
         update();
     }
-    return ret;
+    return VideoTrack::inputFrame(frame);
 }
 
 toolkit::Buffer::Ptr H265Track::getExtraData() const {
@@ -680,4 +688,3 @@ CodecPlugin h265_plugin = { getCodec,
                             getFrameFromPtr };
 
 }//namespace mediakit
-

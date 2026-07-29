@@ -2,8 +2,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <utility>
+
+extern "C" {
+#include <libavutil/channel_layout.h>
+}
+
+#include <fmt/format.h>
 
 #include "Common/config.h"
 #include "Extension/Frame.h"
@@ -29,6 +37,161 @@ void ValidatePolicy(const ReconnectPolicy& policy) {
   if (policy.delay_step.count() <= 0) {
     throw std::invalid_argument("delay_step必须大于0");
   }
+}
+
+bool EqualRational(AVRational left, AVRational right) {
+  return av_cmp_q(left, right) == 0;
+}
+
+bool EqualBytes(const std::uint8_t* left, const std::uint8_t* right,
+                std::size_t size) {
+  return size == 0 || (left && right && std::memcmp(left, right, size) == 0);
+}
+
+std::uint64_t HashBytes(const std::uint8_t* data, std::size_t size) {
+  constexpr std::uint64_t kOffsetBasis = 14695981039346656037ULL;
+  constexpr std::uint64_t kPrime = 1099511628211ULL;
+  auto hash = kOffsetBasis;
+  for (std::size_t index = 0; data && index < size; ++index) {
+    hash ^= data[index];
+    hash *= kPrime;
+  }
+  return hash;
+}
+
+bool EqualCodedSideData(const AVCodecParameters& left,
+                        const AVCodecParameters& right) {
+  if (left.nb_coded_side_data != right.nb_coded_side_data) {
+    return false;
+  }
+  for (int index = 0; index < left.nb_coded_side_data; ++index) {
+    const auto& left_data = left.coded_side_data[index];
+    const auto& right_data = right.coded_side_data[index];
+    if (left_data.type != right_data.type ||
+        left_data.size != right_data.size ||
+        !EqualBytes(left_data.data, right_data.data, left_data.size)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::optional<std::string> FindCodecParametersDifference(
+    const AVCodecParameters& left, const AVCodecParameters& right) {
+  if (left.codec_type != right.codec_type) {
+    return "codec_type";
+  }
+  if (left.codec_id != right.codec_id) {
+    return "codec_id";
+  }
+  if (left.codec_tag != right.codec_tag) {
+    return "codec_tag";
+  }
+  if (left.format != right.format) {
+    return "format";
+  }
+  if (left.bits_per_coded_sample != right.bits_per_coded_sample) {
+    return "bits_per_coded_sample";
+  }
+  if (left.bits_per_raw_sample != right.bits_per_raw_sample) {
+    return "bits_per_raw_sample";
+  }
+  if (left.profile != right.profile) {
+    return "profile";
+  }
+  if (left.level != right.level) {
+    return "level";
+  }
+  if (!EqualCodedSideData(left, right)) {
+    return "coded_side_data";
+  }
+
+  if (left.codec_type == AVMEDIA_TYPE_VIDEO) {
+    if (left.width != right.width || left.height != right.height) {
+      return fmt::format("dimensions({}x{}/{}x{})", left.width, left.height,
+                         right.width, right.height);
+    }
+    if (!EqualRational(left.sample_aspect_ratio, right.sample_aspect_ratio)) {
+      return "sample_aspect_ratio";
+    }
+    if (!EqualRational(left.framerate, right.framerate)) {
+      return "framerate";
+    }
+    if (left.field_order != right.field_order) {
+      return "field_order";
+    }
+    if (left.color_range != right.color_range ||
+        left.color_primaries != right.color_primaries ||
+        left.color_trc != right.color_trc ||
+        left.color_space != right.color_space ||
+        left.chroma_location != right.chroma_location) {
+      return "color_description";
+    }
+    if (left.video_delay != right.video_delay) {
+      return "video_delay";
+    }
+    return std::nullopt;
+  }
+
+  if (left.codec_type == AVMEDIA_TYPE_AUDIO) {
+    if (left.extradata_size != right.extradata_size ||
+        !EqualBytes(left.extradata, right.extradata, left.extradata_size)) {
+      return fmt::format("extradata(size={}/{}, hash={:x}/{:x})",
+                         left.extradata_size, right.extradata_size,
+                         HashBytes(left.extradata, left.extradata_size),
+                         HashBytes(right.extradata, right.extradata_size));
+    }
+    if (av_channel_layout_compare(&left.ch_layout, &right.ch_layout) != 0) {
+      return "ch_layout";
+    }
+    if (left.sample_rate != right.sample_rate) {
+      return "sample_rate";
+    }
+    if (left.block_align != right.block_align) {
+      return "block_align";
+    }
+    if (left.frame_size != right.frame_size) {
+      return "frame_size";
+    }
+    if (left.initial_padding != right.initial_padding) {
+      return "initial_padding";
+    }
+    if (left.trailing_padding != right.trailing_padding) {
+      return "trailing_padding";
+    }
+    if (left.seek_preroll != right.seek_preroll) {
+      return "seek_preroll";
+    }
+    return std::nullopt;
+  }
+  return "unsupported_media_type";
+}
+
+std::optional<std::string> FindStreamsDifference(
+    const std::vector<ffmpeg::StreamInfo>& left,
+    const std::vector<ffmpeg::StreamInfo>& right) {
+  if (left.size() != right.size()) {
+    return "track_count";
+  }
+  for (std::size_t index = 0; index < left.size(); ++index) {
+    const auto* left_parameters = left[index].codec_parameters.get();
+    const auto* right_parameters = right[index].codec_parameters.get();
+    if (left[index].stream_index != right[index].stream_index) {
+      return fmt::format("stream[{}].stream_index", index);
+    }
+    if (!EqualRational(left[index].time_base, right[index].time_base)) {
+      return fmt::format("stream[{}].time_base", index);
+    }
+    if (!left_parameters || !right_parameters) {
+      return fmt::format("stream[{}].codec_parameters", index);
+    }
+    if (const auto difference =
+            FindCodecParametersDifference(*left_parameters, *right_parameters);
+        difference) {
+      return fmt::format("stream[{}].{}", index, *difference);
+    }
+  }
+  return std::nullopt;
 }
 
 }  // namespace
@@ -188,6 +351,7 @@ class PlayerProxy::Impl final
     TeardownAttemptOnPoller();
     url_ = std::move(url);
     options_ = std::move(options);
+    initial_streams_.reset();
     consecutive_failures_ = 0;
     BeginAttemptOnPoller();
   }
@@ -615,6 +779,15 @@ class PlayerProxy::Impl final
       ++stream_index;
     }
 
+    if (!initial_streams_) {
+      initial_streams_ = streams;
+    } else if (const auto difference =
+                   FindStreamsDifference(*initial_streams_, streams)) {
+      throw std::runtime_error(fmt::format(
+          "重连后的媒体流结构或解码参数发生变化，当前链路不支持: {}",
+          *difference));
+    }
+
     attempt->bindings = std::move(bindings);
     if (on_streams_ready_) {
       on_streams_ready_(AttemptGeneration(attempt), streams);
@@ -746,6 +919,7 @@ class PlayerProxy::Impl final
   ReconnectPolicy reconnect_policy_;
   toolkit::mINI options_;
   std::string url_;
+  std::optional<std::vector<ffmpeg::StreamInfo>> initial_streams_;
   std::shared_ptr<Attempt> attempt_;
   toolkit::TaskCancelableImp<std::uint64_t()>::Ptr retry_task_;
 

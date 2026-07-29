@@ -166,8 +166,8 @@ Arguments ParseArguments(int argc, char* argv[]) {
       arguments.cache_duration =
           ParseMilliseconds(RequireValue(argc, argv, index), "--cache-ms", 0);
     } else if (option == "--duration-ms") {
-      arguments.duration =
-          ParseMilliseconds(RequireValue(argc, argv, index), "--duration-ms", 1);
+      arguments.duration = ParseMilliseconds(RequireValue(argc, argv, index),
+                                             "--duration-ms", 1);
     } else {
       throw std::invalid_argument("未知参数: " + option);
     }
@@ -228,66 +228,66 @@ int Run(const Arguments& arguments) {
     }
   });
 
-  player->SetOnStreamsReady(
-      [&](std::uint64_t generation,
-          const std::vector<StreamInfo>& streams) {
-        std::vector<PacketStream> packet_streams;
-        std::vector<StreamInfo> output_streams;
-        packet_streams.reserve(streams.size());
-        output_streams.reserve(streams.size());
-        audio_stream_index.store(-1, std::memory_order_relaxed);
-        video_stream_index.store(-1, std::memory_order_relaxed);
-        audio_packets.store(0, std::memory_order_relaxed);
-        video_packets.store(0, std::memory_order_relaxed);
-        total_packets.store(0, std::memory_order_relaxed);
-        packet_generation.store(generation, std::memory_order_relaxed);
+  player->SetOnStreamsReady([&](std::uint64_t generation,
+                                const std::vector<StreamInfo>& streams) {
+    std::vector<PacketStream> packet_streams;
+    std::vector<StreamInfo> output_streams;
+    packet_streams.reserve(streams.size());
+    output_streams.reserve(streams.size());
+    audio_stream_index.store(-1, std::memory_order_relaxed);
+    video_stream_index.store(-1, std::memory_order_relaxed);
+    audio_packets.store(0, std::memory_order_relaxed);
+    video_packets.store(0, std::memory_order_relaxed);
+    total_packets.store(0, std::memory_order_relaxed);
+    packet_generation.store(generation, std::memory_order_relaxed);
 
-        for (const auto& stream : streams) {
-          const auto media_type = stream.codec_parameters.get()->codec_type;
-          packet_streams.push_back(
-              {stream.stream_index, media_type, stream.time_base});
-          output_streams.push_back(
-              {stream.stream_index, stream.codec_parameters, stream.time_base});
-          if (media_type == AVMEDIA_TYPE_AUDIO) {
-            audio_stream_index.store(stream.stream_index,
-                                     std::memory_order_relaxed);
-          } else if (media_type == AVMEDIA_TYPE_VIDEO) {
-            video_stream_index.store(stream.stream_index,
-                                     std::memory_order_relaxed);
-          }
-          events.Write("stream",
-                       {{"generation", std::to_string(generation)},
-                        {"stream_index", std::to_string(stream.stream_index)},
-                        {"media_type", ToString(media_type)},
-                        {"codec_id",
-                         std::to_string(
-                             stream.codec_parameters.get()->codec_id)}});
-        }
+    for (const auto& stream : streams) {
+      const auto media_type = stream.codec_parameters.get()->codec_type;
+      packet_streams.push_back(
+          {stream.stream_index, media_type, stream.time_base});
+      output_streams.push_back(
+          {stream.stream_index, stream.codec_parameters, stream.time_base});
+      if (media_type == AVMEDIA_TYPE_AUDIO) {
+        audio_stream_index.store(stream.stream_index,
+                                 std::memory_order_relaxed);
+      } else if (media_type == AVMEDIA_TYPE_VIDEO) {
+        video_stream_index.store(stream.stream_index,
+                                 std::memory_order_relaxed);
+      }
+      events.Write("stream",
+                   {{"generation", std::to_string(generation)},
+                    {"stream_index", std::to_string(stream.stream_index)},
+                    {"media_type", ToString(media_type)},
+                    {"codec_id",
+                     std::to_string(stream.codec_parameters.get()->codec_id)}});
+    }
 
-        queue->SetStreams(generation, std::move(packet_streams));
-        if (!output && !arguments.outputs.empty()) {
-          OutputConfig config;
-          config.streams = std::move(output_streams);
-          config.targets = arguments.outputs;
-          output = std::make_shared<OutputSession>(std::move(config), poller);
-          output->Open();
-          events.Write(
-              "output_opened",
-              {{"target_count", std::to_string(arguments.outputs.size())}});
-        }
-        events.Write("streams_ready",
-                     {{"generation", std::to_string(generation)},
-                      {"stream_count", std::to_string(streams.size())}});
-      });
+    queue->SetStreams(generation, std::move(packet_streams));
+    if (!output && !arguments.outputs.empty()) {
+      OutputConfig config;
+      config.streams = std::move(output_streams);
+      config.targets = arguments.outputs;
+      output = std::make_shared<OutputSession>(std::move(config), poller);
+      output->Open();
+      events.Write(
+          "output_opened",
+          {{"target_count", std::to_string(arguments.outputs.size())}});
+    }
+    events.Write("streams_ready",
+                 {{"generation", std::to_string(generation)},
+                  {"stream_count", std::to_string(streams.size())}});
+  });
   player->SetOnPacket([&](std::uint64_t generation, const Packet& packet) {
     return queue->Input(generation, packet);
   });
   player->SetOnState([&](std::uint64_t generation, PlayerState state,
-                         const toolkit::SockException&, bool will_retry) {
+                         const toolkit::SockException& reason,
+                         bool will_retry) {
     if (state == PlayerState::kReady) {
       ready_seen.store(true, std::memory_order_relaxed);
     }
-    if (state == PlayerState::kEnded || state == PlayerState::kFailed) {
+    if (state == PlayerState::kWaitingRetry || state == PlayerState::kEnded ||
+        state == PlayerState::kFailed) {
       queue->EndInput(generation);
     }
     if (state == PlayerState::kFailed) {
@@ -295,6 +295,7 @@ int Run(const Arguments& arguments) {
     }
     events.Write("player_state", {{"generation", std::to_string(generation)},
                                   {"state", ToString(state)},
+                                  {"reason", reason.what()},
                                   {"will_retry", will_retry ? "1" : "0"},
                                   {"reconnect_count",
                                    std::to_string(player->reconnect_count())}});

@@ -98,6 +98,13 @@ class PacketQueue::Impl final
         });
   }
 
+  void SetOnGenerationEnd(OnGenerationEnd callback) {
+    Dispatch(
+        [self = shared_from_this(), callback = std::move(callback)]() mutable {
+          self->on_generation_end_ = std::move(callback);
+        });
+  }
+
   void SetStreams(std::uint64_t generation, std::vector<PacketStream> streams) {
     Dispatch([self = shared_from_this(), generation,
               streams = std::move(streams)]() mutable {
@@ -337,7 +344,7 @@ class PacketQueue::Impl final
 
     input_ended_ = true;
     if (IsImmediateForwarding()) {
-      NotifyStateOnPoller(PacketQueueState::kStarved);
+      NotifyStarvedIfEmptyOnPoller(generation);
       return;
     }
 
@@ -345,6 +352,10 @@ class PacketQueue::Impl final
          state() == PacketQueueState::kStarved) &&
         NextPacket()) {
       StartOutputOnPoller();
+      return;
+    }
+    if (!NextPacket()) {
+      NotifyStarvedIfEmptyOnPoller(generation);
     }
   }
 
@@ -459,7 +470,7 @@ class PacketQueue::Impl final
   void StartOutputOnPoller() {
     const auto* next = NextPacket();
     if (!next) {
-      NotifyStateOnPoller(PacketQueueState::kStarved);
+      NotifyStarvedIfEmptyOnPoller(generation());
       return;
     }
 
@@ -535,7 +546,7 @@ class PacketQueue::Impl final
 
     const auto* next = NextPacket();
     if (!next) {
-      NotifyStateOnPoller(PacketQueueState::kStarved);
+      NotifyStarvedIfEmptyOnPoller(generation());
       return;
     }
 
@@ -591,7 +602,7 @@ class PacketQueue::Impl final
     if (NextPacket()) {
       ScheduleNextPacketOnPoller();
     } else {
-      NotifyStateOnPoller(PacketQueueState::kStarved);
+      NotifyStarvedIfEmptyOnPoller(output_generation);
     }
   }
 
@@ -606,6 +617,7 @@ class PacketQueue::Impl final
     clock_media_us_ = 0;
     clock_wall_ = {};
     input_ended_ = false;
+    generation_ended_ = false;
     resume_state_ = PacketQueueState::kFilling;
     NotifyStateOnPoller(PacketQueueState::kFilling);
   }
@@ -630,6 +642,7 @@ class PacketQueue::Impl final
     packet_count_.store(0, std::memory_order_relaxed);
     streams_configured_ = false;
     input_ended_ = false;
+    generation_ended_ = false;
     NotifyStateOnPoller(PacketQueueState::kStopped);
   }
 
@@ -637,7 +650,34 @@ class PacketQueue::Impl final
     on_packet_ = nullptr;
     on_state_ = nullptr;
     on_timeline_reset_ = nullptr;
+    on_generation_end_ = nullptr;
     StopOnPoller();
+  }
+
+  void NotifyGenerationEndOnPoller(std::uint64_t event_generation) {
+    if (disposing_.load(std::memory_order_acquire) || generation_ended_ ||
+        !streams_configured_ || !input_ended_ || NextPacket() ||
+        event_generation != this->generation() ||
+        state() == PacketQueueState::kStopped) {
+      return;
+    }
+
+    generation_ended_ = true;
+    if (on_generation_end_) {
+      auto callback = on_generation_end_;
+      callback(event_generation);
+    }
+  }
+
+  void NotifyStarvedIfEmptyOnPoller(std::uint64_t event_generation) {
+    if (NextPacket()) {
+      return;
+    }
+    NotifyGenerationEndOnPoller(event_generation);
+    if (event_generation == generation() &&
+        state() != PacketQueueState::kStopped && !NextPacket()) {
+      NotifyStateOnPoller(PacketQueueState::kStarved);
+    }
   }
 
   void NotifyStateOnPoller(PacketQueueState new_state) {
@@ -663,11 +703,13 @@ class PacketQueue::Impl final
   bool generation_initialized_ = false;
   bool streams_configured_ = false;
   bool input_ended_ = false;
+  bool generation_ended_ = false;
   PacketQueueState resume_state_ = PacketQueueState::kFilling;
 
   OnPacket on_packet_;
   OnState on_state_;
   OnTimelineReset on_timeline_reset_;
+  OnGenerationEnd on_generation_end_;
 
   std::atomic<PacketQueueState> state_{PacketQueueState::kFilling};
   std::atomic<std::uint64_t> generation_{0};
@@ -695,6 +737,10 @@ void PacketQueue::SetOnState(OnState callback) {
 
 void PacketQueue::SetOnTimelineReset(OnTimelineReset callback) {
   impl_->SetOnTimelineReset(std::move(callback));
+}
+
+void PacketQueue::SetOnGenerationEnd(OnGenerationEnd callback) {
+  impl_->SetOnGenerationEnd(std::move(callback));
 }
 
 void PacketQueue::SetStreams(std::uint64_t generation,

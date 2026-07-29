@@ -12,6 +12,25 @@ add_test(
     COMMAND mw_processor_c_api_tests
 )
 
+add_executable(mw_decoder_config_tests
+    decoder_config_test.cc
+)
+
+target_include_directories(mw_decoder_config_tests
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+)
+
+target_link_libraries(mw_decoder_config_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+)
+
+add_test(
+    NAME mw_decoder_config_tests
+    COMMAND mw_decoder_config_tests
+)
+
 add_executable(mw_logging_tests
     logging_test.cc
 )
@@ -120,6 +139,43 @@ add_test(
     COMMAND mw_audio_decoder_tests
 )
 
+add_executable(mw_audio_resampler_tests
+    audio_resampler_test.cc
+)
+
+target_link_libraries(mw_audio_resampler_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        mw::streamer
+)
+
+add_test(
+    NAME mw_audio_resampler_tests
+    COMMAND mw_audio_resampler_tests
+)
+
+add_executable(mw_video_decoder_tests
+    video_decoder_test.cc
+)
+
+target_compile_definitions(mw_video_decoder_tests
+    PRIVATE
+        MW_VIDEO_DECODER_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+)
+
+target_link_libraries(mw_video_decoder_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        ZLMediaKit::MediaKit
+        ZLMediaKit::ext-codec
+        mw::streamer
+)
+
+add_test(
+    NAME mw_video_decoder_tests
+    COMMAND mw_video_decoder_tests
+)
+
 add_executable(mw_ffmpeg_types_tests
     ffmpeg_types_test.cc
 )
@@ -133,6 +189,22 @@ target_link_libraries(mw_ffmpeg_types_tests
 add_test(
     NAME mw_ffmpeg_types_tests
     COMMAND mw_ffmpeg_types_tests
+)
+
+add_executable(mw_hardware_context_tests
+    hardware_context_test.cc
+)
+
+target_link_libraries(mw_hardware_context_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        CUDA::cuda_driver
+        mw::streamer
+)
+
+add_test(
+    NAME mw_hardware_context_tests
+    COMMAND mw_hardware_context_tests
 )
 
 add_executable(mw_input_player_proxy_tests
