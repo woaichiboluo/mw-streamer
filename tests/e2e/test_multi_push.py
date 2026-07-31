@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from mw_e2e.events import assert_packet_flow, read_events, wait_for_event
+from mw_e2e.events import assert_pipeline_succeeded, read_events, wait_for_event
 from mw_e2e.ffmpeg import MediaProbe
 from mw_e2e.mediamtx import MediaEnvironment
 from mw_e2e.models import E2EConfig, PublishedMedia
@@ -25,6 +25,7 @@ def test_stable_multi_push(
     runner = Runner(
         e2e_config,
         runner_path,
+        published_media.asset,
         media_environment.source.read_url("srt", published_media.path),
         [
             media_environment.sinks[protocol].publish_url(
@@ -72,12 +73,7 @@ def test_stable_multi_push(
             probe.stop()
         runner.stop()
 
-    assert_packet_flow(
-        read_events(runner.events_path),
-        has_audio=published_media.asset.has_audio,
-        has_video=published_media.asset.has_video,
-        stall_timeout_seconds=settings.stall_timeout_seconds,
-    )
+    assert_pipeline_succeeded(read_events(runner.events_path))
 
 
 @pytest.mark.fault
@@ -103,6 +99,7 @@ def test_multi_push_isolates_and_recovers_one_failed_target(
     runner = Runner(
         e2e_config,
         runner_path,
+        published_media.asset,
         media_environment.source.read_url("srt", published_media.path),
         output_urls,
         settings.startup_timeout_seconds * 3
@@ -200,9 +197,4 @@ def test_multi_push_isolates_and_recovers_one_failed_target(
             probe.stop()
         runner.stop()
 
-    assert_packet_flow(
-        read_events(runner.events_path),
-        has_audio=published_media.asset.has_audio,
-        has_video=published_media.asset.has_video,
-        stall_timeout_seconds=settings.stall_timeout_seconds,
-    )
+    assert_pipeline_succeeded(read_events(runner.events_path))

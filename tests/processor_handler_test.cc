@@ -3,7 +3,11 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 #include <cstring>
+#include <exception>
+#include <memory>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 
 extern "C" {
 #include <libavutil/channel_layout.h>
@@ -16,13 +20,27 @@ extern "C" {
 
 #include "mw/ffmpeg/frame.h"
 #include "mw/ffmpeg/hardware_context.h"
-#include "mw/processor/processor_handler.h"
+#include "mw/processor/file_processor_handler.h"
+#include "mw/processor/streaming_processor_handler.h"
 
 namespace {
 
 using mw::streamer::ffmpeg::Frame;
 using mw::streamer::ffmpeg::HardwareContext;
-using mw::streamer::processor::ProcessorHandler;
+using mw::streamer::processor::FileProcessorHandler;
+using mw::streamer::processor::StreamingProcessorHandler;
+
+template <typename Function>
+void CheckRuntimeError(Function&& function, std::string_view expected) {
+  bool caught = false;
+  try {
+    function();
+  } catch (const std::runtime_error& error) {
+    caught = true;
+    CHECK(std::string_view(error.what()) == expected);
+  }
+  CHECK(caught);
+}
 
 MwStreamerProcessorSourceInfo MakeSourceInfo(bool has_video = true,
                                              bool has_audio = true) {
@@ -89,23 +107,32 @@ struct CallbackState {
   std::uint32_t stop_calls = 0;
   std::string initial_config;
   std::string updated_config;
-  MwStreamerProcessorMode mode = kStreaming;
   MwStreamerProcessorSourceInfo source_info{};
   MwStreamerExecutionContext execution{};
 };
 
 MwStreamerProcessorStartResult OnStart(
-    const MwStreamerProcessorStartRequest* request, void* user_context) {
+    const MwStreamerStreamingProcessorStartRequest* request,
+    void* user_context) {
   auto* state = static_cast<CallbackState*>(user_context);
   ++state->start_calls;
   state->initial_config = request->config->config;
-  state->mode = request->mode;
   state->source_info = *request->source_info;
   state->execution = *request->execution;
   return kMwStreamerProcessorStartSuccess;
 }
 
-void ProcessVideo(const MwStreamerVideoProcessRequest* request,
+MwStreamerProcessorStartResult OnFileStart(
+    const MwStreamerFileProcessorStartRequest* request, void* user_context) {
+  auto* state = static_cast<CallbackState*>(user_context);
+  ++state->start_calls;
+  state->initial_config = request->config->config;
+  state->source_info = *request->source_info;
+  state->execution = *request->execution;
+  return kMwStreamerProcessorStartSuccess;
+}
+
+void ProcessVideo(const MwStreamerStreamingVideoProcessRequest* request,
                   void* user_context) {
   auto* state = static_cast<CallbackState*>(user_context);
   ++state->video_calls;
@@ -120,7 +147,7 @@ void ProcessVideo(const MwStreamerVideoProcessRequest* request,
   }
 }
 
-void ProcessAudio(const MwStreamerAudioProcessRequest* request,
+void ProcessAudio(const MwStreamerStreamingAudioProcessRequest* request,
                   void* user_context) {
   auto* state = static_cast<CallbackState*>(user_context);
   ++state->audio_calls;
@@ -150,37 +177,30 @@ void OnStop(void* user_context) {
   ++static_cast<CallbackState*>(user_context)->stop_calls;
 }
 
-MwStreamerProcessorCallbacks MakeCallbacks(CallbackState* state) {
+MwStreamerStreamingProcessorCallbacks MakeCallbacks(CallbackState* state) {
   return {state,      OnStart,      ProcessVideo, ProcessAudio,
           OnBoundary, UpdateConfig, OnStop};
 }
 
-TEST_CASE("ProcessorHandler冻结构造信息并执行完整生命周期") {
+TEST_CASE("StreamingProcessorHandler冻结构造信息并执行完整生命周期") {
   auto source_info = MakeSourceInfo();
-  MwStreamerExecutionContext execution = {
-      kMwStreamerExecutionCpu,
-      0,
-  };
-  ProcessorHandler handler(kStreaming, source_info, execution);
+  StreamingProcessorHandler handler(source_info, nullptr);
 
   source_info.video.width = 1;
-  execution.type = kMwStreamerExecutionCuda;
-  execution.native_handle = 1;
 
   CallbackState state;
-  handler.SetCallbacks(MakeCallbacks(&state));
   std::string initial_config = "initial";
-  const MwStreamerProcessorConfig config = {
+  const MwStreamerStreamingProcessorConfig config = {
       32,
       16,
       initial_config.c_str(),
   };
-  REQUIRE(handler.Start(config) == kMwStreamerProcessorStartSuccess);
+  REQUIRE(handler.Start(config, MakeCallbacks(&state)) ==
+          kMwStreamerProcessorStartSuccess);
   initial_config = "mutated";
 
   CHECK(state.start_calls == 1);
   CHECK(state.initial_config == "initial");
-  CHECK(state.mode == kStreaming);
   CHECK(state.source_info.video.width == 64);
   CHECK(state.execution.type == kMwStreamerExecutionCpu);
   CHECK(state.execution.native_handle == 0);
@@ -189,34 +209,32 @@ TEST_CASE("ProcessorHandler冻结构造信息并执行完整生命周期") {
   video_input->crop_top = 2;
   video_input->crop_left = 4;
   auto video_output = handler.ProcessVideo(video_input);
-  REQUIRE(video_output.has_value());
   CHECK(state.video_calls == 1);
-  CHECK((*video_output)->format == AV_PIX_FMT_YUV420P);
-  CHECK((*video_output)->width == 32);
-  CHECK((*video_output)->height == 16);
-  CHECK((*video_output)->data[0][0] == 0x5a);
-  CHECK((*video_output)->pts == video_input->pts);
-  CHECK((*video_output)->duration == video_input->duration);
-  CHECK((*video_output)->time_base.num == 1);
-  CHECK((*video_output)->time_base.den == 90000);
-  CHECK((*video_output)->color_range == AVCOL_RANGE_MPEG);
-  CHECK((*video_output)->crop_top == 0);
-  CHECK((*video_output)->crop_left == 0);
+  CHECK(video_output->format == AV_PIX_FMT_YUV420P);
+  CHECK(video_output->width == 32);
+  CHECK(video_output->height == 16);
+  CHECK(video_output->data[0][0] == 0x5a);
+  CHECK(video_output->pts == video_input->pts);
+  CHECK(video_output->duration == video_input->duration);
+  CHECK(video_output->time_base.num == 1);
+  CHECK(video_output->time_base.den == 90000);
+  CHECK(video_output->color_range == AVCOL_RANGE_MPEG);
+  CHECK(video_output->crop_top == 0);
+  CHECK(video_output->crop_left == 0);
 
   auto audio_input = MakeAudioFrame();
   auto audio_output = handler.ProcessAudio(audio_input);
-  REQUIRE(audio_output.has_value());
   CHECK(state.audio_calls == 1);
-  REQUIRE((*audio_output)->extended_data[0] != audio_input->extended_data[0]);
+  REQUIRE(audio_output->extended_data[0] != audio_input->extended_data[0]);
   const auto* input_samples =
       reinterpret_cast<const float*>(audio_input->extended_data[0]);
   const auto* output_samples =
-      reinterpret_cast<const float*>((*audio_output)->extended_data[0]);
+      reinterpret_cast<const float*>(audio_output->extended_data[0]);
   for (int index = 0; index < audio_input->nb_samples * 2; ++index) {
     CHECK(output_samples[index] == input_samples[index] * 2.0F);
   }
-  CHECK((*audio_output)->pts == audio_input->pts);
-  CHECK((*audio_output)->duration == audio_input->duration);
+  CHECK(audio_output->pts == audio_input->pts);
+  CHECK(audio_output->duration == audio_input->duration);
 
   handler.NotifyBoundary(kMwStreamerProcessorTimelineReset);
   handler.NotifyBoundary(kMwStreamerProcessorEndOfInput);
@@ -230,59 +248,52 @@ TEST_CASE("ProcessorHandler冻结构造信息并执行完整生命周期") {
   CHECK(state.updated_config == "updated");
   CHECK(state.stop_calls == 1);
   CHECK_THROWS_AS(handler.ProcessVideo(video_input), std::logic_error);
-  CHECK_THROWS_AS(handler.SetCallbacks(MakeCallbacks(&state)),
+  CHECK_THROWS_AS(handler.Start(config, MakeCallbacks(&state)),
                   std::logic_error);
 }
 
-TEST_CASE("ProcessorHandler提供缓存黑帧和独立音频副本") {
+TEST_CASE("StreamingProcessorHandler提供缓存黑帧和独立音频副本") {
   const auto source_info = MakeSourceInfo();
-  const MwStreamerExecutionContext execution = {
-      kMwStreamerExecutionCpu,
-      0,
-  };
-  ProcessorHandler handler(kStreaming, source_info, execution);
-  const MwStreamerProcessorConfig config = {
+  StreamingProcessorHandler handler(source_info, nullptr);
+  const MwStreamerStreamingProcessorConfig config = {
       32,
       16,
       "",
   };
-  REQUIRE(handler.Start(config) == kMwStreamerProcessorStartSuccess);
+  REQUIRE(handler.Start(config, {}) == kMwStreamerProcessorStartSuccess);
 
   auto video_input = MakeSoftwareVideoFrame();
   auto first_video_output = handler.ProcessVideo(video_input);
   auto second_video_output = handler.ProcessVideo(video_input);
-  REQUIRE(first_video_output.has_value());
-  REQUIRE(second_video_output.has_value());
-  CHECK((*first_video_output)->data[0] == (*second_video_output)->data[0]);
-  CHECK((*first_video_output)->data[0][0] == 16);
-  CHECK((*first_video_output)->data[1][0] == 128);
-  CHECK((*first_video_output)->data[2][0] == 128);
+  CHECK(first_video_output->data[0] == second_video_output->data[0]);
+  CHECK(first_video_output->data[0][0] == 16);
+  CHECK(first_video_output->data[1][0] == 128);
+  CHECK(first_video_output->data[2][0] == 128);
 
   video_input->color_range = AVCOL_RANGE_JPEG;
   auto full_range_output = handler.ProcessVideo(video_input);
-  REQUIRE(full_range_output.has_value());
-  CHECK((*full_range_output)->data[0] != (*first_video_output)->data[0]);
-  CHECK((*full_range_output)->data[0][0] == 0);
-  CHECK((*first_video_output)->data[0][0] == 16);
+  CHECK(full_range_output->data[0] != first_video_output->data[0]);
+  CHECK(full_range_output->data[0][0] == 0);
+  CHECK(first_video_output->data[0][0] == 16);
 
   auto audio_input = MakeAudioFrame();
   auto audio_output = handler.ProcessAudio(audio_input);
-  REQUIRE(audio_output.has_value());
-  REQUIRE((*audio_output)->extended_data[0] != audio_input->extended_data[0]);
-  CHECK(std::memcmp((*audio_output)->extended_data[0],
+  REQUIRE(audio_output->extended_data[0] != audio_input->extended_data[0]);
+  CHECK(std::memcmp(audio_output->extended_data[0],
                     audio_input->extended_data[0],
                     static_cast<std::size_t>(audio_input->nb_samples) * 2 *
                         sizeof(float)) == 0);
+
+  auto changed_audio_layout = MakeAudioFrame();
+  changed_audio_layout->ch_layout.u.mask = AV_CH_LAYOUT_STEREO_DOWNMIX;
+  CHECK_THROWS_AS(handler.ProcessAudio(changed_audio_layout),
+                  std::invalid_argument);
 }
 
-TEST_CASE("ProcessorHandler拒绝运行期视频结构变化") {
+TEST_CASE("StreamingProcessorHandler拒绝运行期视频结构变化") {
   const auto source_info = MakeSourceInfo(true, false);
-  const MwStreamerExecutionContext execution = {
-      kMwStreamerExecutionCpu,
-      0,
-  };
-  ProcessorHandler handler(kStreaming, source_info, execution);
-  const MwStreamerProcessorConfig config = {
+  StreamingProcessorHandler handler(source_info, nullptr);
+  const MwStreamerStreamingProcessorConfig config = {
       32,
       16,
       "",
@@ -290,7 +301,7 @@ TEST_CASE("ProcessorHandler拒绝运行期视频结构变化") {
 
   auto input = MakeSoftwareVideoFrame();
   CHECK_THROWS_AS(handler.ProcessVideo(input), std::logic_error);
-  REQUIRE(handler.Start(config) == kMwStreamerProcessorStartSuccess);
+  REQUIRE(handler.Start(config, {}) == kMwStreamerProcessorStartSuccess);
   handler.ProcessVideo(input);
 
   auto changed_format = MakeSoftwareVideoFrame(AV_PIX_FMT_YUV444P);
@@ -299,20 +310,30 @@ TEST_CASE("ProcessorHandler拒绝运行期视频结构变化") {
 
 struct CudaCallbackState {
   CUcontext expected_context = nullptr;
+  CUstream stream = nullptr;
+  CUevent completion_event = nullptr;
   CUresult current_result = CUDA_ERROR_UNKNOWN;
   CUresult write_result = CUDA_ERROR_UNKNOWN;
+  CUresult event_result = CUDA_ERROR_UNKNOWN;
   bool current_context_matches = false;
+  bool throw_after_submit = false;
 };
 
-void ProcessCudaVideo(const MwStreamerVideoProcessRequest* request,
+MwStreamerProcessorStartResult CaptureCudaExecution(
+    const MwStreamerStreamingProcessorStartRequest* request,
+    void* user_context) {
+  auto* state = static_cast<CudaCallbackState*>(user_context);
+  state->stream = reinterpret_cast<CUstream>(request->execution->native_handle);
+  return kMwStreamerProcessorStartSuccess;
+}
+
+void ProcessCudaVideo(const MwStreamerStreamingVideoProcessRequest* request,
                       void* user_context) {
   auto* state = static_cast<CudaCallbackState*>(user_context);
   CUcontext current_context = nullptr;
   state->current_result = cuCtxGetCurrent(&current_context);
   state->current_context_matches = current_context == state->expected_context;
 
-  const auto stream =
-      reinterpret_cast<CUstream>(request->execution->native_handle);
   state->write_result = CUDA_SUCCESS;
   for (std::uint32_t plane = 0;
        plane < request->output->storage.linear.plane_count; ++plane) {
@@ -321,15 +342,94 @@ void ProcessCudaVideo(const MwStreamerVideoProcessRequest* request,
         cuMemsetD8Async(static_cast<CUdeviceptr>(output_plane.address), 0x5a,
                         static_cast<std::size_t>(output_plane.stride_bytes) *
                             output_plane.row_count,
-                        stream);
+                        state->stream);
     if (result != CUDA_SUCCESS) {
       state->write_result = result;
       return;
     }
   }
+  if (state->completion_event) {
+    state->event_result = cuEventRecord(state->completion_event, state->stream);
+  }
+  if (state->throw_after_submit) {
+    throw std::runtime_error("CUDA Processor回调失败");
+  }
 }
 
-TEST_CASE("ProcessorHandler在CUDA上下文中回调并等待框架Stream") {
+TEST_CASE("StreamingProcessorHandler复制CUDA上下文并等待框架Stream") {
+  Frame input;
+  const AVCUDADeviceContext* cuda_context = nullptr;
+  std::unique_ptr<StreamingProcessorHandler> handler;
+  {
+    const auto hardware_context = HardwareContext::CreateCuda(0);
+    AVBufferRef* frames_ref =
+        av_hwframe_ctx_alloc(const_cast<AVBufferRef*>(hardware_context.get()));
+    REQUIRE(frames_ref != nullptr);
+
+    auto* frames_context =
+        reinterpret_cast<AVHWFramesContext*>(frames_ref->data);
+    frames_context->format = AV_PIX_FMT_CUDA;
+    frames_context->sw_format = AV_PIX_FMT_NV12;
+    frames_context->width = 64;
+    frames_context->height = 32;
+    REQUIRE(av_hwframe_ctx_init(frames_ref) >= 0);
+
+    const int allocation_result =
+        av_hwframe_get_buffer(frames_ref, input.get(), 0);
+    av_buffer_unref(&frames_ref);
+    REQUIRE(allocation_result >= 0);
+
+    const auto* device_context = reinterpret_cast<const AVHWDeviceContext*>(
+        hardware_context.get()->data);
+    cuda_context =
+        static_cast<const AVCUDADeviceContext*>(device_context->hwctx);
+    REQUIRE(cuda_context != nullptr);
+
+    const auto source_info = MakeSourceInfo(true, false);
+    handler = std::make_unique<StreamingProcessorHandler>(source_info,
+                                                          &hardware_context);
+  }
+  input->pts = 90;
+  input->duration = 1;
+  input->time_base = {1, 25};
+
+  CudaCallbackState state;
+  state.expected_context = cuda_context->cuda_ctx;
+  MwStreamerStreamingProcessorCallbacks callbacks{};
+  callbacks.user_context = &state;
+  callbacks.on_start = CaptureCudaExecution;
+  callbacks.process_video = ProcessCudaVideo;
+  const MwStreamerStreamingProcessorConfig config = {
+      32,
+      16,
+      "",
+  };
+  REQUIRE(handler->Start(config, callbacks) ==
+          kMwStreamerProcessorStartSuccess);
+
+  auto output = handler->ProcessVideo(input);
+  CHECK(state.current_result == CUDA_SUCCESS);
+  CHECK(state.current_context_matches);
+  CHECK(state.stream == cuda_context->stream);
+  CHECK(state.write_result == CUDA_SUCCESS);
+  CHECK(cuStreamQuery(cuda_context->stream) == CUDA_SUCCESS);
+  CHECK(output->format == AV_PIX_FMT_CUDA);
+  CHECK(output->width == 32);
+  CHECK(output->height == 16);
+  CHECK(output->pts == 90);
+
+  std::uint8_t first_byte = 0;
+  {
+    const auto inspection_context = HardwareContext::CreateCuda(0);
+    const auto current_scope = inspection_context.MakeCurrent();
+    REQUIRE(cuMemcpyDtoH(&first_byte,
+                         reinterpret_cast<CUdeviceptr>(output->data[0]),
+                         sizeof(first_byte)) == CUDA_SUCCESS);
+  }
+  CHECK(first_byte == 0x5a);
+}
+
+TEST_CASE("StreamingProcessorHandler在CUDA视频回调异常后同步并保留原异常") {
   const auto hardware_context = HardwareContext::CreateCuda(0);
   AVBufferRef* frames_ref =
       av_hwframe_ctx_alloc(const_cast<AVBufferRef*>(hardware_context.get()));
@@ -347,8 +447,6 @@ TEST_CASE("ProcessorHandler在CUDA上下文中回调并等待框架Stream") {
       av_hwframe_get_buffer(frames_ref, input.get(), 0);
   av_buffer_unref(&frames_ref);
   REQUIRE(allocation_result >= 0);
-  input->pts = 90;
-  input->duration = 1;
   input->time_base = {1, 25};
 
   const auto* device_context =
@@ -357,47 +455,42 @@ TEST_CASE("ProcessorHandler在CUDA上下文中回调并等待框架Stream") {
       static_cast<const AVCUDADeviceContext*>(device_context->hwctx);
   REQUIRE(cuda_context != nullptr);
 
-  const auto source_info = MakeSourceInfo(true, false);
-  const MwStreamerExecutionContext execution = {
-      kMwStreamerExecutionCuda,
-      hardware_context.native_stream(),
-  };
-  ProcessorHandler handler(kStreaming, source_info, execution);
   CudaCallbackState state;
   state.expected_context = cuda_context->cuda_ctx;
-  MwStreamerProcessorCallbacks callbacks{};
+  state.throw_after_submit = true;
+  {
+    const auto current_scope = hardware_context.MakeCurrent();
+    REQUIRE(cuEventCreate(&state.completion_event, CU_EVENT_DISABLE_TIMING) ==
+            CUDA_SUCCESS);
+  }
+
+  const auto source_info = MakeSourceInfo(true, false);
+  StreamingProcessorHandler handler(source_info, &hardware_context);
+  MwStreamerStreamingProcessorCallbacks callbacks{};
   callbacks.user_context = &state;
+  callbacks.on_start = CaptureCudaExecution;
   callbacks.process_video = ProcessCudaVideo;
-  handler.SetCallbacks(callbacks);
-  const MwStreamerProcessorConfig config = {
+  const MwStreamerStreamingProcessorConfig config = {
       32,
       16,
       "",
   };
-  REQUIRE(handler.Start(config) == kMwStreamerProcessorStartSuccess);
+  REQUIRE(handler.Start(config, callbacks) == kMwStreamerProcessorStartSuccess);
 
-  auto output = handler.ProcessVideo(input);
-  REQUIRE(output.has_value());
+  CheckRuntimeError([&]() { handler.ProcessVideo(input); },
+                    "CUDA Processor回调失败");
   CHECK(state.current_result == CUDA_SUCCESS);
   CHECK(state.current_context_matches);
   CHECK(state.write_result == CUDA_SUCCESS);
-  CHECK(cuStreamQuery(cuda_context->stream) == CUDA_SUCCESS);
-  CHECK((*output)->format == AV_PIX_FMT_CUDA);
-  CHECK((*output)->width == 32);
-  CHECK((*output)->height == 16);
-  CHECK((*output)->pts == 90);
-
-  std::uint8_t first_byte = 0;
+  CHECK(state.event_result == CUDA_SUCCESS);
   {
     const auto current_scope = hardware_context.MakeCurrent();
-    REQUIRE(cuMemcpyDtoH(&first_byte,
-                         reinterpret_cast<CUdeviceptr>((*output)->data[0]),
-                         sizeof(first_byte)) == CUDA_SUCCESS);
+    CHECK(cuEventQuery(state.completion_event) == CUDA_SUCCESS);
+    CHECK(cuEventDestroy(state.completion_event) == CUDA_SUCCESS);
   }
-  CHECK(first_byte == 0x5a);
 }
 
-TEST_CASE("ProcessorHandler生成CUDA默认黑帧") {
+TEST_CASE("StreamingProcessorHandler生成CUDA默认黑帧") {
   const auto hardware_context = HardwareContext::CreateCuda(0);
   AVBufferRef* frames_ref =
       av_hwframe_ctx_alloc(const_cast<AVBufferRef*>(hardware_context.get()));
@@ -421,27 +514,22 @@ TEST_CASE("ProcessorHandler生成CUDA默认黑帧") {
   input->color_range = AVCOL_RANGE_MPEG;
 
   const auto source_info = MakeSourceInfo(true, false);
-  const MwStreamerExecutionContext execution = {
-      kMwStreamerExecutionCuda,
-      hardware_context.native_stream(),
-  };
-  ProcessorHandler handler(kStreaming, source_info, execution);
-  const MwStreamerProcessorConfig config = {
+  StreamingProcessorHandler handler(source_info, &hardware_context);
+  const MwStreamerStreamingProcessorConfig config = {
       32,
       16,
       "",
   };
-  REQUIRE(handler.Start(config) == kMwStreamerProcessorStartSuccess);
+  REQUIRE(handler.Start(config, {}) == kMwStreamerProcessorStartSuccess);
 
   auto output = handler.ProcessVideo(input);
-  REQUIRE(output.has_value());
   Frame software_output;
   software_output->format = AV_PIX_FMT_NV12;
   software_output->width = 32;
   software_output->height = 16;
   {
     const auto current_scope = hardware_context.MakeCurrent();
-    REQUIRE(av_hwframe_transfer_data(software_output.get(), output->get(), 0) >=
+    REQUIRE(av_hwframe_transfer_data(software_output.get(), output.get(), 0) >=
             0);
   }
 
@@ -449,7 +537,39 @@ TEST_CASE("ProcessorHandler生成CUDA默认黑帧") {
   CHECK(software_output->data[1][0] == 128);
 }
 
-TEST_CASE("ProcessorHandler本地文件CUDA模式不创建输出帧") {
+TEST_CASE("StreamingProcessorHandler拒绝其他硬件上下文分配的CUDA帧") {
+  const auto processor_context = HardwareContext::CreateCuda(0);
+  const auto frame_context = HardwareContext::CreateCuda(0);
+  AVBufferRef* frames_ref =
+      av_hwframe_ctx_alloc(const_cast<AVBufferRef*>(frame_context.get()));
+  REQUIRE(frames_ref != nullptr);
+
+  auto* frames_context = reinterpret_cast<AVHWFramesContext*>(frames_ref->data);
+  frames_context->format = AV_PIX_FMT_CUDA;
+  frames_context->sw_format = AV_PIX_FMT_NV12;
+  frames_context->width = 64;
+  frames_context->height = 32;
+  REQUIRE(av_hwframe_ctx_init(frames_ref) >= 0);
+
+  Frame input;
+  const int allocation_result =
+      av_hwframe_get_buffer(frames_ref, input.get(), 0);
+  av_buffer_unref(&frames_ref);
+  REQUIRE(allocation_result >= 0);
+  input->time_base = {1, 25};
+
+  const auto source_info = MakeSourceInfo(true, false);
+  StreamingProcessorHandler handler(source_info, &processor_context);
+  const MwStreamerStreamingProcessorConfig config = {
+      32,
+      16,
+      "",
+  };
+  REQUIRE(handler.Start(config, {}) == kMwStreamerProcessorStartSuccess);
+  CHECK_THROWS_AS(handler.ProcessVideo(input), std::invalid_argument);
+}
+
+TEST_CASE("FileProcessorHandler的CUDA回调只接收输入帧") {
   const auto hardware_context = HardwareContext::CreateCuda(0);
   AVBufferRef* frames_ref =
       av_hwframe_ctx_alloc(const_cast<AVBufferRef*>(hardware_context.get()));
@@ -470,95 +590,152 @@ TEST_CASE("ProcessorHandler本地文件CUDA模式不创建输出帧") {
   input->time_base = {1, 25};
 
   const auto source_info = MakeSourceInfo(true, false);
-  const MwStreamerExecutionContext execution = {
-      kMwStreamerExecutionCuda,
-      hardware_context.native_stream(),
-  };
-  ProcessorHandler handler(kLocalFile, source_info, execution);
+  FileProcessorHandler handler(source_info, &hardware_context);
   std::uint32_t callback_count = 0;
-  MwStreamerProcessorCallbacks callbacks{};
+  MwStreamerFileProcessorCallbacks callbacks{};
   callbacks.user_context = &callback_count;
-  callbacks.process_video = [](const MwStreamerVideoProcessRequest* request,
+  callbacks.process_video = [](const MwStreamerVideoFrameView* input,
                                void* user_context) {
-    CHECK(request->output == nullptr);
+    CHECK(input->buffer.memory_type == kMwStreamerMemoryCuda);
     ++*static_cast<std::uint32_t*>(user_context);
   };
-  handler.SetCallbacks(callbacks);
-  const MwStreamerProcessorConfig config = {
-      0,
-      0,
-      "",
-  };
-  REQUIRE(handler.Start(config) == kMwStreamerProcessorStartSuccess);
+  const MwStreamerFileProcessorConfig config = {""};
+  REQUIRE(handler.Start(config, callbacks) == kMwStreamerProcessorStartSuccess);
 
-  CHECK_FALSE(handler.ProcessVideo(input).has_value());
-  CHECK_FALSE(handler.ProcessVideo(input).has_value());
+  handler.ProcessVideo(input);
+  handler.ProcessVideo(input);
   CHECK(callback_count == 2);
 }
 
-TEST_CASE("ProcessorHandler本地文件模式只投递输入并通知文件结束") {
+TEST_CASE("FileProcessorHandler只投递输入并通知文件结束") {
   const auto source_info = MakeSourceInfo();
-  const MwStreamerExecutionContext execution = {
-      kMwStreamerExecutionCpu,
-      0,
-  };
-  ProcessorHandler handler(kLocalFile, source_info, execution);
+  FileProcessorHandler handler(source_info, nullptr);
   CallbackState state;
-  auto callbacks = MakeCallbacks(&state);
-  callbacks.process_video = [](const MwStreamerVideoProcessRequest* request,
+  MwStreamerFileProcessorCallbacks callbacks{};
+  callbacks.user_context = &state;
+  callbacks.on_start = OnFileStart;
+  callbacks.on_boundary = OnBoundary;
+  callbacks.update_config = UpdateConfig;
+  callbacks.on_stop = OnStop;
+  callbacks.process_video = [](const MwStreamerVideoFrameView* input,
                                void* user_context) {
     auto* callback_state = static_cast<CallbackState*>(user_context);
-    CHECK(request->output == nullptr);
+    CHECK(input->buffer.width == 64);
     ++callback_state->video_calls;
   };
-  callbacks.process_audio = [](const MwStreamerAudioProcessRequest* request,
+  callbacks.process_audio = [](const MwStreamerAudioFrameView* input,
                                void* user_context) {
     auto* callback_state = static_cast<CallbackState*>(user_context);
-    CHECK(request->output == nullptr);
+    CHECK(input->sample_rate == 48000);
     ++callback_state->audio_calls;
   };
-  handler.SetCallbacks(callbacks);
-  const MwStreamerProcessorConfig config = {
-      0,
-      0,
-      "batch=8",
-  };
+  const MwStreamerFileProcessorConfig config = {"batch=8"};
 
-  REQUIRE(handler.Start(config) == kMwStreamerProcessorStartSuccess);
-  CHECK(state.mode == kLocalFile);
-  CHECK_FALSE(handler.ProcessVideo(MakeSoftwareVideoFrame()).has_value());
-  CHECK_FALSE(handler.ProcessAudio(MakeAudioFrame()).has_value());
+  REQUIRE(handler.Start(config, callbacks) == kMwStreamerProcessorStartSuccess);
+  CHECK(state.initial_config == "batch=8");
+  handler.ProcessVideo(MakeSoftwareVideoFrame());
+  handler.ProcessAudio(MakeAudioFrame());
   handler.NotifyBoundary(kMwStreamerProcessorEndOfInput);
+  handler.UpdateConfig("updated");
+  handler.Stop();
 
   CHECK(state.video_calls == 1);
   CHECK(state.audio_calls == 1);
   CHECK(state.end_of_input_calls == 1);
+  CHECK(state.updated_config == "updated");
+  CHECK(state.stop_calls == 1);
 }
 
-TEST_CASE("ProcessorHandler按模式校验输出尺寸") {
-  const auto source_info = MakeSourceInfo(true, false);
-  const MwStreamerExecutionContext execution = {
-      kMwStreamerExecutionCpu,
-      0,
+TEST_CASE("StreamingProcessorHandler传播回调异常并隔离停止回调异常") {
+  const auto source_info = MakeSourceInfo();
+  StreamingProcessorHandler handler(source_info, nullptr);
+  std::size_t stop_calls = 0;
+  MwStreamerStreamingProcessorCallbacks callbacks{};
+  callbacks.user_context = &stop_calls;
+  callbacks.process_video = [](const MwStreamerStreamingVideoProcessRequest*,
+                               void*) {
+    throw std::runtime_error("视频回调失败");
   };
-
-  ProcessorHandler streaming(kStreaming, source_info, execution);
-  const MwStreamerProcessorConfig missing_streaming_output = {
-      0,
-      0,
-      "",
+  callbacks.process_audio = [](const MwStreamerStreamingAudioProcessRequest*,
+                               void*) {
+    throw std::runtime_error("音频回调失败");
   };
-  CHECK_THROWS_AS(streaming.Start(missing_streaming_output),
-                  std::invalid_argument);
-
-  ProcessorHandler local_file(kLocalFile, source_info, execution);
-  const MwStreamerProcessorConfig unexpected_local_output = {
+  callbacks.on_boundary = [](MwStreamerProcessorBoundaryReason, void*) {
+    throw std::runtime_error("边界回调失败");
+  };
+  callbacks.update_config = [](const char*, void*) {
+    throw std::runtime_error("更新回调失败");
+  };
+  callbacks.on_stop = [](void* user_context) {
+    ++*static_cast<std::size_t*>(user_context);
+    throw std::runtime_error("停止回调失败");
+  };
+  const MwStreamerStreamingProcessorConfig config = {
       32,
       16,
       "",
   };
-  CHECK_THROWS_AS(local_file.Start(unexpected_local_output),
+  REQUIRE(handler.Start(config, callbacks) == kMwStreamerProcessorStartSuccess);
+
+  CheckRuntimeError([&]() { handler.ProcessVideo(MakeSoftwareVideoFrame()); },
+                    "视频回调失败");
+  CheckRuntimeError([&]() { handler.ProcessAudio(MakeAudioFrame()); },
+                    "音频回调失败");
+  CheckRuntimeError(
+      [&]() { handler.NotifyBoundary(kMwStreamerProcessorTimelineReset); },
+      "边界回调失败");
+  CheckRuntimeError([&]() { handler.UpdateConfig("updated"); }, "更新回调失败");
+  CHECK_NOTHROW(handler.Stop());
+  CHECK(stop_calls == 1);
+}
+
+TEST_CASE("StreamingProcessorHandler传播启动异常并隔离析构停止异常") {
+  const auto source_info = MakeSourceInfo(true, false);
+  const MwStreamerStreamingProcessorConfig config = {
+      32,
+      16,
+      "",
+  };
+
+  StreamingProcessorHandler failed(source_info, nullptr);
+  MwStreamerStreamingProcessorCallbacks throwing_start{};
+  throwing_start.on_start = [](const MwStreamerStreamingProcessorStartRequest*,
+                               void*) -> MwStreamerProcessorStartResult {
+    throw std::runtime_error("启动回调失败");
+  };
+  CheckRuntimeError([&]() { failed.Start(config, throwing_start); },
+                    "启动回调失败");
+
+  std::size_t stop_calls = 0;
+  CHECK_NOTHROW([&]() {
+    StreamingProcessorHandler scoped(source_info, nullptr);
+    MwStreamerStreamingProcessorCallbacks callbacks{};
+    callbacks.user_context = &stop_calls;
+    callbacks.on_stop = [](void* user_context) {
+      ++*static_cast<std::size_t*>(user_context);
+      throw std::runtime_error("析构停止回调失败");
+    };
+    REQUIRE(scoped.Start(config, callbacks) ==
+            kMwStreamerProcessorStartSuccess);
+  }());
+  CHECK(stop_calls == 1);
+}
+
+TEST_CASE("Streaming和File Processor使用独立配置") {
+  const auto source_info = MakeSourceInfo(true, false);
+
+  StreamingProcessorHandler streaming(source_info, nullptr);
+  const MwStreamerStreamingProcessorConfig missing_streaming_output = {
+      0,
+      0,
+      "",
+  };
+  CHECK_THROWS_AS(streaming.Start(missing_streaming_output, {}),
                   std::invalid_argument);
+
+  FileProcessorHandler file(source_info, nullptr);
+  const MwStreamerFileProcessorConfig file_config = {"batch=8"};
+  CHECK(file.Start(file_config, {}) == kMwStreamerProcessorStartSuccess);
 }
 
 }  // namespace

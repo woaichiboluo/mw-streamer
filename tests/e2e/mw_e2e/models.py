@@ -17,7 +17,6 @@ class TestSettings:
     cache_durations_ms: tuple[int, ...]
     startup_timeout_seconds: float
     stability_seconds: float
-    stall_timeout_seconds: float
     reconnect_timeout_seconds: float
 
 
@@ -35,6 +34,10 @@ class MediaAsset:
     duration_seconds: float
     audio_codec: str | None
     video_codec: str | None
+    video_width: int | None
+    video_height: int | None
+    video_frame_rate_num: int | None
+    video_frame_rate_den: int | None
 
     @property
     def has_audio(self) -> bool:

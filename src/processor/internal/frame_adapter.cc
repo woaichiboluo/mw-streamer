@@ -1,4 +1,4 @@
-#include "mw/processor/frame_adapter.h"
+#include "mw/processor/internal/frame_adapter.h"
 
 #include <fmt/format.h>
 
@@ -8,15 +8,16 @@
 #include <stdexcept>
 
 extern "C" {
-#include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/samplefmt.h>
 }
 
 #include "mw/ffmpeg/error.h"
+#include "mw/ffmpeg/hardware_context.h"
+#include "mw/ffmpeg/pixel_format.h"
 
-namespace mw::streamer::processor {
+namespace mw::streamer::processor::internal {
 namespace {
 
 constexpr int kProcessorAudioSampleRate = 48000;
@@ -69,13 +70,9 @@ void MapVideoBuffer(const AVFrame& frame,
   auto memory_type = kMwStreamerMemoryHost;
   auto storage_format = static_cast<AVPixelFormat>(frame.format);
   if (storage_format == AV_PIX_FMT_CUDA) {
-    if (!frame.hw_frames_ctx || !frame.hw_frames_ctx->data) {
-      throw std::invalid_argument("CUDA视频帧缺少硬件帧上下文");
-    }
     const auto* frames_context =
-        reinterpret_cast<const AVHWFramesContext*>(frame.hw_frames_ctx->data);
-    if (frames_context->format != AV_PIX_FMT_CUDA ||
-        !frames_context->device_ctx ||
+        ffmpeg::HardwareContext::GetFramesContext(frame);
+    if (!frames_context ||
         frames_context->device_ctx->type != AV_HWDEVICE_TYPE_CUDA) {
       throw std::invalid_argument("视频帧不是有效的CUDA硬件帧");
     }
@@ -88,7 +85,7 @@ void MapVideoBuffer(const AVFrame& frame,
     throw std::invalid_argument("视频帧包含无效的存储格式");
   }
   if (memory_type == kMwStreamerMemoryHost &&
-      (descriptor->flags & AV_PIX_FMT_FLAG_HWACCEL) != 0) {
+      ffmpeg::IsHardwarePixelFormat(storage_format)) {
     throw std::invalid_argument(
         fmt::format("Processor暂不支持硬件视频帧格式: {}",
                     PixelFormatName(storage_format)));
@@ -370,4 +367,4 @@ const MwStreamerAudioBufferView& AudioBufferAdapter::view() const noexcept {
   return view_;
 }
 
-}  // namespace mw::streamer::processor
+}  // namespace mw::streamer::processor::internal

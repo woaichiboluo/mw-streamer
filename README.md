@@ -32,9 +32,9 @@ SRT 每次新建或重连发布会丢弃关键帧之前的残缺历史数据，�
 
 ## 日志
 
-日志模块使用一个活动的 spdlog logger 统一接收 `mw-streamer`、ZLMediaKit、libsrt 和
-FFmpeg 日志，并在正文前分别增加 `[streamer]`、`[ZLM]`、`[SRT]` 和
-`[FFMPEG]`。各模块级别、控制台、滚动文件及异步队列通过
+日志模块使用一个活动的 spdlog logger 统一接收 `mw-streamer`、Processor、
+ZLMediaKit、libsrt 和 FFmpeg 日志，并在正文前分别增加 `[streamer]`、
+`[processor]`、`[ZLM]`、`[SRT]` 和 `[FFMPEG]`。各模块级别、控制台、滚动文件及异步队列通过
 `mw::streamer::log::LogConfig`
 配置；异步日志默认关闭，彩色控制台与普通控制台不会同时创建。
 
@@ -49,9 +49,13 @@ int main() {
     Log::Info("program started");
 
     mw::streamer::InitConfig config;
+    config.log.modules.processor = mw::streamer::log::LogLevel::kInfo;
     config.log.modules.zlm = mw::streamer::log::LogLevel::kInfo;
     config.log.modules.srt = mw::streamer::log::LogLevel::kInfo;
     config.log.modules.ffmpeg = mw::streamer::log::LogLevel::kWarning;
+    config.zlm.event_poller_threads = 4;
+    config.zlm.work_threads = 2;
+    config.zlm.enable_cpu_affinity = true;
     mw::streamer::Init(config);
 
     // 创建并使用媒体对象。
@@ -63,6 +67,10 @@ int main() {
     Log::Info("program stopped");
 }
 ```
+
+ZLM线程池配置只在首次创建线程池前生效，因此必须先调用
+`mw::streamer::Init()`，再创建任何Player、PacketQueue、Output或Pipeline。
+线程数为0时由ZLToolKit按照硬件并发数决定。
 
 `mw::streamer::Shutdown()` 必须由宿主控制线程调用，不能从 SRT reactor
 或媒体回调线程调用。`mw::streamer::Init()` 使用一次性初始化：第一次成功调用的

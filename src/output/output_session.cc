@@ -29,11 +29,15 @@ extern "C" {
 #include "Poller/EventPoller.h"
 #include "Pusher/PusherProxy.h"
 #include "mw/converter/av_packet_to_zlm_frame_converter.h"
+#include "mw/converter/internal/codec_bridge.h"
 #include "mw/log/logging.h"
 #include "mw/output/recording_target.h"
+#include "mw/zlm/internal/config_validator.h"
 
 namespace mw::streamer::output {
 namespace {
+
+using Log = log::Module<log::LogModule::kStreamer>;
 
 constexpr char kInternalApp[] = "mw-streamer-output";
 constexpr char kRtmpScheme[] = "rtmp";
@@ -67,31 +71,6 @@ std::string GetScheme(const std::string& target) {
   return ToLower(target.substr(0, separator));
 }
 
-mediakit::CodecId GetZlmCodecId(AVCodecID codec_id) {
-  switch (codec_id) {
-    case AV_CODEC_ID_H264:
-      return mediakit::CodecH264;
-    case AV_CODEC_ID_HEVC:
-      return mediakit::CodecH265;
-    case AV_CODEC_ID_AAC:
-      return mediakit::CodecAAC;
-    case AV_CODEC_ID_PCM_ALAW:
-      return mediakit::CodecG711A;
-    case AV_CODEC_ID_PCM_MULAW:
-      return mediakit::CodecG711U;
-    case AV_CODEC_ID_OPUS:
-      return mediakit::CodecOpus;
-    case AV_CODEC_ID_MJPEG:
-      return mediakit::CodecJPEG;
-    case AV_CODEC_ID_VP8:
-      return mediakit::CodecVP8;
-    case AV_CODEC_ID_VP9:
-      return mediakit::CodecVP9;
-    default:
-      return mediakit::CodecInvalid;
-  }
-}
-
 bool StartsWithAnnexB(const std::uint8_t* data, std::size_t size) {
   return data && size >= 3 && data[0] == 0 && data[1] == 0 &&
          (data[2] == 1 || (size >= 4 && data[2] == 0 && data[3] == 1));
@@ -113,7 +92,8 @@ void ApplyExtraData(const AVCodecParameters& parameters,
   auto buffer = std::make_shared<toolkit::BufferLikeString>();
   buffer->assign(reinterpret_cast<const char*>(parameters.extradata), size);
   auto frame = mediakit::Factory::getFrameFromBuffer(
-      GetZlmCodecId(parameters.codec_id), std::move(buffer), 0, 0);
+      converter::internal::ToZlmCodecId(parameters.codec_id), std::move(buffer),
+      0, 0);
   if (frame) {
     frame->setIndex(track->getIndex());
     track->inputFrame(frame);
@@ -122,7 +102,7 @@ void ApplyExtraData(const AVCodecParameters& parameters,
 
 mediakit::Track::Ptr CreateTrack(const ffmpeg::StreamInfo& stream) {
   const auto& parameters = *stream.codec_parameters.get();
-  const auto codec_id = GetZlmCodecId(parameters.codec_id);
+  const auto codec_id = converter::internal::ToZlmCodecId(parameters.codec_id);
   if (codec_id == mediakit::CodecInvalid) {
     throw std::invalid_argument("输出流包含不支持的codec");
   }
@@ -162,13 +142,15 @@ std::string GetMediaSourceSchema(NetworkProtocol protocol) {
 }
 
 mediakit::ProtocolOption MakeProtocolOption(
-    const std::vector<NetworkTarget>& targets, std::size_t stream_count) {
+    const std::vector<NetworkTarget>& targets, std::size_t stream_count,
+    const zlm::MuxerConfig& config) {
   mediakit::ProtocolOption option;
   option.modify_stamp = mediakit::ProtocolOption::kModifyStampOff;
   option.enable_audio = true;
   option.add_mute_audio = false;
   option.auto_close = false;
-  option.paced_sender_ms = 0;
+  option.paced_sender_ms =
+      static_cast<std::uint32_t>(config.paced_sender_interval.count());
 
   option.enable_hls = false;
   option.enable_hls_fmp4 = false;
@@ -240,8 +222,7 @@ class OutputSession::Impl final
       try {
         WriteOnPoller(packet);
       } catch (const std::exception& error) {
-        log::Module<log::LogModule::kStreamer>::Error(
-            "引用输出AVPacket失败，数据包已丢弃：{}", error.what());
+        Log::Error("引用输出AVPacket失败，数据包已丢弃：{}", error.what());
       }
       return;
     }
@@ -252,8 +233,7 @@ class OutputSession::Impl final
           [self, packet]() mutable { self->WriteOnPoller(std::move(packet)); },
           false);
     } catch (const std::exception& error) {
-      log::Module<log::LogModule::kStreamer>::Error(
-          "引用输出AVPacket失败，数据包已丢弃：{}", error.what());
+      Log::Error("引用输出AVPacket失败，数据包已丢弃：{}", error.what());
     }
   }
 
@@ -282,6 +262,7 @@ class OutputSession::Impl final
   };
 
   void ValidateConfigOnPoller() {
+    zlm::internal::ValidateOutputConfig(config_.zlm);
     if (config_.streams.empty()) {
       throw std::invalid_argument("OutputSession至少需要一路输出流");
     }
@@ -348,8 +329,8 @@ class OutputSession::Impl final
     }
 
     tuple_ = MakeMediaTuple();
-    const auto option =
-        MakeProtocolOption(network_targets_, config_.streams.size());
+    const auto option = MakeProtocolOption(
+        network_targets_, config_.streams.size(), config_.zlm.muxer);
     muxer_ =
         std::make_shared<mediakit::MultiMediaSourceMuxer>(tuple_, 0.0F, option);
     muxer_->setTrackReadyTimeoutMS(0);
@@ -365,6 +346,11 @@ class OutputSession::Impl final
     muxer_->addTrackCompleted();
     recording_start_time_ = std::chrono::system_clock::now();
     state_ = State::kOpen;
+    Log::Info(
+        "OutputSession已打开: streams={}, network_targets={}, "
+        "fmp4_targets={}, hls_fmp4_targets={}",
+        config_.streams.size(), network_targets_.size(), fmp4_paths_.size(),
+        hls_paths_.size());
   }
 
   void WriteOnPoller(ffmpeg::Packet packet) noexcept {
@@ -419,8 +405,7 @@ class OutputSession::Impl final
           try {
             muxer_->inputFrame(frame);
           } catch (const std::exception& error) {
-            log::Module<log::LogModule::kStreamer>::Error(
-                "ZLM输出Muxer写入失败：{}", error.what());
+            Log::Error("ZLM输出Muxer写入失败：{}", error.what());
           }
         }
         if (!awaiting_recordings) {
@@ -443,8 +428,7 @@ class OutputSession::Impl final
         }
       }
     } catch (const std::exception& error) {
-      log::Module<log::LogModule::kStreamer>::Error("处理输出AVPacket失败：{}",
-                                                    error.what());
+      Log::Error("处理输出AVPacket失败：{}", error.what());
     }
   }
 
@@ -457,8 +441,8 @@ class OutputSession::Impl final
         (*target)->Write(frame);
         ++target;
       } catch (const std::exception& error) {
-        log::Module<log::LogModule::kStreamer>::Error(
-            "{}录像写入失败，已停止该目标：{}", target_name, error.what());
+        Log::Error("{}录像写入失败，已停止该目标：{}，{}", target_name,
+                   (*target)->path().string(), error.what());
         target = targets.erase(target);
       }
     }
@@ -473,27 +457,25 @@ class OutputSession::Impl final
       const std::vector<mediakit::Track::Ptr>& tracks) {
     for (const auto& path : fmp4_paths_) {
       try {
-        auto target = std::make_unique<Fmp4FileTarget>(path, tracks,
-                                                       recording_start_time_);
-        log::Module<log::LogModule::kStreamer>::Info("开始fMP4录像：{}",
-                                                     target->path().string());
+        auto target = std::make_unique<Fmp4FileTarget>(
+            path, tracks, config_.zlm.recording, recording_start_time_);
+        Log::Info("开始fMP4录像：{}", target->path().string());
         fmp4_targets_.push_back(std::move(target));
       } catch (const std::exception& error) {
-        log::Module<log::LogModule::kStreamer>::Error(
-            "创建fMP4录像目标失败，已停止该目标：{}", error.what());
+        Log::Error("创建fMP4录像目标失败，已停止该目标：{}，{}", path.string(),
+                   error.what());
       }
     }
 
     for (const auto& path : hls_paths_) {
       try {
         auto target = std::make_unique<HlsFmp4FileTarget>(
-            path, tracks, recording_start_time_);
-        log::Module<log::LogModule::kStreamer>::Info("开始HLS-fMP4录像：{}",
-                                                     target->path().string());
+            path, tracks, config_.zlm.recording, recording_start_time_);
+        Log::Info("开始HLS-fMP4录像：{}", target->path().string());
         hls_targets_.push_back(std::move(target));
       } catch (const std::exception& error) {
-        log::Module<log::LogModule::kStreamer>::Error(
-            "创建HLS-fMP4录像目标失败，已停止该目标：{}", error.what());
+        Log::Error("创建HLS-fMP4录像目标失败，已停止该目标：{}，{}",
+                   path.string(), error.what());
       }
     }
   }
@@ -524,25 +506,31 @@ class OutputSession::Impl final
       try {
         auto pusher =
             std::make_shared<mediakit::PusherProxy>(source, -1, poller_);
+        (*pusher)[mediakit::Client::kTimeoutMS] =
+            config_.zlm.pusher.connect_timeout.count();
+        if (!config_.zlm.pusher.local_bind_ip.empty()) {
+          (*pusher)[mediakit::Client::kNetAdapter] =
+              config_.zlm.pusher.local_bind_ip;
+        }
         pusher->setPushCallbackOnce(
             [url = target.url](const toolkit::SockException& error) {
               if (error) {
-                log::Module<log::LogModule::kStreamer>::Warning(
-                    "首次推流失败，ZLM将继续重试：{}，{}", url, error.what());
+                Log::Warning("首次推流失败，ZLM将继续重试：{}，{}", url,
+                             error.what());
+                return;
               }
+              Log::Info("首次推流成功：{}", url);
             });
         pusher->setOnClose(
             [url = target.url](const toolkit::SockException& error) {
-              log::Module<log::LogModule::kStreamer>::Error(
-                  "ZLM已停止推流目标：{}，{}", url, error.what());
+              Log::Error("ZLM已停止推流目标：{}，{}", url, error.what());
             });
         pusher->publish(target.url);
         pushers_.push_back(std::move(pusher));
         pusher_started_[index] = true;
       } catch (const std::exception& error) {
-        log::Module<log::LogModule::kStreamer>::Error(
-            "创建ZLM推流目标失败，已停止该目标：{}，{}", target.url,
-            error.what());
+        Log::Error("创建ZLM推流目标失败，已停止该目标：{}，{}", target.url,
+                   error.what());
       }
     }
   }
@@ -554,8 +542,8 @@ class OutputSession::Impl final
       try {
         target->Close();
       } catch (const std::exception& error) {
-        log::Module<log::LogModule::kStreamer>::Error(
-            "关闭{}录像目标失败：{}", target_name, error.what());
+        Log::Error("关闭{}录像目标失败：{}，{}", target_name,
+                   target->path().string(), error.what());
       }
     }
     targets.clear();

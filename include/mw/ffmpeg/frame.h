@@ -22,6 +22,8 @@ class Frame final {
   static Frame Clone(const AVFrame& source);
   Frame Clone() const;
   Frame Ref() const;
+  void CopyPropertiesFrom(const Frame& source);
+  void ClearCrop() noexcept;
 
   const AVFrame* get() const noexcept;
   AVFrame* get() noexcept;

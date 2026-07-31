@@ -4,10 +4,19 @@
 #include <optional>
 #include <stdexcept>
 
+#include "Poller/EventPoller.h"
+#include "Thread/WorkThreadPool.h"
 #include "srt/SrtEpollReactor.h"
 
 namespace mw::streamer {
 namespace {
+
+void ConfigureZlmThreadPools(const zlm::Config& config) {
+  toolkit::EventPollerPool::setPoolSize(config.event_poller_threads);
+  toolkit::EventPollerPool::enableCpuAffinity(config.enable_cpu_affinity);
+  toolkit::WorkThreadPool::setPoolSize(config.work_threads);
+  toolkit::WorkThreadPool::enableCpuAffinity(config.enable_cpu_affinity);
+}
 
 class Initializer final {
  public:
@@ -27,8 +36,10 @@ class Initializer final {
           "stopped");
     }
 
-    std::call_once(init_once_,
-                   [this, &config]() { logging_.emplace(config.log); });
+    std::call_once(init_once_, [this, &config]() {
+      logging_.emplace(config.log);
+      ConfigureZlmThreadPools(config.zlm);
+    });
     if (!logging_) {
       throw std::logic_error(
           "mw-streamer cannot be initialized after it was shut down");

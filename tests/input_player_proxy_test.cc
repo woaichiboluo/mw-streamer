@@ -25,6 +25,7 @@ using mw::streamer::input::PlayerProxy;
 using mw::streamer::input::PlayerState;
 using mw::streamer::input::ReconnectPolicy;
 using mw::streamer::input::TimelineResetReason;
+using mw::streamer::zlm::PlayerConfig;
 using toolkit::Err_eof;
 using toolkit::Err_other;
 using toolkit::ErrCode;
@@ -56,6 +57,18 @@ void StopAndWait(const PlayerProxy::Ptr& proxy) {
 }
 
 }  // namespace
+
+TEST_CASE("input player proxy rejects invalid ZLM timeouts") {
+  auto proxy = std::make_shared<PlayerProxy>();
+  PlayerConfig config;
+  config.connect_timeout = 0ms;
+  CHECK_THROWS_AS(proxy->Start(SamplePath(), config), std::invalid_argument);
+
+  config.connect_timeout = 10s;
+  config.media_timeout = 0ms;
+  CHECK_THROWS_AS(proxy->Start(SamplePath(), config), std::invalid_argument);
+  CHECK(proxy->state() == PlayerState::kIdle);
+}
 
 TEST_CASE(
     "input player proxy publishes streams and AVPackets without a "
@@ -310,6 +323,31 @@ TEST_CASE("stopping input player proxy cancels a pending reconnect") {
   CHECK(proxy->state() == PlayerState::kStopped);
   CHECK(proxy->generation() == generation_before_stop);
   CHECK(proxy->reconnect_count() == 1);
+}
+
+TEST_CASE("stopping input player proxy on owner poller completes inline") {
+  auto proxy = std::make_shared<PlayerProxy>();
+  std::mutex mutex;
+  std::condition_variable condition;
+  bool task_completed = false;
+  bool stop_completed_inline = false;
+
+  proxy->poller()->async(
+      [&]() {
+        bool stop_completed = false;
+        proxy->Stop([&]() { stop_completed = true; });
+        {
+          std::lock_guard<std::mutex> lock(mutex);
+          stop_completed_inline = stop_completed;
+          task_completed = true;
+        }
+        condition.notify_all();
+      },
+      false);
+
+  REQUIRE(WaitFor(condition, mutex, [&]() { return task_completed; }));
+  CHECK(stop_completed_inline);
+  CHECK(proxy->state() == PlayerState::kStopped);
 }
 
 TEST_CASE("destroying input player proxy cleans up without user callbacks") {

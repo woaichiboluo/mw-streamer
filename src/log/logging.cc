@@ -37,10 +37,7 @@ constexpr std::string_view kLogPattern =
 constexpr std::string_view kZlmChannelName = "mw-spdlog-event";
 
 constexpr std::array<std::string_view, kModuleCount> kModuleNames{
-    "ZLM",
-    "SRT",
-    "FFMPEG",
-    "streamer",
+    "ZLM", "SRT", "FFMPEG", "streamer", "processor",
 };
 
 constexpr std::size_t ModuleIndex(LogModule module) noexcept {
@@ -208,10 +205,7 @@ std::string_view TrimLineEnd(std::string_view message) noexcept {
 
 std::array<LogLevel, kModuleCount> ModuleLevels(const LogModuleConfig& config) {
   return {
-      config.zlm,
-      config.srt,
-      config.ffmpeg,
-      config.streamer,
+      config.zlm, config.srt, config.ffmpeg, config.streamer, config.processor,
   };
 }
 

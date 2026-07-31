@@ -7,6 +7,7 @@
 
 #include "mw/ffmpeg/packet.h"
 #include "mw/ffmpeg/stream_info.h"
+#include "mw/zlm/config.h"
 
 namespace toolkit {
 class EventPoller;
@@ -19,6 +20,7 @@ struct OutputConfig {
   // RTMP, RTSP, and SRT URLs are network targets. Paths ending in .mp4 and
   // .m3u8 are fragmented MP4 and HLS-fMP4 recording targets respectively.
   std::vector<std::string> targets;
+  zlm::OutputConfig zlm;
 };
 
 class OutputSession final {

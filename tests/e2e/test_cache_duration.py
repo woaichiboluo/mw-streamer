@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from mw_e2e.events import assert_packet_flow, read_events, wait_for_event
+from mw_e2e.events import assert_pipeline_succeeded, read_events, wait_for_event
 from mw_e2e.ffmpeg import MediaProbe, MediaPublisher
 from mw_e2e.mediamtx import allocate_tcp_port, allocate_udp_port
 from mw_e2e.models import E2EConfig, MediaAsset
@@ -47,6 +47,7 @@ def test_cache_duration(
     runner = Runner(
         e2e_config,
         runner_path,
+        media_asset,
         input_url,
         [output_url],
         cache_duration_seconds
@@ -72,28 +73,27 @@ def test_cache_duration(
     probe.start()
     runner.start()
     try:
-        streams_ready = wait_for_event(
+        processor_started = wait_for_event(
             runner.process,
             runner.events_path,
-            "streams_ready",
+            "processor_started",
             settings.startup_timeout_seconds,
         )
-        playing = wait_for_event(
+        running = wait_for_event(
             runner.process,
             runner.events_path,
-            "queue_state",
+            "pipeline_status",
             cache_duration_seconds + settings.reconnect_timeout_seconds,
-            lambda event: event.get("state") == "playing"
-            and event.get("generation") == streams_ready.get("generation"),
+            lambda event: event.get("state") == "running",
         )
-        buffered_ms = int(playing["ts_ms"]) - int(streams_ready["ts_ms"])
+        buffered_ms = int(running["ts_ms"]) - int(processor_started["ts_ms"])
         if cache_duration_ms == 0:
             assert buffered_ms <= 500, (
-                f"PacketQueue 0 缓存输出延迟过大: {buffered_ms}ms > 500ms"
+                f"0 缓存输出延迟过大: {buffered_ms}ms > 500ms"
             )
         else:
             assert buffered_ms >= cache_duration_ms - 250, (
-                f"PacketQueue 过早开始输出: {buffered_ms}ms < "
+                f"缓存过早开始输出: {buffered_ms}ms < "
                 f"{cache_duration_ms - 250}ms"
             )
 
@@ -109,9 +109,4 @@ def test_cache_duration(
         runner.stop()
         publisher.stop()
 
-    assert_packet_flow(
-        read_events(runner.events_path),
-        has_audio=media_asset.has_audio,
-        has_video=media_asset.has_video,
-        stall_timeout_seconds=settings.stall_timeout_seconds,
-    )
+    assert_pipeline_succeeded(read_events(runner.events_path))

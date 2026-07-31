@@ -14,9 +14,12 @@ extern "C" {
 }
 
 #include "mw/ffmpeg/error.h"
+#include "mw/log/logging.h"
 
 namespace mw::streamer::resampler {
 namespace {
+
+using Log = log::Module<log::LogModule::kStreamer>;
 
 constexpr AVRational kOutputTimeBase{1, AudioResampler::kOutputSampleRate};
 
@@ -91,6 +94,8 @@ class AudioResampler::Impl final {
            next_output_pts_.value_or(AV_NOPTS_VALUE));
     }
     drained_ = true;
+    Log::Debug("音频重采样器已排空: stream_index={}",
+               stream_info_.stream_index);
   }
 
   void Flush() {
@@ -100,6 +105,8 @@ class AudioResampler::Impl final {
     }
     next_output_pts_.reset();
     drained_ = false;
+    Log::Debug("音频重采样器已刷新: stream_index={}",
+               stream_info_.stream_index);
   }
 
   const ffmpeg::StreamInfo& stream_info() const noexcept {
@@ -147,6 +154,15 @@ class AudioResampler::Impl final {
 
     context_ = pending_context;
     input_sample_format_ = static_cast<AVSampleFormat>(input.format);
+    const char* input_format_name =
+        av_get_sample_fmt_name(input_sample_format_);
+    Log::Info(
+        "音频重采样器已初始化: stream_index={}, input_format={}, "
+        "input_sample_rate={}, output_format=flt, output_sample_rate={}, "
+        "channels={}",
+        stream_info_.stream_index,
+        input_format_name ? input_format_name : "unknown", input.sample_rate,
+        kOutputSampleRate, input.ch_layout.nb_channels);
   }
 
   ffmpeg::Frame AllocateOutputFrame(int sample_capacity) const {

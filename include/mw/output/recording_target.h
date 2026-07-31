@@ -8,6 +8,7 @@
 
 #include "Extension/Frame.h"
 #include "Extension/Track.h"
+#include "mw/zlm/config.h"
 
 namespace mw::streamer::output {
 
@@ -17,6 +18,7 @@ class Fmp4FileTarget final {
  public:
   Fmp4FileTarget(const std::filesystem::path& requested_path,
                  const std::vector<mediakit::Track::Ptr>& tracks,
+                 zlm::RecordingConfig config = {},
                  std::chrono::system_clock::time_point start_time =
                      std::chrono::system_clock::now());
   ~Fmp4FileTarget();
@@ -40,6 +42,7 @@ class HlsFmp4FileTarget final {
  public:
   HlsFmp4FileTarget(const std::filesystem::path& requested_path,
                     const std::vector<mediakit::Track::Ptr>& tracks,
+                    zlm::RecordingConfig config = {},
                     std::chrono::system_clock::time_point start_time =
                         std::chrono::system_clock::now());
   ~HlsFmp4FileTarget();

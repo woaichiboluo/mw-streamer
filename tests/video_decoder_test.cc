@@ -21,7 +21,7 @@ extern "C" {
 #include "mw/converter/zlm_codec_parameters_converter.h"
 #include "mw/converter/zlm_packet_converter.h"
 #include "mw/decoder/video_decoder.h"
-#include "mw/processor/frame_adapter.h"
+#include "mw/processor/internal/frame_adapter.h"
 
 namespace {
 
@@ -30,7 +30,6 @@ using mediakit::FrameWriterInterface;
 using mediakit::MP4Demuxer;
 using mediakit::Track;
 using mw::streamer::cache::PacketQueue;
-using mw::streamer::cache::PacketStream;
 using mw::streamer::converter::ZlmCodecParametersConverter;
 using mw::streamer::converter::ZlmPacketConverter;
 using mw::streamer::decoder::VideoDecoder;
@@ -39,7 +38,7 @@ using mw::streamer::decoder::VideoDecoderConfig;
 using mw::streamer::ffmpeg::CodecParameters;
 using mw::streamer::ffmpeg::Packet;
 using mw::streamer::ffmpeg::StreamInfo;
-using mw::streamer::processor::VideoFrameAdapter;
+using mw::streamer::processor::internal::VideoFrameAdapter;
 using namespace std::chrono_literals;
 
 struct VideoSample {
@@ -175,7 +174,7 @@ TEST_CASE("CUDA video decoder emits CUDA frames on the configured device") {
   REQUIRE(decoder.hardware_context() != nullptr);
   CHECK(decoder.config().backend == VideoDecoderBackend::kCuda);
   CHECK(decoder.hardware_context()->device_index() == 0);
-  CHECK(decoder.hardware_context()->native_stream() != 0);
+  CHECK(decoder.hardware_context()->native_handle() != 0);
 
   std::size_t decoded_frames = 0;
   bool valid_frames = true;
@@ -272,9 +271,7 @@ TEST_CASE("packet queue output connects directly to the CUDA video decoder") {
               }
             }
           });
-          queue->SetStreams(1, {PacketStream{sample.stream_info.stream_index,
-                                             AVMEDIA_TYPE_VIDEO,
-                                             sample.stream_info.time_base}});
+          queue->SetStreams(1, {sample.stream_info});
           queue->SetPlaybackRate(20.0);
           for (const auto& packet : sample.packets) {
             if (!queue->Input(1, packet)) {
@@ -355,9 +352,7 @@ TEST_CASE("new packet generation flushes and reuses the same video decoder") {
         ended_generations.push_back(generation);
       });
 
-      const std::vector<PacketStream> streams{
-          PacketStream{sample.stream_info.stream_index, AVMEDIA_TYPE_VIDEO,
-                       sample.stream_info.time_base}};
+      const std::vector<StreamInfo> streams{sample.stream_info};
       queue->SetStreams(1, streams);
       for (std::size_t index = 0; index < sample.packets.size() / 2; ++index) {
         if (!queue->Input(1, sample.packets[index])) {

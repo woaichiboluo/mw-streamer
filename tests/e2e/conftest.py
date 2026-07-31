@@ -25,6 +25,23 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         required=True,
         help="mw_streamer_e2e_runner 的路径",
     )
+    group.addoption(
+        "--run-bench",
+        action="store_true",
+        default=False,
+        help="运行每组持续10分钟的Pipeline Bench测试",
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    if config.getoption("--run-bench"):
+        return
+    skip_bench = pytest.mark.skip(reason="需要通过--run-bench显式启用Bench测试")
+    for item in items:
+        if "bench" in item.keywords:
+            item.add_marker(skip_bench)
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
@@ -135,3 +152,32 @@ def published_media(
         yield PublishedMedia(media_asset, media_path)
     finally:
         publisher.stop()
+
+
+@pytest.fixture
+def bench_media_asset(
+    request: pytest.FixtureRequest, pytestconfig: pytest.Config
+) -> MediaAsset:
+    codec = request.param
+    try:
+        assets = discover_media(pytestconfig.getoption("--e2e-config"))
+    except ConfigurationError as error:
+        raise pytest.UsageError(str(error)) from error
+
+    candidates = [
+        candidate
+        for candidate in assets
+        if candidate.video_codec == codec
+    ]
+    if not candidates:
+        display_codec = "H.264" if codec == "h264" else "H.265"
+        raise pytest.UsageError(
+            f"Bench测试要求媒体目录至少包含一个{display_codec}视频文件"
+        )
+    return min(
+        candidates,
+        key=lambda candidate: (
+            (candidate.video_width or 0) * (candidate.video_height or 0),
+            candidate.identifier,
+        ),
+    )

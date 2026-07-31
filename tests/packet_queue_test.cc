@@ -25,8 +25,9 @@ namespace {
 using namespace std::chrono_literals;
 using mw::streamer::cache::PacketQueue;
 using mw::streamer::cache::PacketQueueState;
-using mw::streamer::cache::PacketStream;
+using mw::streamer::ffmpeg::CodecParameters;
 using mw::streamer::ffmpeg::Packet;
+using mw::streamer::ffmpeg::StreamInfo;
 using mw::streamer::input::PlayerProxy;
 using mw::streamer::input::PlayerState;
 
@@ -43,10 +44,19 @@ Packet MakePacket(int stream_index, std::int64_t dts, AVRational time_base) {
   return packet;
 }
 
-std::vector<PacketStream> MillisecondStreams() {
+StreamInfo MakeStreamInfo(int stream_index, AVMediaType media_type,
+                          AVRational time_base) {
+  CodecParameters parameters;
+  parameters.get()->codec_type = media_type;
+  parameters.get()->codec_id =
+      media_type == AVMEDIA_TYPE_AUDIO ? AV_CODEC_ID_AAC : AV_CODEC_ID_H264;
+  return {stream_index, std::move(parameters), time_base};
+}
+
+std::vector<StreamInfo> MillisecondStreams() {
   return {
-      {0, AVMEDIA_TYPE_VIDEO, {1, 1000}},
-      {1, AVMEDIA_TYPE_AUDIO, {1, 1000}},
+      MakeStreamInfo(0, AVMEDIA_TYPE_VIDEO, {1, 1000}),
+      MakeStreamInfo(1, AVMEDIA_TYPE_AUDIO, {1, 1000}),
   };
 }
 
@@ -140,15 +150,15 @@ TEST_CASE("packet queue waits for both audio and video prebuffer") {
 }
 
 TEST_CASE("zero-duration packet queue forwards packets immediately") {
-  std::vector<PacketStream> streams;
+  std::vector<StreamInfo> streams;
   std::vector<std::pair<int, std::int64_t>> inputs;
 
   SECTION("audio only") {
-    streams = {{3, AVMEDIA_TYPE_AUDIO, {1, 1000}}};
+    streams = {MakeStreamInfo(3, AVMEDIA_TYPE_AUDIO, {1, 1000})};
     inputs = {{3, 0}, {3, 20}};
   }
   SECTION("video only") {
-    streams = {{7, AVMEDIA_TYPE_VIDEO, {1, 1000}}};
+    streams = {MakeStreamInfo(7, AVMEDIA_TYPE_VIDEO, {1, 1000})};
     inputs = {{7, 0}, {7, 40}};
   }
   SECTION("audio and video preserve arrival order") {
@@ -223,7 +233,7 @@ TEST_CASE("zero-duration packet queue keeps timeline validation") {
       [&](std::uint64_t generation) { resets.push_back(generation); });
 
   RunOnPollerAndWait(queue->poller(), [&]() {
-    queue->SetStreams(1, {{3, AVMEDIA_TYPE_AUDIO, {1, 1000}}});
+    queue->SetStreams(1, {MakeStreamInfo(3, AVMEDIA_TYPE_AUDIO, {1, 1000})});
     accepted = accepted && Feed(*queue, 1, 3, 100);
     accepted = accepted && Feed(*queue, 1, 3, 99);
     accepted = accepted && Feed(*queue, 1, 7, 200);
@@ -254,7 +264,7 @@ TEST_CASE("zero-duration packet queue never buffers while paused") {
   });
 
   RunOnPollerAndWait(queue->poller(), [&]() {
-    queue->SetStreams(1, {{3, AVMEDIA_TYPE_AUDIO, {1, 1000}}});
+    queue->SetStreams(1, {MakeStreamInfo(3, AVMEDIA_TYPE_AUDIO, {1, 1000})});
     accepted = accepted && Feed(*queue, 1, 3, 0);
     queue->Pause(true);
     accepted = accepted && Feed(*queue, 1, 3, 20);
@@ -277,10 +287,14 @@ TEST_CASE("packet queue honors representative cache durations") {
   const auto cache_duration_ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(cache_duration)
           .count();
-  std::vector<PacketStream> streams;
+  std::vector<StreamInfo> streams;
 
-  SECTION("audio only") { streams = {{3, AVMEDIA_TYPE_AUDIO, {1, 1000}}}; }
-  SECTION("video only") { streams = {{7, AVMEDIA_TYPE_VIDEO, {1, 1000}}}; }
+  SECTION("audio only") {
+    streams = {MakeStreamInfo(3, AVMEDIA_TYPE_AUDIO, {1, 1000})};
+  }
+  SECTION("video only") {
+    streams = {MakeStreamInfo(7, AVMEDIA_TYPE_VIDEO, {1, 1000})};
+  }
   SECTION("audio and video") { streams = MillisecondStreams(); }
 
   auto queue = std::make_shared<PacketQueue>(cache_duration);
@@ -353,7 +367,7 @@ TEST_CASE("packet queue buffers and drains a single configured track") {
   });
 
   RunOnPollerAndWait(queue->poller(), [&]() {
-    queue->SetStreams(1, {{stream_index, media_type, {1, 1000}}});
+    queue->SetStreams(1, {MakeStreamInfo(stream_index, media_type, {1, 1000})});
     for (std::int64_t dts = 0; dts <= 900; dts += 100) {
       Feed(*queue, 1, stream_index, dts);
     }
@@ -466,8 +480,9 @@ TEST_CASE("packet queue interleaves normalized DTS without rewriting packets") {
   const AVRational video_time_base{1, 1000};
   const AVRational audio_time_base{1, 48000};
   RunOnPollerAndWait(queue->poller(), [&]() {
-    queue->SetStreams(1, {{0, AVMEDIA_TYPE_VIDEO, video_time_base},
-                          {1, AVMEDIA_TYPE_AUDIO, audio_time_base}});
+    queue->SetStreams(1,
+                      {MakeStreamInfo(0, AVMEDIA_TYPE_VIDEO, video_time_base),
+                       MakeStreamInfo(1, AVMEDIA_TYPE_AUDIO, audio_time_base)});
 
     for (std::int64_t index = 0; index <= 12; ++index) {
       Feed(*queue, 1, 0, 10 + index * 100, video_time_base);
@@ -588,20 +603,29 @@ TEST_CASE("packet queue validates its supported stream combinations") {
 
   auto queue = std::make_shared<PacketQueue>(1s);
   CHECK_THROWS_AS(queue->SetStreams(1, {}), std::invalid_argument);
-  CHECK_NOTHROW(queue->SetStreams(1, {{0, AVMEDIA_TYPE_VIDEO, {1, 1000}}}));
-  CHECK_NOTHROW(queue->SetStreams(2, {{1, AVMEDIA_TYPE_AUDIO, {1, 1000}}}));
+  CHECK_NOTHROW(
+      queue->SetStreams(1, {MakeStreamInfo(0, AVMEDIA_TYPE_VIDEO, {1, 1000})}));
+  CHECK_NOTHROW(
+      queue->SetStreams(2, {MakeStreamInfo(1, AVMEDIA_TYPE_AUDIO, {1, 1000})}));
   CHECK_NOTHROW(queue->SetStreams(3, MillisecondStreams()));
-  CHECK_THROWS_AS(queue->SetStreams(4, {{0, AVMEDIA_TYPE_VIDEO, {1, 1000}},
-                                        {1, AVMEDIA_TYPE_VIDEO, {1, 1000}}}),
-                  std::invalid_argument);
-  CHECK_THROWS_AS(queue->SetStreams(4, {{0, AVMEDIA_TYPE_AUDIO, {1, 1000}},
-                                        {1, AVMEDIA_TYPE_AUDIO, {1, 1000}}}),
-                  std::invalid_argument);
-  CHECK_THROWS_AS(queue->SetStreams(1, {{0, AVMEDIA_TYPE_VIDEO, {1, 1000}},
-                                        {0, AVMEDIA_TYPE_AUDIO, {1, 1000}}}),
-                  std::invalid_argument);
-  CHECK_THROWS_AS(queue->SetStreams(1, {{0, AVMEDIA_TYPE_DATA, {1, 1000}}}),
-                  std::invalid_argument);
+  CHECK_THROWS_AS(
+      queue->SetStreams(4, {MakeStreamInfo(0, AVMEDIA_TYPE_VIDEO, {1, 1000}),
+                            MakeStreamInfo(1, AVMEDIA_TYPE_VIDEO, {1, 1000})}),
+      std::invalid_argument);
+  CHECK_THROWS_AS(
+      queue->SetStreams(4, {MakeStreamInfo(0, AVMEDIA_TYPE_AUDIO, {1, 1000}),
+                            MakeStreamInfo(1, AVMEDIA_TYPE_AUDIO, {1, 1000})}),
+      std::invalid_argument);
+  CHECK_THROWS_AS(
+      queue->SetStreams(1, {MakeStreamInfo(0, AVMEDIA_TYPE_VIDEO, {1, 1000}),
+                            MakeStreamInfo(0, AVMEDIA_TYPE_AUDIO, {1, 1000})}),
+      std::invalid_argument);
+  CHECK_THROWS_AS(
+      queue->SetStreams(1, {MakeStreamInfo(0, AVMEDIA_TYPE_DATA, {1, 1000})}),
+      std::invalid_argument);
+  CHECK_NOTHROW(
+      queue->SetStreams(0, {MakeStreamInfo(0, AVMEDIA_TYPE_VIDEO, {1, 1000}),
+                            MakeStreamInfo(2, AVMEDIA_TYPE_DATA, {1, 1000})}));
   RunOnPollerAndWait(queue->poller(), [&]() {
     queue->SetStreams(4, MillisecondStreams());
     Feed(*queue, 4, 0, 0);
@@ -634,7 +658,7 @@ TEST_CASE("new generation replaces the configured track set") {
     Feed(*queue, 1, 0, 0);
     Feed(*queue, 1, 1, 0);
 
-    queue->SetStreams(2, {{5, AVMEDIA_TYPE_AUDIO, {1, 1000}}});
+    queue->SetStreams(2, {MakeStreamInfo(5, AVMEDIA_TYPE_AUDIO, {1, 1000})});
     Feed(*queue, 2, 0, 0);
     for (std::int64_t dts = 0; dts <= 1000; dts += 100) {
       Feed(*queue, 2, 5, dts);
@@ -819,13 +843,7 @@ TEST_CASE("player proxy feeds and fully drains an eight second packet queue") {
   proxy->SetOnStreamsReady(
       [&](std::uint64_t generation,
           const std::vector<mw::streamer::ffmpeg::StreamInfo>& streams) {
-        std::vector<PacketStream> packet_streams;
-        for (const auto& stream : streams) {
-          packet_streams.push_back({stream.stream_index,
-                                    stream.codec_parameters.get()->codec_type,
-                                    stream.time_base});
-        }
-        queue->SetStreams(generation, std::move(packet_streams));
+        queue->SetStreams(generation, streams);
       });
   proxy->SetOnPacket([&](std::uint64_t generation, const Packet& packet) {
     return queue->Input(generation, packet);

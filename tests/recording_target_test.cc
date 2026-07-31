@@ -4,12 +4,14 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 
 #include "Common/config.h"
 #include "Record/MP4Demuxer.h"
 #include "Util/onceToken.h"
+#include "mw/zlm/internal/config_validator.h"
 
 #ifdef CHECK
 #undef CHECK
@@ -21,6 +23,9 @@ namespace {
 
 using mw::streamer::output::Fmp4FileTarget;
 using mw::streamer::output::HlsFmp4FileTarget;
+using mw::streamer::zlm::RecordingConfig;
+using mw::streamer::zlm::internal::ValidateOutputConfig;
+using mw::streamer::zlm::internal::ValidateRecordingConfig;
 
 std::filesystem::path SamplePath() {
   return std::filesystem::path(MW_RECORDING_TARGET_TEST_DATA_DIR) /
@@ -57,6 +62,18 @@ std::string ReadFile(const std::filesystem::path& path) {
 
 }  // namespace
 
+TEST_CASE("Output配置复用统一录像配置校验") {
+  RecordingConfig recording;
+  CHECK_NOTHROW(ValidateRecordingConfig(recording));
+
+  recording.file_buffer_size = 0;
+  CHECK_THROWS_AS(ValidateRecordingConfig(recording), std::invalid_argument);
+
+  mw::streamer::zlm::OutputConfig output;
+  output.recording = recording;
+  CHECK_THROWS_AS(ValidateOutputConfig(output), std::invalid_argument);
+}
+
 TEST_CASE("ZLM录像目标生成带相同开始时间的fMP4和HLS-fMP4") {
   auto& zlm_config = toolkit::mINI::Instance();
   const auto old_enable_fmp4 = zlm_config[mediakit::Record::kEnableFmp4];
@@ -75,9 +92,14 @@ TEST_CASE("ZLM录像目标生成带相同开始时间的fMP4和HLS-fMP4") {
   const auto tracks = demuxer.getTracks(true);
   REQUIRE(tracks.size() == 2);
 
+  RecordingConfig recording_config;
+  recording_config.file_buffer_size = 4096;
+  recording_config.hls_segment_duration = std::chrono::seconds(4);
   const auto start_time = std::chrono::system_clock::now();
-  Fmp4FileTarget fmp4(directory.path() / "camera.mp4", tracks, start_time);
-  HlsFmp4FileTarget hls(directory.path() / "camera.m3u8", tracks, start_time);
+  Fmp4FileTarget fmp4(directory.path() / "camera.mp4", tracks, recording_config,
+                      start_time);
+  HlsFmp4FileTarget hls(directory.path() / "camera.m3u8", tracks,
+                        recording_config, start_time);
 
   bool eof = false;
   std::size_t frame_count = 0;
@@ -134,5 +156,5 @@ TEST_CASE("ZLM录像目标生成带相同开始时间的fMP4和HLS-fMP4") {
       ++media_segment_count;
     }
   }
-  CHECK(media_segment_count >= 3);
+  CHECK(media_segment_count == 2);
 }

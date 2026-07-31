@@ -30,7 +30,6 @@ using mediakit::MP4Demuxer;
 using mediakit::Track;
 using mw::streamer::cache::PacketQueue;
 using mw::streamer::cache::PacketQueueState;
-using mw::streamer::cache::PacketStream;
 using mw::streamer::converter::ZlmCodecParametersConverter;
 using mw::streamer::converter::ZlmPacketConverter;
 using mw::streamer::decoder::AudioDecoder;
@@ -224,8 +223,7 @@ TEST_CASE("audio decoder decodes drains and flushes an AAC stream") {
         ended_generations.push_back(generation);
       });
 
-      const std::vector<PacketStream> streams{PacketStream{
-          stream_info.stream_index, AVMEDIA_TYPE_AUDIO, stream_info.time_base}};
+      const std::vector<StreamInfo> streams{stream_info};
       queue->SetStreams(1, streams);
       for (std::size_t index = 0; index < retained_packets.size() / 2;
            ++index) {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 from pathlib import Path
 
 from .models import E2EConfig, MediaAsset
@@ -58,12 +59,13 @@ class MediaProbe:
         protocol: str,
         input_url: str,
         asset: MediaAsset,
-        duration_seconds: float,
+        duration_seconds: float | None,
         artifact_directory: Path,
         name: str,
         *,
         listen: bool = False,
         listen_timeout_seconds: float | None = None,
+        stream_copy: bool = False,
     ) -> None:
         if listen and protocol != "rtsp":
             raise ValueError("只有RTSP探针支持监听模式")
@@ -95,11 +97,15 @@ class MediaProbe:
                     str(math.ceil(listen_timeout_seconds)),
                 ]
             )
-        command.extend(["-i", input_url, "-t", str(duration_seconds)])
+        command.extend(["-i", input_url])
+        if duration_seconds is not None:
+            command.extend(["-t", str(duration_seconds)])
         if asset.has_video:
             command.extend(["-map", "0:v:0"])
         if asset.has_audio:
             command.extend(["-map", "0:a:0"])
+        if stream_copy:
+            command.extend(["-c", "copy"])
         command.extend(["-f", "null", "-"])
         self.process = ManagedProcess(command, artifact_directory / f"{name}.log")
         self.duration_seconds = duration_seconds
@@ -108,13 +114,15 @@ class MediaProbe:
         self.process.start()
 
     def wait(self, timeout: float) -> None:
+        if self.duration_seconds is None:
+            raise ValueError("无固定时长的媒体探针不能调用wait")
         returncode = self.process.wait(timeout)
         if returncode != 0:
             raise ProcessError(
                 f"FFmpeg 接收探针失败，返回码 {returncode}: "
                 f"{self.process.log_path}"
             )
-        progress = self._read_progress()
+        progress = self.read_progress()
         if progress.get("progress") != "end":
             raise ProcessError(f"FFmpeg 接收探针没有正常结束: {self.progress_path}")
         output_time_us = int(
@@ -130,7 +138,7 @@ class MediaProbe:
     def stop(self) -> None:
         self.process.stop()
 
-    def _read_progress(self) -> dict[str, str]:
+    def read_progress(self) -> dict[str, str]:
         values: dict[str, str] = {}
         try:
             lines = self.progress_path.read_text(encoding="utf-8").splitlines()
@@ -141,3 +149,74 @@ class MediaProbe:
             if separator:
                 values[key] = value
         return values
+
+
+def monitor_stable_probes(
+    probes: list[MediaProbe],
+    duration_seconds: float,
+    stall_timeout_seconds: float,
+) -> None:
+    if not probes:
+        raise ValueError("至少需要一个媒体探针")
+    if duration_seconds <= 0 or stall_timeout_seconds <= 0:
+        raise ValueError("探针超时必须大于0")
+
+    last_media_time = {id(probe): -1 for probe in probes}
+    last_frame = {id(probe): -1 for probe in probes}
+    last_change_at = {id(probe): time.monotonic() for probe in probes}
+    first_media_time: dict[int, int] = {}
+    monitor_deadline: float | None = None
+
+    while monitor_deadline is None or time.monotonic() < monitor_deadline:
+        now = time.monotonic()
+        for probe in probes:
+            probe_id = id(probe)
+            if probe.process.returncode is not None:
+                raise ProcessError(
+                    f"Bench媒体探针提前退出，返回码"
+                    f"{probe.process.returncode}: {probe.process.log_path}"
+                )
+            if not probe.progress_path.exists():
+                if now - last_change_at[probe_id] > stall_timeout_seconds:
+                    raise ProcessError(
+                        f"FFmpeg接收探针启动后没有媒体进度: "
+                        f"{probe.process.log_path}"
+                    )
+                continue
+
+            progress = probe.read_progress()
+            media_time = int(
+                progress.get(
+                    "out_time_us", progress.get("out_time_ms", "0")
+                )
+            )
+            frame = int(progress.get("frame", "0"))
+            if (
+                media_time > last_media_time[probe_id]
+                or frame > last_frame[probe_id]
+            ):
+                first_media_time.setdefault(probe_id, media_time)
+                last_media_time[probe_id] = media_time
+                last_frame[probe_id] = frame
+                last_change_at[probe_id] = now
+            elif now - last_change_at[probe_id] > stall_timeout_seconds:
+                raise ProcessError(
+                    f"FFmpeg接收探针媒体进度停顿超过"
+                    f"{stall_timeout_seconds:g}秒: {probe.process.log_path}"
+                )
+
+        if monitor_deadline is None and len(first_media_time) == len(probes):
+            monitor_deadline = now + duration_seconds
+        time.sleep(1.0)
+
+    minimum_media_duration_us = int(duration_seconds * 0.98 * 1_000_000)
+    for probe in probes:
+        probe_id = id(probe)
+        media_duration_us = (
+            last_media_time[probe_id] - first_media_time[probe_id]
+        )
+        if media_duration_us < minimum_media_duration_us:
+            raise ProcessError(
+                f"Bench接收媒体时长不足: {media_duration_us}us < "
+                f"{minimum_media_duration_us}us: {probe.process.log_path}"
+            )

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
-from .models import E2EConfig
+from .models import E2EConfig, MediaAsset
 from .process import ManagedProcess, ProcessError
 
 
@@ -12,12 +12,15 @@ class Runner:
         self,
         config: E2EConfig,
         executable: Path,
+        asset: MediaAsset,
         input_url: str,
         output_urls: Sequence[str],
         duration_seconds: float,
         artifact_directory: Path,
         cache_duration_ms: int | None = None,
     ) -> None:
+        if not output_urls:
+            raise ValueError("StreamingPipeline E2E 至少需要一个输出目标")
         self.events_path = artifact_directory / "runner.events"
         effective_cache_duration_ms = (
             config.tests.cache_duration_ms
@@ -34,6 +37,20 @@ class Runner:
             str(effective_cache_duration_ms),
             "--duration-ms",
             str(int(duration_seconds * 1000)),
+            "--output-width",
+            str(asset.video_width or 0),
+            "--output-height",
+            str(asset.video_height or 0),
+            "--frame-rate-num",
+            str(asset.video_frame_rate_num or 0),
+            "--frame-rate-den",
+            str(asset.video_frame_rate_den or 1),
+            "--video-codec",
+            (
+                "h265"
+                if asset.video_codec == "hevc"
+                else (asset.video_codec or "none")
+            ),
         ]
         for output_url in output_urls:
             command.extend(["--output", output_url])

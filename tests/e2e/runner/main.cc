@@ -6,9 +6,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
-#include <future>
 #include <iterator>
-#include <memory>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -16,28 +15,16 @@
 #include <utility>
 #include <vector>
 
-extern "C" {
-#include <libavutil/avutil.h>
-}
-
-#include "Poller/EventPoller.h"
-#include "mw/cache/packet_queue.h"
 #include "mw/init/init.h"
-#include "mw/input/player_proxy.h"
-#include "mw/output/output_session.h"
+#include "mw/pipeline/streaming_pipeline.h"
+#include "mw/processor/processor.h"
 
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::cache::PacketQueue;
-using mw::streamer::cache::PacketQueueState;
-using mw::streamer::cache::PacketStream;
-using mw::streamer::ffmpeg::Packet;
-using mw::streamer::ffmpeg::StreamInfo;
-using mw::streamer::input::PlayerProxy;
-using mw::streamer::input::PlayerState;
-using mw::streamer::output::OutputConfig;
-using mw::streamer::output::OutputSession;
+using mw::streamer::pipeline::StreamingPipeline;
+using mw::streamer::pipeline::StreamingPipelineConfig;
+using mw::streamer::pipeline::StreamingPipelineStatus;
 
 std::atomic_bool g_stop_requested = false;
 
@@ -45,51 +32,20 @@ void HandleSignal(int) {
   g_stop_requested.store(true, std::memory_order_relaxed);
 }
 
-const char* ToString(PlayerState state) {
-  switch (state) {
-    case PlayerState::kIdle:
+const char* ToString(StreamingPipelineStatus status) {
+  switch (status) {
+    case StreamingPipelineStatus::kIdle:
       return "idle";
-    case PlayerState::kConnecting:
-      return "connecting";
-    case PlayerState::kReady:
-      return "ready";
-    case PlayerState::kWaitingRetry:
-      return "waiting_retry";
-    case PlayerState::kEnded:
-      return "ended";
-    case PlayerState::kFailed:
+    case StreamingPipelineStatus::kStarting:
+      return "starting";
+    case StreamingPipelineStatus::kRunning:
+      return "running";
+    case StreamingPipelineStatus::kFailed:
       return "failed";
-    case PlayerState::kStopped:
+    case StreamingPipelineStatus::kStopped:
       return "stopped";
   }
   return "unknown";
-}
-
-const char* ToString(PacketQueueState state) {
-  switch (state) {
-    case PacketQueueState::kFilling:
-      return "filling";
-    case PacketQueueState::kPlaying:
-      return "playing";
-    case PacketQueueState::kPaused:
-      return "paused";
-    case PacketQueueState::kStarved:
-      return "starved";
-    case PacketQueueState::kStopped:
-      return "stopped";
-  }
-  return "unknown";
-}
-
-const char* ToString(AVMediaType media_type) {
-  switch (media_type) {
-    case AVMEDIA_TYPE_AUDIO:
-      return "audio";
-    case AVMEDIA_TYPE_VIDEO:
-      return "video";
-    default:
-      return "unsupported";
-  }
 }
 
 class EventWriter final {
@@ -131,6 +87,11 @@ struct Arguments {
   std::string events_path;
   std::chrono::milliseconds cache_duration{1000};
   std::chrono::milliseconds duration{10000};
+  std::uint32_t output_width = 0;
+  std::uint32_t output_height = 0;
+  std::uint32_t frame_rate_num = 0;
+  std::uint32_t frame_rate_den = 1;
+  MwStreamerCodec video_codec = kMwStreamerCodecUnknown;
 };
 
 std::string RequireValue(int argc, char* argv[], int& index) {
@@ -152,6 +113,29 @@ std::chrono::milliseconds ParseMilliseconds(const std::string& value,
   return std::chrono::milliseconds(number);
 }
 
+std::uint32_t ParseUnsigned(const std::string& value, const char* option) {
+  std::size_t parsed = 0;
+  const auto number = std::stoull(value, &parsed);
+  if (parsed != value.size() ||
+      number > std::numeric_limits<std::uint32_t>::max()) {
+    throw std::invalid_argument(fmt::format("{}必须是有效的非负整数", option));
+  }
+  return static_cast<std::uint32_t>(number);
+}
+
+MwStreamerCodec ParseVideoCodec(const std::string& value) {
+  if (value == "none") {
+    return kMwStreamerCodecUnknown;
+  }
+  if (value == "h264") {
+    return kMwStreamerCodecH264;
+  }
+  if (value == "h265") {
+    return kMwStreamerCodecH265;
+  }
+  throw std::invalid_argument("--video-codec必须是none、h264或h265");
+}
+
 Arguments ParseArguments(int argc, char* argv[]) {
   Arguments arguments;
   for (int index = 1; index < argc; ++index) {
@@ -168,6 +152,20 @@ Arguments ParseArguments(int argc, char* argv[]) {
     } else if (option == "--duration-ms") {
       arguments.duration = ParseMilliseconds(RequireValue(argc, argv, index),
                                              "--duration-ms", 1);
+    } else if (option == "--output-width") {
+      arguments.output_width =
+          ParseUnsigned(RequireValue(argc, argv, index), "--output-width");
+    } else if (option == "--output-height") {
+      arguments.output_height =
+          ParseUnsigned(RequireValue(argc, argv, index), "--output-height");
+    } else if (option == "--frame-rate-num") {
+      arguments.frame_rate_num =
+          ParseUnsigned(RequireValue(argc, argv, index), "--frame-rate-num");
+    } else if (option == "--frame-rate-den") {
+      arguments.frame_rate_den =
+          ParseUnsigned(RequireValue(argc, argv, index), "--frame-rate-den");
+    } else if (option == "--video-codec") {
+      arguments.video_codec = ParseVideoCodec(RequireValue(argc, argv, index));
     } else {
       throw std::invalid_argument("未知参数: " + option);
     }
@@ -176,10 +174,87 @@ Arguments ParseArguments(int argc, char* argv[]) {
   if (arguments.input.empty()) {
     throw std::invalid_argument("--input不能为空");
   }
+  if (arguments.outputs.empty()) {
+    throw std::invalid_argument("--output至少需要一个");
+  }
   if (arguments.events_path.empty()) {
     throw std::invalid_argument("--events不能为空");
   }
+  if ((arguments.output_width == 0) != (arguments.output_height == 0)) {
+    throw std::invalid_argument("视频输出宽高必须同时为0或同时大于0");
+  }
+  if (arguments.frame_rate_den == 0 ||
+      (arguments.output_width == 0 && arguments.frame_rate_num != 0)) {
+    throw std::invalid_argument("视频帧率参数无效");
+  }
+  if ((arguments.output_width == 0) !=
+      (arguments.video_codec == kMwStreamerCodecUnknown)) {
+    throw std::invalid_argument("视频输出尺寸与编码格式不匹配");
+  }
   return arguments;
+}
+
+struct ProcessorObserver {
+  EventWriter* events = nullptr;
+  std::atomic_uint64_t timeline_reset_count{0};
+};
+
+MwStreamerProcessorStartResult OnProcessorStart(
+    const MwStreamerStreamingProcessorStartRequest* request,
+    void* user_context) {
+  auto* observer = static_cast<ProcessorObserver*>(user_context);
+  if (!observer || !observer->events || !request || !request->source_info ||
+      !request->config || !request->execution) {
+    return kMwStreamerProcessorStartFailed;
+  }
+
+  observer->events->Write(
+      "processor_started",
+      {{"has_audio", request->source_info->has_audio ? "1" : "0"},
+       {"has_video", request->source_info->has_video ? "1" : "0"},
+       {"source_width", std::to_string(request->source_info->video.width)},
+       {"source_height", std::to_string(request->source_info->video.height)},
+       {"output_width", std::to_string(request->config->output_width)},
+       {"output_height", std::to_string(request->config->output_height)},
+       {"execution", request->execution->type == kMwStreamerExecutionCuda
+                         ? "cuda"
+                         : "cpu"}});
+  return kMwStreamerProcessorStartSuccess;
+}
+
+void OnProcessorBoundary(MwStreamerProcessorBoundaryReason reason,
+                         void* user_context) {
+  auto* observer = static_cast<ProcessorObserver*>(user_context);
+  if (!observer || !observer->events) {
+    throw std::invalid_argument("E2E Processor边界回调参数无效");
+  }
+
+  const char* reason_name = nullptr;
+  std::uint64_t reset_count = observer->timeline_reset_count.load();
+  switch (reason) {
+    case kMwStreamerProcessorTimelineReset:
+      reason_name = "timeline_reset";
+      reset_count = observer->timeline_reset_count.fetch_add(
+                        1, std::memory_order_acq_rel) +
+                    1;
+      break;
+    case kMwStreamerProcessorEndOfInput:
+      reason_name = "end_of_input";
+      break;
+    default:
+      throw std::invalid_argument("E2E Processor收到未知边界");
+  }
+  observer->events->Write(
+      "processor_boundary",
+      {{"reason", reason_name},
+       {"timeline_reset_count", std::to_string(reset_count)}});
+}
+
+void OnProcessorStop(void* user_context) {
+  auto* observer = static_cast<ProcessorObserver*>(user_context);
+  if (observer && observer->events) {
+    observer->events->Write("processor_stopped");
+  }
 }
 
 int Run(const Arguments& arguments) {
@@ -187,163 +262,71 @@ int Run(const Arguments& arguments) {
   init_config.log.console.color = false;
   init_config.log.modules.zlm = mw::streamer::log::LogLevel::kInfo;
   init_config.log.modules.streamer = mw::streamer::log::LogLevel::kInfo;
+  init_config.log.modules.processor = mw::streamer::log::LogLevel::kInfo;
   mw::streamer::Init(init_config);
 
   EventWriter events(arguments.events_path);
-  auto poller = toolkit::EventPollerPool::Instance().getPoller();
-  auto queue = std::make_shared<PacketQueue>(arguments.cache_duration, poller);
-  auto player = std::make_shared<PlayerProxy>(poller);
-  std::shared_ptr<OutputSession> output;
+  ProcessorObserver observer;
+  observer.events = &events;
 
-  std::atomic_bool ready_seen = false;
-  std::atomic_bool failed = false;
-  std::atomic_int audio_stream_index = -1;
-  std::atomic_int video_stream_index = -1;
-  std::atomic_uint64_t packet_generation = 0;
-  std::atomic_uint64_t audio_packets = 0;
-  std::atomic_uint64_t video_packets = 0;
-  std::atomic_uint64_t total_packets = 0;
+  StreamingPipelineConfig config;
+  config.input_url = arguments.input;
+  config.output_targets = arguments.outputs;
+  config.cache_duration = arguments.cache_duration;
+  config.processor.output_width = arguments.output_width;
+  config.processor.output_height = arguments.output_height;
+  config.video_encoder.frame_rate = {
+      static_cast<std::int32_t>(arguments.frame_rate_num),
+      static_cast<std::int32_t>(arguments.frame_rate_den),
+  };
+  config.video_encoder.codec = arguments.video_codec;
 
-  queue->SetOnState(
-      [&events](std::uint64_t generation, PacketQueueState state) {
-        events.Write("queue_state", {{"generation", std::to_string(generation)},
-                                     {"state", ToString(state)}});
-      });
-  queue->SetOnTimelineReset([&events](std::uint64_t generation) {
-    events.Write("timeline_reset",
-                 {{"generation", std::to_string(generation)}});
-  });
-  queue->SetOnPacket([&](std::uint64_t, const Packet& packet) {
-    ++total_packets;
-    if (packet->stream_index ==
-        audio_stream_index.load(std::memory_order_relaxed)) {
-      ++audio_packets;
-    }
-    if (packet->stream_index ==
-        video_stream_index.load(std::memory_order_relaxed)) {
-      ++video_packets;
-    }
-    if (output) {
-      output->Write(packet);
-    }
-  });
+  StreamingPipeline pipeline(std::move(config));
+  const MwStreamerStreamingProcessorCallbacks callbacks{
+      &observer,           OnProcessorStart, nullptr,         nullptr,
+      OnProcessorBoundary, nullptr,          OnProcessorStop,
+  };
+  pipeline.SetProcessorCallbacks(callbacks);
 
-  player->SetOnStreamsReady([&](std::uint64_t generation,
-                                const std::vector<StreamInfo>& streams) {
-    std::vector<PacketStream> packet_streams;
-    std::vector<StreamInfo> output_streams;
-    packet_streams.reserve(streams.size());
-    output_streams.reserve(streams.size());
-    audio_stream_index.store(-1, std::memory_order_relaxed);
-    video_stream_index.store(-1, std::memory_order_relaxed);
-    audio_packets.store(0, std::memory_order_relaxed);
-    video_packets.store(0, std::memory_order_relaxed);
-    total_packets.store(0, std::memory_order_relaxed);
-    packet_generation.store(generation, std::memory_order_relaxed);
-
-    for (const auto& stream : streams) {
-      const auto media_type = stream.codec_parameters.get()->codec_type;
-      packet_streams.push_back(
-          {stream.stream_index, media_type, stream.time_base});
-      output_streams.push_back(
-          {stream.stream_index, stream.codec_parameters, stream.time_base});
-      if (media_type == AVMEDIA_TYPE_AUDIO) {
-        audio_stream_index.store(stream.stream_index,
-                                 std::memory_order_relaxed);
-      } else if (media_type == AVMEDIA_TYPE_VIDEO) {
-        video_stream_index.store(stream.stream_index,
-                                 std::memory_order_relaxed);
-      }
-      events.Write("stream",
-                   {{"generation", std::to_string(generation)},
-                    {"stream_index", std::to_string(stream.stream_index)},
-                    {"media_type", ToString(media_type)},
-                    {"codec_id",
-                     std::to_string(stream.codec_parameters.get()->codec_id)}});
-    }
-
-    queue->SetStreams(generation, std::move(packet_streams));
-    if (!output && !arguments.outputs.empty()) {
-      OutputConfig config;
-      config.streams = std::move(output_streams);
-      config.targets = arguments.outputs;
-      output = std::make_shared<OutputSession>(std::move(config), poller);
-      output->Open();
+  std::atomic_bool running_seen = false;
+  std::atomic_bool failed_seen = false;
+  pipeline.SetOnStatus([&](StreamingPipelineStatus status) {
+    events.Write("pipeline_status", {{"state", ToString(status)}});
+    if (status == StreamingPipelineStatus::kRunning) {
+      running_seen.store(true, std::memory_order_release);
       events.Write(
           "output_opened",
           {{"target_count", std::to_string(arguments.outputs.size())}});
+    } else if (status == StreamingPipelineStatus::kFailed) {
+      failed_seen.store(true, std::memory_order_release);
     }
-    events.Write("streams_ready",
-                 {{"generation", std::to_string(generation)},
-                  {"stream_count", std::to_string(streams.size())}});
-  });
-  player->SetOnPacket([&](std::uint64_t generation, const Packet& packet) {
-    return queue->Input(generation, packet);
-  });
-  player->SetOnState([&](std::uint64_t generation, PlayerState state,
-                         const toolkit::SockException& reason,
-                         bool will_retry) {
-    if (state == PlayerState::kReady) {
-      ready_seen.store(true, std::memory_order_relaxed);
-    }
-    if (state == PlayerState::kWaitingRetry || state == PlayerState::kEnded ||
-        state == PlayerState::kFailed) {
-      queue->EndInput(generation);
-    }
-    if (state == PlayerState::kFailed) {
-      failed.store(true, std::memory_order_relaxed);
-    }
-    events.Write("player_state", {{"generation", std::to_string(generation)},
-                                  {"state", ToString(state)},
-                                  {"reason", reason.what()},
-                                  {"will_retry", will_retry ? "1" : "0"},
-                                  {"reconnect_count",
-                                   std::to_string(player->reconnect_count())}});
   });
 
   events.Write("runner_started");
-  player->Start(arguments.input);
+  pipeline.Start();
 
   const auto finish_at = std::chrono::steady_clock::now() + arguments.duration;
   while (!g_stop_requested.load(std::memory_order_relaxed) &&
+         !failed_seen.load(std::memory_order_acquire) &&
          std::chrono::steady_clock::now() < finish_at) {
     std::this_thread::sleep_for(1s);
-    events.Write(
-        "heartbeat",
-        {{"generation", std::to_string(packet_generation.load())},
-         {"reconnect_count", std::to_string(player->reconnect_count())},
-         {"total_packets", std::to_string(total_packets.load())},
-         {"audio_packets", std::to_string(audio_packets.load())},
-         {"video_packets", std::to_string(video_packets.load())},
-         {"queued_packets", std::to_string(queue->packet_count())}});
+    events.Write("heartbeat",
+                 {{"state", ToString(pipeline.status())},
+                  {"timeline_reset_count",
+                   std::to_string(observer.timeline_reset_count.load())}});
   }
 
-  auto stopped = std::make_shared<std::promise<void>>();
-  auto stopped_future = stopped->get_future();
-  player->Stop([stopped]() { stopped->set_value(); });
-  stopped_future.wait();
-  queue->Stop();
-  poller->sync([]() {});
-  if (output) {
-    output->Close();
-  }
+  pipeline.Stop();
+  const auto final_status = pipeline.status();
+  events.Write("summary",
+               {{"running_seen", running_seen.load() ? "1" : "0"},
+                {"failed_seen", failed_seen.load() ? "1" : "0"},
+                {"final_status", ToString(final_status)},
+                {"timeline_reset_count",
+                 std::to_string(observer.timeline_reset_count.load())}});
 
-  events.Write(
-      "summary",
-      {{"ready_seen", ready_seen.load() ? "1" : "0"},
-       {"failed", failed.load() ? "1" : "0"},
-       {"total_packets", std::to_string(total_packets.load())},
-       {"audio_packets", std::to_string(audio_packets.load())},
-       {"video_packets", std::to_string(video_packets.load())},
-       {"reconnect_count", std::to_string(player->reconnect_count())}});
-
-  output.reset();
-  player.reset();
-  queue.reset();
   mw::streamer::Shutdown();
-
-  return ready_seen.load() && total_packets.load() > 0 && !failed.load() ? 0
-                                                                         : 2;
+  return running_seen.load() && !failed_seen.load() ? 0 : 2;
 }
 
 }  // namespace

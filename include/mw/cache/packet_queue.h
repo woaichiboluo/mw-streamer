@@ -8,12 +8,8 @@
 #include <memory>
 #include <vector>
 
-extern "C" {
-#include <libavutil/avutil.h>
-#include <libavutil/rational.h>
-}
-
 #include "mw/ffmpeg/packet.h"
+#include "mw/ffmpeg/stream_info.h"
 
 namespace toolkit {
 class EventPoller;
@@ -27,12 +23,6 @@ enum class PacketQueueState {
   kPaused,
   kStarved,
   kStopped,
-};
-
-struct PacketStream {
-  int stream_index = -1;
-  AVMediaType media_type = AVMEDIA_TYPE_UNKNOWN;
-  AVRational time_base{0, 1};
 };
 
 class PacketQueue final {
@@ -69,8 +59,9 @@ class PacketQueue final {
 
   // One audio stream, one video stream, or one of each is required. Calling
   // SetStreams with a newer generation atomically clears the previous
-  // timeline.
-  void SetStreams(std::uint64_t generation, std::vector<PacketStream> streams);
+  // timeline. Non-audio/video streams are ignored.
+  void SetStreams(std::uint64_t generation,
+                  const std::vector<ffmpeg::StreamInfo>& streams);
 
   // The packet is referenced before this method returns. Invalid packets,
   // unknown streams, decreasing per-stream DTS, and stale generations are

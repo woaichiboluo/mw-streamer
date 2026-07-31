@@ -30,37 +30,6 @@ void ValidateCacheDuration(std::chrono::milliseconds duration) {
   }
 }
 
-void ValidateStreams(const std::vector<PacketStream>& streams) {
-  std::size_t audio_count = 0;
-  std::size_t video_count = 0;
-
-  if (streams.empty()) {
-    throw std::invalid_argument("PacketQueue至少需要一路音频或视频");
-  }
-
-  for (const auto& stream : streams) {
-    if (stream.stream_index < 0 || stream.time_base.num <= 0 ||
-        stream.time_base.den <= 0) {
-      throw std::invalid_argument("PacketStream参数无效");
-    }
-    if (stream.media_type == AVMEDIA_TYPE_AUDIO) {
-      ++audio_count;
-    } else if (stream.media_type == AVMEDIA_TYPE_VIDEO) {
-      ++video_count;
-    } else {
-      throw std::invalid_argument("PacketQueue只支持音频和视频轨道");
-    }
-  }
-
-  if (audio_count > 1 || video_count > 1) {
-    throw std::invalid_argument("PacketQueue最多支持一路音频和一路视频");
-  }
-  if (streams.size() == 2 &&
-      streams[0].stream_index == streams[1].stream_index) {
-    throw std::invalid_argument("音频和视频stream_index不能相同");
-  }
-}
-
 }  // namespace
 
 class PacketQueue::Impl final
@@ -105,10 +74,12 @@ class PacketQueue::Impl final
         });
   }
 
-  void SetStreams(std::uint64_t generation, std::vector<PacketStream> streams) {
+  void SetStreams(std::uint64_t generation,
+                  const std::vector<ffmpeg::StreamInfo>& streams) {
+    auto descriptors = DescribeStreams(streams);
     Dispatch([self = shared_from_this(), generation,
-              streams = std::move(streams)]() mutable {
-      self->SetStreamsOnPoller(generation, std::move(streams));
+              descriptors = std::move(descriptors)]() mutable {
+      self->SetStreamsOnPoller(generation, std::move(descriptors));
     });
   }
 
@@ -191,17 +162,24 @@ class PacketQueue::Impl final
   }
 
  private:
+  struct StreamDescriptor {
+    int stream_index = -1;
+    AVMediaType media_type = AVMEDIA_TYPE_UNKNOWN;
+    AVRational time_base{0, 1};
+  };
+
   struct CachedPacket {
     ffmpeg::Packet packet;
     std::int64_t dts_us = AV_NOPTS_VALUE;
   };
 
   struct TrackQueue {
-    PacketStream stream;
+    int stream_index = -1;
+    AVRational time_base{0, 1};
     std::deque<CachedPacket> packets;
     std::int64_t latest_dts_us = AV_NOPTS_VALUE;
 
-    bool configured() const { return stream.stream_index >= 0; }
+    bool configured() const { return stream_index >= 0; }
 
     void Clear() {
       packets.clear();
@@ -209,7 +187,8 @@ class PacketQueue::Impl final
     }
 
     void Reset() {
-      stream = {};
+      stream_index = -1;
+      time_base = {0, 1};
       Clear();
     }
   };
@@ -223,8 +202,50 @@ class PacketQueue::Impl final
     poller_->async(std::forward<Func>(function), false);
   }
 
+  static std::vector<StreamDescriptor> DescribeStreams(
+      const std::vector<ffmpeg::StreamInfo>& streams) {
+    std::vector<StreamDescriptor> descriptors;
+    descriptors.reserve(streams.size());
+    int audio_stream_index = -1;
+    int video_stream_index = -1;
+
+    for (const auto& stream : streams) {
+      const auto* parameters = stream.codec_parameters.get();
+      if (!parameters) {
+        throw std::invalid_argument("FFmpeg StreamInfo参数无效");
+      }
+      if (parameters->codec_type != AVMEDIA_TYPE_AUDIO &&
+          parameters->codec_type != AVMEDIA_TYPE_VIDEO) {
+        continue;
+      }
+
+      stream.Validate();
+      if (parameters->codec_type == AVMEDIA_TYPE_AUDIO) {
+        if (audio_stream_index >= 0) {
+          throw std::invalid_argument("PacketQueue最多支持一路音频和一路视频");
+        }
+        audio_stream_index = stream.stream_index;
+      } else {
+        if (video_stream_index >= 0) {
+          throw std::invalid_argument("PacketQueue最多支持一路音频和一路视频");
+        }
+        video_stream_index = stream.stream_index;
+      }
+      descriptors.push_back(
+          {stream.stream_index, parameters->codec_type, stream.time_base});
+    }
+
+    if (descriptors.empty()) {
+      throw std::invalid_argument("PacketQueue至少需要一路音频或视频");
+    }
+    if (audio_stream_index >= 0 && audio_stream_index == video_stream_index) {
+      throw std::invalid_argument("音频和视频stream_index不能相同");
+    }
+    return descriptors;
+  }
+
   void SetStreamsOnPoller(std::uint64_t generation,
-                          std::vector<PacketStream> streams) {
+                          std::vector<StreamDescriptor> streams) {
     if (disposing_.load(std::memory_order_acquire) || generation == 0 ||
         generation < this->generation()) {
       return;
@@ -249,9 +270,11 @@ class PacketQueue::Impl final
 
     for (const auto& stream : streams) {
       if (stream.media_type == AVMEDIA_TYPE_AUDIO) {
-        audio_.stream = stream;
+        audio_.stream_index = stream.stream_index;
+        audio_.time_base = stream.time_base;
       } else {
-        video_.stream = stream;
+        video_.stream_index = stream.stream_index;
+        video_.time_base = stream.time_base;
       }
     }
     streams_configured_ = true;
@@ -298,8 +321,8 @@ class PacketQueue::Impl final
       return;
     }
 
-    const auto dts_us = av_rescale_q(raw_packet->dts, track->stream.time_base,
-                                     kComparisonTimeBase);
+    const auto dts_us =
+        av_rescale_q(raw_packet->dts, track->time_base, kComparisonTimeBase);
     if (track->latest_dts_us != AV_NOPTS_VALUE &&
         dts_us < track->latest_dts_us) {
       return;
@@ -440,10 +463,10 @@ class PacketQueue::Impl final
   }
 
   TrackQueue* FindTrack(int stream_index) {
-    if (audio_.configured() && audio_.stream.stream_index == stream_index) {
+    if (audio_.configured() && audio_.stream_index == stream_index) {
       return &audio_;
     }
-    if (video_.configured() && video_.stream.stream_index == stream_index) {
+    if (video_.configured() && video_.stream_index == stream_index) {
       return &video_;
     }
     return nullptr;
@@ -744,9 +767,8 @@ void PacketQueue::SetOnGenerationEnd(OnGenerationEnd callback) {
 }
 
 void PacketQueue::SetStreams(std::uint64_t generation,
-                             std::vector<PacketStream> streams) {
-  ValidateStreams(streams);
-  impl_->SetStreams(generation, std::move(streams));
+                             const std::vector<ffmpeg::StreamInfo>& streams) {
+  impl_->SetStreams(generation, streams);
 }
 
 bool PacketQueue::Input(std::uint64_t generation,

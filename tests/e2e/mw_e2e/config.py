@@ -106,9 +106,6 @@ def load_config(path: str) -> E2EConfig:
             stability_seconds=_require_positive_number(
                 tests_table, "stability_seconds"
             ),
-            stall_timeout_seconds=_require_positive_number(
-                tests_table, "stall_timeout_seconds"
-            ),
             reconnect_timeout_seconds=_require_positive_number(
                 tests_table, "reconnect_timeout_seconds"
             ),
@@ -122,7 +119,7 @@ def _probe_media(config: E2EConfig, path: Path) -> MediaAsset:
         "-v",
         "error",
         "-show_entries",
-        "stream=codec_type,codec_name:format=duration",
+        "stream=codec_type,codec_name,width,height,avg_frame_rate:format=duration",
         "-of",
         "json",
         str(path),
@@ -142,34 +139,58 @@ def _probe_media(config: E2EConfig, path: Path) -> MediaAsset:
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise ConfigurationError(f"媒体文件元数据不完整: {path}") from error
 
-    audio_codecs = [
-        stream["codec_name"]
-        for stream in streams
-        if stream.get("codec_type") == "audio"
+    audio_streams = [
+        stream for stream in streams if stream.get("codec_type") == "audio"
     ]
-    video_codecs = [
-        stream["codec_name"]
-        for stream in streams
-        if stream.get("codec_type") == "video"
+    video_streams = [
+        stream for stream in streams if stream.get("codec_type") == "video"
     ]
-    if not audio_codecs and not video_codecs:
+    if not audio_streams and not video_streams:
         raise ConfigurationError(f"媒体文件没有音频或视频轨道: {path}")
-    if len(audio_codecs) > 1 or len(video_codecs) > 1:
+    if len(audio_streams) > 1 or len(video_streams) > 1:
         raise ConfigurationError(f"首版每种媒体类型最多支持一条轨道: {path}")
-    if audio_codecs and audio_codecs[0] != "aac":
+    if audio_streams and audio_streams[0].get("codec_name") != "aac":
         raise ConfigurationError(f"首版网络矩阵只支持 AAC 音频: {path}")
-    if video_codecs and video_codecs[0] not in {"h264", "hevc"}:
+    if video_streams and video_streams[0].get("codec_name") not in {
+        "h264",
+        "hevc",
+    }:
         raise ConfigurationError(f"首版网络矩阵只支持 H.264/H.265 视频: {path}")
     if duration_seconds <= 0:
         raise ConfigurationError(f"媒体文件时长无效: {path}")
+
+    video_width = None
+    video_height = None
+    video_frame_rate_num = None
+    video_frame_rate_den = None
+    if video_streams:
+        try:
+            video_width = int(video_streams[0]["width"])
+            video_height = int(video_streams[0]["height"])
+            frame_rate = video_streams[0]["avg_frame_rate"].split("/", 1)
+            video_frame_rate_num = int(frame_rate[0])
+            video_frame_rate_den = int(frame_rate[1])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ConfigurationError(f"媒体文件视频元数据无效: {path}") from error
+        if (
+            video_width <= 0
+            or video_height <= 0
+            or video_frame_rate_num <= 0
+            or video_frame_rate_den <= 0
+        ):
+            raise ConfigurationError(f"媒体文件视频元数据无效: {path}")
 
     relative_path = path.relative_to(config.media_directory)
     return MediaAsset(
         path=path,
         identifier=relative_path.as_posix(),
         duration_seconds=duration_seconds,
-        audio_codec=audio_codecs[0] if audio_codecs else None,
-        video_codec=video_codecs[0] if video_codecs else None,
+        audio_codec=audio_streams[0]["codec_name"] if audio_streams else None,
+        video_codec=video_streams[0]["codec_name"] if video_streams else None,
+        video_width=video_width,
+        video_height=video_height,
+        video_frame_rate_num=video_frame_rate_num,
+        video_frame_rate_den=video_frame_rate_den,
     )
 
 

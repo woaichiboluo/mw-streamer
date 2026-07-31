@@ -1,8 +1,25 @@
 #include "mw/ffmpeg/stream_info.h"
 
 #include <stdexcept>
+#include <utility>
+
+#include "mw/ffmpeg/error.h"
 
 namespace mw::streamer::ffmpeg {
+
+StreamInfo StreamInfo::FromCodecContext(const AVCodecContext& context,
+                                        int stream_index) {
+  CodecParameters parameters;
+  ThrowIfError(avcodec_parameters_from_context(parameters.get(), &context),
+               "从AVCodecContext导出CodecParameters");
+  StreamInfo stream_info{
+      stream_index,
+      std::move(parameters),
+      context.time_base,
+  };
+  stream_info.Validate();
+  return stream_info;
+}
 
 void StreamInfo::Validate() const {
   const auto* parameters = codec_parameters.get();

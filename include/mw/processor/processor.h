@@ -3,34 +3,17 @@
 
 #include <stdint.h>
 
+#include "mw/media/types.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-typedef struct MwStreamerRational {
-  int32_t num;
-  int32_t den;
-} MwStreamerRational;
 
 typedef struct MwStreamerMediaTimestamp {
   int64_t pts;
   int64_t duration;
   MwStreamerRational time_base;
 } MwStreamerMediaTimestamp;
-
-typedef enum MwStreamerCodec {
-  kMwStreamerCodecUnknown = 0,
-  kMwStreamerCodecH264,
-  kMwStreamerCodecH265,
-  kMwStreamerCodecAv1,
-  kMwStreamerCodecAac,
-  kMwStreamerCodecG711A,
-  kMwStreamerCodecG711U,
-  kMwStreamerCodecOpus,
-  kMwStreamerCodecMjpeg,
-  kMwStreamerCodecVp8,
-  kMwStreamerCodecVp9,
-} MwStreamerCodec;
 
 typedef enum MwStreamerMemoryType {
   kMwStreamerMemoryHost = 0,
@@ -134,11 +117,6 @@ typedef enum MwStreamerProcessorStartResult {
   kMwStreamerProcessorStartSuccess = 0,
   kMwStreamerProcessorStartFailed,
 } MwStreamerProcessorStartResult;
-
-typedef enum MwStreamerProcessorMode {
-  kStreaming = 0,
-  kLocalFile,
-} MwStreamerProcessorMode;
 
 typedef enum MwStreamerProcessorBoundaryReason {
   kMwStreamerProcessorTimelineReset = 0,
@@ -250,58 +228,72 @@ typedef struct MwStreamerProcessorSourceInfo {
   MwStreamerAudioSourceInfo audio;
 } MwStreamerProcessorSourceInfo;
 
-// output_width and output_height are fixed for the Processor lifetime. They
-// are zero in kLocalFile mode and when kStreaming has no video stream. config
-// is a null-terminated opaque user string; the Pipeline copies it during
-// creation and updates only that field while running.
-typedef struct MwStreamerProcessorConfig {
+// Output dimensions are fixed for the Streaming Processor lifetime. They are
+// zero when the stream has no video. config is a null-terminated opaque user
+// string; the Pipeline copies it during creation and updates only that field
+// while running.
+typedef struct MwStreamerStreamingProcessorConfig {
   uint32_t output_width;
   uint32_t output_height;
   const char* config;
-} MwStreamerProcessorConfig;
+} MwStreamerStreamingProcessorConfig;
 
-typedef struct MwStreamerVideoProcessRequest {
+typedef struct MwStreamerFileProcessorConfig {
+  const char* config;
+} MwStreamerFileProcessorConfig;
+
+typedef struct MwStreamerStreamingVideoProcessRequest {
   const MwStreamerVideoFrameView* input;
-  // Non-null in kStreaming mode and null in kLocalFile mode. In streaming
-  // mode, the framework attaches input->timestamp to the completed output
-  // frame.
+  // The framework attaches input->timestamp to the completed output frame.
   MwStreamerVideoBufferView* output;
-  const MwStreamerExecutionContext* execution;
-} MwStreamerVideoProcessRequest;
+} MwStreamerStreamingVideoProcessRequest;
 
-typedef struct MwStreamerAudioProcessRequest {
+typedef struct MwStreamerStreamingAudioProcessRequest {
   const MwStreamerAudioFrameView* input;
-  // Non-null in kStreaming mode and null in kLocalFile mode. In streaming
-  // mode, the framework attaches input->timestamp to the completed output
-  // frame.
+  // The framework attaches input->timestamp to the completed output frame.
   MwStreamerAudioBufferView* output;
-} MwStreamerAudioProcessRequest;
+} MwStreamerStreamingAudioProcessRequest;
 
-typedef struct MwStreamerProcessorStartRequest {
-  MwStreamerProcessorMode mode;
+typedef struct MwStreamerStreamingProcessorStartRequest {
   const MwStreamerProcessorSourceInfo* source_info;
-  const MwStreamerProcessorConfig* config;
+  const MwStreamerStreamingProcessorConfig* config;
   const MwStreamerExecutionContext* execution;
-} MwStreamerProcessorStartRequest;
+} MwStreamerStreamingProcessorStartRequest;
+
+typedef struct MwStreamerFileProcessorStartRequest {
+  const MwStreamerProcessorSourceInfo* source_info;
+  const MwStreamerFileProcessorConfig* config;
+  const MwStreamerExecutionContext* execution;
+} MwStreamerFileProcessorStartRequest;
 
 // A failed callback must release any partially initialized user resources
 // before returning. on_stop is paired only with a successful on_start.
-typedef MwStreamerProcessorStartResult (*MwStreamerProcessorStartCallback)(
-    const MwStreamerProcessorStartRequest* request, void* user_context);
+typedef MwStreamerProcessorStartResult (
+    *MwStreamerStreamingProcessorStartCallback)(
+    const MwStreamerStreamingProcessorStartRequest* request,
+    void* user_context);
 
-// In kStreaming mode, every callback must completely produce one output for
-// one input. CPU output is ready when the callback returns. For asynchronous
-// backends, the final output write must have been submitted to the supplied
-// execution sequence. In kLocalFile mode output is null and the callback
-// consumes the input without producing a media frame.
-typedef void (*MwStreamerProcessVideoCallback)(
-    const MwStreamerVideoProcessRequest* request, void* user_context);
+typedef MwStreamerProcessorStartResult (*MwStreamerFileProcessorStartCallback)(
+    const MwStreamerFileProcessorStartRequest* request, void* user_context);
 
-// Audio presented to Processor is always 48 kHz float32 interleaved. In
-// kStreaming mode, the output has the same channel count and
-// samples_per_channel as the input. In kLocalFile mode output is null.
-typedef void (*MwStreamerProcessAudioCallback)(
-    const MwStreamerAudioProcessRequest* request, void* user_context);
+// Every Streaming callback must completely produce one output for one input.
+// CPU output is ready when the callback returns. For asynchronous backends,
+// the final output write must have been submitted to the supplied execution
+// sequence.
+typedef void (*MwStreamerStreamingProcessVideoCallback)(
+    const MwStreamerStreamingVideoProcessRequest* request, void* user_context);
+
+// Audio presented to Streaming Processor is always 48 kHz float32 interleaved.
+// The output has the same channel count and samples_per_channel as the input.
+typedef void (*MwStreamerStreamingProcessAudioCallback)(
+    const MwStreamerStreamingAudioProcessRequest* request, void* user_context);
+
+// File callbacks consume decoded input without allocating or producing an
+// output media frame.
+typedef void (*MwStreamerFileProcessVideoCallback)(
+    const MwStreamerVideoFrameView* input, void* user_context);
+typedef void (*MwStreamerFileProcessAudioCallback)(
+    const MwStreamerAudioFrameView* input, void* user_context);
 
 // Optional input boundary notification. Timeline reset is called after all
 // work from the old timeline and before the first callback of the new
@@ -315,30 +307,55 @@ typedef void (*MwStreamerProcessorUpdateConfigCallback)(const char* config,
 
 typedef void (*MwStreamerProcessorStopCallback)(void* user_context);
 
-typedef struct MwStreamerProcessorCallbacks {
+typedef struct MwStreamerStreamingProcessorCallbacks {
   // Borrowed user data returned unchanged to every callback. The framework
   // never reads or releases it.
   void* user_context;
 
-  // on_start receives source information and the initial config before the
-  // first process callback. All request views are borrowed for the callback.
-  MwStreamerProcessorStartCallback on_start;
-  MwStreamerProcessVideoCallback process_video;
-  MwStreamerProcessAudioCallback process_audio;
+  // on_start receives source information, the fixed execution context, and the
+  // initial config before the first process callback. User code that needs the
+  // backend stream must copy it into user_context here. All request views are
+  // borrowed for the callback.
+  MwStreamerStreamingProcessorStartCallback on_start;
+  MwStreamerStreamingProcessVideoCallback process_video;
+  MwStreamerStreamingProcessAudioCallback process_audio;
 
   // Optional. A boundary is emitted once for the whole Processor, not once per
   // audio or video stream.
   MwStreamerProcessorBoundaryCallback on_boundary;
 
-  // Runtime updates are serialized with audio and video processing. The
-  // null-terminated string is borrowed for the callback; user code must copy
-  // data it needs after returning.
+  // Runtime updates originate from the Pipeline control thread and may run
+  // concurrently with audio and video processing. The null-terminated string
+  // is borrowed for the callback; user code must copy data it needs after
+  // returning and synchronize access to its own runtime state.
   MwStreamerProcessorUpdateConfigCallback update_config;
 
   // Called once after a successful on_start, after all process callbacks and
-  // their submitted output work have completed.
+  // their submitted output work have completed. Exceptions are logged and
+  // suppressed by the framework.
   MwStreamerProcessorStopCallback on_stop;
-} MwStreamerProcessorCallbacks;
+} MwStreamerStreamingProcessorCallbacks;
+
+typedef struct MwStreamerFileProcessorCallbacks {
+  // Borrowed user data returned unchanged to every callback. The framework
+  // never reads or releases it.
+  void* user_context;
+
+  MwStreamerFileProcessorStartCallback on_start;
+  MwStreamerFileProcessVideoCallback process_video;
+  MwStreamerFileProcessAudioCallback process_audio;
+
+  // Optional. A boundary is emitted once for the whole Processor, not once per
+  // audio or video stream.
+  MwStreamerProcessorBoundaryCallback on_boundary;
+
+  // Runtime updates may run concurrently with audio and video processing. The
+  // null-terminated string is borrowed for the callback.
+  MwStreamerProcessorUpdateConfigCallback update_config;
+
+  // Called once after a successful on_start and all processing has completed.
+  MwStreamerProcessorStopCallback on_stop;
+} MwStreamerFileProcessorCallbacks;
 
 #ifdef __cplusplus
 }

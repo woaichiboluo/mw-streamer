@@ -27,6 +27,7 @@ enum class LogModule : std::uint8_t {
   kSrt,
   kFfmpeg,
   kStreamer,
+  kProcessor,
   kCount,
 };
 
@@ -40,6 +41,7 @@ struct LogModuleConfig {
   LogLevel srt = LogLevel::kOff;
   LogLevel ffmpeg = LogLevel::kOff;
   LogLevel streamer = LogLevel::kInfo;
+  LogLevel processor = LogLevel::kInfo;
 };
 
 struct ConsoleSinkConfig {

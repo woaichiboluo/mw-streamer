@@ -1,12 +1,12 @@
-#ifndef MW_STREAMER_INCLUDE_MW_PROCESSOR_FRAME_ADAPTER_H_
-#define MW_STREAMER_INCLUDE_MW_PROCESSOR_FRAME_ADAPTER_H_
+#ifndef MW_STREAMER_INCLUDE_MW_PROCESSOR_INTERNAL_FRAME_ADAPTER_H_
+#define MW_STREAMER_INCLUDE_MW_PROCESSOR_INTERNAL_FRAME_ADAPTER_H_
 
 #include <array>
 
 #include "mw/ffmpeg/frame.h"
 #include "mw/processor/processor.h"
 
-namespace mw::streamer::processor {
+namespace mw::streamer::processor::internal {
 
 // Adapters expose borrowed AVFrame storage through the Processor C ABI. They
 // must remain alive for every use of the returned view and never retain the
@@ -63,6 +63,6 @@ class AudioBufferAdapter final {
   MwStreamerAudioBufferView view_{};
 };
 
-}  // namespace mw::streamer::processor
+}  // namespace mw::streamer::processor::internal
 
-#endif  // MW_STREAMER_INCLUDE_MW_PROCESSOR_FRAME_ADAPTER_H_
+#endif  // MW_STREAMER_INCLUDE_MW_PROCESSOR_INTERNAL_FRAME_ADAPTER_H_

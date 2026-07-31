@@ -2,6 +2,26 @@ add_executable(mw_processor_c_api_tests
     processor_c_api_test.c
 )
 
+add_executable(mw_common_tests
+    common_test.cc
+)
+
+target_include_directories(mw_common_tests
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+)
+
+target_link_libraries(mw_common_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        ZLMediaKit::ToolKit
+)
+
+add_test(
+    NAME mw_common_tests
+    COMMAND mw_common_tests
+)
+
 target_include_directories(mw_processor_c_api_tests
     PRIVATE
         "${PROJECT_SOURCE_DIR}/include"
@@ -25,6 +45,41 @@ target_link_libraries(mw_frame_adapter_tests
 add_test(
     NAME mw_frame_adapter_tests
     COMMAND mw_frame_adapter_tests
+)
+
+add_executable(mw_source_info_adapter_tests
+    source_info_adapter_test.cc
+)
+
+target_link_libraries(mw_source_info_adapter_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        mw::streamer
+)
+
+add_test(
+    NAME mw_source_info_adapter_tests
+    COMMAND mw_source_info_adapter_tests
+)
+
+add_executable(mw_processor_enum_converter_tests
+    processor_enum_converter_test.cc
+    "${PROJECT_SOURCE_DIR}/src/processor/internal/enum_converter.cc"
+)
+
+target_include_directories(mw_processor_enum_converter_tests
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+)
+
+target_link_libraries(mw_processor_enum_converter_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+)
+
+add_test(
+    NAME mw_processor_enum_converter_tests
+    COMMAND mw_processor_enum_converter_tests
 )
 
 add_executable(mw_processor_handler_tests
@@ -60,6 +115,116 @@ target_link_libraries(mw_decoder_config_tests
 add_test(
     NAME mw_decoder_config_tests
     COMMAND mw_decoder_config_tests
+)
+
+add_executable(mw_encoder_config_tests
+    encoder_config_test.cc
+)
+
+target_include_directories(mw_encoder_config_tests
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+)
+
+target_link_libraries(mw_encoder_config_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+)
+
+add_test(
+    NAME mw_encoder_config_tests
+    COMMAND mw_encoder_config_tests
+)
+
+add_executable(mw_pipeline_config_tests
+    pipeline_config_test.cc
+)
+
+target_include_directories(mw_pipeline_config_tests
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+)
+
+target_link_libraries(mw_pipeline_config_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+)
+
+add_test(
+    NAME mw_pipeline_config_tests
+    COMMAND mw_pipeline_config_tests
+)
+
+add_executable(mw_streaming_pipeline_tests
+    streaming_pipeline_test.cc
+)
+
+target_compile_definitions(mw_streaming_pipeline_tests
+    PRIVATE
+        MW_STREAMING_PIPELINE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+)
+
+target_link_libraries(mw_streaming_pipeline_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        ZLMediaKit::MediaKit
+        mw::streamer
+)
+
+add_test(
+    NAME mw_streaming_pipeline_tests
+    COMMAND mw_streaming_pipeline_tests
+)
+
+add_executable(mw_processing_chain_tests
+    processing_chain_test.cc
+)
+
+target_compile_definitions(mw_processing_chain_tests
+    PRIVATE
+        MW_PROCESSING_CHAIN_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+)
+
+target_link_libraries(mw_processing_chain_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        ZLMediaKit::MediaKit
+        mw::streamer
+)
+
+add_test(
+    NAME mw_processing_chain_tests
+    COMMAND mw_processing_chain_tests
+)
+
+add_executable(mw_audio_encoder_tests
+    audio_encoder_test.cc
+)
+
+target_link_libraries(mw_audio_encoder_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        mw::streamer
+)
+
+add_test(
+    NAME mw_audio_encoder_tests
+    COMMAND mw_audio_encoder_tests
+)
+
+add_executable(mw_video_encoder_tests
+    video_encoder_test.cc
+)
+
+target_link_libraries(mw_video_encoder_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        mw::streamer
+)
+
+add_test(
+    NAME mw_video_encoder_tests
+    COMMAND mw_video_encoder_tests
 )
 
 add_executable(mw_logging_tests

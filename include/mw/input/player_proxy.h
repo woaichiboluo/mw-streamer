@@ -9,24 +9,16 @@
 #include <vector>
 
 #include "Network/Socket.h"
-#include "Util/mini.h"
 #include "mw/ffmpeg/packet.h"
 #include "mw/ffmpeg/stream_info.h"
+#include "mw/input/config.h"
+#include "mw/zlm/config.h"
 
 namespace toolkit {
 class EventPoller;
 }
 
 namespace mw::streamer::input {
-
-struct ReconnectPolicy {
-  // Number of retries after the initial attempt. A negative value retries
-  // indefinitely.
-  int max_retries = -1;
-  std::chrono::milliseconds min_delay{2000};
-  std::chrono::milliseconds max_delay{60000};
-  std::chrono::milliseconds delay_step{3000};
-};
 
 enum class PlayerState {
   kIdle,
@@ -86,7 +78,7 @@ class PlayerProxy final {
 
   // One proxy manages one active URL. Start again only after stop completes or
   // the previous finite input reaches a terminal state.
-  void Start(std::string url, toolkit::mINI options = {});
+  void Start(std::string url, zlm::PlayerConfig config = {});
 
   // Playback controls are accepted only while a finite local input is Ready.
   // Completion reports that validation passed and the command was synchronously

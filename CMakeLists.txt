@@ -30,29 +30,52 @@ find_package(CUDAToolkit REQUIRED)
 find_package(SRT REQUIRED)
 
 add_subdirectory(third_party/ZLMediaKit)
+add_subdirectory(third_party/HdrHistogram_c)
 
 add_library(mw_streamer STATIC
     src/cache/packet_queue.cc
     src/converter/av_packet_to_zlm_frame_converter.cc
+    src/converter/internal/codec_bridge.cc
     src/converter/zlm_codec_parameters_converter.cc
     src/converter/zlm_packet_converter.cc
     src/decoder/audio_decoder.cc
+    src/decoder/internal/codec_finder.cc
     src/decoder/video_decoder.cc
+    src/encoder/audio_encoder.cc
+    src/encoder/internal/options.cc
+    src/encoder/video_encoder.cc
     src/ffmpeg/codec_context.cc
     src/ffmpeg/codec_parameters.cc
+    src/ffmpeg/dictionary.cc
     src/ffmpeg/error.cc
     src/ffmpeg/frame.cc
     src/ffmpeg/hardware_context.cc
     src/ffmpeg/packet.cc
+    src/ffmpeg/pixel_format.cc
     src/ffmpeg/stream_info.cc
     src/init/init.cc
     src/input/player_proxy.cc
     src/log/logging.cc
+    src/media/internal/codec_bridge.cc
     src/output/output_session.cc
     src/output/recording_target.cc
-    src/processor/frame_adapter.cc
+    src/pipeline/internal/streaming/audio_processing_chain.cc
+    src/pipeline/internal/streaming/audio_worker.cc
+    src/pipeline/internal/streaming/output_worker.cc
+    src/pipeline/internal/streaming/video_worker.cc
+    src/pipeline/internal/streaming/video_processing_chain.cc
+    src/pipeline/streaming_pipeline.cc
+    src/processor/internal/audio_frame_allocator.cc
+    src/processor/internal/enum_converter.cc
+    src/processor/internal/execution_context_adapter.cc
+    src/processor/internal/frame_adapter.cc
+    src/processor/internal/source_info_adapter.cc
+    src/processor/internal/video_frame_allocator.cc
+    src/processor/file_processor_handler.cc
     src/processor/processor_handler.cc
+    src/processor/streaming_processor_handler.cc
     src/resampler/audio_resampler.cc
+    src/zlm/internal/config_validator.cc
 )
 add_library(mw::streamer ALIAS mw_streamer)
 
@@ -73,6 +96,7 @@ target_link_libraries(mw_streamer
     PRIVATE
         SRT::SRT
         CUDA::cuda_driver
+        HdrHistogram::HdrHistogram
         ZLMediaKit::ext-codec
         ZLMediaKit::SRT
         spdlog::spdlog

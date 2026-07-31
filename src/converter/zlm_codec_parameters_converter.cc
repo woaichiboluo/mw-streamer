@@ -11,35 +11,11 @@ extern "C" {
 #include <libavutil/mem.h>
 }
 
+#include "mw/converter/internal/codec_bridge.h"
+#include "mw/converter/internal/zlm_time_base.h"
+
 namespace mw::streamer::converter {
 namespace {
-
-constexpr AVRational kZlmTimeBase{1, 1000};
-
-AVCodecID GetFfmpegCodecId(mediakit::CodecId codec) {
-  switch (codec) {
-    case mediakit::CodecH264:
-      return AV_CODEC_ID_H264;
-    case mediakit::CodecH265:
-      return AV_CODEC_ID_HEVC;
-    case mediakit::CodecAAC:
-      return AV_CODEC_ID_AAC;
-    case mediakit::CodecG711A:
-      return AV_CODEC_ID_PCM_ALAW;
-    case mediakit::CodecG711U:
-      return AV_CODEC_ID_PCM_MULAW;
-    case mediakit::CodecOpus:
-      return AV_CODEC_ID_OPUS;
-    case mediakit::CodecJPEG:
-      return AV_CODEC_ID_MJPEG;
-    case mediakit::CodecVP8:
-      return AV_CODEC_ID_VP8;
-    case mediakit::CodecVP9:
-      return AV_CODEC_ID_VP9;
-    default:
-      return AV_CODEC_ID_NONE;
-  }
-}
 
 std::vector<std::uint8_t> GetExtraData(const mediakit::Track::Ptr& track) {
   std::vector<std::uint8_t> result;
@@ -91,7 +67,7 @@ ZlmCodecParametersConverter::ZlmCodecParametersConverter(
     throw std::invalid_argument("track不能为空");
   }
 
-  const auto codec_id = GetFfmpegCodecId(track->getCodecId());
+  const auto codec_id = internal::ToFfmpegCodecId(track->getCodecId());
   if (codec_id == AV_CODEC_ID_NONE) {
     throw std::invalid_argument("不支持的ZLM codec");
   }
@@ -127,7 +103,7 @@ const ffmpeg::CodecParameters& ZlmCodecParametersConverter::codec_parameters()
 }
 
 AVRational ZlmCodecParametersConverter::time_base() const {
-  return kZlmTimeBase;
+  return internal::kZlmTimeBase;
 }
 
 }  // namespace mw::streamer::converter

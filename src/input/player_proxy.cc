@@ -20,6 +20,7 @@ extern "C" {
 #include "Poller/EventPoller.h"
 #include "mw/converter/zlm_codec_parameters_converter.h"
 #include "mw/converter/zlm_packet_converter.h"
+#include "mw/zlm/internal/config_validator.h"
 
 namespace mw::streamer::input {
 namespace {
@@ -243,11 +244,12 @@ class PlayerProxy::Impl final
         false);
   }
 
-  void Start(std::string url, toolkit::mINI options) {
+  void Start(std::string url, zlm::PlayerConfig config) {
+    zlm::internal::ValidatePlayerConfig(config);
     auto self = shared_from_this();
     poller_->async(
-        [self, url = std::move(url), options = std::move(options)]() mutable {
-          self->StartOnPoller(std::move(url), std::move(options));
+        [self, url = std::move(url), config = std::move(config)]() mutable {
+          self->StartOnPoller(std::move(url), std::move(config));
         },
         false);
   }
@@ -281,6 +283,10 @@ class PlayerProxy::Impl final
   }
 
   void Stop(OnStopped on_stopped) {
+    if (poller_->isCurrentThread()) {
+      StopOnPoller(std::move(on_stopped));
+      return;
+    }
     auto self = shared_from_this();
     poller_->async(
         [self, on_stopped = std::move(on_stopped)]() mutable {
@@ -335,7 +341,7 @@ class PlayerProxy::Impl final
     }
   }
 
-  void StartOnPoller(std::string url, toolkit::mINI options) {
+  void StartOnPoller(std::string url, zlm::PlayerConfig config) {
     const auto current = state();
     if (current != PlayerState::kIdle && current != PlayerState::kEnded &&
         current != PlayerState::kFailed && current != PlayerState::kStopped) {
@@ -350,7 +356,7 @@ class PlayerProxy::Impl final
     CancelRetryOnPoller();
     TeardownAttemptOnPoller();
     url_ = std::move(url);
-    options_ = std::move(options);
+    config_ = std::move(config);
     initial_streams_.reset();
     consecutive_failures_ = 0;
     BeginAttemptOnPoller();
@@ -365,8 +371,12 @@ class PlayerProxy::Impl final
     attempt->player = std::make_shared<mediakit::MediaPlayer>(poller_);
     attempt_ = attempt;
 
-    for (const auto& option : options_) {
-      (*attempt->player)[option.first] = option.second;
+    (*attempt->player)[mediakit::Client::kTimeoutMS] =
+        config_.connect_timeout.count();
+    (*attempt->player)[mediakit::Client::kMediaTimeoutMS] =
+        config_.media_timeout.count();
+    if (!config_.local_bind_ip.empty()) {
+      (*attempt->player)[mediakit::Client::kNetAdapter] = config_.local_bind_ip;
     }
     // PlayerProxy must preserve the source track set. ZLM enables synthetic
     // silent AAC globally by default, which turns video-only inputs into
@@ -917,7 +927,7 @@ class PlayerProxy::Impl final
 
   std::shared_ptr<toolkit::EventPoller> poller_;
   ReconnectPolicy reconnect_policy_;
-  toolkit::mINI options_;
+  zlm::PlayerConfig config_;
   std::string url_;
   std::optional<std::vector<ffmpeg::StreamInfo>> initial_streams_;
   std::shared_ptr<Attempt> attempt_;
@@ -960,8 +970,8 @@ void PlayerProxy::SetOnTimelineReset(OnTimelineReset callback) {
   impl_->SetOnTimelineReset(std::move(callback));
 }
 
-void PlayerProxy::Start(std::string url, toolkit::mINI options) {
-  impl_->Start(std::move(url), std::move(options));
+void PlayerProxy::Start(std::string url, zlm::PlayerConfig config) {
+  impl_->Start(std::move(url), std::move(config));
 }
 
 void PlayerProxy::Pause(bool paused, OnControlCompleted completed) {

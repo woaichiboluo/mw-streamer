@@ -18,6 +18,7 @@ extern "C" {
 #include "mw/ffmpeg/error.h"
 #include "mw/ffmpeg/frame.h"
 #include "mw/ffmpeg/packet.h"
+#include "mw/ffmpeg/pixel_format.h"
 #include "mw/ffmpeg/stream_info.h"
 
 namespace {
@@ -26,6 +27,7 @@ using mw::streamer::ffmpeg::CodecContext;
 using mw::streamer::ffmpeg::CodecParameters;
 using mw::streamer::ffmpeg::ErrorText;
 using mw::streamer::ffmpeg::Frame;
+using mw::streamer::ffmpeg::IsHardwarePixelFormat;
 using mw::streamer::ffmpeg::Packet;
 using mw::streamer::ffmpeg::StreamInfo;
 using mw::streamer::ffmpeg::ThrowIfError;
@@ -190,6 +192,39 @@ TEST_CASE("Frame supports adopt and FFmpeg reference-copy semantics") {
   CHECK(referenced->extended_data[0] == copy->extended_data[0]);
 }
 
+TEST_CASE("Frame copies properties without replacing media storage") {
+  Frame source;
+  source->pts = 100;
+  source->duration = 4;
+  source->time_base = {1, 25};
+  source->color_range = AVCOL_RANGE_MPEG;
+  source->crop_top = 2;
+
+  Frame destination;
+  destination->format = AV_SAMPLE_FMT_FLTP;
+  destination->sample_rate = 48000;
+  destination->nb_samples = 32;
+  av_channel_layout_default(&destination->ch_layout, 2);
+  REQUIRE(av_frame_get_buffer(destination.get(), 0) >= 0);
+  auto* const data = destination->extended_data[0];
+
+  destination.CopyPropertiesFrom(source);
+
+  CHECK(destination->pts == 100);
+  CHECK(destination->duration == 4);
+  CHECK(destination->time_base.num == 1);
+  CHECK(destination->time_base.den == 25);
+  CHECK(destination->color_range == AVCOL_RANGE_MPEG);
+  CHECK(destination->crop_top == 2);
+  CHECK(destination->extended_data[0] == data);
+
+  destination.ClearCrop();
+  CHECK(destination->crop_top == 0);
+  CHECK(destination->crop_bottom == 0);
+  CHECK(destination->crop_left == 0);
+  CHECK(destination->crop_right == 0);
+}
+
 TEST_CASE("FFmpeg common validation and error helpers are reusable") {
   CodecParameters parameters;
   parameters.get()->codec_type = AVMEDIA_TYPE_AUDIO;
@@ -204,6 +239,27 @@ TEST_CASE("FFmpeg common validation and error helpers are reusable") {
   CHECK_FALSE(ErrorText(AVERROR(EINVAL)).empty());
   CHECK_THROWS_AS(ThrowIfError(AVERROR(EINVAL), "测试操作"),
                   std::runtime_error);
+}
+
+TEST_CASE("StreamInfo can be exported from an AVCodecContext") {
+  const auto* codec = avcodec_find_decoder(AV_CODEC_ID_AAC);
+  REQUIRE(codec);
+  CodecContext context(codec);
+  context.get()->time_base = {1, 48000};
+
+  auto stream_info = StreamInfo::FromCodecContext(*context.get(), 4);
+
+  CHECK(stream_info.stream_index == 4);
+  CHECK(stream_info.codec_parameters.get()->codec_type == AVMEDIA_TYPE_AUDIO);
+  CHECK(stream_info.codec_parameters.get()->codec_id == AV_CODEC_ID_AAC);
+  CHECK(stream_info.time_base.num == 1);
+  CHECK(stream_info.time_base.den == 48000);
+}
+
+TEST_CASE("FFmpeg hardware pixel format detection is centralized") {
+  CHECK(IsHardwarePixelFormat(AV_PIX_FMT_CUDA));
+  CHECK_FALSE(IsHardwarePixelFormat(AV_PIX_FMT_YUV420P));
+  CHECK_FALSE(IsHardwarePixelFormat(AV_PIX_FMT_NONE));
 }
 
 TEST_CASE("CodecContext has unique movable ownership") {

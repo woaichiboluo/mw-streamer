@@ -65,6 +65,23 @@ Frame Frame::Clone() const {
 
 Frame Frame::Ref() const { return Frame(*this); }
 
+void Frame::CopyPropertiesFrom(const Frame& source) {
+  if (!frame_ || !source.frame_) {
+    throw std::logic_error("不能复制已移动Frame的属性");
+  }
+  ThrowIfError(av_frame_copy_props(frame_, source.frame_), "复制AVFrame属性");
+}
+
+void Frame::ClearCrop() noexcept {
+  if (!frame_) {
+    return;
+  }
+  frame_->crop_top = 0;
+  frame_->crop_bottom = 0;
+  frame_->crop_left = 0;
+  frame_->crop_right = 0;
+}
+
 const AVFrame* Frame::get() const noexcept { return frame_; }
 
 AVFrame* Frame::get() noexcept { return frame_; }

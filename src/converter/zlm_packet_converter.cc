@@ -7,13 +7,9 @@
 
 #include "ext-codec/H264.h"
 #include "ext-codec/H265.h"
+#include "mw/converter/internal/zlm_time_base.h"
 
 namespace mw::streamer::converter {
-namespace {
-
-constexpr AVRational kZlmTimeBase{1, 1000};
-
-}  // namespace
 
 ZlmPacketConverter::ZlmPacketConverter(const mediakit::Track::Ptr& track,
                                        int stream_index)
@@ -121,7 +117,7 @@ bool ZlmPacketConverter::EmitPacket(const char* data, size_t size,
   packet.get()->dts = static_cast<std::int64_t>(dts);
   packet.get()->pts = static_cast<std::int64_t>(pts);
   packet.get()->stream_index = stream_index_;
-  packet.get()->time_base = kZlmTimeBase;
+  packet.get()->time_base = internal::kZlmTimeBase;
   packet.get()->pos = -1;
   if (key_frame) {
     packet.get()->flags |= AV_PKT_FLAG_KEY;

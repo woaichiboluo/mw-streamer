@@ -1,8 +1,9 @@
 # 真实推拉流端到端测试
 
-本目录使用真实的 FFmpeg、MediaMTX 和媒体文件验证以下能力：
+本目录通过 `StreamingPipeline` 使用真实的 FFmpeg、MediaMTX 和媒体文件验证以下
+能力：
 
-- `0s / 1s / 5s / 15s / 30s` PacketQueue 缓存边界与代表值；
+- `0s / 1s / 5s / 15s / 30s` 压缩包缓存边界与代表值；
 - RTSP、RTMP、SRT 稳定拉流；
 - 输入连接被服务端主动断开后的自动重连；
 - RTSP、RTMP、SRT 稳定推流；
@@ -12,7 +13,8 @@
 
 测试不使用 Docker，也不生成伪媒体。每个测试媒体可以是纯音频、纯视频或同时包含
 音视频。收集测试时会使用 `ffprobe` 检查目录中的每个文件；无法识别或不满足首版
-编解码范围的文件会直接报错，不会静默跳过。
+编解码范围的文件会直接报错，不会静默跳过。视频尺寸和平均帧率同样由 `ffprobe`
+读取，并作为 Pipeline 的固定输出参数。
 
 ## 准备配置
 
@@ -63,6 +65,36 @@ python3 -m venv .cache/e2e-venv
   -m fault --e2e-config tests/e2e/e2e.local.toml \
   --e2e-runner build/tests/e2e/mw_streamer_e2e_runner
 ```
+
+Runner 始终配置至少一个真实输出目标。Pipeline 是否成功由其公共状态事件判断，
+媒体轨道和持续输出则由 FFmpeg 从输出端实际读取验证；测试不再依赖 PlayerProxy
+或 PacketQueue 的内部状态。
+
+## 运行十分钟 Bench
+
+Bench 分别选择媒体目录中像素数最小的 H.264 和 H.265 真实视频。每种编码分别
+通过 FILE、RTSP、RTMP、SRT 输入，并在一次 Pipeline 编码后同时推送 RTSP、
+RTMP、SRT。每组持续 10 分钟，共 8 组，串行执行约 80 分钟。网络输入通过
+FFmpeg 循环发布；FILE 输入则在用例开始前通过压缩包复制生成约 11 分钟的临时
+MP4，因此两种输入都会运行多轮真实媒体，且不会重新编码测试源。
+
+Bench 默认跳过，需要显式启用：
+
+```bash
+.cache/e2e-venv/bin/python -m pytest \
+  -c tests/e2e/pytest.ini \
+  -m bench \
+  --run-bench \
+  --e2e-config tests/e2e/e2e.local.toml \
+  --e2e-runner build/tests/e2e/mw_streamer_e2e_runner
+```
+
+每个目标都必须先由对应 MediaMTX sink 确认发布路径可用，分别证明 RTSP、RTMP、
+SRT 推流成功。三个 FFmpeg 探针再从各 sink 的 RTSP 出口读取完整轨道，并使用
+压缩包复制避免探针解码高分辨率视频干扰 Pipeline 性能。这也避开 RTMP reader
+无法暴露 H.265 视频轨道的协议限制。如果任一路媒体进度连续超过启动超时时间没有
+增长，或十分钟内累计媒体时间不足墙上时间的 98%，测试立即失败。媒体目录缺少
+H.264 或 H.265 视频时也会明确报错。
 
 每次运行的 MediaMTX 配置、进程日志、runner 事件和 FFmpeg progress 都保存在
 `tests/e2e/artifacts/<UTC 时间>/`，失败后可以直接按测试用例目录定位证据。

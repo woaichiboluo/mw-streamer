@@ -1,3 +1,4 @@
+#include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 #include <cstring>
@@ -9,12 +10,16 @@ extern "C" {
 }
 
 #include "mw/converter/av_packet_to_zlm_frame_converter.h"
+#include "mw/converter/internal/codec_bridge.h"
+#include "mw/converter/internal/zlm_time_base.h"
 #include "mw/ffmpeg/codec_parameters.h"
 #include "mw/ffmpeg/packet.h"
 
 namespace {
 
 using mw::streamer::converter::AvPacketToZlmFrameConverter;
+using mw::streamer::converter::internal::ToFfmpegCodecId;
+using mw::streamer::converter::internal::ToZlmCodecId;
 using mw::streamer::ffmpeg::CodecParameters;
 using mw::streamer::ffmpeg::Packet;
 
@@ -37,6 +42,31 @@ CodecParameters MakeCodecParameters(AVCodecID codec_id) {
 }
 
 }  // namespace
+
+TEST_CASE("FFmpeg和ZLM Codec映射支持双向转换") {
+  constexpr std::array mappings{
+      std::pair{AV_CODEC_ID_H264, mediakit::CodecH264},
+      std::pair{AV_CODEC_ID_HEVC, mediakit::CodecH265},
+      std::pair{AV_CODEC_ID_AAC, mediakit::CodecAAC},
+      std::pair{AV_CODEC_ID_PCM_ALAW, mediakit::CodecG711A},
+      std::pair{AV_CODEC_ID_PCM_MULAW, mediakit::CodecG711U},
+      std::pair{AV_CODEC_ID_OPUS, mediakit::CodecOpus},
+      std::pair{AV_CODEC_ID_MJPEG, mediakit::CodecJPEG},
+      std::pair{AV_CODEC_ID_VP8, mediakit::CodecVP8},
+      std::pair{AV_CODEC_ID_VP9, mediakit::CodecVP9},
+  };
+  for (const auto& [ffmpeg_codec, zlm_codec] : mappings) {
+    CHECK(ToZlmCodecId(ffmpeg_codec) == zlm_codec);
+    CHECK(ToFfmpegCodecId(zlm_codec) == ffmpeg_codec);
+  }
+  CHECK(ToZlmCodecId(AV_CODEC_ID_NONE) == mediakit::CodecInvalid);
+  CHECK(ToFfmpegCodecId(mediakit::CodecInvalid) == AV_CODEC_ID_NONE);
+}
+
+TEST_CASE("ZLM时间基固定为毫秒") {
+  CHECK(mw::streamer::converter::internal::kZlmTimeBase.num == 1);
+  CHECK(mw::streamer::converter::internal::kZlmTimeBase.den == 1000);
+}
 
 TEST_CASE("AVPacket转换为可缓存的H264 ZLM Frame") {
   auto parameters = MakeCodecParameters(AV_CODEC_ID_H264);

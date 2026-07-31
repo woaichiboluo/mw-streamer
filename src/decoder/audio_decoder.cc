@@ -9,40 +9,15 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 }
 
-#include <fmt/format.h>
-
+#include "mw/decoder/internal/codec_finder.h"
 #include "mw/ffmpeg/codec_context.h"
 #include "mw/ffmpeg/error.h"
+#include "mw/log/logging.h"
 
 namespace mw::streamer::decoder {
 namespace {
 
-const AVCodec* FindAudioDecoder(const ffmpeg::StreamInfo& stream_info,
-                                const AudioDecoderConfig& config) {
-  stream_info.Validate();
-  const auto* parameters = stream_info.codec_parameters.get();
-  if (parameters->codec_type != AVMEDIA_TYPE_AUDIO) {
-    throw std::invalid_argument("AudioDecoder只接受音频流");
-  }
-
-  const auto* codec =
-      config.decoder_name.empty()
-          ? avcodec_find_decoder(parameters->codec_id)
-          : avcodec_find_decoder_by_name(config.decoder_name.c_str());
-  if (!codec) {
-    throw std::invalid_argument(fmt::format(
-        "找不到音频解码器: codec_id={}, decoder_name={}",
-        static_cast<int>(parameters->codec_id), config.decoder_name));
-  }
-  if (codec->type != AVMEDIA_TYPE_AUDIO || codec->id != parameters->codec_id) {
-    throw std::invalid_argument(
-        fmt::format("音频解码器与输入编码不匹配: decoder_name={}, "
-                    "decoder_codec_id={}, input_codec_id={}",
-                    codec->name, static_cast<int>(codec->id),
-                    static_cast<int>(parameters->codec_id)));
-  }
-  return codec;
-}
+using Log = log::Module<log::LogModule::kStreamer>;
 
 }  // namespace
 
@@ -51,7 +26,8 @@ class AudioDecoder::Impl final {
   Impl(ffmpeg::StreamInfo stream_info, AudioDecoderConfig config)
       : stream_info_(std::move(stream_info)),
         config_(std::move(config)),
-        context_(FindAudioDecoder(stream_info_, config_)) {
+        context_(internal::FindDecoder(stream_info_, config_.decoder_name,
+                                       AVMEDIA_TYPE_AUDIO)) {
     const auto* codec = context_.get()->codec;
     ffmpeg::ThrowIfError(
         avcodec_parameters_to_context(context_.get(),
@@ -60,6 +36,12 @@ class AudioDecoder::Impl final {
     context_.get()->pkt_timebase = stream_info_.time_base;
     ffmpeg::ThrowIfError(avcodec_open2(context_.get(), codec, nullptr),
                          "打开音频解码器");
+    Log::Info(
+        "音频解码器已打开: stream_index={}, decoder_name={}, sample_rate={}, "
+        "channels={}, time_base={}/{}",
+        stream_info_.stream_index, codec->name, context_.get()->sample_rate,
+        context_.get()->ch_layout.nb_channels, stream_info_.time_base.num,
+        stream_info_.time_base.den);
   }
 
   void SetOnFrame(OnFrame callback) { on_frame_ = std::move(callback); }
@@ -97,12 +79,14 @@ class AudioDecoder::Impl final {
 
     ReceiveFrames();
     drained_ = true;
+    Log::Debug("音频解码器已排空: stream_index={}", stream_info_.stream_index);
   }
 
   void Flush() {
     context_.FlushBuffers();
     frame_.Unref();
     drained_ = false;
+    Log::Debug("音频解码器已刷新: stream_index={}", stream_info_.stream_index);
   }
 
   const ffmpeg::StreamInfo& stream_info() const noexcept {

@@ -191,4 +191,12 @@ TEST_CASE("OutputSession同步拒绝无目标和未知网络协议") {
   unknown_protocol.targets.push_back("udp://127.0.0.1:9000/live");
   OutputSession unknown_protocol_session(std::move(unknown_protocol));
   CHECK_THROWS_AS(unknown_protocol_session.Open(), std::invalid_argument);
+
+  OutputConfig invalid_zlm;
+  invalid_zlm.streams.push_back({0, parameters, AVRational{1, 1000}});
+  invalid_zlm.targets.push_back("rtmp://127.0.0.1/live/test");
+  invalid_zlm.zlm.recording.hls_segment_duration =
+      std::chrono::milliseconds::zero();
+  OutputSession invalid_zlm_session(std::move(invalid_zlm));
+  CHECK_THROWS_AS(invalid_zlm_session.Open(), std::invalid_argument);
 }

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from mw_e2e.events import assert_packet_flow, read_events, wait_for_event
+from mw_e2e.events import assert_pipeline_succeeded, read_events, wait_for_event
 from mw_e2e.ffmpeg import MediaProbe
 from mw_e2e.mediamtx import MediaEnvironment
 from mw_e2e.models import E2EConfig, PublishedMedia
@@ -25,6 +25,7 @@ def test_output_reconnect(
     runner = Runner(
         e2e_config,
         runner_path,
+        published_media.asset,
         media_environment.source.read_url("srt", published_media.path),
         [sink.publish_url(output_protocol, output_path)],
         settings.startup_timeout_seconds * 2
@@ -78,9 +79,4 @@ def test_output_reconnect(
             probe.stop()
         runner.stop()
 
-    assert_packet_flow(
-        read_events(runner.events_path),
-        has_audio=published_media.asset.has_audio,
-        has_video=published_media.asset.has_video,
-        stall_timeout_seconds=settings.stall_timeout_seconds,
-    )
+    assert_pipeline_succeeded(read_events(runner.events_path))

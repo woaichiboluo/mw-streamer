@@ -14,16 +14,16 @@ extern "C" {
 
 #include "mw/ffmpeg/frame.h"
 #include "mw/ffmpeg/hardware_context.h"
-#include "mw/processor/frame_adapter.h"
+#include "mw/processor/internal/frame_adapter.h"
 
 namespace {
 
 using mw::streamer::ffmpeg::Frame;
 using mw::streamer::ffmpeg::HardwareContext;
-using mw::streamer::processor::AudioBufferAdapter;
-using mw::streamer::processor::AudioFrameAdapter;
-using mw::streamer::processor::VideoBufferAdapter;
-using mw::streamer::processor::VideoFrameAdapter;
+using mw::streamer::processor::internal::AudioBufferAdapter;
+using mw::streamer::processor::internal::AudioFrameAdapter;
+using mw::streamer::processor::internal::VideoBufferAdapter;
+using mw::streamer::processor::internal::VideoFrameAdapter;
 
 struct PixelFormatCase {
   AVPixelFormat ffmpeg_format;

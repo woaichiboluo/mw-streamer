@@ -14,6 +14,8 @@ extern "C" {
 #include <libavutil/log.h>
 }
 
+#include "Poller/EventPoller.h"
+#include "Thread/WorkThreadPool.h"
 #include "Util/logger.h"
 
 namespace {
@@ -74,6 +76,8 @@ TEST_CASE("init has a one-time process lifecycle",
 
   mw::streamer::InitConfig invalid_config;
   invalid_config.log.console.enabled = false;
+  invalid_config.zlm.event_poller_threads = 1;
+  invalid_config.zlm.work_threads = 1;
   CHECK_THROWS_AS(mw::streamer::Init(invalid_config), std::invalid_argument);
   CHECK_FALSE(mw::streamer::IsInitialized());
 
@@ -85,13 +89,20 @@ TEST_CASE("init has a one-time process lifecycle",
   config.log.async.enabled = true;
   config.log.async.queue_size = 128;
   config.log.async.overflow = mw::streamer::log::OverflowPolicy::kBlock;
+  config.zlm.event_poller_threads = 2;
+  config.zlm.work_threads = 3;
+  config.zlm.enable_cpu_affinity = false;
 
   mw::streamer::Init(config);
   CHECK(mw::streamer::IsInitialized());
+  CHECK(toolkit::EventPollerPool::Instance().getExecutorSize() == 2);
+  CHECK(toolkit::WorkThreadPool::Instance().getExecutorSize() == 3);
 
   // The first successful configuration wins. Later calls do not validate or
   // replace it.
   CHECK_NOTHROW(mw::streamer::Init(invalid_config));
+  CHECK(toolkit::EventPollerPool::Instance().getExecutorSize() == 2);
+  CHECK(toolkit::WorkThreadPool::Instance().getExecutorSize() == 3);
 
   StreamerLog::Info("configured async message");
   InfoL << "zlm init bridge message";

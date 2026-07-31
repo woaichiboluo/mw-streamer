@@ -11,46 +11,18 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
-#include <libavutil/pixdesc.h>
 }
 
+#include "mw/decoder/internal/codec_finder.h"
 #include "mw/ffmpeg/codec_context.h"
 #include "mw/ffmpeg/error.h"
+#include "mw/ffmpeg/pixel_format.h"
+#include "mw/log/logging.h"
 
 namespace mw::streamer::decoder {
 namespace {
 
-const AVCodec* FindVideoDecoder(const ffmpeg::StreamInfo& stream_info,
-                                const VideoDecoderConfig& config) {
-  stream_info.Validate();
-  const auto* parameters = stream_info.codec_parameters.get();
-  if (parameters->codec_type != AVMEDIA_TYPE_VIDEO) {
-    throw std::invalid_argument("VideoDecoder只接受视频流");
-  }
-
-  const auto* codec =
-      config.decoder_name.empty()
-          ? avcodec_find_decoder(parameters->codec_id)
-          : avcodec_find_decoder_by_name(config.decoder_name.c_str());
-  if (!codec) {
-    throw std::invalid_argument(fmt::format(
-        "找不到视频解码器: codec_id={}, decoder_name={}",
-        static_cast<int>(parameters->codec_id), config.decoder_name));
-  }
-  if (codec->type != AVMEDIA_TYPE_VIDEO || codec->id != parameters->codec_id) {
-    throw std::invalid_argument(
-        fmt::format("视频解码器与输入编码不匹配: decoder_name={}, "
-                    "decoder_codec_id={}, input_codec_id={}",
-                    codec->name, static_cast<int>(codec->id),
-                    static_cast<int>(parameters->codec_id)));
-  }
-  if (config.backend == VideoDecoderBackend::kSoftware &&
-      (codec->capabilities & AV_CODEC_CAP_HARDWARE) != 0) {
-    throw std::invalid_argument(fmt::format(
-        "软件解码不能使用硬件解码器: decoder_name={}", codec->name));
-  }
-  return codec;
-}
+using Log = log::Module<log::LogModule::kStreamer>;
 
 bool SupportsCudaDeviceContext(const AVCodec* codec) {
   for (int index = 0;; ++index) {
@@ -66,11 +38,6 @@ bool SupportsCudaDeviceContext(const AVCodec* codec) {
   }
 }
 
-bool IsHardwarePixelFormat(AVPixelFormat format) {
-  const auto* descriptor = av_pix_fmt_desc_get(format);
-  return descriptor && (descriptor->flags & AV_PIX_FMT_FLAG_HWACCEL) != 0;
-}
-
 }  // namespace
 
 class VideoDecoder::Impl final {
@@ -78,8 +45,14 @@ class VideoDecoder::Impl final {
   Impl(ffmpeg::StreamInfo stream_info, VideoDecoderConfig config)
       : stream_info_(std::move(stream_info)),
         config_(std::move(config)),
-        codec_(FindVideoDecoder(stream_info_, config_)),
+        codec_(internal::FindDecoder(stream_info_, config_.decoder_name,
+                                     AVMEDIA_TYPE_VIDEO)),
         context_(codec_) {
+    if (config_.backend == VideoDecoderBackend::kSoftware &&
+        (codec_->capabilities & AV_CODEC_CAP_HARDWARE) != 0) {
+      throw std::invalid_argument(fmt::format(
+          "软件解码不能使用硬件解码器: decoder_name={}", codec_->name));
+    }
     if (config_.backend == VideoDecoderBackend::kCuda &&
         config_.device_index < 0) {
       throw std::invalid_argument("CUDA设备索引不能为负数");
@@ -109,6 +82,21 @@ class VideoDecoder::Impl final {
 
     ffmpeg::ThrowIfError(avcodec_open2(context_.get(), codec_, nullptr),
                          "打开视频解码器");
+    if (config_.backend == VideoDecoderBackend::kCuda) {
+      Log::Info(
+          "视频解码器已打开: stream_index={}, decoder_name={}, backend=cuda, "
+          "device_index={}, dimensions={}x{}, time_base={}/{}",
+          stream_info_.stream_index, codec_->name, config_.device_index,
+          context_.get()->width, context_.get()->height,
+          stream_info_.time_base.num, stream_info_.time_base.den);
+    } else {
+      Log::Info(
+          "视频解码器已打开: stream_index={}, decoder_name={}, "
+          "backend=software, dimensions={}x{}, time_base={}/{}",
+          stream_info_.stream_index, codec_->name, context_.get()->width,
+          context_.get()->height, stream_info_.time_base.num,
+          stream_info_.time_base.den);
+    }
   }
 
   void SetOnFrame(OnFrame callback) { on_frame_ = std::move(callback); }
@@ -146,12 +134,14 @@ class VideoDecoder::Impl final {
 
     ReceiveFrames();
     drained_ = true;
+    Log::Debug("视频解码器已排空: stream_index={}", stream_info_.stream_index);
   }
 
   void Flush() {
     context_.FlushBuffers();
     frame_.Unref();
     drained_ = false;
+    Log::Debug("视频解码器已刷新: stream_index={}", stream_info_.stream_index);
   }
 
   const ffmpeg::StreamInfo& stream_info() const noexcept {
@@ -177,7 +167,7 @@ class VideoDecoder::Impl final {
         if (*format == AV_PIX_FMT_CUDA) {
           return *format;
         }
-      } else if (!IsHardwarePixelFormat(*format)) {
+      } else if (!ffmpeg::IsHardwarePixelFormat(*format)) {
         return *format;
       }
     }
@@ -225,7 +215,7 @@ class VideoDecoder::Impl final {
       }
       return;
     }
-    if (IsHardwarePixelFormat(format)) {
+    if (ffmpeg::IsHardwarePixelFormat(format)) {
       throw std::runtime_error("软件视频解码器输出了硬件帧");
     }
   }

@@ -3,24 +3,82 @@
 #include <fmt/chrono.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <ctime>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "Record/HlsMakerImp.h"
 #include "Record/MP4Muxer.h"
+#include "Util/File.h"
 #include "mw/log/logging.h"
+#include "mw/zlm/internal/config_validator.h"
 
 namespace mw::streamer::output {
 namespace {
 
+using Log = log::Module<log::LogModule::kStreamer>;
+
 constexpr std::string_view kMp4Extension = ".mp4";
 constexpr std::string_view kHlsExtension = ".m3u8";
-constexpr std::uint32_t kHlsFileBufferSize = 64 * 1024;
-constexpr float kHlsSegmentDurationSeconds = 2.0F;
 constexpr std::uint32_t kHlsRecordingSegmentCount = 0;
+
+class BufferedMP4File final : public mediakit::MP4FileIO {
+ public:
+  BufferedMP4File(const std::filesystem::path& path, std::size_t buffer_size)
+      : buffer_(buffer_size) {
+    auto* file = toolkit::File::create_file(path.string().c_str(), "wb+");
+    if (!file) {
+      throw std::runtime_error("无法创建fMP4录像文件");
+    }
+    if (std::setvbuf(file, buffer_.data(), _IOFBF, buffer_.size()) != 0) {
+      std::fclose(file);
+      throw std::runtime_error("无法设置fMP4录像文件缓存");
+    }
+    file_.reset(file, [](std::FILE* handle) {
+      std::fflush(handle);
+      std::fclose(handle);
+    });
+  }
+
+ protected:
+  int64_t onTell() override {
+#if defined(_WIN32)
+    return _ftelli64(file_.get());
+#else
+    return std::ftell(file_.get());
+#endif
+  }
+
+  int onSeek(int64_t offset) override {
+#if defined(_WIN32)
+    return _fseeki64(file_.get(), offset, offset >= 0 ? SEEK_SET : SEEK_END);
+#else
+    return std::fseek(file_.get(), offset, offset >= 0 ? SEEK_SET : SEEK_END);
+#endif
+  }
+
+  int onRead(void* data, std::size_t bytes) override {
+    if (std::fread(data, 1, bytes, file_.get()) == bytes) {
+      return 0;
+    }
+    return std::ferror(file_.get()) != 0 ? std::ferror(file_.get()) : -1;
+  }
+
+  int onWrite(const void* data, std::size_t bytes) override {
+    return std::fwrite(data, 1, bytes, file_.get()) == bytes
+               ? 0
+               : std::ferror(file_.get());
+  }
+
+ private:
+  std::vector<char> buffer_;
+  std::shared_ptr<std::FILE> file_;
+};
 
 std::string FormatStartTime(std::chrono::system_clock::time_point start_time) {
   const std::time_t time = std::chrono::system_clock::to_time_t(start_time);
@@ -88,10 +146,8 @@ void AddTracks(Recorder& recorder,
 
 class Fmp4FileTarget::Muxer final : public mediakit::MP4MuxerInterface {
  public:
-  explicit Muxer(const std::filesystem::path& path)
-      : file_(std::make_shared<mediakit::MP4FileDisk>()) {
-    file_->openFile(path.string().c_str(), "wb+");
-  }
+  Muxer(const std::filesystem::path& path, std::size_t file_buffer_size)
+      : file_(std::make_shared<BufferedMP4File>(path, file_buffer_size)) {}
 
   void Close() {
     resetTracks();
@@ -104,23 +160,25 @@ class Fmp4FileTarget::Muxer final : public mediakit::MP4MuxerInterface {
   }
 
  private:
-  mediakit::MP4FileDisk::Ptr file_;
+  std::shared_ptr<BufferedMP4File> file_;
 };
 
 class HlsFmp4FileTarget::Recorder final : public mediakit::MP4MuxerMemory {
  public:
-  explicit Recorder(const std::filesystem::path& path)
-      : hls_(std::make_shared<mediakit::HlsMakerImp>(
-            true, path.string(), std::string(), kHlsFileBufferSize,
-            kHlsSegmentDurationSeconds, kHlsRecordingSegmentCount, false,
-            ".mp4")) {}
+  Recorder(const std::filesystem::path& path,
+           const zlm::RecordingConfig& config)
+      : path_(path),
+        hls_(std::make_shared<mediakit::HlsMakerImp>(
+            true, path.string(), std::string(),
+            static_cast<std::uint32_t>(config.file_buffer_size),
+            static_cast<float>(config.hls_segment_duration.count()) / 1000.0F,
+            kHlsRecordingSegmentCount, false, ".mp4")) {}
 
   ~Recorder() override {
     try {
       flush();
     } catch (const std::exception& error) {
-      log::Module<log::LogModule::kStreamer>::Error("刷新HLS-fMP4录像失败：{}",
-                                                    error.what());
+      Log::Error("刷新HLS-fMP4录像失败：{}，{}", path_.string(), error.what());
     }
   }
 
@@ -140,14 +198,17 @@ class HlsFmp4FileTarget::Recorder final : public mediakit::MP4MuxerMemory {
     hls_->inputData(buffer.data(), buffer.size(), timestamp, key_position);
   }
 
+  std::filesystem::path path_;
   std::shared_ptr<mediakit::HlsMakerImp> hls_;
 };
 
 Fmp4FileTarget::Fmp4FileTarget(const std::filesystem::path& requested_path,
                                const std::vector<mediakit::Track::Ptr>& tracks,
+                               zlm::RecordingConfig config,
                                std::chrono::system_clock::time_point start_time)
-    : path_(MakeTimestampedFilePath(requested_path, start_time)),
-      muxer_(std::make_shared<Muxer>(path_)) {
+    : path_(MakeTimestampedFilePath(requested_path, start_time)) {
+  zlm::internal::ValidateRecordingConfig(config);
+  muxer_ = std::make_shared<Muxer>(path_, config.file_buffer_size);
   try {
     AddTracks(*muxer_, tracks);
   } catch (...) {
@@ -161,8 +222,7 @@ Fmp4FileTarget::~Fmp4FileTarget() {
   try {
     Close();
   } catch (const std::exception& error) {
-    log::Module<log::LogModule::kStreamer>::Error("关闭fMP4录像失败：{}",
-                                                  error.what());
+    Log::Error("关闭fMP4录像失败：{}，{}", path_.string(), error.what());
   }
 }
 
@@ -188,9 +248,11 @@ const std::filesystem::path& Fmp4FileTarget::path() const noexcept {
 HlsFmp4FileTarget::HlsFmp4FileTarget(
     const std::filesystem::path& requested_path,
     const std::vector<mediakit::Track::Ptr>& tracks,
+    zlm::RecordingConfig config,
     std::chrono::system_clock::time_point start_time)
-    : path_(MakeTimestampedHlsPath(requested_path, start_time)),
-      recorder_(std::make_shared<Recorder>(path_)) {
+    : path_(MakeTimestampedHlsPath(requested_path, start_time)) {
+  zlm::internal::ValidateRecordingConfig(config);
+  recorder_ = std::make_shared<Recorder>(path_, config);
   try {
     AddTracks(*recorder_, tracks);
   } catch (...) {
@@ -203,8 +265,7 @@ HlsFmp4FileTarget::~HlsFmp4FileTarget() {
   try {
     Close();
   } catch (const std::exception& error) {
-    log::Module<log::LogModule::kStreamer>::Error("关闭HLS-fMP4录像失败：{}",
-                                                  error.what());
+    Log::Error("关闭HLS-fMP4录像失败：{}，{}", path_.string(), error.what());
   }
 }
 

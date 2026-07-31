@@ -2,6 +2,7 @@
 #define MW_STREAMER_INCLUDE_MW_FFMPEG_STREAM_INFO_H_
 
 extern "C" {
+#include <libavcodec/avcodec.h>
 #include <libavutil/rational.h>
 }
 
@@ -14,6 +15,8 @@ struct StreamInfo {
   CodecParameters codec_parameters;
   AVRational time_base{0, 1};
 
+  static StreamInfo FromCodecContext(const AVCodecContext& context,
+                                     int stream_index);
   void Validate() const;
 };
 

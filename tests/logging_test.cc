@@ -18,6 +18,8 @@ namespace {
 
 using StreamerLog =
     mw::streamer::log::Module<mw::streamer::log::LogModule::kStreamer>;
+using ProcessorLog =
+    mw::streamer::log::Module<mw::streamer::log::LogModule::kProcessor>;
 
 class TemporaryLogFile {
  public:
@@ -74,6 +76,26 @@ TEST_CASE("module level filters before the shared logger", "[logging]") {
   const auto content = file.Read();
   CHECK(content.find("hidden info message") == std::string::npos);
   CHECK(content.find("[streamer] visible warning 42") != std::string::npos);
+}
+
+TEST_CASE("Processor logs use an independent module level", "[logging]") {
+  TemporaryLogFile file;
+  auto config = MakeFileLogConfig(file.path());
+  config.modules.streamer = mw::streamer::log::LogLevel::kOff;
+  config.modules.processor = mw::streamer::log::LogLevel::kWarning;
+
+  {
+    mw::streamer::log::Logging logging(config);
+    StreamerLog::Warning("hidden streamer warning");
+    ProcessorLog::Info("hidden processor info");
+    ProcessorLog::Warning("visible processor warning");
+  }
+
+  const auto content = file.Read();
+  CHECK(content.find("hidden streamer warning") == std::string::npos);
+  CHECK(content.find("hidden processor info") == std::string::npos);
+  CHECK(content.find("[processor] visible processor warning") !=
+        std::string::npos);
 }
 
 TEST_CASE("ZLM and FFmpeg logs use module prefixes", "[logging][bridge]") {

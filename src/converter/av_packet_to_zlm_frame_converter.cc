@@ -10,36 +10,11 @@
 #include "ext-codec/AAC.h"
 #include "ext-codec/H264.h"
 #include "ext-codec/H265.h"
+#include "mw/converter/internal/codec_bridge.h"
+#include "mw/converter/internal/zlm_time_base.h"
 
 namespace mw::streamer::converter {
 namespace {
-
-constexpr AVRational kZlmTimeBase{1, 1000};
-
-mediakit::CodecId GetZlmCodecId(AVCodecID codec_id) {
-  switch (codec_id) {
-    case AV_CODEC_ID_H264:
-      return mediakit::CodecH264;
-    case AV_CODEC_ID_HEVC:
-      return mediakit::CodecH265;
-    case AV_CODEC_ID_AAC:
-      return mediakit::CodecAAC;
-    case AV_CODEC_ID_PCM_ALAW:
-      return mediakit::CodecG711A;
-    case AV_CODEC_ID_PCM_MULAW:
-      return mediakit::CodecG711U;
-    case AV_CODEC_ID_OPUS:
-      return mediakit::CodecOpus;
-    case AV_CODEC_ID_MJPEG:
-      return mediakit::CodecJPEG;
-    case AV_CODEC_ID_VP8:
-      return mediakit::CodecVP8;
-    case AV_CODEC_ID_VP9:
-      return mediakit::CodecVP9;
-    default:
-      return mediakit::CodecInvalid;
-  }
-}
 
 class AvPacketBuffer final : public toolkit::Buffer {
  public:
@@ -75,7 +50,7 @@ bool HasValidTimestamp(const AVPacket& packet) {
 AvPacketToZlmFrameConverter::AvPacketToZlmFrameConverter(
     const ffmpeg::CodecParameters& codec_parameters, AVRational time_base,
     int stream_index)
-    : codec_id_(GetZlmCodecId(codec_parameters.get()->codec_id)),
+    : codec_id_(internal::ToZlmCodecId(codec_parameters.get()->codec_id)),
       time_base_(time_base),
       stream_index_(stream_index) {
   const auto& parameters = *codec_parameters.get();
@@ -107,8 +82,10 @@ std::vector<mediakit::Frame::Ptr> AvPacketToZlmFrameConverter::Convert(
     return {};
   }
 
-  const auto dts = av_rescale_q(raw_packet->dts, time_base_, kZlmTimeBase);
-  const auto pts = av_rescale_q(raw_packet->pts, time_base_, kZlmTimeBase);
+  const auto dts =
+      av_rescale_q(raw_packet->dts, time_base_, internal::kZlmTimeBase);
+  const auto pts =
+      av_rescale_q(raw_packet->pts, time_base_, internal::kZlmTimeBase);
   if (dts < 0 || pts < 0) {
     return {};
   }

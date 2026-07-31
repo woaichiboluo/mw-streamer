@@ -13,6 +13,7 @@ extern "C" {
 }
 
 #include "mw/ffmpeg/error.h"
+#include "mw/ffmpeg/pixel_format.h"
 
 namespace mw::streamer::ffmpeg {
 namespace {
@@ -187,6 +188,28 @@ HardwareContext HardwareContext::CreateCuda(int device_index) {
   return HardwareContext(device_ref, device_index);
 }
 
+const AVHWFramesContext* HardwareContext::GetFramesContext(
+    const AVFrame& frame) noexcept {
+  const auto format = static_cast<AVPixelFormat>(frame.format);
+  if (!IsHardwarePixelFormat(format) || !frame.hw_frames_ctx ||
+      !frame.hw_frames_ctx->data) {
+    return nullptr;
+  }
+
+  const auto* frames_context =
+      reinterpret_cast<const AVHWFramesContext*>(frame.hw_frames_ctx->data);
+  if (frames_context->format != format ||
+      frames_context->sw_format == AV_PIX_FMT_NONE ||
+      !frames_context->device_ref || !frames_context->device_ref->data ||
+      !frames_context->device_ctx ||
+      frames_context->device_ctx != reinterpret_cast<const AVHWDeviceContext*>(
+                                        frames_context->device_ref->data) ||
+      frames_context->device_ctx->type == AV_HWDEVICE_TYPE_NONE) {
+    return nullptr;
+  }
+  return frames_context;
+}
+
 HardwareContext::HardwareContext(AVBufferRef* context, int device_index)
     : context_(context), device_index_(device_index) {}
 
@@ -238,25 +261,44 @@ int HardwareContext::device_index() const noexcept { return device_index_; }
 
 const AVBufferRef* HardwareContext::get() const noexcept { return context_; }
 
-std::uintptr_t HardwareContext::native_stream() const noexcept {
+std::uintptr_t HardwareContext::native_handle() const noexcept {
   const auto* cuda_context = GetCudaContext(context_);
   return cuda_context ? reinterpret_cast<std::uintptr_t>(cuda_context->stream)
                       : 0;
+}
+
+bool HardwareContext::IsCompatible(const AVFrame& frame) const noexcept {
+  const auto* frames_context = GetFramesContext(frame);
+  if (!context_ || !frames_context) {
+    return false;
+  }
+
+  return frames_context->device_ref && frames_context->device_ctx &&
+         frames_context->device_ref->data == context_->data &&
+         frames_context->device_ctx ==
+             reinterpret_cast<const AVHWDeviceContext*>(context_->data) &&
+         frames_context->device_ctx->type == type();
 }
 
 HardwareContext::CurrentScope HardwareContext::MakeCurrent() const {
   if (!context_) {
     throw std::logic_error("不能使用已移动的HardwareContext");
   }
-  return MakeCurrent(context_);
+  return CurrentScope(context_);
 }
 
-HardwareContext::CurrentScope HardwareContext::MakeCurrent(
-    const AVBufferRef* context) {
-  if (!context) {
-    throw std::invalid_argument("不能切换到空硬件上下文");
+void HardwareContext::Synchronize() const {
+  if (!context_) {
+    throw std::logic_error("不能同步已移动的HardwareContext");
   }
-  return CurrentScope(context);
+  const auto* cuda_context = GetCudaContext(context_);
+  if (!cuda_context || !cuda_context->stream) {
+    throw std::logic_error("HardwareContext不支持同步当前硬件后端");
+  }
+
+  const auto current_scope = MakeCurrent();
+  ThrowIfCudaError(cuStreamSynchronize(cuda_context->stream),
+                   "同步硬件执行上下文");
 }
 
 }  // namespace mw::streamer::ffmpeg
