@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 #include "Record/MP4Demuxer.h"
@@ -89,6 +90,7 @@ TEST_CASE("StreamingPipeline完成音视频处理并生成fMP4") {
   TestDirectory directory;
   auto config = MakeSoftwareConfig(SamplePath("h264_aac.mp4"),
                                    directory.path() / "result.mp4");
+  config.standby.enabled = true;
   std::mutex mutex;
   std::condition_variable condition;
   std::vector<StreamingPipelineStatus> statuses;
@@ -125,6 +127,35 @@ TEST_CASE("StreamingPipeline完成音视频处理并生成fMP4") {
   REQUIRE(pipeline.status() == StreamingPipelineStatus::kStopped);
   CHECK(end_of_input_calls.load() == 1);
   CHECK(stop_calls.load() == 0);
+  const auto performance = pipeline.CollectPerformance();
+  CHECK(performance.interval > 0ns);
+  CHECK_FALSE(performance.input.is_network);
+  CHECK(performance.input.received_bytes == 0);
+  CHECK(performance.outputs.empty());
+  REQUIRE(performance.has_video);
+  REQUIRE(performance.has_audio);
+  CHECK(performance.video.decode.frames == 20);
+  CHECK(performance.video.process.frames == 20);
+  CHECK(performance.video.encode.frames == 21);
+  CHECK(performance.video.decode.latency.sample_count > 0);
+  CHECK(performance.video.process.latency.sample_count == 20);
+  CHECK(performance.video.encode.latency.sample_count == 21);
+  CHECK(performance.audio.decode.samples > 0);
+  CHECK(performance.audio.process.samples > 0);
+  CHECK(performance.audio.encode.samples > 0);
+  CHECK(performance.audio.decode.latency.sample_count > 0);
+  CHECK(performance.audio.process.latency.sample_count == 95);
+  CHECK(performance.audio.encode.latency.sample_count == 95);
+  CHECK(performance.video.dropped_packets == 0);
+  CHECK(performance.audio.dropped_packets == 0);
+
+  const auto empty_performance = pipeline.CollectPerformance();
+  CHECK(empty_performance.video.decode.frames == 0);
+  CHECK(empty_performance.video.process.frames == 0);
+  CHECK(empty_performance.video.encode.frames == 0);
+  CHECK(empty_performance.audio.decode.samples == 0);
+  CHECK(empty_performance.audio.process.samples == 0);
+  CHECK(empty_performance.audio.encode.samples == 0);
   pipeline.Stop();
   pipeline.Stop();
   CHECK(stop_calls.load() == 1);
@@ -173,6 +204,17 @@ TEST_CASE("StreamingPipeline同步拒绝无效配置") {
   StreamingPipeline pipeline(std::move(config));
 
   CHECK_NOTHROW(pipeline.UpdateProcessorConfig("updated"));
+  CHECK_THROWS_AS(pipeline.Start(), std::invalid_argument);
+  CHECK(pipeline.status() == StreamingPipelineStatus::kIdle);
+}
+
+TEST_CASE("StreamingPipeline同步拒绝负数轨道等待时间") {
+  StreamingPipelineConfig config;
+  config.input_url = "input.mp4";
+  config.output_targets = {"output.mp4"};
+  config.max_track_wait = -1ms;
+  StreamingPipeline pipeline(std::move(config));
+
   CHECK_THROWS_AS(pipeline.Start(), std::invalid_argument);
   CHECK(pipeline.status() == StreamingPipelineStatus::kIdle);
 }
@@ -254,6 +296,43 @@ TEST_CASE("StreamingPipeline可在异步初始化期间立即停止") {
     pipeline.Stop();
     CHECK(pipeline.status() == StreamingPipelineStatus::kStopped);
   }
+}
+
+TEST_CASE("StreamingPipeline性能采集可与外部停止并发") {
+  TestDirectory directory;
+  auto config = MakeSoftwareConfig(SamplePath("h264_video.mp4"),
+                                   directory.path() / "collected.mp4");
+  StreamingPipeline pipeline(std::move(config));
+  std::atomic_bool collecting = true;
+  std::atomic_bool collection_attempted = false;
+  std::atomic_size_t collection_count = 0;
+  std::exception_ptr collection_error;
+
+  pipeline.Start();
+  std::thread collector([&]() {
+    try {
+      while (collecting.load(std::memory_order_acquire)) {
+        static_cast<void>(pipeline.CollectPerformance());
+        collection_count.fetch_add(1, std::memory_order_release);
+        collection_attempted.store(true, std::memory_order_release);
+      }
+    } catch (...) {
+      collection_error = std::current_exception();
+      collection_attempted.store(true, std::memory_order_release);
+    }
+  });
+  while (!collection_attempted.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+
+  pipeline.Stop();
+  collecting.store(false, std::memory_order_release);
+  collector.join();
+
+  if (collection_error) {
+    std::rethrow_exception(collection_error);
+  }
+  CHECK(pipeline.status() == StreamingPipelineStatus::kStopped);
 }
 
 TEST_CASE("StreamingPipeline支持外部线程更新Processor配置并停止") {

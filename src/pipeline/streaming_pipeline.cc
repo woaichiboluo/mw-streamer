@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -28,6 +29,8 @@ extern "C" {
 #include "mw/decoder/video_decoder.h"
 #include "mw/input/player_proxy.h"
 #include "mw/log/logging.h"
+#include "mw/output/output_session.h"
+#include "mw/performance/internal/streaming_collector.h"
 #include "mw/pipeline/internal/streaming/audio_worker.h"
 #include "mw/pipeline/internal/streaming/output_worker.h"
 #include "mw/pipeline/internal/streaming/video_worker.h"
@@ -41,6 +44,10 @@ using Log = log::Module<log::LogModule::kStreamer>;
 using internal::streaming::AudioWorker;
 using internal::streaming::OutputWorker;
 using internal::streaming::VideoWorker;
+
+bool IsNetworkInput(const std::string& url) {
+  return url.find("://") != std::string::npos;
+}
 
 }  // namespace
 
@@ -65,13 +72,14 @@ class StreamingPipeline::Impl final {
     RequireIdle("启动StreamingPipeline");
     ValidateConfig();
 
-    poller_ = toolkit::EventPollerPool::Instance().getPoller();
-    player_ =
-        std::make_unique<input::PlayerProxy>(poller_, config_.reconnect_policy);
-    packet_queue_ =
-        std::make_unique<cache::PacketQueue>(config_.cache_duration, poller_);
+    performance_.Reset();
     {
       std::lock_guard<std::mutex> lock(control_mutex_);
+      poller_ = toolkit::EventPollerPool::Instance().getPoller();
+      player_ = std::make_shared<input::PlayerProxy>(poller_,
+                                                     config_.reconnect_policy);
+      packet_queue_ =
+          std::make_unique<cache::PacketQueue>(config_.cache_duration, poller_);
       status_.store(StreamingPipelineStatus::kStarting,
                     std::memory_order_release);
       NotifyStatus(StreamingPipelineStatus::kStarting);
@@ -142,7 +150,7 @@ class StreamingPipeline::Impl final {
       snapshot.processor->Stop();
     }
 
-    std::unique_ptr<input::PlayerProxy> player;
+    std::shared_ptr<input::PlayerProxy> player;
     std::unique_ptr<cache::PacketQueue> packet_queue;
     std::unique_ptr<processor::StreamingProcessorHandler> processor;
     std::unique_ptr<common::Barrier> boundary_barrier;
@@ -186,6 +194,61 @@ class StreamingPipeline::Impl final {
     return status_.load(std::memory_order_acquire);
   }
 
+  performance::StreamingPipelineSnapshot CollectPerformance() {
+    std::shared_ptr<input::PlayerProxy> player;
+    std::shared_ptr<output::OutputSession> output;
+    std::size_t audio_queue_depth = 0;
+    std::size_t video_queue_depth = 0;
+    std::size_t output_queue_depth = 0;
+    bool has_audio = false;
+    bool has_video = false;
+    {
+      std::lock_guard<std::mutex> lock(control_mutex_);
+      player = player_;
+      has_audio = has_audio_;
+      has_video = has_video_;
+      if (audio_worker_) {
+        audio_queue_depth = audio_worker_->queue_depth();
+      }
+      if (video_worker_) {
+        video_queue_depth = video_worker_->queue_depth();
+      }
+      if (output_worker_) {
+        output_queue_depth = output_worker_->queue_depth();
+        output = output_worker_->output_session();
+      }
+    }
+
+    performance::NetworkInputSnapshot network_input;
+    network_input.is_network = IsNetworkInput(config_.input_url);
+    if (player) {
+      network_input.connected = player->state() == input::PlayerState::kReady;
+      network_input.generation = player->generation();
+      network_input.reconnect_count = player->reconnect_count();
+      if (network_input.is_network) {
+        network_input.received_bytes = player->received_bytes();
+      }
+    }
+
+    std::vector<performance::NetworkOutputSnapshot> outputs;
+    if (output) {
+      auto traffic = output->GetNetworkTraffic();
+      outputs.reserve(traffic.size());
+      for (auto& target : traffic) {
+        outputs.push_back({
+            std::move(target.target),
+            target.connected,
+            target.reconnect_count,
+            target.sent_bytes,
+        });
+      }
+    }
+
+    return performance_.Collect(has_audio, has_video, audio_queue_depth,
+                                video_queue_depth, output_queue_depth,
+                                std::move(network_input), std::move(outputs));
+  }
+
  private:
   void RequireIdle(const char* operation) const {
     if (status() != StreamingPipelineStatus::kIdle) {
@@ -203,6 +266,9 @@ class StreamingPipeline::Impl final {
     if (config_.audio_queue_capacity == 0 ||
         config_.video_queue_capacity == 0) {
       throw std::invalid_argument("StreamingPipeline工作队列容量必须大于0");
+    }
+    if (config_.max_track_wait < std::chrono::milliseconds::zero()) {
+      throw std::invalid_argument("StreamingPipeline轨道等待时间不能为负数");
     }
   }
 
@@ -247,6 +313,8 @@ class StreamingPipeline::Impl final {
           output_worker_ = std::move(chains.output_worker);
           audio_worker_ = std::move(chains.audio_worker);
           video_worker_ = std::move(chains.video_worker);
+          has_audio_ = audio_worker_ != nullptr;
+          has_video_ = video_worker_ != nullptr;
           audio_stream_index_ = chains.audio_stream_index;
           video_stream_index_ = chains.video_stream_index;
 
@@ -310,6 +378,10 @@ class StreamingPipeline::Impl final {
     if (!audio_stream && !video_stream) {
       throw std::invalid_argument("StreamingPipeline输入不包含音频或视频");
     }
+    if (video_stream && (config_.video_encoder.frame_rate.num <= 0 ||
+                         config_.video_encoder.frame_rate.den <= 0)) {
+      throw std::invalid_argument("视频处理链路必须配置正数编码帧率");
+    }
 
     std::unique_ptr<decoder::VideoDecoder> video_decoder;
     if (video_stream) {
@@ -336,10 +408,16 @@ class StreamingPipeline::Impl final {
     chains.boundary_barrier = std::make_unique<common::Barrier>(
         static_cast<std::size_t>(audio_stream.has_value()) +
         static_cast<std::size_t>(video_stream.has_value()));
+    const auto* hardware_context =
+        video_decoder ? video_decoder->hardware_context() : nullptr;
     chains.output_worker = std::make_unique<OutputWorker>(
-        audio_stream.has_value(), video_stream.has_value(),
-        config_.output_targets, config_.zlm.output, startup_packet_capacity,
-        poller_,
+        audio_stream ? audio_stream->stream_index : -1,
+        video_stream ? video_stream->stream_index : -1, config_.audio_encoder,
+        config_.video_encoder, config_.output_targets, config_.zlm.output,
+        startup_packet_capacity, config_.max_track_wait,
+        config_.standby.enabled, config_.standby.image_path, hardware_context,
+        audio_stream ? &performance_.audio() : nullptr,
+        video_stream ? &performance_.video() : nullptr, poller_,
         OutputWorker::Callbacks{
             [this]() { SetRunning(); },
             [this]() { SetNaturallyStopped(); },
@@ -353,17 +431,16 @@ class StreamingPipeline::Impl final {
     if (audio_stream) {
       chains.audio_stream_index = audio_stream->stream_index;
       chains.audio_worker = std::make_unique<AudioWorker>(
-          *audio_stream, config_.audio_decoder, config_.audio_encoder,
-          config_.audio_queue_capacity, *chains.processor,
-          *chains.boundary_barrier, *chains.output_worker, on_worker_failed);
+          *audio_stream, config_.audio_decoder, config_.audio_queue_capacity,
+          *chains.processor, *chains.boundary_barrier, *chains.output_worker,
+          performance_.audio(), on_worker_failed);
     }
     if (video_stream) {
       chains.video_stream_index = video_stream->stream_index;
       chains.video_worker = std::make_unique<VideoWorker>(
-          std::move(video_decoder), config_.video_encoder,
-          config_.video_queue_capacity, *chains.processor,
-          *chains.boundary_barrier, *chains.output_worker,
-          std::move(on_worker_failed));
+          std::move(video_decoder), config_.video_queue_capacity,
+          *chains.processor, *chains.boundary_barrier, *chains.output_worker,
+          performance_.video(), std::move(on_worker_failed));
     }
     return chains;
   }
@@ -383,9 +460,7 @@ class StreamingPipeline::Impl final {
     }
   }
 
-  void OnDuePacket(std::uint64_t generation,
-                   const ffmpeg::Packet& packet) noexcept {
-    static_cast<void>(generation);
+  void OnDuePacket(std::uint64_t, const ffmpeg::Packet& packet) noexcept {
     if (stopping_.load(std::memory_order_acquire) || !packet.get()) {
       return;
     }
@@ -579,8 +654,9 @@ class StreamingPipeline::Impl final {
   std::atomic_bool stopping_{false};
   std::mutex control_mutex_;
 
+  performance::internal::StreamingCollector performance_;
   std::shared_ptr<toolkit::EventPoller> poller_;
-  std::unique_ptr<input::PlayerProxy> player_;
+  std::shared_ptr<input::PlayerProxy> player_;
   std::unique_ptr<cache::PacketQueue> packet_queue_;
   std::unique_ptr<processor::StreamingProcessorHandler> processor_;
   std::unique_ptr<common::Barrier> boundary_barrier_;
@@ -590,6 +666,8 @@ class StreamingPipeline::Impl final {
 
   int audio_stream_index_ = -1;
   int video_stream_index_ = -1;
+  bool has_audio_ = false;
+  bool has_video_ = false;
   bool audio_overflow_ = false;
   bool video_overflow_ = false;
   std::uint64_t final_generation_ = 0;
@@ -623,6 +701,10 @@ void StreamingPipeline::Stop() noexcept { impl_->Stop(); }
 
 StreamingPipelineStatus StreamingPipeline::status() const noexcept {
   return impl_->status();
+}
+
+performance::StreamingPipelineSnapshot StreamingPipeline::CollectPerformance() {
+  return impl_->CollectPerformance();
 }
 
 }  // namespace mw::streamer::pipeline

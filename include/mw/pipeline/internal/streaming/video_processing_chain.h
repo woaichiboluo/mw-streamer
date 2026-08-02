@@ -15,6 +15,10 @@ namespace mw::streamer::processor {
 class StreamingProcessorHandler;
 }
 
+namespace mw::streamer::performance::internal {
+class TrackRecorder;
+}
+
 namespace mw::streamer::pipeline::internal::streaming {
 
 class VideoProcessingChain final {
@@ -23,6 +27,7 @@ class VideoProcessingChain final {
 
   VideoProcessingChain(std::unique_ptr<decoder::VideoDecoder> decoder,
                        processor::StreamingProcessorHandler& processor,
+                       performance::internal::TrackRecorder& performance,
                        OnFrame on_frame = {});
   ~VideoProcessingChain();
 
@@ -38,6 +43,7 @@ class VideoProcessingChain final {
 
   std::unique_ptr<decoder::VideoDecoder> decoder_;
   processor::StreamingProcessorHandler& processor_;
+  performance::internal::TrackRecorder& performance_;
   OnFrame on_frame_;
 };
 

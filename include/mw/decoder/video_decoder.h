@@ -1,6 +1,8 @@
 #ifndef MW_STREAMER_INCLUDE_MW_DECODER_VIDEO_DECODER_H_
 #define MW_STREAMER_INCLUDE_MW_DECODER_VIDEO_DECODER_H_
 
+#include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 
@@ -11,6 +13,11 @@
 #include "mw/ffmpeg/stream_info.h"
 
 namespace mw::streamer::decoder {
+
+struct VideoDecodeResult {
+  std::uint64_t frames = 0;
+  std::chrono::nanoseconds service_time{0};
+};
 
 class VideoDecoder final {
  public:
@@ -27,11 +34,11 @@ class VideoDecoder final {
   // may produce zero or more frames. The frame is borrowed for OnFrame; copy or
   // call Ref to retain it.
   void SetOnFrame(OnFrame callback);
-  void Decode(const ffmpeg::Packet& packet);
+  VideoDecodeResult Decode(const ffmpeg::Packet& packet);
 
   // Drain emits all delayed frames and ends the current decoder timeline.
   // Decode cannot be called again until Flush starts a new timeline.
-  void Drain();
+  VideoDecodeResult Drain();
   void Flush();
 
   const ffmpeg::StreamInfo& stream_info() const noexcept;

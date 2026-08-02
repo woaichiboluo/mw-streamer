@@ -6,37 +6,32 @@
 
 extern "C" {
 #include <libavcodec/packet.h>
-#include <libavutil/avutil.h>
 }
 
 #include "mw/common/barrier.h"
 #include "mw/common/thread.h"
 #include "mw/decoder/video_decoder.h"
-#include "mw/encoder/video_encoder.h"
+#include "mw/performance/internal/stage_recorder.h"
 #include "mw/pipeline/internal/streaming/output_worker.h"
 #include "mw/processor/streaming_processor_handler.h"
 
 namespace mw::streamer::pipeline::internal::streaming {
 
 VideoWorker::VideoWorker(
-    std::unique_ptr<decoder::VideoDecoder> decoder,
-    encoder::VideoEncoderConfig encoder_config, std::size_t queue_capacity,
+    std::unique_ptr<decoder::VideoDecoder> decoder, std::size_t queue_capacity,
     processor::StreamingProcessorHandler& processor,
     common::Barrier& boundary_barrier, OutputWorker& output,
+    performance::internal::TrackRecorder& performance,
     std::function<void(const char* worker, const char* error)> on_failed)
     : queue_capacity_(queue_capacity),
-      encoder_(std::make_unique<encoder::VideoEncoder>(
-          std::move(encoder_config), decoder->stream_info().stream_index)),
       processing_chain_(
-          std::move(decoder), processor,
-          [this](const ffmpeg::Frame& frame) { EncodeFrame(frame); }),
+          std::move(decoder), processor, performance,
+          [this](const ffmpeg::Frame& frame) { output_.WriteVideo(frame); }),
       processor_(processor),
       boundary_barrier_(boundary_barrier),
       output_(output),
-      on_failed_(std::move(on_failed)) {
-  encoder_->SetOnPacket(
-      [this](const ffmpeg::Packet& packet) { output_.Write(packet); });
-}
+      performance_(performance),
+      on_failed_(std::move(on_failed)) {}
 
 VideoWorker::~VideoWorker() { Stop(); }
 
@@ -50,6 +45,7 @@ void VideoWorker::Start() {
 bool VideoWorker::Input(const ffmpeg::Packet& packet) {
   if (recovering_) {
     if ((packet->flags & AV_PKT_FLAG_KEY) == 0) {
+      performance_.RecordDroppedPackets(1);
       return false;
     }
     queue_.Push({WorkType::kDecoderReset, std::nullopt, false});
@@ -61,7 +57,7 @@ bool VideoWorker::Input(const ffmpeg::Packet& packet) {
   const bool accepted = queue_.TryPush(
       WorkItem{WorkType::kPacket, packet.Ref(), false}, queue_capacity_);
   if (!accepted) {
-    queue_.Clear();
+    performance_.RecordDroppedPackets(queue_.Clear() + 1);
     recovering_ = true;
   }
   return accepted;
@@ -89,6 +85,8 @@ void VideoWorker::Stop() noexcept {
   }
 }
 
+std::size_t VideoWorker::queue_depth() const { return queue_.size(); }
+
 void VideoWorker::Run() noexcept {
   try {
     RunLoop();
@@ -113,20 +111,18 @@ void VideoWorker::RunLoop() {
         if (!SynchronizeBoundary(kMwStreamerProcessorTimelineReset)) {
           return;
         }
+        output_.InterruptTrack(AVMEDIA_TYPE_VIDEO);
         break;
       case WorkType::kEnd:
         processing_chain_.Drain();
         if (work->final_end) {
-          if (!encoder_->is_open()) {
-            throw std::runtime_error("视频流没有产生可编码帧");
-          }
           if (!SynchronizeBoundary(kMwStreamerProcessorEndOfInput)) {
             return;
           }
-          encoder_->Drain();
-          output_.EndTrack(AVMEDIA_TYPE_VIDEO);
+          output_.FinishTrack(AVMEDIA_TYPE_VIDEO);
           return;
         }
+        output_.InterruptTrack(AVMEDIA_TYPE_VIDEO);
         break;
     }
   }
@@ -136,14 +132,6 @@ bool VideoWorker::SynchronizeBoundary(
     MwStreamerProcessorBoundaryReason reason) {
   return boundary_barrier_.ArriveAndWait(
       [this, reason]() { processor_.NotifyBoundary(reason); });
-}
-
-void VideoWorker::EncodeFrame(const ffmpeg::Frame& frame) {
-  if (!encoder_->is_open()) {
-    encoder_->Open(frame);
-    output_.RegisterOutputStream(AVMEDIA_TYPE_VIDEO, encoder_->stream_info());
-  }
-  encoder_->Encode(frame);
 }
 
 }  // namespace mw::streamer::pipeline::internal::streaming

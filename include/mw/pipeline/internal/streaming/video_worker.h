@@ -7,7 +7,6 @@
 #include <optional>
 
 #include "mw/common/blocking_queue.h"
-#include "mw/encoder/config.h"
 #include "mw/ffmpeg/packet.h"
 #include "mw/pipeline/internal/streaming/video_processing_chain.h"
 #include "mw/processor/processor.h"
@@ -21,12 +20,12 @@ namespace mw::streamer::decoder {
 class VideoDecoder;
 }
 
-namespace mw::streamer::encoder {
-class VideoEncoder;
-}
-
 namespace mw::streamer::processor {
 class StreamingProcessorHandler;
+}
+
+namespace mw::streamer::performance::internal {
+class TrackRecorder;
 }
 
 namespace mw::streamer::pipeline::internal::streaming {
@@ -37,9 +36,10 @@ class VideoWorker final {
  public:
   VideoWorker(
       std::unique_ptr<decoder::VideoDecoder> decoder,
-      encoder::VideoEncoderConfig encoder_config, std::size_t queue_capacity,
+      std::size_t queue_capacity,
       processor::StreamingProcessorHandler& processor,
       common::Barrier& boundary_barrier, OutputWorker& output,
+      performance::internal::TrackRecorder& performance,
       std::function<void(const char* worker, const char* error)> on_failed);
   ~VideoWorker();
 
@@ -52,6 +52,7 @@ class VideoWorker final {
   void End(bool final_end);
   void RequestStop() noexcept;
   void Stop() noexcept;
+  std::size_t queue_depth() const;
 
  private:
   enum class WorkType {
@@ -70,16 +71,15 @@ class VideoWorker final {
   void Run() noexcept;
   void RunLoop();
   bool SynchronizeBoundary(MwStreamerProcessorBoundaryReason reason);
-  void EncodeFrame(const ffmpeg::Frame& frame);
 
   const std::size_t queue_capacity_;
   common::BlockingQueue<WorkItem> queue_;
   std::unique_ptr<common::Thread> thread_;
-  std::unique_ptr<encoder::VideoEncoder> encoder_;
   VideoProcessingChain processing_chain_;
   processor::StreamingProcessorHandler& processor_;
   common::Barrier& boundary_barrier_;
   OutputWorker& output_;
+  performance::internal::TrackRecorder& performance_;
   std::function<void(const char* worker, const char* error)> on_failed_;
   bool recovering_ = false;
 };

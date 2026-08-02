@@ -32,15 +32,29 @@ class MediaPublisher:
             command.extend(["-map", "0:v:0"])
         if asset.has_audio:
             command.extend(["-map", "0:a:0"])
-        command.extend(
-            [
-                "-c",
-                "copy",
-                "-f",
-                "mpegts",
-                output_url,
-            ]
-        )
+        command.extend(["-c", "copy"])
+        if output_url.startswith("srt://"):
+            command.extend(["-f", "mpegts"])
+        elif output_url.startswith("rtmp://"):
+            command.extend(["-f", "flv"])
+        elif output_url.startswith("rtsp://"):
+            command.extend(
+                [
+                    "-copyts",
+                    "-start_at_zero",
+                    "-avoid_negative_ts",
+                    "disabled",
+                    "-rtsp_transport",
+                    "tcp",
+                    "-muxdelay",
+                    "0",
+                    "-f",
+                    "rtsp",
+                ]
+            )
+        else:
+            raise ValueError(f"媒体发布地址协议不受支持: {output_url}")
+        command.append(output_url)
         self.process = ManagedProcess(
             command, artifact_directory / "publisher.log"
         )
@@ -149,6 +163,78 @@ class MediaProbe:
             if separator:
                 values[key] = value
         return values
+
+
+class MediaRecorder:
+    def __init__(
+        self,
+        config: E2EConfig,
+        protocol: str,
+        input_url: str,
+        asset: MediaAsset,
+        duration_seconds: float,
+        output_path: Path,
+        artifact_directory: Path,
+        *,
+        listen: bool = False,
+        listen_timeout_seconds: float | None = None,
+    ) -> None:
+        if duration_seconds <= 0:
+            raise ValueError("媒体录制时长必须大于0")
+        if listen and protocol != "rtsp":
+            raise ValueError("只有RTSP录像支持监听模式")
+        if listen and (
+            listen_timeout_seconds is None or listen_timeout_seconds <= 0
+        ):
+            raise ValueError("RTSP监听录像必须提供正数超时")
+        command = [
+            str(config.tools.ffmpeg),
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "info",
+        ]
+        if protocol == "rtsp":
+            command.extend(["-rtsp_transport", "tcp"])
+        if listen:
+            command.extend(
+                [
+                    "-rtsp_flags",
+                    "listen",
+                    "-listen_timeout",
+                    str(math.ceil(listen_timeout_seconds)),
+                ]
+            )
+        command.extend(["-i", input_url, "-t", str(duration_seconds)])
+        if asset.has_video:
+            command.extend(["-map", "0:v:0"])
+        if asset.has_audio:
+            command.extend(["-map", "0:a:0"])
+        if asset.has_video:
+            command.extend(["-c:v", "copy"])
+        if asset.has_audio:
+            command.extend(["-c:a", "pcm_s16le"])
+        command.extend(["-y", str(output_path)])
+        self.output_path = output_path
+        self.process = ManagedProcess(
+            command, artifact_directory / "recorder.log"
+        )
+
+    def start(self) -> None:
+        self.process.start()
+
+    def wait(self, timeout: float) -> None:
+        returncode = self.process.wait(timeout)
+        if returncode != 0:
+            raise ProcessError(
+                f"FFmpeg媒体录制失败，返回码{returncode}: "
+                f"{self.process.log_path}"
+            )
+        if not self.output_path.is_file():
+            raise ProcessError(f"FFmpeg没有生成录制文件: {self.output_path}")
+
+    def stop(self) -> None:
+        self.process.stop()
 
 
 def monitor_stable_probes(

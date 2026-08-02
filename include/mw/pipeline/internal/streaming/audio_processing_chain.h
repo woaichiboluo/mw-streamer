@@ -17,6 +17,10 @@ namespace mw::streamer::processor {
 class StreamingProcessorHandler;
 }
 
+namespace mw::streamer::performance::internal {
+class TrackRecorder;
+}
+
 namespace mw::streamer::resampler {
 class AudioResampler;
 }
@@ -30,6 +34,7 @@ class AudioProcessingChain final {
   AudioProcessingChain(ffmpeg::StreamInfo stream_info,
                        decoder::AudioDecoderConfig decoder_config,
                        processor::StreamingProcessorHandler& processor,
+                       performance::internal::TrackRecorder& performance,
                        OnFrame on_frame = {});
   ~AudioProcessingChain();
 
@@ -46,6 +51,7 @@ class AudioProcessingChain final {
   std::unique_ptr<decoder::AudioDecoder> decoder_;
   std::unique_ptr<resampler::AudioResampler> resampler_;
   processor::StreamingProcessorHandler& processor_;
+  performance::internal::TrackRecorder& performance_;
   OnFrame on_frame_;
 };
 

@@ -1,6 +1,7 @@
 #ifndef MW_STREAMER_INCLUDE_MW_OUTPUT_OUTPUT_SESSION_H_
 #define MW_STREAMER_INCLUDE_MW_OUTPUT_OUTPUT_SESSION_H_
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -21,6 +22,13 @@ struct OutputConfig {
   // .m3u8 are fragmented MP4 and HLS-fMP4 recording targets respectively.
   std::vector<std::string> targets;
   zlm::OutputConfig zlm;
+};
+
+struct NetworkTraffic {
+  std::string target;
+  bool connected = false;
+  std::uint64_t reconnect_count = 0;
+  std::uint64_t sent_bytes = 0;
 };
 
 class OutputSession final {
@@ -44,6 +52,8 @@ class OutputSession final {
   // processing. Runtime target failures are logged and do not propagate to the
   // input, cache, or other output targets.
   void Write(const ffmpeg::Packet& packet);
+
+  std::vector<NetworkTraffic> GetNetworkTraffic() const;
 
   // Close stops all pushers and finalizes every recording target. The session
   // cannot be opened again after Close.

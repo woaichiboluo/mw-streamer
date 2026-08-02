@@ -95,6 +95,7 @@ class PlayerProxy final {
   PlayerState state() const noexcept;
   std::uint64_t generation() const noexcept;
   std::uint64_t reconnect_count() const noexcept;
+  std::uint64_t received_bytes() const;
   std::shared_ptr<toolkit::EventPoller> poller() const;
 
  private:

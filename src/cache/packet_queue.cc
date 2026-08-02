@@ -491,6 +491,7 @@ class PacketQueue::Impl final
   }
 
   void StartOutputOnPoller() {
+    AlignTrackFrontsOnPoller();
     const auto* next = NextPacket();
     if (!next) {
       NotifyStarvedIfEmptyOnPoller(generation());
@@ -504,6 +505,28 @@ class PacketQueue::Impl final
     if (output_epoch == output_epoch_ &&
         state() == PacketQueueState::kPlaying) {
       ScheduleNextPacketOnPoller();
+    }
+  }
+
+  void AlignTrackFrontsOnPoller() {
+    if (!audio_.configured() || !video_.configured() ||
+        audio_.packets.empty() || video_.packets.empty()) {
+      return;
+    }
+
+    const auto common_dts_us =
+        std::max(audio_.packets.front().dts_us,
+                 video_.packets.front().dts_us);
+    TrimLeadingPackets(audio_, common_dts_us);
+    TrimLeadingPackets(video_, common_dts_us);
+    UpdatePacketCountOnPoller();
+  }
+
+  static void TrimLeadingPackets(TrackQueue& track,
+                                 std::int64_t common_dts_us) {
+    while (track.packets.size() > 1 &&
+           track.packets[1].dts_us <= common_dts_us) {
+      track.packets.pop_front();
     }
   }
 

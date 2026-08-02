@@ -149,6 +149,51 @@ TEST_CASE("packet queue waits for both audio and video prebuffer") {
   StopAndWait(queue);
 }
 
+TEST_CASE("packet queue starts at the first common audio-video interval") {
+  auto queue = std::make_shared<PacketQueue>(1s);
+  std::mutex mutex;
+  std::condition_variable condition;
+  std::vector<std::pair<int, std::int64_t>> outputs;
+
+  queue->SetOnPacket([&](std::uint64_t, const Packet& packet) {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      outputs.emplace_back(packet->stream_index, packet->dts);
+    }
+    condition.notify_all();
+  });
+
+  RunOnPollerAndWait(queue->poller(), [&]() {
+    queue->SetStreams(1, MillisecondStreams());
+    for (std::int64_t dts = 0; dts <= 9300; dts += 100) {
+      Feed(*queue, 1, 1, dts);
+    }
+    for (std::int64_t dts = 8000; dts <= 9200; dts += 100) {
+      Feed(*queue, 1, 0, dts);
+    }
+    queue->EndInput(1);
+  });
+
+  REQUIRE(WaitFor(condition, mutex, [&]() { return outputs.size() == 27; },
+                  3s));
+  RunOnPollerAndWait(queue->poller(), []() {});
+
+  std::vector<std::pair<int, std::int64_t>> snapshot;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    snapshot = outputs;
+  }
+  REQUIRE(snapshot.size() == 27);
+  CHECK(snapshot.front() == std::pair{0, std::int64_t{8000}});
+  for (const auto& [stream_index, dts] : snapshot) {
+    CHECK((stream_index == 0 || stream_index == 1));
+    CHECK(dts >= 8000);
+  }
+  CHECK(queue->state() == PacketQueueState::kStarved);
+
+  StopAndWait(queue);
+}
+
 TEST_CASE("zero-duration packet queue forwards packets immediately") {
   std::vector<StreamInfo> streams;
   std::vector<std::pair<int, std::int64_t>> inputs;

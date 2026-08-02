@@ -1,6 +1,8 @@
 #ifndef MW_STREAMER_INCLUDE_MW_DECODER_AUDIO_DECODER_H_
 #define MW_STREAMER_INCLUDE_MW_DECODER_AUDIO_DECODER_H_
 
+#include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 
@@ -10,6 +12,11 @@
 #include "mw/ffmpeg/stream_info.h"
 
 namespace mw::streamer::decoder {
+
+struct AudioDecodeResult {
+  std::uint64_t samples = 0;
+  std::chrono::nanoseconds service_time{0};
+};
 
 class AudioDecoder final {
  public:
@@ -26,11 +33,11 @@ class AudioDecoder final {
   // may produce zero or more frames. The frame is borrowed for OnFrame; copy or
   // call Ref to retain it.
   void SetOnFrame(OnFrame callback);
-  void Decode(const ffmpeg::Packet& packet);
+  AudioDecodeResult Decode(const ffmpeg::Packet& packet);
 
   // Drain emits all delayed frames and ends the current decoder timeline.
   // Decode cannot be called again until Flush starts a new timeline.
-  void Drain();
+  AudioDecodeResult Drain();
   void Flush();
 
   const ffmpeg::StreamInfo& stream_info() const noexcept;

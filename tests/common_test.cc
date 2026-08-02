@@ -58,6 +58,16 @@ TEST_CASE("BlockingQueue关闭会唤醒等待线程") {
   consumer.Join();
 }
 
+TEST_CASE("BlockingQueue支持带截止时间的等待") {
+  BlockingQueue<int> queue;
+  const auto deadline = std::chrono::steady_clock::now() + 20ms;
+
+  CHECK_FALSE(queue.WaitPopUntil(deadline).has_value());
+  CHECK_FALSE(queue.closed());
+  REQUIRE(queue.Push(7));
+  REQUIRE(queue.WaitPopUntil(std::chrono::steady_clock::now() + 1s) == 7);
+}
+
 TEST_CASE("BlockingQueue能够清空待处理数据") {
   BlockingQueue<int> queue;
   REQUIRE(queue.Push(1));

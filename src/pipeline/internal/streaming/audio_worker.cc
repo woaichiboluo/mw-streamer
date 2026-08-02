@@ -4,13 +4,9 @@
 #include <stdexcept>
 #include <utility>
 
-extern "C" {
-#include <libavutil/avutil.h>
-}
-
 #include "mw/common/barrier.h"
 #include "mw/common/thread.h"
-#include "mw/encoder/audio_encoder.h"
+#include "mw/performance/internal/stage_recorder.h"
 #include "mw/pipeline/internal/streaming/output_worker.h"
 #include "mw/processor/streaming_processor_handler.h"
 
@@ -18,23 +14,20 @@ namespace mw::streamer::pipeline::internal::streaming {
 
 AudioWorker::AudioWorker(
     ffmpeg::StreamInfo stream_info, decoder::AudioDecoderConfig decoder_config,
-    encoder::AudioEncoderConfig encoder_config, std::size_t queue_capacity,
-    processor::StreamingProcessorHandler& processor,
+    std::size_t queue_capacity, processor::StreamingProcessorHandler& processor,
     common::Barrier& boundary_barrier, OutputWorker& output,
+    performance::internal::TrackRecorder& performance,
     std::function<void(const char* worker, const char* error)> on_failed)
     : queue_capacity_(queue_capacity),
-      encoder_(std::make_unique<encoder::AudioEncoder>(
-          std::move(encoder_config), stream_info.stream_index)),
       processing_chain_(
           std::move(stream_info), std::move(decoder_config), processor,
-          [this](const ffmpeg::Frame& frame) { EncodeFrame(frame); }),
+          performance,
+          [this](const ffmpeg::Frame& frame) { output_.WriteAudio(frame); }),
       processor_(processor),
       boundary_barrier_(boundary_barrier),
       output_(output),
-      on_failed_(std::move(on_failed)) {
-  encoder_->SetOnPacket(
-      [this](const ffmpeg::Packet& packet) { output_.Write(packet); });
-}
+      performance_(performance),
+      on_failed_(std::move(on_failed)) {}
 
 AudioWorker::~AudioWorker() { Stop(); }
 
@@ -46,8 +39,12 @@ void AudioWorker::Start() {
 }
 
 bool AudioWorker::Input(const ffmpeg::Packet& packet) {
-  return queue_.TryPush(WorkItem{WorkType::kPacket, packet.Ref(), false},
-                        queue_capacity_);
+  const bool accepted = queue_.TryPush(
+      WorkItem{WorkType::kPacket, packet.Ref(), false}, queue_capacity_);
+  if (!accepted) {
+    performance_.RecordDroppedPackets(1);
+  }
+  return accepted;
 }
 
 void AudioWorker::Reset() {
@@ -71,6 +68,8 @@ void AudioWorker::Stop() noexcept {
   }
 }
 
+std::size_t AudioWorker::queue_depth() const { return queue_.size(); }
+
 void AudioWorker::Run() noexcept {
   try {
     RunLoop();
@@ -92,20 +91,18 @@ void AudioWorker::RunLoop() {
         if (!SynchronizeBoundary(kMwStreamerProcessorTimelineReset)) {
           return;
         }
+        output_.InterruptTrack(AVMEDIA_TYPE_AUDIO);
         break;
       case WorkType::kEnd:
         processing_chain_.Drain();
         if (work->final_end) {
-          if (!encoder_->is_open()) {
-            throw std::runtime_error("音频流没有产生可编码帧");
-          }
           if (!SynchronizeBoundary(kMwStreamerProcessorEndOfInput)) {
             return;
           }
-          encoder_->Drain();
-          output_.EndTrack(AVMEDIA_TYPE_AUDIO);
+          output_.FinishTrack(AVMEDIA_TYPE_AUDIO);
           return;
         }
+        output_.InterruptTrack(AVMEDIA_TYPE_AUDIO);
         break;
     }
   }
@@ -115,14 +112,6 @@ bool AudioWorker::SynchronizeBoundary(
     MwStreamerProcessorBoundaryReason reason) {
   return boundary_barrier_.ArriveAndWait(
       [this, reason]() { processor_.NotifyBoundary(reason); });
-}
-
-void AudioWorker::EncodeFrame(const ffmpeg::Frame& frame) {
-  if (!encoder_->is_open()) {
-    encoder_->Open(frame);
-    output_.RegisterOutputStream(AVMEDIA_TYPE_AUDIO, encoder_->stream_info());
-  }
-  encoder_->Encode(frame);
 }
 
 }  // namespace mw::streamer::pipeline::internal::streaming

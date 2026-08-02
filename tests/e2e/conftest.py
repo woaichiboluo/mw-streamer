@@ -11,6 +11,7 @@ from mw_e2e.config import ConfigurationError, discover_media, load_config
 from mw_e2e.ffmpeg import MediaPublisher
 from mw_e2e.mediamtx import MediaEnvironment
 from mw_e2e.models import E2EConfig, MediaAsset, PublishedMedia
+from mw_e2e.sync import analyze_sync, generate_sync_media
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -152,6 +153,23 @@ def published_media(
         yield PublishedMedia(media_asset, media_path)
     finally:
         publisher.stop()
+
+
+@pytest.fixture(scope="session", params=["h264", "hevc"])
+def sync_media_asset(
+    request: pytest.FixtureRequest,
+    e2e_config: E2EConfig,
+    artifact_root: Path,
+) -> MediaAsset:
+    codec = str(request.param)
+    directory = artifact_root / "sync-media"
+    asset = generate_sync_media(e2e_config, codec, directory)
+    analyze_sync(
+        e2e_config,
+        asset.path,
+        directory / f"sync-{codec}-source-analysis.json",
+    )
+    return asset
 
 
 @pytest.fixture

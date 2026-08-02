@@ -22,6 +22,33 @@ add_test(
     COMMAND mw_common_tests
 )
 
+add_executable(mw_performance_tests
+    performance_test.cc
+)
+
+target_link_libraries(mw_performance_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        HdrHistogram::HdrHistogram
+        mw::streamer
+)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(mw_performance_tests
+        PRIVATE
+            "-Wl,--push-state,--no-as-needed"
+            FFmpeg::avutil
+            "-Wl,--pop-state"
+    )
+else()
+    target_link_libraries(mw_performance_tests PRIVATE FFmpeg::avutil)
+endif()
+
+add_test(
+    NAME mw_performance_tests
+    COMMAND mw_performance_tests
+)
+
 target_include_directories(mw_processor_c_api_tests
     PRIVATE
         "${PROJECT_SOURCE_DIR}/include"
@@ -155,6 +182,21 @@ add_test(
     COMMAND mw_pipeline_config_tests
 )
 
+add_executable(mw_streaming_standby_tests
+    streaming_standby_test.cc
+)
+
+target_link_libraries(mw_streaming_standby_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        mw::streamer
+)
+
+add_test(
+    NAME mw_streaming_standby_tests
+    COMMAND mw_streaming_standby_tests
+)
+
 add_executable(mw_streaming_pipeline_tests
     streaming_pipeline_test.cc
 )
@@ -188,6 +230,7 @@ target_compile_definitions(mw_processing_chain_tests
 target_link_libraries(mw_processing_chain_tests
     PRIVATE
         Catch2::Catch2WithMain
+        HdrHistogram::HdrHistogram
         ZLMediaKit::MediaKit
         mw::streamer
 )
@@ -405,6 +448,7 @@ add_test(
 
 add_executable(mw_input_player_proxy_tests
     input_player_proxy_test.cc
+    zlm_timestamp_reviser_test.cc
 )
 
 target_compile_definitions(mw_input_player_proxy_tests

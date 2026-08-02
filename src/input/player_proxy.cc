@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -13,6 +14,7 @@ extern "C" {
 
 #include <fmt/format.h>
 
+#include "Common/Stamp.h"
 #include "Common/config.h"
 #include "Extension/Frame.h"
 #include "Extension/Track.h"
@@ -20,6 +22,7 @@ extern "C" {
 #include "Poller/EventPoller.h"
 #include "mw/converter/zlm_codec_parameters_converter.h"
 #include "mw/converter/zlm_packet_converter.h"
+#include "mw/input/internal/zlm_timestamp_reviser.h"
 #include "mw/zlm/internal/config_validator.h"
 
 namespace mw::streamer::input {
@@ -312,6 +315,16 @@ class PlayerProxy::Impl final
     return reconnect_count_.load(std::memory_order_relaxed);
   }
 
+  std::uint64_t ReceivedBytes() {
+    if (poller_->isCurrentThread()) {
+      return ReceivedBytesOnPoller();
+    }
+    std::uint64_t bytes = 0;
+    auto self = shared_from_this();
+    poller_->sync([self, &bytes]() { bytes = self->ReceivedBytesOnPoller(); });
+    return bytes;
+  }
+
   const std::shared_ptr<toolkit::EventPoller>& poller() const {
     return poller_;
   }
@@ -321,6 +334,7 @@ class PlayerProxy::Impl final
     mediakit::Track::Ptr track;
     mediakit::FrameWriterInterface* delegate = nullptr;
     converter::ZlmPacketConverter::Ptr packet_converter;
+    std::unique_ptr<mediakit::Stamp> stamp;
   };
 
   struct Attempt {
@@ -329,6 +343,7 @@ class PlayerProxy::Impl final
     std::atomic_bool active{true};
     std::atomic_bool accepting_frames{true};
     std::atomic_bool finite{false};
+    bool revise_timestamps = false;
     bool paused = false;
     std::shared_ptr<mediakit::MediaPlayer> player;
     std::vector<Binding> bindings;
@@ -368,7 +383,14 @@ class PlayerProxy::Impl final
     auto attempt = std::make_shared<Attempt>();
     attempt->generation.store(NextGenerationOnPoller(),
                               std::memory_order_release);
+    attempt->revise_timestamps = internal::ShouldReviseZlmTimestamps(url_);
     attempt->player = std::make_shared<mediakit::MediaPlayer>(poller_);
+    attempt->player->setOnCreateSocket(
+        [](const toolkit::EventPoller::Ptr& poller) {
+          auto socket = toolkit::Socket::createSocket(poller, true);
+          static_cast<void>(socket->getRecvTotalBytes());
+          return socket;
+        });
     attempt_ = attempt;
 
     (*attempt->player)[mediakit::Client::kTimeoutMS] =
@@ -785,6 +807,9 @@ class PlayerProxy::Impl final
       Binding binding;
       binding.track = track;
       binding.packet_converter = std::move(packet_converter);
+      if (attempt->revise_timestamps) {
+        binding.stamp = std::make_unique<mediakit::Stamp>();
+      }
       bindings.emplace_back(std::move(binding));
       ++stream_index;
     }
@@ -799,6 +824,21 @@ class PlayerProxy::Impl final
     }
 
     attempt->bindings = std::move(bindings);
+    if (attempt->revise_timestamps) {
+      mediakit::Stamp* video_stamp = nullptr;
+      for (auto& binding : attempt->bindings) {
+        if (binding.track->getTrackType() == mediakit::TrackVideo) {
+          video_stamp = binding.stamp.get();
+          break;
+        }
+      }
+      for (auto& binding : attempt->bindings) {
+        if (video_stamp &&
+            binding.track->getTrackType() == mediakit::TrackAudio) {
+          binding.stamp->syncTo(*video_stamp);
+        }
+      }
+    }
     if (on_streams_ready_) {
       on_streams_ready_(AttemptGeneration(attempt), streams);
     }
@@ -847,7 +887,9 @@ class PlayerProxy::Impl final
         static_cast<std::size_t>(stream_index) >= attempt->bindings.size()) {
       return;
     }
-    attempt->bindings[stream_index].packet_converter->InputFrame(frame);
+    auto& binding = attempt->bindings[stream_index];
+    binding.packet_converter->InputFrame(
+        internal::ReviseZlmFrameTimestamp(frame, binding.stamp.get()));
   }
 
   void FlushBindingsOnPoller(const std::shared_ptr<Attempt>& attempt) {
@@ -859,6 +901,9 @@ class PlayerProxy::Impl final
   void ResetBindingsOnPoller(const std::shared_ptr<Attempt>& attempt) {
     for (auto& binding : attempt->bindings) {
       binding.packet_converter->Reset();
+      if (binding.stamp) {
+        binding.stamp->reset();
+      }
     }
   }
 
@@ -923,6 +968,13 @@ class PlayerProxy::Impl final
     if (on_state_) {
       on_state_(event_generation, new_state, reason, will_retry);
     }
+  }
+
+  std::uint64_t ReceivedBytesOnPoller() const {
+    if (!attempt_ || !attempt_->player) {
+      return 0;
+    }
+    return static_cast<std::uint64_t>(attempt_->player->getRecvTotalBytes());
   }
 
   std::shared_ptr<toolkit::EventPoller> poller_;
@@ -999,6 +1051,10 @@ std::uint64_t PlayerProxy::generation() const noexcept {
 
 std::uint64_t PlayerProxy::reconnect_count() const noexcept {
   return impl_->reconnect_count();
+}
+
+std::uint64_t PlayerProxy::received_bytes() const {
+  return impl_->ReceivedBytes();
 }
 
 std::shared_ptr<toolkit::EventPoller> PlayerProxy::poller() const {

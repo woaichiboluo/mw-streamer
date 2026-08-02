@@ -1,6 +1,7 @@
 #ifndef MW_STREAMER_INCLUDE_MW_COMMON_BLOCKING_QUEUE_H_
 #define MW_STREAMER_INCLUDE_MW_COMMON_BLOCKING_QUEUE_H_
 
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <deque>
@@ -52,6 +53,24 @@ class BlockingQueue final {
   std::optional<T> WaitPop() {
     std::unique_lock<std::mutex> lock(mutex_);
     condition_.wait(lock, [this]() { return closed_ || !queue_.empty(); });
+    if (queue_.empty()) {
+      return std::nullopt;
+    }
+    T value = std::move(queue_.front());
+    queue_.pop_front();
+    return value;
+  }
+
+  // Returns nullopt when the deadline expires or after a closed queue becomes
+  // empty. Call closed() to distinguish those two outcomes.
+  template <typename Clock, typename Duration>
+  std::optional<T> WaitPopUntil(
+      const std::chrono::time_point<Clock, Duration>& deadline) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!condition_.wait_until(
+            lock, deadline, [this]() { return closed_ || !queue_.empty(); })) {
+      return std::nullopt;
+    }
     if (queue_.empty()) {
       return std::nullopt;
     }

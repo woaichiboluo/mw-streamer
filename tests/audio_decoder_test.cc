@@ -132,9 +132,10 @@ TEST_CASE("audio decoder decodes drains and flushes an AAC stream") {
 
   auto packet_converter = std::make_shared<ZlmPacketConverter>(audio_track, 1);
   std::vector<Packet> retained_packets;
+  std::uint64_t reported_samples = 0;
   packet_converter->SetOnPacket([&](const Packet& packet) {
     retained_packets.push_back(packet.Clone());
-    decoder.Decode(packet);
+    reported_samples += decoder.Decode(packet).samples;
     return true;
   });
 
@@ -152,7 +153,7 @@ TEST_CASE("audio decoder decodes drains and flushes an AAC stream") {
     REQUIRE(error == 0);
   }
   REQUIRE(packet_converter->Flush());
-  decoder.Drain();
+  reported_samples += decoder.Drain().samples;
   resampler.Drain();
 
   const auto first_pass_frames = decoded_frames;
@@ -165,6 +166,7 @@ TEST_CASE("audio decoder decodes drains and flushes an AAC stream") {
   CHECK(first_pass_frames == retained_packets.size());
   CHECK(first_pass_samples ==
         static_cast<std::int64_t>(first_pass_frames) * 1024);
+  CHECK(reported_samples == static_cast<std::uint64_t>(first_pass_samples));
   CHECK(first_pass_resampled_frames == first_pass_frames);
   CHECK(first_pass_resampled_samples == first_pass_samples);
   CHECK_THROWS_AS(decoder.Decode(retained_packets.front()), std::logic_error);

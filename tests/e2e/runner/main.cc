@@ -1,10 +1,13 @@
+#include <cuda.h>
 #include <fmt/format.h>
 
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -92,6 +95,10 @@ struct Arguments {
   std::uint32_t frame_rate_num = 0;
   std::uint32_t frame_rate_den = 1;
   MwStreamerCodec video_codec = kMwStreamerCodecUnknown;
+  std::chrono::milliseconds video_jitter_min{0};
+  std::chrono::milliseconds video_jitter_max{0};
+  bool passthrough_video = false;
+  bool standby = false;
 };
 
 std::string RequireValue(int argc, char* argv[], int& index) {
@@ -166,6 +173,16 @@ Arguments ParseArguments(int argc, char* argv[]) {
           ParseUnsigned(RequireValue(argc, argv, index), "--frame-rate-den");
     } else if (option == "--video-codec") {
       arguments.video_codec = ParseVideoCodec(RequireValue(argc, argv, index));
+    } else if (option == "--video-jitter-min-ms") {
+      arguments.video_jitter_min = ParseMilliseconds(
+          RequireValue(argc, argv, index), "--video-jitter-min-ms", 0);
+    } else if (option == "--video-jitter-max-ms") {
+      arguments.video_jitter_max = ParseMilliseconds(
+          RequireValue(argc, argv, index), "--video-jitter-max-ms", 0);
+    } else if (option == "--passthrough-video") {
+      arguments.passthrough_video = true;
+    } else if (option == "--standby") {
+      arguments.standby = true;
     } else {
       throw std::invalid_argument("未知参数: " + option);
     }
@@ -191,12 +208,26 @@ Arguments ParseArguments(int argc, char* argv[]) {
       (arguments.video_codec == kMwStreamerCodecUnknown)) {
     throw std::invalid_argument("视频输出尺寸与编码格式不匹配");
   }
+  if (arguments.video_jitter_min > arguments.video_jitter_max) {
+    throw std::invalid_argument("视频抖动最小值不能大于最大值");
+  }
+  if (arguments.video_jitter_max > 0ms && !arguments.passthrough_video) {
+    throw std::invalid_argument("视频抖动测试必须启用视频透传");
+  }
+  if (arguments.passthrough_video && arguments.output_width == 0) {
+    throw std::invalid_argument("纯音频输入不能启用视频透传");
+  }
   return arguments;
 }
 
 struct ProcessorObserver {
   EventWriter* events = nullptr;
   std::atomic_uint64_t timeline_reset_count{0};
+  std::chrono::milliseconds video_jitter_min{0};
+  std::chrono::milliseconds video_jitter_max{0};
+  MwStreamerExecutionContext execution{};
+  std::uint64_t video_frame_count = 0;
+  std::uint64_t video_jitter_count = 0;
 };
 
 MwStreamerProcessorStartResult OnProcessorStart(
@@ -207,6 +238,7 @@ MwStreamerProcessorStartResult OnProcessorStart(
       !request->config || !request->execution) {
     return kMwStreamerProcessorStartFailed;
   }
+  observer->execution = *request->execution;
 
   observer->events->Write(
       "processor_started",
@@ -220,6 +252,108 @@ MwStreamerProcessorStartResult OnProcessorStart(
                          ? "cuda"
                          : "cpu"}});
   return kMwStreamerProcessorStartSuccess;
+}
+
+void ThrowIfCudaError(CUresult result, const char* operation) {
+  if (result == CUDA_SUCCESS) {
+    return;
+  }
+  const char* name = nullptr;
+  cuGetErrorName(result, &name);
+  throw std::runtime_error(
+      fmt::format("{}失败: {}", operation, name ? name : "CUDA_ERROR_UNKNOWN"));
+}
+
+void CopyHostVideo(const MwStreamerVideoBufferView& input,
+                   MwStreamerVideoBufferView* output) {
+  for (std::uint32_t plane = 0; plane < input.storage.linear.plane_count;
+       ++plane) {
+    const auto& source = input.storage.linear.planes[plane];
+    const auto& destination = output->storage.linear.planes[plane];
+    for (std::uint32_t row = 0; row < source.row_count; ++row) {
+      const auto* source_row =
+          reinterpret_cast<const std::uint8_t*>(source.address) +
+          static_cast<std::ptrdiff_t>(row) * source.stride_bytes;
+      auto* destination_row =
+          reinterpret_cast<std::uint8_t*>(destination.address) +
+          static_cast<std::ptrdiff_t>(row) * destination.stride_bytes;
+      std::memcpy(destination_row, source_row, source.row_bytes);
+    }
+  }
+}
+
+void CopyCudaVideo(const MwStreamerVideoBufferView& input,
+                   MwStreamerVideoBufferView* output, CUstream stream) {
+  for (std::uint32_t plane = 0; plane < input.storage.linear.plane_count;
+       ++plane) {
+    const auto& source = input.storage.linear.planes[plane];
+    const auto& destination = output->storage.linear.planes[plane];
+    if (source.stride_bytes <= 0 || destination.stride_bytes <= 0) {
+      throw std::invalid_argument("E2E CUDA视频平面stride无效");
+    }
+    CUDA_MEMCPY2D copy{};
+    copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+    copy.srcDevice = static_cast<CUdeviceptr>(source.address);
+    copy.srcPitch = static_cast<std::size_t>(source.stride_bytes);
+    copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+    copy.dstDevice = static_cast<CUdeviceptr>(destination.address);
+    copy.dstPitch = static_cast<std::size_t>(destination.stride_bytes);
+    copy.WidthInBytes = source.row_bytes;
+    copy.Height = source.row_count;
+    ThrowIfCudaError(cuMemcpy2DAsync(&copy, stream), "异步复制E2E CUDA视频帧");
+  }
+}
+
+void ProcessVideo(const MwStreamerStreamingVideoProcessRequest* request,
+                  void* user_context) {
+  auto* observer = static_cast<ProcessorObserver*>(user_context);
+  if (!observer || !request || !request->input || !request->output) {
+    throw std::invalid_argument("E2E视频透传回调参数无效");
+  }
+  const auto& input = request->input->buffer;
+  auto* output = request->output;
+  if (input.memory_type != output->memory_type ||
+      input.storage_type != kMwStreamerVideoStorageLinear ||
+      output->storage_type != kMwStreamerVideoStorageLinear ||
+      input.pixel_format != output->pixel_format ||
+      input.width != output->width || input.height != output->height ||
+      input.storage.linear.plane_count != output->storage.linear.plane_count) {
+    throw std::invalid_argument("E2E视频透传输入输出格式不匹配");
+  }
+  for (std::uint32_t plane = 0; plane < input.storage.linear.plane_count;
+       ++plane) {
+    const auto& source = input.storage.linear.planes[plane];
+    const auto& destination = output->storage.linear.planes[plane];
+    if (source.row_bytes != destination.row_bytes ||
+        source.row_count != destination.row_count) {
+      throw std::invalid_argument("E2E视频透传平面布局不匹配");
+    }
+  }
+
+  ++observer->video_frame_count;
+  if (observer->video_jitter_max > 0ms &&
+      observer->video_frame_count % 30 == 0) {
+    const auto delay = observer->video_jitter_count++ % 2 == 0
+                           ? observer->video_jitter_min
+                           : observer->video_jitter_max;
+    std::this_thread::sleep_for(delay);
+    observer->events->Write(
+        "video_jitter",
+        {{"delay_ms", std::to_string(delay.count())},
+         {"frame", std::to_string(observer->video_frame_count)}});
+  }
+
+  if (input.memory_type == kMwStreamerMemoryHost) {
+    CopyHostVideo(input, output);
+    return;
+  }
+  if (input.memory_type != kMwStreamerMemoryCuda ||
+      observer->execution.type != kMwStreamerExecutionCuda ||
+      observer->execution.native_handle == 0) {
+    throw std::invalid_argument("E2E视频透传收到未知执行上下文");
+  }
+  CopyCudaVideo(input, output,
+                reinterpret_cast<CUstream>(observer->execution.native_handle));
 }
 
 void OnProcessorBoundary(MwStreamerProcessorBoundaryReason reason,
@@ -268,6 +402,8 @@ int Run(const Arguments& arguments) {
   EventWriter events(arguments.events_path);
   ProcessorObserver observer;
   observer.events = &events;
+  observer.video_jitter_min = arguments.video_jitter_min;
+  observer.video_jitter_max = arguments.video_jitter_max;
 
   StreamingPipelineConfig config;
   config.input_url = arguments.input;
@@ -280,12 +416,16 @@ int Run(const Arguments& arguments) {
       static_cast<std::int32_t>(arguments.frame_rate_den),
   };
   config.video_encoder.codec = arguments.video_codec;
+  config.standby.enabled = arguments.standby;
 
   StreamingPipeline pipeline(std::move(config));
-  const MwStreamerStreamingProcessorCallbacks callbacks{
-      &observer,           OnProcessorStart, nullptr,         nullptr,
-      OnProcessorBoundary, nullptr,          OnProcessorStop,
-  };
+  MwStreamerStreamingProcessorCallbacks callbacks{};
+  callbacks.user_context = &observer;
+  callbacks.on_start = OnProcessorStart;
+  callbacks.process_video =
+      arguments.passthrough_video ? ProcessVideo : nullptr;
+  callbacks.on_boundary = OnProcessorBoundary;
+  callbacks.on_stop = OnProcessorStop;
   pipeline.SetProcessorCallbacks(callbacks);
 
   std::atomic_bool running_seen = false;

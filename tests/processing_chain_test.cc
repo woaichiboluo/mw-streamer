@@ -14,6 +14,7 @@ extern "C" {
 #include "mw/converter/zlm_codec_parameters_converter.h"
 #include "mw/converter/zlm_packet_converter.h"
 #include "mw/decoder/video_decoder.h"
+#include "mw/performance/internal/stage_recorder.h"
 #include "mw/pipeline/internal/streaming/audio_processing_chain.h"
 #include "mw/pipeline/internal/streaming/video_processing_chain.h"
 #include "mw/processor/internal/source_info_adapter.h"
@@ -31,6 +32,7 @@ using mw::streamer::decoder::VideoDecoder;
 using mw::streamer::decoder::VideoDecoderBackend;
 using mw::streamer::decoder::VideoDecoderConfig;
 using mw::streamer::ffmpeg::StreamInfo;
+using mw::streamer::performance::internal::TrackRecorder;
 using mw::streamer::pipeline::internal::streaming::AudioProcessingChain;
 using mw::streamer::pipeline::internal::streaming::VideoProcessingChain;
 using mw::streamer::processor::StreamingProcessorHandler;
@@ -86,15 +88,18 @@ TEST_CASE("Streaming ProcessingChain串联音视频解码与Processor") {
           kMwStreamerProcessorStartSuccess);
 
   std::size_t audio_outputs = 0;
+  TrackRecorder audio_performance;
   AudioProcessingChain audio_chain(
-      *audio_stream, {}, processor,
+      *audio_stream, {}, processor, audio_performance,
       [&](const mw::streamer::ffmpeg::Frame&) { ++audio_outputs; });
   VideoDecoderConfig video_decoder_config;
   video_decoder_config.backend = VideoDecoderBackend::kSoftware;
   std::size_t video_outputs = 0;
+  TrackRecorder video_performance;
   VideoProcessingChain video_chain(
       std::make_unique<VideoDecoder>(*video_stream, video_decoder_config),
-      processor, [&](const mw::streamer::ffmpeg::Frame&) { ++video_outputs; });
+      processor, video_performance,
+      [&](const mw::streamer::ffmpeg::Frame&) { ++video_outputs; });
 
   auto audio_converter = std::make_shared<ZlmPacketConverter>(audio_track, 1);
   auto video_converter = std::make_shared<ZlmPacketConverter>(video_track, 0);

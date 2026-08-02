@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 
+#include "mw/performance/snapshot.h"
 #include "mw/pipeline/config.h"
 #include "mw/processor/processor.h"
 
@@ -51,6 +52,10 @@ class StreamingPipeline final {
   void Stop() noexcept;
 
   StreamingPipelineStatus status() const noexcept;
+  // Returns interval stage statistics since the previous collection together
+  // with current-connection network byte counters. Concurrent calls are
+  // serialized internally, and every call advances the collection window.
+  performance::StreamingPipelineSnapshot CollectPerformance();
 
  private:
   class Impl;

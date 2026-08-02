@@ -25,7 +25,13 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
 include(cmake/Dependencies.cmake)
 
-find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVUTIL SWRESAMPLE)
+find_package(FFmpeg REQUIRED COMPONENTS
+    AVCODEC
+    AVFORMAT
+    AVUTIL
+    SWRESAMPLE
+    SWSCALE
+)
 find_package(CUDAToolkit REQUIRED)
 find_package(SRT REQUIRED)
 
@@ -54,14 +60,19 @@ add_library(mw_streamer STATIC
     src/ffmpeg/pixel_format.cc
     src/ffmpeg/stream_info.cc
     src/init/init.cc
+    src/input/internal/zlm_timestamp_reviser.cc
     src/input/player_proxy.cc
     src/log/logging.cc
     src/media/internal/codec_bridge.cc
     src/output/output_session.cc
     src/output/recording_target.cc
+    src/performance/internal/stage_recorder.cc
+    src/performance/internal/streaming_collector.cc
     src/pipeline/internal/streaming/audio_processing_chain.cc
     src/pipeline/internal/streaming/audio_worker.cc
+    src/pipeline/internal/streaming/frame_synchronizer.cc
     src/pipeline/internal/streaming/output_worker.cc
+    src/pipeline/internal/streaming/standby_video_frame.cc
     src/pipeline/internal/streaming/video_worker.cc
     src/pipeline/internal/streaming/video_processing_chain.cc
     src/pipeline/streaming_pipeline.cc
@@ -106,11 +117,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(mw_streamer
         PRIVATE
             "-Wl,--push-state,--no-as-needed"
+            FFmpeg::avformat
             FFmpeg::swresample
+            FFmpeg::swscale
             "-Wl,--pop-state"
     )
 else()
-    target_link_libraries(mw_streamer PRIVATE FFmpeg::swresample)
+    target_link_libraries(mw_streamer
+        PRIVATE
+            FFmpeg::avformat
+            FFmpeg::swresample
+            FFmpeg::swscale
+    )
 endif()
 
 if(BUILD_TESTING)

@@ -69,17 +69,24 @@ class MediaMtx:
         name: str,
         root: Path,
         protocols: set[str],
+        *,
+        record: bool = False,
     ) -> None:
         self.config = config
         self.name = name
         self.root = root / name
         self.protocols = protocols
+        self.record = record
         self.ports = ServerPorts.allocate()
         self._process: ManagedProcess | None = None
 
     @property
     def api_address(self) -> str:
         return f"http://127.0.0.1:{self.ports.api}"
+
+    @property
+    def recording_root(self) -> Path:
+        return self.root / "recordings"
 
     def start(self) -> None:
         if self._process is not None:
@@ -175,6 +182,14 @@ class MediaMtx:
             f"等待 {protocol} {state} 连接超时: {self.name}/{path}",
         )
 
+    def recordings(self, path: str) -> list[Path]:
+        candidates = sorted((self.recording_root / path).glob("*.mp4"))
+        if not candidates:
+            raise ProcessError(
+                f"MediaMTX没有生成录像: {self.recording_root / path}"
+            )
+        return candidates
+
     def kick_connection(self, protocol: str, connection_id: str) -> None:
         endpoint = self._connection_endpoints[protocol]
         request = urllib.request.Request(
@@ -232,6 +247,10 @@ class MediaMtx:
 
     def _render_config(self) -> str:
         enabled = lambda protocol: "true" if protocol in self.protocols else "false"
+        record = "true" if self.record else "false"
+        record_path = json.dumps(
+            str(self.recording_root / "%path/%Y-%m-%d_%H-%M-%S-%f")
+        )
         return f"""\
 logLevel: debug
 logDestinations: [stdout]
@@ -252,6 +271,12 @@ srtAddress: 127.0.0.1:{self.ports.srt}
 moq: false
 paths:
   all_others:
+    record: {record}
+    recordPath: {record_path}
+    recordFormat: fmp4
+    recordPartDuration: 100ms
+    recordSegmentDuration: 1h
+    recordDeleteAfter: 0s
 """
 
 

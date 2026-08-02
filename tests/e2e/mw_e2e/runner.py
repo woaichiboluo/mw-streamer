@@ -18,6 +18,10 @@ class Runner:
         duration_seconds: float,
         artifact_directory: Path,
         cache_duration_ms: int | None = None,
+        *,
+        passthrough_video: bool = False,
+        standby: bool = False,
+        video_jitter_ms: tuple[int, int] | None = None,
     ) -> None:
         if not output_urls:
             raise ValueError("StreamingPipeline E2E 至少需要一个输出目标")
@@ -52,6 +56,22 @@ class Runner:
                 else (asset.video_codec or "none")
             ),
         ]
+        if passthrough_video:
+            command.append("--passthrough-video")
+        if standby:
+            command.append("--standby")
+        if video_jitter_ms is not None:
+            minimum, maximum = video_jitter_ms
+            if minimum < 0 or maximum < minimum:
+                raise ValueError("视频抖动范围无效")
+            command.extend(
+                [
+                    "--video-jitter-min-ms",
+                    str(minimum),
+                    "--video-jitter-max-ms",
+                    str(maximum),
+                ]
+            )
         for output_url in output_urls:
             command.extend(["--output", output_url])
         self.process = ManagedProcess(

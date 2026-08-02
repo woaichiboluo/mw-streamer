@@ -162,6 +162,11 @@ TEST_CASE("OutputSession隔离网络失败并同时生成fMP4和HLS-fMP4") {
     CHECK(binding.converter->Flush());
   }
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  const auto network_traffic = session.GetNetworkTraffic();
+  REQUIRE(network_traffic.size() == 3);
+  CHECK(network_traffic[0].target == "rtmp://127.0.0.1:1/live/unreachable");
+  CHECK(network_traffic[1].target == "rtsp://127.0.0.1:1/live/unreachable");
+  CHECK(network_traffic[2].target == "srt://127.0.0.1:1?mode=caller");
   session.Close();
 
   const auto fmp4_path = FindGeneratedFmp4(directory.path());

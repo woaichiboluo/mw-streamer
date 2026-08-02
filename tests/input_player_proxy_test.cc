@@ -139,12 +139,48 @@ TEST_CASE(
   CHECK(end_reason == Err_eof);
   CHECK(proxy->generation() == 1);
   CHECK(proxy->reconnect_count() == 0);
+  CHECK(proxy->received_bytes() == 0);
   CHECK(valid_packets);
   CHECK(video_packets == 20);
   CHECK(audio_packets == 95);
   REQUIRE(stream_types.size() == 2);
   CHECK(stream_types[0] == AVMEDIA_TYPE_VIDEO);
   CHECK(stream_types[1] == AVMEDIA_TYPE_AUDIO);
+
+  StopAndWait(proxy);
+}
+
+TEST_CASE("file input preserves the original cross-track PTS offset") {
+  auto proxy = std::make_shared<PlayerProxy>();
+  std::mutex mutex;
+  std::condition_variable condition;
+  std::atomic_bool ended = false;
+  std::atomic<std::int64_t> first_video_pts = AV_NOPTS_VALUE;
+  std::atomic<std::int64_t> first_audio_pts = AV_NOPTS_VALUE;
+
+  proxy->SetOnPacket([&](std::uint64_t, const Packet& packet) {
+    auto expected = std::int64_t{AV_NOPTS_VALUE};
+    if (packet->stream_index == 0) {
+      first_video_pts.compare_exchange_strong(expected, packet->pts);
+    } else if (packet->stream_index == 1) {
+      first_audio_pts.compare_exchange_strong(expected, packet->pts);
+    }
+    return true;
+  });
+  proxy->SetOnState(
+      [&](std::uint64_t, PlayerState state, const SockException&, bool) {
+        if (state == PlayerState::kEnded) {
+          ended = true;
+          condition.notify_all();
+        }
+      });
+
+  proxy->Start(SamplePath("h265_aac_fragmented.mp4"));
+
+  REQUIRE(WaitFor(condition, mutex, [&]() { return ended.load(); }));
+  CHECK(first_video_pts == 200);
+  CHECK(first_audio_pts == 0);
+  CHECK(first_video_pts - first_audio_pts == 200);
 
   StopAndWait(proxy);
 }

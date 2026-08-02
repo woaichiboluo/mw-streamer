@@ -18,6 +18,7 @@ extern "C" {
 #include "mw/ffmpeg/error.h"
 #include "mw/ffmpeg/pixel_format.h"
 #include "mw/log/logging.h"
+#include "mw/performance/internal/stopwatch.h"
 
 namespace mw::streamer::decoder {
 namespace {
@@ -101,7 +102,7 @@ class VideoDecoder::Impl final {
 
   void SetOnFrame(OnFrame callback) { on_frame_ = std::move(callback); }
 
-  void Decode(const ffmpeg::Packet& packet) {
+  VideoDecodeResult Decode(const ffmpeg::Packet& packet) {
     const auto* raw_packet = packet.get();
     if (!raw_packet || raw_packet->stream_index != stream_info_.stream_index) {
       throw std::invalid_argument("视频AVPacket为空或stream_index不匹配");
@@ -110,18 +111,25 @@ class VideoDecoder::Impl final {
       throw std::logic_error("VideoDecoder已Drain，必须Flush后才能继续解码");
     }
 
-    SendPacket(raw_packet);
+    VideoDecodeResult result;
+    performance::internal::Stopwatch stopwatch;
+    SendPacket(raw_packet, result, stopwatch);
+    result.service_time = stopwatch.elapsed();
+    return result;
   }
 
-  void Drain() {
+  VideoDecodeResult Drain() {
+    VideoDecodeResult decode_result;
     if (drained_) {
-      return;
+      return decode_result;
     }
 
+    performance::internal::Stopwatch stopwatch;
     for (;;) {
-      const auto result = avcodec_send_packet(context_.get(), nullptr);
+      const auto result = stopwatch.Measure(
+          [this]() { return avcodec_send_packet(context_.get(), nullptr); });
       if (result == AVERROR(EAGAIN)) {
-        if (ReceiveFrames() == 0) {
+        if (ReceiveFrames(&decode_result, &stopwatch) == 0) {
           throw std::runtime_error("视频解码器send和receive同时返回EAGAIN");
         }
         continue;
@@ -132,9 +140,11 @@ class VideoDecoder::Impl final {
       break;
     }
 
-    ReceiveFrames();
+    ReceiveFrames(&decode_result, &stopwatch);
+    decode_result.service_time = stopwatch.elapsed();
     drained_ = true;
     Log::Debug("视频解码器已排空: stream_index={}", stream_info_.stream_index);
+    return decode_result;
   }
 
   void Flush() {
@@ -174,11 +184,14 @@ class VideoDecoder::Impl final {
     return AV_PIX_FMT_NONE;
   }
 
-  void SendPacket(const AVPacket* packet) {
+  void SendPacket(const AVPacket* packet, VideoDecodeResult& decode_result,
+                  performance::internal::Stopwatch& stopwatch) {
     for (;;) {
-      const auto result = avcodec_send_packet(context_.get(), packet);
+      const auto result = stopwatch.Measure([this, packet]() {
+        return avcodec_send_packet(context_.get(), packet);
+      });
       if (result == AVERROR(EAGAIN)) {
-        if (ReceiveFrames() == 0) {
+        if (ReceiveFrames(&decode_result, &stopwatch) == 0) {
           throw std::runtime_error("视频解码器send和receive同时返回EAGAIN");
         }
         continue;
@@ -186,21 +199,33 @@ class VideoDecoder::Impl final {
       ffmpeg::ThrowIfError(result, "提交视频压缩包");
       break;
     }
-    ReceiveFrames();
+    ReceiveFrames(&decode_result, &stopwatch);
   }
 
-  std::size_t ReceiveFrames() {
+  std::size_t ReceiveFrames(
+      VideoDecodeResult* decode_result = nullptr,
+      performance::internal::Stopwatch* stopwatch = nullptr) {
     std::size_t frame_count = 0;
     for (;;) {
       frame_.Unref();
-      const auto result = avcodec_receive_frame(context_.get(), frame_.get());
+      const auto result =
+          stopwatch ? stopwatch->Measure([this]() {
+            return avcodec_receive_frame(context_.get(), frame_.get());
+          })
+                    : avcodec_receive_frame(context_.get(), frame_.get());
       if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) {
         return frame_count;
       }
       ffmpeg::ThrowIfError(result, "接收视频解码帧");
+      if (frame_->best_effort_timestamp != AV_NOPTS_VALUE) {
+        frame_->pts = frame_->best_effort_timestamp;
+      }
       frame_->time_base = stream_info_.time_base;
       ValidateFrame();
       ++frame_count;
+      if (decode_result) {
+        ++decode_result->frames;
+      }
       if (on_frame_) {
         on_frame_(frame_);
       }
@@ -241,11 +266,11 @@ void VideoDecoder::SetOnFrame(OnFrame callback) {
   impl_->SetOnFrame(std::move(callback));
 }
 
-void VideoDecoder::Decode(const ffmpeg::Packet& packet) {
-  impl_->Decode(packet);
+VideoDecodeResult VideoDecoder::Decode(const ffmpeg::Packet& packet) {
+  return impl_->Decode(packet);
 }
 
-void VideoDecoder::Drain() { impl_->Drain(); }
+VideoDecodeResult VideoDecoder::Drain() { return impl_->Drain(); }
 
 void VideoDecoder::Flush() { impl_->Flush(); }
 

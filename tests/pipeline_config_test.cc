@@ -37,11 +37,14 @@ TEST_CASE("streaming pipeline config owns the complete streaming setup") {
   CHECK(config.cache_duration == std::chrono::milliseconds::zero());
   CHECK(config.audio_queue_capacity == 256);
   CHECK(config.video_queue_capacity == 128);
+  CHECK(config.max_track_wait == std::chrono::milliseconds(500));
   CHECK(config.video_decoder.backend ==
         mw::streamer::decoder::VideoDecoderBackend::kCuda);
   CHECK(config.processor.output_width == 0);
   CHECK(config.processor.output_height == 0);
   CHECK(config.video_encoder.codec == kMwStreamerCodecH264);
+  CHECK_FALSE(config.standby.enabled);
+  CHECK(config.standby.image_path.empty());
   CHECK(config.output_targets.empty());
 }
 

@@ -128,6 +128,10 @@ TEST_CASE("software video decoder decodes drains and flushes an H264 stream") {
       valid_frames = false;
       return;
     }
+    if (frame->best_effort_timestamp != AV_NOPTS_VALUE &&
+        frame->pts != frame->best_effort_timestamp) {
+      valid_frames = false;
+    }
     if (frame->pts != AV_NOPTS_VALUE && previous_pts != AV_NOPTS_VALUE &&
         frame->pts < previous_pts) {
       valid_frames = false;
@@ -144,15 +148,17 @@ TEST_CASE("software video decoder decodes drains and flushes an H264 stream") {
     ++decoded_frames;
   });
 
+  std::uint64_t reported_frames = 0;
   for (const auto& packet : sample.packets) {
-    decoder.Decode(packet);
+    reported_frames += decoder.Decode(packet).frames;
   }
-  decoder.Drain();
+  reported_frames += decoder.Drain().frames;
 
   const auto first_pass_frames = decoded_frames;
   CHECK(valid_frames);
   CHECK(sample.packets.size() == 20);
   CHECK(first_pass_frames == sample.packets.size());
+  CHECK(reported_frames == first_pass_frames);
   CHECK_THROWS_AS(decoder.Decode(sample.packets.front()), std::logic_error);
   CHECK_NOTHROW(decoder.Drain());
 
@@ -182,6 +188,11 @@ TEST_CASE("CUDA video decoder emits CUDA frames on the configured device") {
     const auto* frame = decoded_frame.get();
     if (!frame || frame->format != AV_PIX_FMT_CUDA || frame->width != 64 ||
         frame->height != 64 || !frame->hw_frames_ctx) {
+      valid_frames = false;
+      return;
+    }
+    if (frame->best_effort_timestamp != AV_NOPTS_VALUE &&
+        frame->pts != frame->best_effort_timestamp) {
       valid_frames = false;
       return;
     }

@@ -246,6 +246,17 @@ class OutputSession::Impl final
     poller_->sync([self]() { self->CloseOnPoller(); });
   }
 
+  std::vector<NetworkTraffic> GetNetworkTraffic() {
+    if (poller_->isCurrentThread()) {
+      return GetNetworkTrafficOnPoller();
+    }
+    std::vector<NetworkTraffic> traffic;
+    auto self = shared_from_this();
+    poller_->sync(
+        [self, &traffic]() { traffic = self->GetNetworkTrafficOnPoller(); });
+    return traffic;
+  }
+
  private:
   enum class State {
     kCreated,
@@ -337,6 +348,7 @@ class OutputSession::Impl final
     muxer_->setMediaListener(shared_from_this());
     muxer_->setTrackListener(shared_from_this());
     pusher_started_.resize(network_targets_.size(), false);
+    pushers_.resize(network_targets_.size());
 
     for (const auto& stream : config_.streams) {
       if (!muxer_->addTrack(CreateTrack(stream))) {
@@ -506,6 +518,11 @@ class OutputSession::Impl final
       try {
         auto pusher =
             std::make_shared<mediakit::PusherProxy>(source, -1, poller_);
+        pusher->setOnCreateSocket([](const toolkit::EventPoller::Ptr& poller) {
+          auto socket = toolkit::Socket::createSocket(poller, true);
+          static_cast<void>(socket->getSendTotalBytes());
+          return socket;
+        });
         (*pusher)[mediakit::Client::kTimeoutMS] =
             config_.zlm.pusher.connect_timeout.count();
         if (!config_.zlm.pusher.local_bind_ip.empty()) {
@@ -526,7 +543,7 @@ class OutputSession::Impl final
               Log::Error("ZLM已停止推流目标：{}，{}", url, error.what());
             });
         pusher->publish(target.url);
-        pushers_.push_back(std::move(pusher));
+        pushers_[index] = std::move(pusher);
         pusher_started_[index] = true;
       } catch (const std::exception& error) {
         Log::Error("创建ZLM推流目标失败，已停止该目标：{}，{}", target.url,
@@ -563,6 +580,23 @@ class OutputSession::Impl final
     registered_schemas_.clear();
     schemas_with_pending_key_.clear();
     ready_schemas_.clear();
+  }
+
+  std::vector<NetworkTraffic> GetNetworkTrafficOnPoller() const {
+    std::vector<NetworkTraffic> traffic;
+    traffic.reserve(network_targets_.size());
+    for (std::size_t index = 0; index < network_targets_.size(); ++index) {
+      NetworkTraffic target;
+      target.target = network_targets_[index].url;
+      if (index < pushers_.size() && pushers_[index]) {
+        target.connected = pushers_[index]->getStatus() == 0;
+        target.reconnect_count = pushers_[index]->getRePublishCount();
+        target.sent_bytes =
+            static_cast<std::uint64_t>(pushers_[index]->getSendTotalBytes());
+      }
+      traffic.push_back(std::move(target));
+    }
+    return traffic;
   }
 
   void onAllTrackReady() override {
@@ -645,6 +679,10 @@ void OutputSession::Open() { impl_->Open(); }
 
 void OutputSession::Write(const ffmpeg::Packet& packet) {
   impl_->Write(packet);
+}
+
+std::vector<NetworkTraffic> OutputSession::GetNetworkTraffic() const {
+  return impl_->GetNetworkTraffic();
 }
 
 void OutputSession::Close() noexcept { impl_->Close(); }
