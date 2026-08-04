@@ -282,9 +282,6 @@ class StreamingPipeline::Impl final {
     if (config_.input_url.empty()) {
       throw std::invalid_argument("StreamingPipeline输入地址不能为空");
     }
-    if (config_.output_targets.empty()) {
-      throw std::invalid_argument("StreamingPipeline至少需要一个输出目标");
-    }
     if (config_.audio_queue_capacity == 0 ||
         config_.video_queue_capacity == 0) {
       throw std::invalid_argument("StreamingPipeline工作队列容量必须大于0");

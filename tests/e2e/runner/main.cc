@@ -147,6 +147,7 @@ struct Arguments {
   std::chrono::milliseconds video_jitter_min{0};
   std::chrono::milliseconds video_jitter_max{0};
   bool passthrough_video = false;
+  bool software_video = false;
   bool standby = false;
 };
 
@@ -247,6 +248,8 @@ Arguments ParseArguments(int argc, char* argv[]) {
           RequireValue(argc, argv, index), "--video-jitter-max-ms", 0);
     } else if (option == "--passthrough-video") {
       arguments.passthrough_video = true;
+    } else if (option == "--software-video") {
+      arguments.software_video = true;
     } else if (option == "--standby") {
       arguments.standby = true;
     } else {
@@ -257,8 +260,8 @@ Arguments ParseArguments(int argc, char* argv[]) {
   if (arguments.input.empty()) {
     throw std::invalid_argument("--input不能为空");
   }
-  if (arguments.pipeline != PipelineKind::kFile && arguments.outputs.empty()) {
-    throw std::invalid_argument("--output至少需要一个");
+  if (arguments.pipeline == PipelineKind::kRemux && arguments.outputs.empty()) {
+    throw std::invalid_argument("RemuxPipeline的--output至少需要一个");
   }
   if (arguments.events_path.empty()) {
     throw std::invalid_argument("--events不能为空");
@@ -559,6 +562,9 @@ int RunStreaming(const Arguments& arguments, EventWriter& events) {
       static_cast<std::int32_t>(arguments.frame_rate_den),
   };
   config.video_encoder.codec = arguments.video_codec;
+  if (arguments.software_video) {
+    config.video_decoder.backend = VideoDecoderBackend::kSoftware;
+  }
   config.standby.enabled = arguments.standby;
 
   StreamingPipeline pipeline(std::move(config));
@@ -592,6 +598,7 @@ int RunStreaming(const Arguments& arguments, EventWriter& events) {
   const auto finish_at = std::chrono::steady_clock::now() + arguments.duration;
   while (!g_stop_requested.load(std::memory_order_relaxed) &&
          !failed_seen.load(std::memory_order_acquire) &&
+         pipeline.status() != StreamingPipelineStatus::kStopped &&
          std::chrono::steady_clock::now() < finish_at) {
     std::this_thread::sleep_for(1s);
     events.Write("heartbeat",
@@ -602,12 +609,19 @@ int RunStreaming(const Arguments& arguments, EventWriter& events) {
 
   pipeline.Stop();
   const auto final_status = pipeline.status();
+  const auto performance = pipeline.CollectPerformance();
   events.Write("summary",
                {{"running_seen", running_seen.load() ? "1" : "0"},
                 {"failed_seen", failed_seen.load() ? "1" : "0"},
                 {"final_status", ToString(final_status)},
                 {"timeline_reset_count",
-                 std::to_string(observer.timeline_reset_count.load())}});
+                 std::to_string(observer.timeline_reset_count.load())},
+                {"has_audio", performance.has_audio ? "1" : "0"},
+                {"has_video", performance.has_video ? "1" : "0"},
+                {"audio_encode_samples",
+                 std::to_string(performance.audio.encode.samples)},
+                {"video_encode_frames",
+                 std::to_string(performance.video.encode.frames)}});
 
   return running_seen.load() && !failed_seen.load() ? 0 : 2;
 }

@@ -48,9 +48,10 @@ struct StreamingPipelineConfig {
   // and relay without changing the processed output pipeline.
   std::vector<std::string> input_targets;
 
-  // RTMP, RTSP, SRT, fragmented MP4, and HLS-fMP4 targets accepted by
-  // OutputSession. Encoded StreamInfo is produced at runtime and deliberately
-  // does not belong to this configuration.
+  // Optional RTMP, RTSP, SRT, fragmented MP4, and HLS-fMP4 targets accepted by
+  // OutputSession. When empty, processed frames are still encoded and the
+  // encoded packets are discarded. Encoded StreamInfo is produced at runtime
+  // and deliberately does not belong to this configuration.
   std::vector<std::string> output_targets;
 };
 

@@ -41,7 +41,8 @@ class StreamingPipeline final {
   void SetOnStatus(OnStatus callback);
 
   // Start is asynchronous. kRunning is reported after every present encoder
-  // and the shared OutputSession have opened. Runtime failures transition to
+  // and, when configured, the shared OutputSession has opened. Without output
+  // targets, encoded packets are discarded. Runtime failures transition to
   // kFailed and stop data production without rebuilding the chain. The
   // external owner must then call Stop before destroying or recreating it.
   void Start();

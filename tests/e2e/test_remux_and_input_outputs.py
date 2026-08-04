@@ -21,6 +21,49 @@ def _assert_source_spec(recording: MediaAsset, source: MediaAsset) -> None:
 
 
 @pytest.mark.smoke
+def test_streaming_pipeline_records_input_without_processed_output(
+    e2e_config: E2EConfig,
+    runner_path: Path,
+    artifact_directory: Path,
+) -> None:
+    sample_path = Path(__file__).parents[1] / "data" / "h264_aac.mp4"
+    asset = probe_media_file(e2e_config, sample_path)
+    recording_target = artifact_directory / "streaming-input-only.mp4"
+    runner = Runner(
+        e2e_config,
+        runner_path,
+        asset,
+        str(sample_path),
+        [],
+        e2e_config.tests.startup_timeout_seconds * 2,
+        artifact_directory,
+        input_output_urls=[str(recording_target)],
+        software_video=True,
+    )
+
+    runner.start()
+    try:
+        runner.wait(e2e_config.tests.startup_timeout_seconds * 2)
+    finally:
+        runner.stop()
+
+    events = read_events(runner.events_path)
+    assert_pipeline_succeeded(events)
+    ready_events = [
+        event for event in events if event.get("event") == "output_opened"
+    ]
+    assert ready_events[-1]["target_count"] == "0"
+    assert ready_events[-1]["input_target_count"] == "1"
+    summary = [event for event in events if event.get("event") == "summary"][-1]
+    assert int(summary["video_encode_frames"]) > 0
+    assert int(summary["audio_encode_samples"]) > 0
+
+    recording = probe_media_file(e2e_config, find_recording(recording_target))
+    _assert_source_spec(recording, asset)
+    assert recording.duration_seconds >= 1.5
+
+
+@pytest.mark.smoke
 @pytest.mark.stability
 def test_remux_pipeline_simultaneously_pushes_and_records_source(
     published_media: PublishedMedia,

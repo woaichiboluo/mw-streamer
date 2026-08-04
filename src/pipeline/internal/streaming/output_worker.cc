@@ -179,7 +179,7 @@ void OutputWorker::EncodeFrame(FrameSynchronizer::OutputFrame frame) {
     if (!audio_encoder_->is_open()) {
       audio_encoder_->Open(frame.frame);
       if (AllEncodersOpen()) {
-        OpenOutput();
+        PrepareOutput();
       }
     }
     stopwatch.Measure(
@@ -195,7 +195,7 @@ void OutputWorker::EncodeFrame(FrameSynchronizer::OutputFrame frame) {
   if (!video_encoder_->is_open()) {
     video_encoder_->Open(frame.frame);
     if (AllEncodersOpen()) {
-      OpenOutput();
+      PrepareOutput();
     }
   }
   stopwatch.Measure([this, &frame]() {
@@ -208,6 +208,9 @@ void OutputWorker::EncodeFrame(FrameSynchronizer::OutputFrame frame) {
 }
 
 void OutputWorker::HandlePacket(const ffmpeg::Packet& packet) {
+  if (output_targets_.empty()) {
+    return;
+  }
   if (output_) {
     output_->Write(packet);
     return;
@@ -218,8 +221,13 @@ void OutputWorker::HandlePacket(const ffmpeg::Packet& packet) {
   pending_packets_.push_back(packet.Ref());
 }
 
-void OutputWorker::OpenOutput() {
-  if (output_) {
+void OutputWorker::PrepareOutput() {
+  if (ready_) {
+    return;
+  }
+  if (output_targets_.empty()) {
+    ready_ = true;
+    callbacks_.on_ready();
     return;
   }
   auto output = std::make_shared<output::OutputSession>(
@@ -233,6 +241,7 @@ void OutputWorker::OpenOutput() {
     output_->Write(packet);
   }
   pending_packets_.clear();
+  ready_ = true;
   callbacks_.on_ready();
 }
 

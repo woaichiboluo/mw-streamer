@@ -22,13 +22,14 @@ class Runner:
         pipeline: Literal["streaming", "remux", "file"] = "streaming",
         input_output_urls: Sequence[str] = (),
         passthrough_video: bool = False,
+        software_video: bool = False,
         standby: bool = False,
         video_jitter_ms: tuple[int, int] | None = None,
     ) -> None:
-        if pipeline != "file" and not output_urls:
-            raise ValueError("Pipeline E2E 至少需要一个输出目标")
         if pipeline not in {"streaming", "remux", "file"}:
             raise ValueError(f"未知Pipeline类型: {pipeline}")
+        if pipeline == "remux" and not output_urls:
+            raise ValueError("RemuxPipeline E2E 至少需要一个输出目标")
         if pipeline == "remux" and input_output_urls:
             raise ValueError("RemuxPipeline请通过output_urls配置输出")
         if pipeline == "file" and (output_urls or input_output_urls):
@@ -73,6 +74,8 @@ class Runner:
             )
             if passthrough_video:
                 command.append("--passthrough-video")
+            if software_video:
+                command.append("--software-video")
             if standby:
                 command.append("--standby")
             if video_jitter_ms is not None:

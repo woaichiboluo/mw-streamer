@@ -48,7 +48,8 @@ class TrackRecorder;
 
 namespace mw::streamer::pipeline::internal::streaming {
 
-// Owns frame synchronization, both encoders, and OutputSession on one thread.
+// Owns frame synchronization, both encoders, and the optional OutputSession on
+// one thread. Without output targets, encoded packets are discarded.
 // AudioWorker and VideoWorker only deliver processed frames and boundaries.
 class OutputWorker final {
  public:
@@ -105,7 +106,7 @@ class OutputWorker final {
   void DrainReadyFrames();
   void EncodeFrame(FrameSynchronizer::OutputFrame frame);
   void HandlePacket(const ffmpeg::Packet& packet);
-  void OpenOutput();
+  void PrepareOutput();
   void CompleteOutput();
   void CloseOutput() noexcept;
   bool AllEncodersOpen() const noexcept;
@@ -126,6 +127,7 @@ class OutputWorker final {
   FrameSynchronizer synchronizer_;
   performance::internal::TrackRecorder* audio_performance_;
   performance::internal::TrackRecorder* video_performance_;
+  bool ready_ = false;
   output::OutputSession* output_ = nullptr;
   std::shared_ptr<output::OutputSession> published_output_;
   std::vector<ffmpeg::Packet> pending_packets_;

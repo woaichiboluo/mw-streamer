@@ -178,6 +178,49 @@ TEST_CASE("StreamingPipeline完成音视频处理并生成fMP4") {
   CHECK(demuxer.getDurationMS() >= 1800);
 }
 
+TEST_CASE("StreamingPipeline无输出目标时编码后丢弃数据") {
+  TestDirectory directory;
+  auto config = MakeSoftwareConfig(SamplePath("h264_aac.mp4"),
+                                   directory.path() / "unused.mp4");
+  config.output_targets.clear();
+  std::mutex mutex;
+  std::condition_variable condition;
+  std::vector<StreamingPipelineStatus> statuses;
+  StreamingPipeline pipeline(std::move(config));
+  pipeline.SetOnStatus([&](StreamingPipelineStatus status) {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      statuses.push_back(status);
+    }
+    condition.notify_all();
+  });
+
+  pipeline.Start();
+  WaitForTerminalStatus(pipeline, condition, mutex);
+  REQUIRE(pipeline.status() == StreamingPipelineStatus::kStopped);
+
+  const auto performance = pipeline.CollectPerformance();
+  REQUIRE(performance.has_video);
+  REQUIRE(performance.has_audio);
+  CHECK(performance.video.process.frames == 20);
+  CHECK(performance.video.encode.frames == 21);
+  CHECK(performance.audio.process.samples > 0);
+  CHECK(performance.audio.encode.samples > 0);
+  CHECK(performance.video.encode.latency.sample_count == 21);
+  CHECK(performance.audio.encode.latency.sample_count > 0);
+  CHECK(performance.outputs.empty());
+  CHECK(std::filesystem::is_empty(directory.path()));
+
+  pipeline.Stop();
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    REQUIRE(statuses.size() == 3);
+    CHECK(statuses[0] == StreamingPipelineStatus::kStarting);
+    CHECK(statuses[1] == StreamingPipelineStatus::kRunning);
+    CHECK(statuses[2] == StreamingPipelineStatus::kStopped);
+  }
+}
+
 TEST_CASE("StreamingPipeline同时录像源输入和处理后输出") {
   TestDirectory directory;
   const auto input_directory = directory.path() / "input";

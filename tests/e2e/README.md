@@ -84,10 +84,10 @@ python3 -m venv .cache/e2e-venv
   --e2e-runner build/tests/e2e/mw_streamer_e2e_runner
 ```
 
-StreamingPipeline和RemuxPipeline始终配置至少一个真实输出目标；FilePipeline直接处理
-本地文件且不创建输出。Pipeline 是否成功由其公共状态事件判断，媒体轨道和持续输出
-则由 FFmpeg 从输出端实际读取验证；测试不再依赖 PlayerProxy 或 PacketQueue 的内部
-状态。
+RemuxPipeline始终配置至少一个真实输出目标；StreamingPipeline可以不配置处理后输出，
+此时仍完成编码并丢弃编码包；FilePipeline直接处理本地文件且不创建输出。Pipeline 是否
+成功由其公共状态事件判断，媒体轨道和持续输出则由 FFmpeg 从输出端实际读取验证；测试
+不再依赖 PlayerProxy 或 PacketQueue 的内部状态。
 
 ## 运行十分钟 Bench
 
