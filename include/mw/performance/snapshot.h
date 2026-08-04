@@ -71,6 +71,16 @@ struct StreamingPipelineSnapshot {
   std::size_t output_queue_depth = 0;
 };
 
+struct RemuxPipelineSnapshot {
+  std::chrono::nanoseconds interval{0};
+  NetworkInputSnapshot input;
+  std::vector<NetworkOutputSnapshot> outputs;
+  std::uint64_t packets = 0;
+  std::uint64_t bytes = 0;
+  double bits_per_second = 0.0;
+  std::size_t output_queue_depth = 0;
+};
+
 struct LocalFileVideoSnapshot {
   VideoStageSnapshot decode;
   VideoStageSnapshot process;
@@ -83,6 +93,12 @@ struct LocalFileAudioSnapshot {
 
 struct LocalFilePipelineSnapshot {
   std::chrono::nanoseconds interval{0};
+  bool progress_available = false;
+  std::chrono::microseconds processed_position{0};
+  std::chrono::microseconds duration{0};
+  double progress = 0.0;
+  bool processing_speed_available = false;
+  double processing_speed = 0.0;
   bool has_video = false;
   LocalFileVideoSnapshot video;
   bool has_audio = false;

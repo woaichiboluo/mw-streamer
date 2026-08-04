@@ -8,12 +8,15 @@
 namespace {
 
 using mw::streamer::pipeline::LocalFilePipelineConfig;
+using mw::streamer::pipeline::RemuxPipelineConfig;
 using mw::streamer::pipeline::StreamingPipelineConfig;
 using mw::streamer::processor::FileProcessorConfig;
 using mw::streamer::processor::StreamingProcessorConfig;
 
 static_assert(std::is_copy_constructible_v<StreamingPipelineConfig>);
 static_assert(std::is_move_constructible_v<StreamingPipelineConfig>);
+static_assert(std::is_copy_constructible_v<RemuxPipelineConfig>);
+static_assert(std::is_move_constructible_v<RemuxPipelineConfig>);
 static_assert(std::is_copy_constructible_v<LocalFilePipelineConfig>);
 static_assert(std::is_move_constructible_v<LocalFilePipelineConfig>);
 
@@ -45,7 +48,18 @@ TEST_CASE("streaming pipeline config owns the complete streaming setup") {
   CHECK(config.video_encoder.codec == kMwStreamerCodecH264);
   CHECK_FALSE(config.standby.enabled);
   CHECK(config.standby.image_path.empty());
+  CHECK(config.input_targets.empty());
   CHECK(config.output_targets.empty());
+}
+
+TEST_CASE("remux pipeline config owns input and output setup") {
+  RemuxPipelineConfig config;
+
+  CHECK(config.input_url.empty());
+  CHECK(config.output_targets.empty());
+  CHECK(config.reconnect_policy.max_retries == -1);
+  CHECK(config.zlm.player.connect_timeout == std::chrono::seconds(10));
+  CHECK(config.zlm.output.recording.file_buffer_size == 64 * 1024);
 }
 
 TEST_CASE("local-file pipeline config excludes streaming-only setup") {

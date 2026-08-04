@@ -1,15 +1,18 @@
 #include "mw/pipeline/streaming_pipeline.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <system_error>
 #include <thread>
 #include <vector>
 
+#include "Extension/Track.h"
 #include "Record/MP4Demuxer.h"
 
 #ifdef CHECK
@@ -168,6 +171,94 @@ TEST_CASE("StreamingPipeline完成音视频处理并生成fMP4") {
   }
 
   const auto output_path = FindRecordedMp4(directory.path());
+  REQUIRE_FALSE(output_path.empty());
+  mediakit::MP4Demuxer demuxer;
+  demuxer.openMP4(output_path.string());
+  CHECK(demuxer.getTracks(true).size() == 2);
+  CHECK(demuxer.getDurationMS() >= 1800);
+}
+
+TEST_CASE("StreamingPipeline同时录像源输入和处理后输出") {
+  TestDirectory directory;
+  const auto input_directory = directory.path() / "input";
+  const auto output_directory = directory.path() / "processed";
+  auto config = MakeSoftwareConfig(SamplePath("h264_aac.mp4"),
+                                   output_directory / "result.mp4");
+  config.processor.output_width = 32;
+  config.processor.output_height = 32;
+  config.input_targets = {(input_directory / "source.mp4").string()};
+
+  std::mutex mutex;
+  std::condition_variable condition;
+  StreamingPipeline pipeline(std::move(config));
+  pipeline.SetOnStatus(
+      [&](StreamingPipelineStatus) { condition.notify_all(); });
+
+  pipeline.Start();
+  WaitForTerminalStatus(pipeline, condition, mutex);
+  REQUIRE(pipeline.status() == StreamingPipelineStatus::kStopped);
+  pipeline.Stop();
+
+  const auto input_path = FindRecordedMp4(input_directory);
+  const auto output_path = FindRecordedMp4(output_directory);
+  REQUIRE_FALSE(input_path.empty());
+  REQUIRE_FALSE(output_path.empty());
+
+  mediakit::MP4Demuxer input_demuxer;
+  input_demuxer.openMP4(input_path.string());
+  const auto input_tracks = input_demuxer.getTracks(true);
+  REQUIRE(input_tracks.size() == 2);
+  const auto input_video = std::find_if(
+      input_tracks.begin(), input_tracks.end(), [](const auto& track) {
+        return track->getTrackType() == mediakit::TrackVideo;
+      });
+  REQUIRE(input_video != input_tracks.end());
+  const auto typed_input_video =
+      std::dynamic_pointer_cast<mediakit::VideoTrack>(*input_video);
+  REQUIRE(typed_input_video);
+  CHECK(typed_input_video->getVideoWidth() == 64);
+  CHECK(typed_input_video->getVideoHeight() == 64);
+  CHECK(input_demuxer.getDurationMS() >= 1800);
+
+  mediakit::MP4Demuxer output_demuxer;
+  output_demuxer.openMP4(output_path.string());
+  const auto output_tracks = output_demuxer.getTracks(true);
+  REQUIRE(output_tracks.size() == 2);
+  const auto output_video = std::find_if(
+      output_tracks.begin(), output_tracks.end(), [](const auto& track) {
+        return track->getTrackType() == mediakit::TrackVideo;
+      });
+  REQUIRE(output_video != output_tracks.end());
+  const auto typed_output_video =
+      std::dynamic_pointer_cast<mediakit::VideoTrack>(*output_video);
+  REQUIRE(typed_output_video);
+  CHECK(typed_output_video->getVideoWidth() == 32);
+  CHECK(typed_output_video->getVideoHeight() == 32);
+  CHECK(output_demuxer.getDurationMS() >= 1800);
+}
+
+TEST_CASE("StreamingPipeline隔离输入旁路目录创建失败") {
+  TestDirectory directory;
+  const auto blocked_path = directory.path() / "blocked";
+  std::ofstream(blocked_path).put('x');
+  const auto output_directory = directory.path() / "processed";
+  auto config = MakeSoftwareConfig(SamplePath("h264_aac.mp4"),
+                                   output_directory / "result.mp4");
+  config.input_targets = {(blocked_path / "source.mp4").string()};
+
+  std::mutex mutex;
+  std::condition_variable condition;
+  StreamingPipeline pipeline(std::move(config));
+  pipeline.SetOnStatus(
+      [&](StreamingPipelineStatus) { condition.notify_all(); });
+
+  pipeline.Start();
+  WaitForTerminalStatus(pipeline, condition, mutex);
+  REQUIRE(pipeline.status() == StreamingPipelineStatus::kStopped);
+  pipeline.Stop();
+
+  CHECK_FALSE(std::filesystem::is_directory(blocked_path));
+  const auto output_path = FindRecordedMp4(output_directory);
   REQUIRE_FALSE(output_path.empty());
   mediakit::MP4Demuxer demuxer;
   demuxer.openMP4(output_path.string());

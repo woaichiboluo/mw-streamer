@@ -515,8 +515,7 @@ class PacketQueue::Impl final
     }
 
     const auto common_dts_us =
-        std::max(audio_.packets.front().dts_us,
-                 video_.packets.front().dts_us);
+        std::max(audio_.packets.front().dts_us, video_.packets.front().dts_us);
     TrimLeadingPackets(audio_, common_dts_us);
     TrimLeadingPackets(video_, common_dts_us);
     UpdatePacketCountOnPoller();

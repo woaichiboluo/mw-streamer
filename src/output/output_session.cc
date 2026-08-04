@@ -217,6 +217,25 @@ class OutputSession::Impl final
     }
   }
 
+  void SetOnAllTargetsUnavailable(OnAllTargetsUnavailable callback) {
+    auto self = shared_from_this();
+    if (poller_->isCurrentThread()) {
+      SetOnAllTargetsUnavailableOnPoller(std::move(callback));
+      return;
+    }
+    std::exception_ptr error;
+    poller_->sync([self, callback = std::move(callback), &error]() mutable {
+      try {
+        self->SetOnAllTargetsUnavailableOnPoller(std::move(callback));
+      } catch (...) {
+        error = std::current_exception();
+      }
+    });
+    if (error) {
+      std::rethrow_exception(error);
+    }
+  }
+
   void Write(const ffmpeg::Packet& packet) {
     if (poller_->isCurrentThread()) {
       try {
@@ -271,6 +290,13 @@ class OutputSession::Impl final
         : converter(stream.codec_parameters, stream.time_base,
                     stream.stream_index) {}
   };
+
+  void SetOnAllTargetsUnavailableOnPoller(OnAllTargetsUnavailable callback) {
+    if (state_ != State::kCreated) {
+      throw std::logic_error("目标失效回调只能在OutputSession打开前设置");
+    }
+    on_all_targets_unavailable_ = std::move(callback);
+  }
 
   void ValidateConfigOnPoller() {
     zlm::internal::ValidateOutputConfig(config_.zlm);
@@ -327,6 +353,7 @@ class OutputSession::Impl final
       throw std::logic_error("OutputSession只能打开一次");
     }
     ValidateConfigOnPoller();
+    available_target_count_ = config_.targets.size();
     has_video_ =
         std::any_of(config_.streams.begin(), config_.streams.end(),
                     [](const ffmpeg::StreamInfo& stream) {
@@ -348,6 +375,7 @@ class OutputSession::Impl final
     muxer_->setMediaListener(shared_from_this());
     muxer_->setTrackListener(shared_from_this());
     pusher_started_.resize(network_targets_.size(), false);
+    network_target_unavailable_.resize(network_targets_.size(), false);
     pushers_.resize(network_targets_.size());
 
     for (const auto& stream : config_.streams) {
@@ -456,6 +484,7 @@ class OutputSession::Impl final
         Log::Error("{}录像写入失败，已停止该目标：{}，{}", target_name,
                    (*target)->path().string(), error.what());
         target = targets.erase(target);
+        MarkTargetUnavailableOnPoller();
       }
     }
   }
@@ -476,6 +505,7 @@ class OutputSession::Impl final
       } catch (const std::exception& error) {
         Log::Error("创建fMP4录像目标失败，已停止该目标：{}，{}", path.string(),
                    error.what());
+        MarkTargetUnavailableOnPoller();
       }
     }
 
@@ -488,8 +518,48 @@ class OutputSession::Impl final
       } catch (const std::exception& error) {
         Log::Error("创建HLS-fMP4录像目标失败，已停止该目标：{}，{}",
                    path.string(), error.what());
+        MarkTargetUnavailableOnPoller();
       }
     }
+  }
+
+  void MarkTargetUnavailableOnPoller() {
+    if (state_ != State::kOpen || available_target_count_ == 0) {
+      return;
+    }
+    --available_target_count_;
+    if (available_target_count_ != 0 || all_targets_unavailable_notified_) {
+      return;
+    }
+    all_targets_unavailable_notified_ = true;
+    std::weak_ptr<Impl> weak_self = shared_from_this();
+    poller_->async(
+        [weak_self]() {
+          const auto self = weak_self.lock();
+          if (!self || self->state_ != State::kOpen ||
+              !self->on_all_targets_unavailable_) {
+            return;
+          }
+          try {
+            self->on_all_targets_unavailable_();
+          } catch (const std::exception& error) {
+            Log::Error("OutputSession目标失效回调异常，已隔离：{}",
+                       error.what());
+          } catch (...) {
+            Log::Error("OutputSession目标失效回调异常，已隔离：未知异常");
+          }
+        },
+        false);
+  }
+
+  void MarkNetworkTargetUnavailableOnPoller(std::size_t index) {
+    if (state_ != State::kOpen || index >= network_target_unavailable_.size() ||
+        network_target_unavailable_[index]) {
+      return;
+    }
+    network_target_unavailable_[index] = true;
+    pushers_[index].reset();
+    MarkTargetUnavailableOnPoller();
   }
 
   void StartPushersOnPoller(const std::string& registered_schema = {}) {
@@ -498,7 +568,7 @@ class OutputSession::Impl final
     }
 
     for (std::size_t index = 0; index < network_targets_.size(); ++index) {
-      if (pusher_started_[index]) {
+      if (pusher_started_[index] || network_target_unavailable_[index]) {
         continue;
       }
       const auto& target = network_targets_[index];
@@ -538,16 +608,33 @@ class OutputSession::Impl final
               }
               Log::Info("首次推流成功：{}", url);
             });
-        pusher->setOnClose(
-            [url = target.url](const toolkit::SockException& error) {
-              Log::Error("ZLM已停止推流目标：{}，{}", url, error.what());
-            });
-        pusher->publish(target.url);
-        pushers_[index] = std::move(pusher);
+        std::weak_ptr<Impl> weak_self = shared_from_this();
+        pusher->setOnClose([weak_self, index, url = target.url](
+                               const toolkit::SockException& error) {
+          Log::Error("ZLM已停止推流目标：{}，{}", url, error.what());
+          const auto self = weak_self.lock();
+          if (!self) {
+            return;
+          }
+          auto mark_unavailable = [weak_self, index]() {
+            if (const auto locked = weak_self.lock()) {
+              locked->MarkNetworkTargetUnavailableOnPoller(index);
+            }
+          };
+          if (self->poller_->isCurrentThread()) {
+            mark_unavailable();
+          } else {
+            self->poller_->async(std::move(mark_unavailable), false);
+          }
+        });
+        pushers_[index] = pusher;
         pusher_started_[index] = true;
+        pusher->publish(target.url);
       } catch (const std::exception& error) {
         Log::Error("创建ZLM推流目标失败，已停止该目标：{}，{}", target.url,
                    error.what());
+        pusher_started_[index] = true;
+        MarkNetworkTargetUnavailableOnPoller(index);
       }
     }
   }
@@ -571,6 +658,7 @@ class OutputSession::Impl final
       return;
     }
     state_ = State::kClosed;
+    on_all_targets_unavailable_ = nullptr;
     pushers_.clear();
     CloseRecordingListOnPoller(fmp4_targets_, "fMP4");
     CloseRecordingListOnPoller(hls_targets_, "HLS-fMP4");
@@ -600,11 +688,11 @@ class OutputSession::Impl final
   }
 
   void onAllTrackReady() override {
-    if (state_ != State::kOpen || !muxer_) {
+    if (state_ != State::kOpen || !muxer_ || recordings_initialized_) {
       return;
     }
-    InitializeRecordingsOnPoller(muxer_->getTracks(true));
     recordings_initialized_ = true;
+    InitializeRecordingsOnPoller(muxer_->getTracks(true));
     for (const auto& frame : pending_recording_frames_) {
       WriteRecordingsOnPoller(frame);
     }
@@ -657,6 +745,7 @@ class OutputSession::Impl final
   mediakit::MultiMediaSourceMuxer::Ptr muxer_;
   std::vector<mediakit::PusherProxy::Ptr> pushers_;
   std::vector<bool> pusher_started_;
+  std::vector<bool> network_target_unavailable_;
   std::vector<std::unique_ptr<Fmp4FileTarget>> fmp4_targets_;
   std::vector<std::unique_ptr<HlsFmp4FileTarget>> hls_targets_;
   bool recordings_initialized_ = false;
@@ -667,6 +756,9 @@ class OutputSession::Impl final
   std::unordered_set<std::string> ready_schemas_;
   bool has_video_ = false;
   bool output_started_ = false;
+  std::size_t available_target_count_ = 0;
+  bool all_targets_unavailable_notified_ = false;
+  OnAllTargetsUnavailable on_all_targets_unavailable_;
 };
 
 OutputSession::OutputSession(OutputConfig config,
@@ -674,6 +766,11 @@ OutputSession::OutputSession(OutputConfig config,
     : impl_(std::make_shared<Impl>(std::move(config), std::move(poller))) {}
 
 OutputSession::~OutputSession() { Close(); }
+
+void OutputSession::SetOnAllTargetsUnavailable(
+    OnAllTargetsUnavailable callback) {
+  impl_->SetOnAllTargetsUnavailable(std::move(callback));
+}
 
 void OutputSession::Open() { impl_->Open(); }
 

@@ -8,6 +8,7 @@
 #include <exception>
 #include <functional>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -31,6 +32,7 @@ extern "C" {
 #include "mw/log/logging.h"
 #include "mw/output/output_session.h"
 #include "mw/performance/internal/streaming_collector.h"
+#include "mw/pipeline/internal/remux/source_output_worker.h"
 #include "mw/pipeline/internal/streaming/audio_worker.h"
 #include "mw/pipeline/internal/streaming/output_worker.h"
 #include "mw/pipeline/internal/streaming/video_worker.h"
@@ -41,6 +43,7 @@ namespace mw::streamer::pipeline {
 namespace {
 
 using Log = log::Module<log::LogModule::kStreamer>;
+using internal::remux::SourceOutputWorker;
 using internal::streaming::AudioWorker;
 using internal::streaming::OutputWorker;
 using internal::streaming::VideoWorker;
@@ -80,14 +83,27 @@ class StreamingPipeline::Impl final {
                                                      config_.reconnect_policy);
       packet_queue_ =
           std::make_unique<cache::PacketQueue>(config_.cache_duration, poller_);
+      if (!config_.input_targets.empty()) {
+        const auto source_queue_capacity =
+            config_.audio_queue_capacity >
+                    std::numeric_limits<std::size_t>::max() -
+                        config_.video_queue_capacity
+                ? std::numeric_limits<std::size_t>::max()
+                : config_.audio_queue_capacity + config_.video_queue_capacity;
+        source_output_worker_ = std::make_unique<SourceOutputWorker>(
+            config_.input_targets, config_.zlm.output, source_queue_capacity,
+            poller_);
+      }
       status_.store(StreamingPipelineStatus::kStarting,
                     std::memory_order_release);
       NotifyStatus(StreamingPipelineStatus::kStarting);
     }
     BindInputCallbacks();
     player_->Start(config_.input_url, config_.zlm.player);
-    Log::Info("StreamingPipeline开始启动: input={}, outputs={}",
-              config_.input_url, config_.output_targets.size());
+    Log::Info(
+        "StreamingPipeline开始启动: input={}, input_targets={}, outputs={}",
+        config_.input_url, config_.input_targets.size(),
+        config_.output_targets.size());
   }
 
   void UpdateProcessorConfig(std::string config) {
@@ -143,6 +159,9 @@ class StreamingPipeline::Impl final {
     if (snapshot.output_worker) {
       snapshot.output_worker->Stop();
     }
+    if (snapshot.source_output_worker) {
+      snapshot.source_output_worker->Stop();
+    }
     if (player_stopped.valid()) {
       player_stopped.wait();
     }
@@ -155,6 +174,7 @@ class StreamingPipeline::Impl final {
     std::unique_ptr<processor::StreamingProcessorHandler> processor;
     std::unique_ptr<common::Barrier> boundary_barrier;
     std::unique_ptr<OutputWorker> output_worker;
+    std::unique_ptr<SourceOutputWorker> source_output_worker;
     std::unique_ptr<AudioWorker> audio_worker;
     std::unique_ptr<VideoWorker> video_worker;
     {
@@ -164,6 +184,7 @@ class StreamingPipeline::Impl final {
       processor = std::move(processor_);
       boundary_barrier = std::move(boundary_barrier_);
       output_worker = std::move(output_worker_);
+      source_output_worker = std::move(source_output_worker_);
       audio_worker = std::move(audio_worker_);
       video_worker = std::move(video_worker_);
       if (status() != StreamingPipelineStatus::kFailed) {
@@ -181,6 +202,7 @@ class StreamingPipeline::Impl final {
     video_worker.reset();
     audio_worker.reset();
     output_worker.reset();
+    source_output_worker.reset();
     boundary_barrier.reset();
     processor.reset();
     player.reset();
@@ -289,6 +311,9 @@ class StreamingPipeline::Impl final {
         });
     player_->SetOnPacket(
         [this](std::uint64_t generation, const ffmpeg::Packet& packet) {
+          if (source_output_worker_) {
+            source_output_worker_->Write(generation, packet);
+          }
           return packet_queue_->Input(generation, packet);
         });
     player_->SetOnState(
@@ -301,6 +326,9 @@ class StreamingPipeline::Impl final {
   void OnStreamsReady(std::uint64_t generation,
                       const std::vector<ffmpeg::StreamInfo>& streams) noexcept {
     try {
+      if (source_output_worker_) {
+        source_output_worker_->Open(streams);
+      }
       {
         std::lock_guard<std::mutex> lock(control_mutex_);
         if (stopping_.load(std::memory_order_acquire)) {
@@ -606,15 +634,22 @@ class StreamingPipeline::Impl final {
     processor::StreamingProcessorHandler* processor = nullptr;
     common::Barrier* boundary_barrier = nullptr;
     OutputWorker* output_worker = nullptr;
+    SourceOutputWorker* source_output_worker = nullptr;
     AudioWorker* audio_worker = nullptr;
     VideoWorker* video_worker = nullptr;
   };
 
   StopSnapshot SnapshotLocked() const noexcept {
     return {
-        poller_.get(),       player_.get(),           packet_queue_.get(),
-        processor_.get(),    boundary_barrier_.get(), output_worker_.get(),
-        audio_worker_.get(), video_worker_.get(),
+        poller_.get(),
+        player_.get(),
+        packet_queue_.get(),
+        processor_.get(),
+        boundary_barrier_.get(),
+        output_worker_.get(),
+        source_output_worker_.get(),
+        audio_worker_.get(),
+        video_worker_.get(),
     };
   }
 
@@ -630,6 +665,9 @@ class StreamingPipeline::Impl final {
     }
     if (snapshot.output_worker) {
       snapshot.output_worker->RequestStop();
+    }
+    if (snapshot.source_output_worker) {
+      snapshot.source_output_worker->RequestStop();
     }
   }
 
@@ -661,6 +699,7 @@ class StreamingPipeline::Impl final {
   std::unique_ptr<processor::StreamingProcessorHandler> processor_;
   std::unique_ptr<common::Barrier> boundary_barrier_;
   std::unique_ptr<OutputWorker> output_worker_;
+  std::unique_ptr<SourceOutputWorker> source_output_worker_;
   std::unique_ptr<AudioWorker> audio_worker_;
   std::unique_ptr<VideoWorker> video_worker_;
 

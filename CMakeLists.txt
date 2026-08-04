@@ -56,6 +56,7 @@ add_library(mw_streamer STATIC
     src/ffmpeg/error.cc
     src/ffmpeg/frame.cc
     src/ffmpeg/hardware_context.cc
+    src/ffmpeg/input_format_context.cc
     src/ffmpeg/packet.cc
     src/ffmpeg/pixel_format.cc
     src/ffmpeg/stream_info.cc
@@ -66,8 +67,12 @@ add_library(mw_streamer STATIC
     src/media/internal/codec_bridge.cc
     src/output/output_session.cc
     src/output/recording_target.cc
+    src/performance/internal/local_file_collector.cc
+    src/performance/internal/remux_collector.cc
     src/performance/internal/stage_recorder.cc
     src/performance/internal/streaming_collector.cc
+    src/pipeline/file_pipeline.cc
+    src/pipeline/internal/remux/source_output_worker.cc
     src/pipeline/internal/streaming/audio_processing_chain.cc
     src/pipeline/internal/streaming/audio_worker.cc
     src/pipeline/internal/streaming/frame_synchronizer.cc
@@ -75,6 +80,7 @@ add_library(mw_streamer STATIC
     src/pipeline/internal/streaming/standby_video_frame.cc
     src/pipeline/internal/streaming/video_worker.cc
     src/pipeline/internal/streaming/video_processing_chain.cc
+    src/pipeline/remux_pipeline.cc
     src/pipeline/streaming_pipeline.cc
     src/processor/internal/audio_frame_allocator.cc
     src/processor/internal/enum_converter.cc

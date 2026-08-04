@@ -2,6 +2,7 @@
 #define MW_STREAMER_INCLUDE_MW_OUTPUT_OUTPUT_SESSION_H_
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -34,6 +35,7 @@ struct NetworkTraffic {
 class OutputSession final {
  public:
   using Ptr = std::shared_ptr<OutputSession>;
+  using OnAllTargetsUnavailable = std::function<void()>;
 
   explicit OutputSession(
       OutputConfig config,
@@ -42,6 +44,11 @@ class OutputSession final {
 
   OutputSession(const OutputSession&) = delete;
   OutputSession& operator=(const OutputSession&) = delete;
+
+  // The callback runs on the session poller after every configured target has
+  // become permanently unavailable. Retrying network targets remain available.
+  // It must be set before Open and is never emitted by an explicit Close.
+  void SetOnAllTargetsUnavailable(OnAllTargetsUnavailable callback);
 
   // Open validates configuration synchronously. Video output discards packets
   // before the first key frame; protocol publishing starts after every Track

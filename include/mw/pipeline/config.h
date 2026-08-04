@@ -43,9 +43,26 @@ struct StreamingPipelineConfig {
   encoder::VideoEncoderConfig video_encoder;
   StreamingStandbyConfig standby;
 
+  // Optional source-packet outputs. Targets use the same URL/path semantics
+  // and file naming rules as OutputSession. Empty disables source recording
+  // and relay without changing the processed output pipeline.
+  std::vector<std::string> input_targets;
+
   // RTMP, RTSP, SRT, fragmented MP4, and HLS-fMP4 targets accepted by
   // OutputSession. Encoded StreamInfo is produced at runtime and deliberately
   // does not belong to this configuration.
+  std::vector<std::string> output_targets;
+};
+
+struct RemuxPipelineConfig {
+  // RemuxPipeline preserves compressed audio/video and does not decode,
+  // process, or re-encode it.
+  std::string input_url;
+  zlm::PipelineConfig zlm;
+  input::ReconnectPolicy reconnect_policy;
+
+  // RTMP, RTSP, SRT, fragmented MP4, and HLS-fMP4 targets accepted by
+  // OutputSession. At least one target is required.
   std::vector<std::string> output_targets;
 };
 

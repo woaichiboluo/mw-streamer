@@ -124,7 +124,7 @@ def find_recording(requested_path: Path) -> Path:
     )
     if len(candidates) != 1:
         raise ProcessError(
-            f"期望得到一个同步录像，实际为{len(candidates)}个: "
+            f"期望得到一个录像，实际为{len(candidates)}个: "
             f"{requested_path.parent}"
         )
     return candidates[0]

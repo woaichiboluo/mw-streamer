@@ -174,8 +174,8 @@ TEST_CASE("packet queue starts at the first common audio-video interval") {
     queue->EndInput(1);
   });
 
-  REQUIRE(WaitFor(condition, mutex, [&]() { return outputs.size() == 27; },
-                  3s));
+  REQUIRE(WaitFor(
+      condition, mutex, [&]() { return outputs.size() == 27; }, 3s));
   RunOnPollerAndWait(queue->poller(), []() {});
 
   std::vector<std::pair<int, std::int64_t>> snapshot;

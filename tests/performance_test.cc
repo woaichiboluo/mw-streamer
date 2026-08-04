@@ -5,6 +5,8 @@
 #include <utility>
 #include <vector>
 
+#include "mw/performance/internal/local_file_collector.h"
+#include "mw/performance/internal/remux_collector.h"
 #include "mw/performance/internal/stage_recorder.h"
 #include "mw/performance/internal/streaming_collector.h"
 
@@ -12,6 +14,7 @@
 #undef CHECK
 #endif
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 namespace {
@@ -19,6 +22,8 @@ namespace {
 using namespace std::chrono_literals;
 using mw::streamer::performance::NetworkInputSnapshot;
 using mw::streamer::performance::NetworkOutputSnapshot;
+using mw::streamer::performance::internal::LocalFileCollector;
+using mw::streamer::performance::internal::RemuxCollector;
 using mw::streamer::performance::internal::StageRecorder;
 using mw::streamer::performance::internal::StreamingCollector;
 
@@ -173,4 +178,99 @@ TEST_CASE("StreamingCollector生成统一窗口并保留网络原始字节") {
   CHECK(second.audio.decode.samples == 0);
   CHECK(second.audio.decode.samples_per_second == 0.0);
   CHECK(second.audio.decode.latency.sample_count == 0);
+}
+
+TEST_CASE("RemuxCollector生成区间码率并在采集后清空") {
+  RemuxCollector collector;
+  collector.RecordPacket(1000);
+  collector.Reset();
+  collector.RecordPacket(100);
+  collector.RecordPacket(300);
+  std::this_thread::sleep_for(2ms);
+
+  NetworkInputSnapshot input;
+  input.is_network = true;
+  input.connected = true;
+  input.generation = 7;
+  input.reconnect_count = 2;
+  input.received_bytes = 1234;
+  std::vector<NetworkOutputSnapshot> outputs{
+      {"rtsp://127.0.0.1/live/test", true, 1, 5678},
+  };
+  const auto first = collector.Collect(3, input, std::move(outputs));
+
+  CHECK(first.interval > 0ns);
+  CHECK(first.packets == 2);
+  CHECK(first.bytes == 400);
+  CHECK(first.bits_per_second ==
+        Catch::Approx(static_cast<double>(first.bytes) * 8.0 /
+                      std::chrono::duration<double>(first.interval).count()));
+  CHECK(first.output_queue_depth == 3);
+  CHECK(first.input.is_network);
+  CHECK(first.input.connected);
+  CHECK(first.input.generation == 7);
+  CHECK(first.input.reconnect_count == 2);
+  CHECK(first.input.received_bytes == 1234);
+  REQUIRE(first.outputs.size() == 1);
+  CHECK(first.outputs.front().target == "rtsp://127.0.0.1/live/test");
+  CHECK(first.outputs.front().connected);
+  CHECK(first.outputs.front().reconnect_count == 1);
+  CHECK(first.outputs.front().sent_bytes == 5678);
+
+  const auto second = collector.Collect(0, {}, {});
+  CHECK(second.interval > 0ns);
+  CHECK(second.packets == 0);
+  CHECK(second.bytes == 0);
+  CHECK(second.bits_per_second == 0.0);
+  CHECK(second.output_queue_depth == 0);
+  CHECK(second.outputs.empty());
+}
+
+TEST_CASE("LocalFileCollector使用音视频安全水位计算进度和速度") {
+  LocalFileCollector collector;
+  collector.Configure(true, true, true, 10s);
+  collector.RecordAudioPosition(4s);
+  collector.RecordVideoPosition(3s);
+  collector.audio().process().Record(48000, 1ms);
+  collector.video().process().Record(30, 1ms);
+  std::this_thread::sleep_for(2ms);
+
+  const auto first = collector.Collect();
+  CHECK(first.has_audio);
+  CHECK(first.has_video);
+  CHECK(first.progress_available);
+  CHECK(first.duration == 10s);
+  CHECK(first.processed_position == 3s);
+  CHECK(first.progress == Catch::Approx(0.3));
+  CHECK(first.processing_speed_available);
+  CHECK(first.processing_speed > 0.0);
+  CHECK(first.audio.process.samples == 48000);
+  CHECK(first.video.process.frames == 30);
+
+  collector.MarkCompleted();
+  std::this_thread::sleep_for(2ms);
+  const auto completed = collector.Collect();
+  CHECK(completed.processed_position == 10s);
+  CHECK(completed.progress == 1.0);
+  CHECK(completed.processing_speed_available);
+  CHECK(completed.processing_speed == 0.0);
+  CHECK(completed.audio.process.samples == 0);
+  CHECK(completed.video.process.frames == 0);
+}
+
+TEST_CASE("LocalFileCollector在时长未知时仍报告位置和速度") {
+  LocalFileCollector collector;
+  collector.Configure(false, true, false, 0us);
+  collector.RecordVideoPosition(2s);
+  std::this_thread::sleep_for(2ms);
+
+  const auto snapshot = collector.Collect();
+  CHECK_FALSE(snapshot.has_audio);
+  CHECK(snapshot.has_video);
+  CHECK_FALSE(snapshot.progress_available);
+  CHECK(snapshot.duration == 0us);
+  CHECK(snapshot.processed_position == 2s);
+  CHECK(snapshot.progress == 0.0);
+  CHECK(snapshot.processing_speed_available);
+  CHECK(snapshot.processing_speed > 0.0);
 }

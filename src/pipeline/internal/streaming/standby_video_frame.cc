@@ -20,29 +20,18 @@ extern "C" {
 #include "mw/ffmpeg/codec_context.h"
 #include "mw/ffmpeg/error.h"
 #include "mw/ffmpeg/hardware_context.h"
+#include "mw/ffmpeg/input_format_context.h"
 #include "mw/ffmpeg/packet.h"
 #include "mw/ffmpeg/pixel_format.h"
 
 namespace mw::streamer::pipeline::internal::streaming {
 namespace {
 
-using FormatContext =
-    std::unique_ptr<AVFormatContext, void (*)(AVFormatContext*)>;
 using ScaleContext = std::unique_ptr<SwsContext, void (*)(SwsContext*)>;
 
-FormatContext OpenImage(const std::string& path) {
-  AVFormatContext* context = nullptr;
-  ffmpeg::ThrowIfError(
-      avformat_open_input(&context, path.c_str(), nullptr, nullptr),
-      "打开备播图片");
-  return {context,
-          [](AVFormatContext* value) { avformat_close_input(&value); }};
-}
-
 ffmpeg::Frame DecodeImage(const std::string& path) {
-  auto input = OpenImage(path);
-  ffmpeg::ThrowIfError(avformat_find_stream_info(input.get(), nullptr),
-                       "读取备播图片流信息");
+  ffmpeg::InputFormatContext input(path);
+  input.FindStreamInfo();
   const int stream_index =
       av_find_best_stream(input.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
   ffmpeg::ThrowIfError(stream_index, "查找备播图片视频流");
@@ -61,11 +50,8 @@ ffmpeg::Frame DecodeImage(const std::string& path) {
   ffmpeg::Packet packet;
   for (;;) {
     packet.Unref();
-    const int read_result = av_read_frame(input.get(), packet.get());
-    if (read_result < 0) {
-      if (read_result != AVERROR_EOF) {
-        ffmpeg::ThrowIfError(read_result, "读取备播图片");
-      }
+    const bool has_packet = input.ReadPacket(packet);
+    if (!has_packet) {
       ffmpeg::ThrowIfError(avcodec_send_packet(decoder.get(), nullptr),
                            "提交备播图片结束标记");
     } else if (packet->stream_index != stream_index) {
@@ -90,7 +76,7 @@ ffmpeg::Frame DecodeImage(const std::string& path) {
     if (receive_result != AVERROR(EAGAIN) && receive_result != AVERROR_EOF) {
       ffmpeg::ThrowIfError(receive_result, "接收备播图片解码帧");
     }
-    if (read_result == AVERROR_EOF) {
+    if (!has_packet) {
       break;
     }
   }

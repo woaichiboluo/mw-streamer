@@ -113,7 +113,9 @@ def load_config(path: str) -> E2EConfig:
     )
 
 
-def _probe_media(config: E2EConfig, path: Path) -> MediaAsset:
+def _probe_media(
+    config: E2EConfig, path: Path, identifier: str | None = None
+) -> MediaAsset:
     command = [
         str(config.tools.ffprobe),
         "-v",
@@ -180,10 +182,11 @@ def _probe_media(config: E2EConfig, path: Path) -> MediaAsset:
         ):
             raise ConfigurationError(f"媒体文件视频元数据无效: {path}")
 
-    relative_path = path.relative_to(config.media_directory)
+    if identifier is None:
+        identifier = path.relative_to(config.media_directory).as_posix()
     return MediaAsset(
         path=path,
-        identifier=relative_path.as_posix(),
+        identifier=identifier,
         duration_seconds=duration_seconds,
         audio_codec=audio_streams[0]["codec_name"] if audio_streams else None,
         video_codec=video_streams[0]["codec_name"] if video_streams else None,
@@ -192,6 +195,10 @@ def _probe_media(config: E2EConfig, path: Path) -> MediaAsset:
         video_frame_rate_num=video_frame_rate_num,
         video_frame_rate_den=video_frame_rate_den,
     )
+
+
+def probe_media_file(config: E2EConfig, path: Path) -> MediaAsset:
+    return _probe_media(config, path.resolve(), path.name)
 
 
 @lru_cache(maxsize=None)

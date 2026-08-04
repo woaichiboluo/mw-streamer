@@ -1,8 +1,11 @@
 #include "mw/output/output_session.h"
 
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -204,4 +207,60 @@ TEST_CASE("OutputSession同步拒绝无目标和未知网络协议") {
       std::chrono::milliseconds::zero();
   OutputSession invalid_zlm_session(std::move(invalid_zlm));
   CHECK_THROWS_AS(invalid_zlm_session.Open(), std::invalid_argument);
+}
+
+TEST_CASE("OutputSession在所有文件目标永久失效后通知一次") {
+  TestDirectory directory;
+  const auto blocked_path = directory.path() / "blocked";
+  std::ofstream(blocked_path).put('x');
+
+  mediakit::MP4Demuxer demuxer;
+  demuxer.openMP4(SamplePath().string());
+  const auto tracks = demuxer.getTracks(true);
+  REQUIRE_FALSE(tracks.empty());
+
+  OutputConfig config;
+  config.targets = {(blocked_path / "input.mp4").string()};
+  AddStreams(tracks, config);
+  OutputSession session(std::move(config));
+  std::mutex mutex;
+  std::condition_variable condition;
+  std::size_t unavailable_calls = 0;
+  session.SetOnAllTargetsUnavailable([&]() {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      ++unavailable_calls;
+    }
+    condition.notify_all();
+  });
+  auto bindings = MakeBindings(tracks, session);
+  session.Open();
+
+  std::unordered_map<int, ZlmPacketConverter::Ptr> converters;
+  for (const auto& binding : bindings) {
+    converters.emplace(binding.track->getIndex(), binding.converter);
+  }
+  bool eof = false;
+  while (!eof) {
+    bool key_frame = false;
+    int error = 0;
+    auto frame = demuxer.readFrame(key_frame, eof, &error);
+    REQUIRE(error == 0);
+    if (!frame) {
+      continue;
+    }
+    if (key_frame && !frame->keyFrame()) {
+      frame = std::make_shared<mediakit::FrameCacheAble>(frame, true);
+    }
+    REQUIRE(converters.at(frame->getIndex())->InputFrame(frame));
+  }
+
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    REQUIRE(condition.wait_for(lock, std::chrono::seconds(2),
+                               [&]() { return unavailable_calls == 1; }));
+  }
+  session.Close();
+  CHECK(unavailable_calls == 1);
+  CHECK_FALSE(std::filesystem::is_directory(blocked_path));
 }

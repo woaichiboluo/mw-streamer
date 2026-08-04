@@ -1,7 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -17,6 +19,7 @@ extern "C" {
 #include "mw/ffmpeg/codec_parameters.h"
 #include "mw/ffmpeg/error.h"
 #include "mw/ffmpeg/frame.h"
+#include "mw/ffmpeg/input_format_context.h"
 #include "mw/ffmpeg/packet.h"
 #include "mw/ffmpeg/pixel_format.h"
 #include "mw/ffmpeg/stream_info.h"
@@ -27,6 +30,7 @@ using mw::streamer::ffmpeg::CodecContext;
 using mw::streamer::ffmpeg::CodecParameters;
 using mw::streamer::ffmpeg::ErrorText;
 using mw::streamer::ffmpeg::Frame;
+using mw::streamer::ffmpeg::InputFormatContext;
 using mw::streamer::ffmpeg::IsHardwarePixelFormat;
 using mw::streamer::ffmpeg::Packet;
 using mw::streamer::ffmpeg::StreamInfo;
@@ -50,6 +54,17 @@ static_assert(!std::is_copy_constructible_v<CodecContext>);
 static_assert(!std::is_copy_assignable_v<CodecContext>);
 static_assert(std::is_nothrow_move_constructible_v<CodecContext>);
 static_assert(std::is_nothrow_move_assignable_v<CodecContext>);
+
+static_assert(!std::is_copy_constructible_v<InputFormatContext>);
+static_assert(!std::is_copy_assignable_v<InputFormatContext>);
+static_assert(std::is_nothrow_move_constructible_v<InputFormatContext>);
+static_assert(std::is_nothrow_move_assignable_v<InputFormatContext>);
+
+std::filesystem::path SamplePath(const char* name = "h264_aac.mp4") {
+  return std::filesystem::path(MW_FFMPEG_TYPES_TEST_DATA_DIR) / name;
+}
+
+int NeverInterrupt(void* opaque) { return opaque ? 0 : 1; }
 
 }  // namespace
 
@@ -78,6 +93,49 @@ TEST_CASE("CodecParameters has deep-copy value semantics") {
   assigned = source;
   CHECK(assigned.get()->codec_id == AV_CODEC_ID_AAC);
   CHECK(assigned.get()->extradata != source.get()->extradata);
+}
+
+TEST_CASE("InputFormatContext owns an input and reads packets to EOF") {
+  int callback_context = 1;
+  InputFormatContext input(SamplePath().string(),
+                           {NeverInterrupt, &callback_context});
+  REQUIRE(input.get());
+  CHECK(input->interrupt_callback.callback == NeverInterrupt);
+  CHECK(input->interrupt_callback.opaque == &callback_context);
+
+  input.FindStreamInfo();
+  CHECK(input->nb_streams == 2);
+
+  Packet packet;
+  std::size_t packet_count = 0;
+  while (input.ReadPacket(packet)) {
+    ++packet_count;
+    packet.Unref();
+  }
+  CHECK(packet_count > 0);
+}
+
+TEST_CASE("InputFormatContext supports move-only ownership") {
+  InputFormatContext source(SamplePath().string());
+  InputFormatContext moved(std::move(source));
+  CHECK(source.get() == nullptr);
+  REQUIRE(moved.get());
+
+  InputFormatContext assigned(SamplePath("h264_video.mp4").string());
+  assigned = std::move(moved);
+  CHECK(moved.get() == nullptr);
+  REQUIRE(assigned.get());
+  assigned.FindStreamInfo();
+
+  Packet packet;
+  CHECK(assigned.ReadPacket(packet));
+  CHECK_THROWS_AS(source.FindStreamInfo(), std::logic_error);
+}
+
+TEST_CASE("InputFormatContext rejects invalid inputs") {
+  CHECK_THROWS_AS(InputFormatContext(""), std::invalid_argument);
+  CHECK_THROWS_AS(InputFormatContext(SamplePath("missing-input.mp4").string()),
+                  std::runtime_error);
 }
 
 TEST_CASE("Packet Clone owns metadata and references the media buffer") {

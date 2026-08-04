@@ -9,6 +9,10 @@
 - RTSP、RTMP、SRT 稳定推流；
 - 输出连接被服务端主动断开后的自动重连；
 - 同一输入同时稳定推送到三个协议；
+- RemuxPipeline将源压缩流同时转推并录制为本地MP4；
+- StreamingPipeline将源输入同时旁路转推和录像，并保持处理后输出；
+- FilePipeline全速处理本地音视频文件，并验证自然EOF、Processor生命周期、
+  处理进度和当前处理倍速；
 - 多推过程中单个输出故障后的隔离和恢复。
 - H.264/H.265 专用白闪与音频脉冲媒体的内容级音画同步；
 - FILE、RTMP、RTSP、SRT 输入到 FILE、RTMP、RTSP、SRT 输出的完整同步矩阵；每种输入在一次 Pipeline 中同时输出四种目标，每组连续运行 5 分钟；
@@ -80,9 +84,10 @@ python3 -m venv .cache/e2e-venv
   --e2e-runner build/tests/e2e/mw_streamer_e2e_runner
 ```
 
-Runner 始终配置至少一个真实输出目标。Pipeline 是否成功由其公共状态事件判断，
-媒体轨道和持续输出则由 FFmpeg 从输出端实际读取验证；测试不再依赖 PlayerProxy
-或 PacketQueue 的内部状态。
+StreamingPipeline和RemuxPipeline始终配置至少一个真实输出目标；FilePipeline直接处理
+本地文件且不创建输出。Pipeline 是否成功由其公共状态事件判断，媒体轨道和持续输出
+则由 FFmpeg 从输出端实际读取验证；测试不再依赖 PlayerProxy 或 PacketQueue 的内部
+状态。
 
 ## 运行十分钟 Bench
 
