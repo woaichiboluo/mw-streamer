@@ -247,6 +247,31 @@ task = "offline"
   }
 }
 
+TEST_CASE("仓库TOML配置模板与加载器保持一致") {
+  const std::filesystem::path template_dir = MW_TOML_TEMPLATE_DIR;
+
+  const auto init = LoadInitConfigFromToml(template_dir / "init.toml");
+  CHECK(init.log.console.enabled);
+  CHECK(init.zlm.enable_cpu_affinity);
+
+  const auto streaming =
+      LoadStreamingPipelineConfigFromToml(template_dir / "streaming.toml");
+  CHECK(streaming.input_url == "rtsp://127.0.0.1/live/input");
+  CHECK(streaming.video_encoder.frame_rate.num == 25);
+  CHECK(streaming.video_encoder.frame_rate.den == 1);
+  REQUIRE(streaming.input_targets.size() == 1);
+  REQUIRE(streaming.output_targets.size() == 1);
+
+  const auto remux =
+      LoadRemuxPipelineConfigFromToml(template_dir / "remux.toml");
+  CHECK(remux.input_url == "rtsp://127.0.0.1/live/input");
+  REQUIRE(remux.output_targets.size() == 1);
+
+  const auto file = LoadFilePipelineConfigFromToml(template_dir / "file.toml");
+  CHECK(file.input_path == "./input.mp4");
+  CHECK(file.processor.config.find("mode = 'offline'") != std::string::npos);
+}
+
 TEST_CASE("TOML缺失字段保留C++默认值") {
   TemporaryToml empty("");
 

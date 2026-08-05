@@ -1,0 +1,16 @@
+# FilePipeline全速解码本地文件并同步回调File Processor。
+input_path = "./input.mp4"
+
+[audio_decoder]
+# 空字符串表示选择输入编码对应的FFmpeg默认解码器。
+decoder_name = ""
+
+[video_decoder]
+decoder_name = ""
+# 可选: software, cuda。
+backend = "cuda"
+device_index = 0
+
+# 此表及其嵌套内容由库原样序列化后传给Processor插件。
+[processor.config]
+mode = "offline"

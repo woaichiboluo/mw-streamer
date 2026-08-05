@@ -94,6 +94,13 @@ frame_rate = { num = 25, den = 1 }
 配置仍然只需要一个文件；`processor` 下由 Pipeline 使用的固定字段和允许动态更新的
 `processor.config` 通过表层级区分，不需要调用方自行拆分或解析。
 
+仓库的 `template/` 目录提供可直接复制修改的完整配置模板：
+
+- `init.toml`：进程初始化、日志和ZLToolKit线程配置。
+- `streaming.toml`：解码、Processor、编码、输入旁路和输出配置。
+- `remux.toml`：不解码的录像与转推配置。
+- `file.toml`：本地文件全速解码和File Processor配置。
+
 ## C 接口
 
 `mw/c_api.h` 提供三类 Pipeline 的纯 C 句柄接口。`start` 只表示异步启动请求被接受；

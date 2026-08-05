@@ -1,0 +1,80 @@
+# 支持ZLMediaKit能够拉取的网络地址或有限输入。
+input_url = "rtsp://127.0.0.1/live/input"
+cache_duration_ms = 1000
+audio_queue_capacity = 256
+video_queue_capacity = 128
+max_track_wait_ms = 500
+
+# 输入压缩包旁路目标；空数组表示不对输入录像或转推。
+# 也可以填写推流地址，例如rtmp://127.0.0.1/live/source。
+input_targets = ["./input.mp4"]
+
+# 处理、编码后的输出目标；空数组表示编码后直接丢弃。
+# 还支持RTMP、RTSP、SRT以及m3u8等OutputSession目标。
+output_targets = ["./output.mp4"]
+
+[zlm.player]
+connect_timeout_ms = 10000
+media_timeout_ms = 5000
+# 空字符串表示不指定本地绑定地址。
+local_bind_ip = ""
+
+[zlm.output.pusher]
+connect_timeout_ms = 10000
+local_bind_ip = ""
+
+[zlm.output.muxer]
+# 0表示关闭ZLM平滑发送。
+paced_sender_interval_ms = 0
+
+[zlm.output.recording]
+file_buffer_size = 65536
+hls_segment_duration_ms = 2000
+
+[reconnect_policy]
+# -1表示无限重试，0表示不重试。
+max_retries = -1
+min_delay_ms = 2000
+max_delay_ms = 60000
+delay_step_ms = 3000
+
+[audio_decoder]
+# 空字符串表示选择输入编码对应的FFmpeg默认解码器。
+decoder_name = ""
+
+[video_decoder]
+decoder_name = ""
+# 可选: software, cuda。
+backend = "cuda"
+device_index = 0
+
+[processor]
+# 有视频时宽高必须同时大于0；纯音频时必须同时为0。
+output_width = 1920
+output_height = 1080
+
+# 此表及其嵌套内容由库原样序列化后传给Processor插件。
+[processor.config]
+mode = "passthrough"
+
+[audio_encoder]
+# 空字符串表示使用FFmpeg默认AAC编码器。
+encoder_name = ""
+
+[audio_encoder.properties]
+b = "128k"
+
+[video_encoder]
+# 可选: h264, h265。
+codec = "h264"
+# CUDA帧可使用h264_nvenc/hevc_nvenc；空字符串表示自动选择。
+encoder_name = ""
+frame_rate = { num = 25, den = 1 }
+
+[video_encoder.properties]
+preset = "p4"
+
+[standby]
+enabled = false
+# 空字符串使用内置备播图。
+image_path = ""

@@ -1,0 +1,29 @@
+# RemuxPipeline保留输入压缩包，不进行解码和重新编码。
+input_url = "rtsp://127.0.0.1/live/input"
+
+# RemuxPipeline至少需要一个输出目标。
+# 还支持RTMP、RTSP、SRT以及m3u8等OutputSession目标。
+output_targets = ["./remux.mp4"]
+
+[zlm.player]
+connect_timeout_ms = 10000
+media_timeout_ms = 5000
+local_bind_ip = ""
+
+[zlm.output.pusher]
+connect_timeout_ms = 10000
+local_bind_ip = ""
+
+[zlm.output.muxer]
+paced_sender_interval_ms = 0
+
+[zlm.output.recording]
+file_buffer_size = 65536
+hls_segment_duration_ms = 2000
+
+[reconnect_policy]
+# -1表示无限重试，0表示不重试。
+max_retries = -1
+min_delay_ms = 2000
+max_delay_ms = 60000
+delay_step_ms = 3000
