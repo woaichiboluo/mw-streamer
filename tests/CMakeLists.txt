@@ -2,6 +2,68 @@ add_executable(mw_processor_c_api_tests
     processor_c_api_test.c
 )
 
+target_include_directories(mw_processor_c_api_tests
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+)
+
+add_test(
+    NAME mw_processor_c_api_tests
+    COMMAND mw_processor_c_api_tests
+)
+
+add_executable(mw_c_api_header_tests
+    c_api_header_test.c
+)
+
+target_include_directories(mw_c_api_header_tests
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+)
+
+target_link_libraries(mw_c_api_header_tests
+    PRIVATE
+        mw::streamer
+)
+
+add_test(
+    NAME mw_c_api_header_tests
+    COMMAND mw_c_api_header_tests
+)
+
+add_executable(mw_c_api_tests
+    c_api_test.cc
+)
+
+target_compile_definitions(mw_c_api_tests
+    PRIVATE
+        MW_C_API_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+)
+
+target_link_libraries(mw_c_api_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        fmt::fmt
+        mw::streamer
+)
+
+add_test(
+    NAME mw_c_api_tests
+    COMMAND mw_c_api_tests
+)
+
+if(BUILD_SHARED_LIBS)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_test(
+            NAME mw_shared_library_abi_tests
+            COMMAND ${CMAKE_COMMAND}
+                -DLIBRARY=$<TARGET_FILE:mw_streamer>
+                -DNM=${CMAKE_NM}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/shared_library_abi_test.cmake
+        )
+    endif()
+endif()
+
 add_executable(mw_common_tests
     common_test.cc
 )
@@ -30,7 +92,7 @@ target_link_libraries(mw_performance_tests
     PRIVATE
         Catch2::Catch2WithMain
         HdrHistogram::HdrHistogram
-        mw::streamer
+        mw::streamer_test
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -49,16 +111,6 @@ add_test(
     COMMAND mw_performance_tests
 )
 
-target_include_directories(mw_processor_c_api_tests
-    PRIVATE
-        "${PROJECT_SOURCE_DIR}/include"
-)
-
-add_test(
-    NAME mw_processor_c_api_tests
-    COMMAND mw_processor_c_api_tests
-)
-
 add_executable(mw_frame_adapter_tests
     frame_adapter_test.cc
 )
@@ -66,7 +118,7 @@ add_executable(mw_frame_adapter_tests
 target_link_libraries(mw_frame_adapter_tests
     PRIVATE
         Catch2::Catch2WithMain
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -81,7 +133,7 @@ add_executable(mw_source_info_adapter_tests
 target_link_libraries(mw_source_info_adapter_tests
     PRIVATE
         Catch2::Catch2WithMain
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -117,7 +169,7 @@ target_link_libraries(mw_processor_handler_tests
     PRIVATE
         Catch2::Catch2WithMain
         CUDA::cuda_driver
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -182,6 +234,21 @@ add_test(
     COMMAND mw_pipeline_config_tests
 )
 
+add_executable(mw_toml_config_tests
+    toml_config_test.cc
+)
+
+target_link_libraries(mw_toml_config_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        mw::streamer_test
+)
+
+add_test(
+    NAME mw_toml_config_tests
+    COMMAND mw_toml_config_tests
+)
+
 add_executable(mw_streaming_standby_tests
     streaming_standby_test.cc
 )
@@ -189,7 +256,7 @@ add_executable(mw_streaming_standby_tests
 target_link_libraries(mw_streaming_standby_tests
     PRIVATE
         Catch2::Catch2WithMain
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -210,7 +277,7 @@ target_link_libraries(mw_streaming_pipeline_tests
     PRIVATE
         Catch2::Catch2WithMain
         ZLMediaKit::MediaKit
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -230,7 +297,7 @@ target_compile_definitions(mw_file_pipeline_tests
 target_link_libraries(mw_file_pipeline_tests
     PRIVATE
         Catch2::Catch2WithMain
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -251,7 +318,7 @@ target_link_libraries(mw_remux_pipeline_tests
     PRIVATE
         Catch2::Catch2WithMain
         ZLMediaKit::MediaKit
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -273,7 +340,7 @@ target_link_libraries(mw_processing_chain_tests
         Catch2::Catch2WithMain
         HdrHistogram::HdrHistogram
         ZLMediaKit::MediaKit
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -288,7 +355,7 @@ add_executable(mw_audio_encoder_tests
 target_link_libraries(mw_audio_encoder_tests
     PRIVATE
         Catch2::Catch2WithMain
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -303,7 +370,7 @@ add_executable(mw_video_encoder_tests
 target_link_libraries(mw_video_encoder_tests
     PRIVATE
         Catch2::Catch2WithMain
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -320,7 +387,7 @@ target_link_libraries(mw_logging_tests
         Catch2::Catch2WithMain
         FFmpeg::avutil
         ZLMediaKit::ToolKit
-        mw::streamer
+        mw::streamer_test
 )
 
 include(Catch)
@@ -335,7 +402,7 @@ target_link_libraries(mw_init_tests
         Catch2::Catch2WithMain
         FFmpeg::avutil
         ZLMediaKit::ToolKit
-        mw::streamer
+        mw::streamer_test
 )
 
 catch_discover_tests(mw_init_tests)
@@ -348,7 +415,7 @@ target_link_libraries(mw_srt_init_tests
     PRIVATE
         Catch2::Catch2WithMain
         ZLMediaKit::SRT
-        mw::streamer
+        mw::streamer_test
 )
 
 catch_discover_tests(mw_srt_init_tests)
@@ -389,7 +456,7 @@ target_link_libraries(mw_zlm_packet_converter_tests
         FFmpeg::avutil
         ZLMediaKit::MediaKit
         ZLMediaKit::ext-codec
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -411,7 +478,7 @@ target_link_libraries(mw_audio_decoder_tests
         Catch2::Catch2WithMain
         ZLMediaKit::MediaKit
         ZLMediaKit::ext-codec
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -426,7 +493,7 @@ add_executable(mw_audio_resampler_tests
 target_link_libraries(mw_audio_resampler_tests
     PRIVATE
         Catch2::Catch2WithMain
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -448,7 +515,7 @@ target_link_libraries(mw_video_decoder_tests
         Catch2::Catch2WithMain
         ZLMediaKit::MediaKit
         ZLMediaKit::ext-codec
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -468,7 +535,7 @@ target_compile_definitions(mw_ffmpeg_types_tests
 target_link_libraries(mw_ffmpeg_types_tests
     PRIVATE
         Catch2::Catch2WithMain
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -484,7 +551,7 @@ target_link_libraries(mw_hardware_context_tests
     PRIVATE
         Catch2::Catch2WithMain
         CUDA::cuda_driver
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -507,7 +574,7 @@ target_link_libraries(mw_input_player_proxy_tests
         Catch2::Catch2WithMain
         FFmpeg::avutil
         ZLMediaKit::ToolKit
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -530,7 +597,7 @@ target_link_libraries(mw_packet_queue_tests
         FFmpeg::avcodec
         FFmpeg::avutil
         ZLMediaKit::ToolKit
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -550,7 +617,7 @@ target_compile_definitions(mw_recording_target_tests
 target_link_libraries(mw_recording_target_tests
     PRIVATE
         Catch2::Catch2WithMain
-        mw::streamer
+        mw::streamer_test
         ZLMediaKit::MediaKit
         ZLMediaKit::ext-codec
 )
@@ -575,7 +642,7 @@ target_link_libraries(mw_output_session_tests
         FFmpeg::avcodec
         ZLMediaKit::MediaKit
         ZLMediaKit::ext-codec
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(
@@ -591,7 +658,7 @@ target_link_libraries(mw_source_output_worker_tests
     PRIVATE
         Catch2::Catch2WithMain
         FFmpeg::avcodec
-        mw::streamer
+        mw::streamer_test
 )
 
 add_test(

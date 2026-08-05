@@ -4,9 +4,12 @@ cmake_policy(SET CMP0091 NEW)
 
 project(mw_streamer VERSION 0.1.0 LANGUAGES C CXX)
 
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static libraries" FORCE)
+option(BUILD_TESTS "Build mw-streamer tests" ${PROJECT_IS_TOP_LEVEL})
+option(BUILD_EXAMPLES "Build mw-streamer examples" OFF)
+option(BUILD_SHARED_LIBS "Build mw-streamer as a shared library" ON)
 
-include(CTest)
+set(_MW_STREAMER_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
+set(BUILD_SHARED_LIBS OFF)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -34,12 +37,17 @@ find_package(FFmpeg REQUIRED COMPONENTS
 )
 find_package(CUDAToolkit REQUIRED)
 find_package(SRT REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 add_subdirectory(third_party/ZLMediaKit)
 add_subdirectory(third_party/HdrHistogram_c)
 
-add_library(mw_streamer STATIC
+set(BUILD_SHARED_LIBS ${_MW_STREAMER_BUILD_SHARED_LIBS})
+unset(_MW_STREAMER_BUILD_SHARED_LIBS)
+
+set(MW_STREAMER_CORE_SOURCES
     src/cache/packet_queue.cc
+    src/config/toml.cc
     src/converter/av_packet_to_zlm_frame_converter.cc
     src/converter/internal/codec_bridge.cc
     src/converter/zlm_codec_parameters_converter.cc
@@ -94,7 +102,75 @@ add_library(mw_streamer STATIC
     src/resampler/audio_resampler.cc
     src/zlm/internal/config_validator.cc
 )
+
+add_library(mw_streamer
+    src/c_api.cc
+    ${MW_STREAMER_CORE_SOURCES}
+)
 add_library(mw::streamer ALIAS mw_streamer)
+
+function(mw_configure_static_interface target)
+    target_compile_definitions(${target}
+        PUBLIC MW_STREAMER_STATIC_LIBRARY
+    )
+    target_link_libraries(${target}
+        PUBLIC
+            ZLMediaKit::MediaKit
+            ZLMediaKit::ToolKit
+            fmt::fmt
+        PRIVATE
+            SRT::SRT
+            CUDA::cuda_driver
+            HdrHistogram::HdrHistogram
+            ZLMediaKit::ext-codec
+            ZLMediaKit::SRT
+            spdlog::spdlog
+            tomlplusplus::tomlplusplus
+    )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_libraries(${target}
+            PUBLIC
+                "-Wl,--no-as-needed"
+                FFmpeg::avcodec
+                FFmpeg::avformat
+                FFmpeg::avutil
+                FFmpeg::swresample
+                FFmpeg::swscale
+                "-Wl,--as-needed"
+        )
+    else()
+        target_link_libraries(${target}
+            PUBLIC
+                FFmpeg::avcodec
+                FFmpeg::avformat
+                FFmpeg::avutil
+                FFmpeg::swresample
+                FFmpeg::swscale
+        )
+    endif()
+endfunction()
+
+if(BUILD_SHARED_LIBS)
+    target_compile_definitions(mw_streamer
+        PRIVATE MW_STREAMER_BUILDING_LIBRARY
+    )
+    set_target_properties(mw_streamer
+        PROPERTIES
+            C_VISIBILITY_PRESET hidden
+            CXX_VISIBILITY_PRESET hidden
+            VISIBILITY_INLINES_HIDDEN YES
+            WINDOWS_EXPORT_ALL_SYMBOLS OFF
+    )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_options(mw_streamer
+            PRIVATE
+                "LINKER:--version-script=${PROJECT_SOURCE_DIR}/cmake/mw_streamer.map"
+                "LINKER:--exclude-libs,ALL"
+        )
+    endif()
+else()
+    mw_configure_static_interface(mw_streamer)
+endif()
 
 target_include_directories(mw_streamer
     PUBLIC
@@ -103,40 +179,66 @@ target_include_directories(mw_streamer
         "${PROJECT_SOURCE_DIR}/src"
 )
 
-target_link_libraries(mw_streamer
-    PUBLIC
-        FFmpeg::avcodec
-        FFmpeg::avutil
-        ZLMediaKit::MediaKit
-        ZLMediaKit::ToolKit
-        fmt::fmt
-    PRIVATE
-        SRT::SRT
-        CUDA::cuda_driver
-        HdrHistogram::HdrHistogram
-        ZLMediaKit::ext-codec
-        ZLMediaKit::SRT
-        spdlog::spdlog
-)
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(BUILD_SHARED_LIBS)
     target_link_libraries(mw_streamer
         PRIVATE
-            "-Wl,--push-state,--no-as-needed"
+            SRT::SRT
+            CUDA::cuda_driver
+            HdrHistogram::HdrHistogram
+            ZLMediaKit::MediaKit
+            ZLMediaKit::ToolKit
+            ZLMediaKit::ext-codec
+            ZLMediaKit::SRT
+            fmt::fmt
+            spdlog::spdlog
+            tomlplusplus::tomlplusplus
+    )
+endif()
+
+if(BUILD_SHARED_LIBS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(mw_streamer
+        PRIVATE
+            "-Wl,--no-as-needed"
+            FFmpeg::avcodec
             FFmpeg::avformat
+            FFmpeg::avutil
             FFmpeg::swresample
             FFmpeg::swscale
-            "-Wl,--pop-state"
+            "-Wl,--as-needed"
     )
-else()
+elseif(BUILD_SHARED_LIBS)
     target_link_libraries(mw_streamer
         PRIVATE
+            FFmpeg::avcodec
             FFmpeg::avformat
+            FFmpeg::avutil
             FFmpeg::swresample
             FFmpeg::swscale
     )
 endif()
 
-if(BUILD_TESTING)
+if(BUILD_TESTS)
+    enable_testing()
+
+    if(BUILD_SHARED_LIBS)
+        add_library(mw_streamer_test_support STATIC
+            ${MW_STREAMER_CORE_SOURCES}
+        )
+        add_library(mw::streamer_test ALIAS mw_streamer_test_support)
+        mw_configure_static_interface(mw_streamer_test_support)
+        target_include_directories(mw_streamer_test_support
+            PUBLIC
+                "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+            PRIVATE
+                "${PROJECT_SOURCE_DIR}/src"
+        )
+    else()
+        add_library(mw::streamer_test ALIAS mw_streamer)
+    endif()
+
     add_subdirectory(tests)
+endif()
+
+if(BUILD_EXAMPLES)
+    add_subdirectory(examples)
 endif()

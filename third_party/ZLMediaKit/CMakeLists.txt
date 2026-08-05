@@ -45,7 +45,6 @@ set(ENABLE_HLS ON CACHE INTERNAL "mw-streamer fixed feature" FORCE)
 set(ENABLE_MP4 ON CACHE INTERNAL "mw-streamer fixed feature" FORCE)
 set(ENABLE_RTPPROXY ON CACHE INTERNAL "mw-streamer fixed feature" FORCE)
 set(ENABLE_SRT ON CACHE INTERNAL "mw-streamer fixed feature" FORCE)
-set(BUILD_SHARED_LIBS OFF CACHE INTERNAL "mw-streamer builds static libraries" FORCE)
 
 ##############################################################################
 # 设置socket默认缓冲区大小为256k.如果设置为0则不设置socket的默认缓冲区大小,使用系统内核默认值(设置为0仅对linux有效)

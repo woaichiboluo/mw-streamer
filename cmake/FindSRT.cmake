@@ -1,7 +1,7 @@
 # FindSRT.cmake
 #
-# Locate the shared Secure Reliable Transport (SRT) library through its
-# pkg-config metadata.
+# Locate the Secure Reliable Transport (SRT) library through its pkg-config
+# metadata.
 #
 # Result variables:
 #
@@ -21,8 +21,9 @@
 #
 #   SRT::SRT
 #
-# Static SRT libraries are intentionally unsupported. Both pkg-config metadata
-# and the shared library are required.
+# Both pkg-config metadata and a linkable library are required. The platform's
+# normal library suffix order decides whether a shared or static library is
+# preferred.
 
 include(FindPackageHandleStandardArgs)
 
@@ -40,13 +41,6 @@ find_path(
   NO_DEFAULT_PATH
 )
 
-set(_SRT_LIBRARY_SUFFIXES "${CMAKE_FIND_LIBRARY_SUFFIXES}")
-if(WIN32 AND CMAKE_IMPORT_LIBRARY_SUFFIX)
-  set(CMAKE_FIND_LIBRARY_SUFFIXES "${CMAKE_IMPORT_LIBRARY_SUFFIX}")
-elseif(CMAKE_SHARED_LIBRARY_SUFFIX)
-  set(CMAKE_FIND_LIBRARY_SUFFIXES "${CMAKE_SHARED_LIBRARY_SUFFIX}")
-endif()
-
 find_library(
   SRT_LIBRARY
   NAMES srt
@@ -56,13 +50,11 @@ find_library(
   NO_DEFAULT_PATH
 )
 
-set(CMAKE_FIND_LIBRARY_SUFFIXES "${_SRT_LIBRARY_SUFFIXES}")
-
 find_package_handle_standard_args(
   SRT
   REQUIRED_VARS SRT_LIBRARY SRT_INCLUDE_DIR PC_SRT_FOUND
   VERSION_VAR PC_SRT_VERSION
-  REASON_FAILURE_MESSAGE "Install the shared libsrt library and its srt.pc file"
+  REASON_FAILURE_MESSAGE "Install libsrt and its srt.pc file"
 )
 
 set(SRT_VERSION "${PC_SRT_VERSION}")
@@ -72,15 +64,23 @@ set(SRT_LIBRARIES "${SRT_LIBRARY}")
 set(SRT_DEFINITIONS "${PC_SRT_CFLAGS_OTHER}")
 
 if(SRT_FOUND AND NOT TARGET SRT::SRT)
-  add_library(SRT::SRT INTERFACE IMPORTED)
+  add_library(SRT::SRT UNKNOWN IMPORTED)
   set_target_properties(
     SRT::SRT
-    PROPERTIES INTERFACE_LINK_LIBRARIES PkgConfig::PC_SRT
+    PROPERTIES
+      IMPORTED_LOCATION "${SRT_LIBRARY}"
+      INTERFACE_COMPILE_OPTIONS "${PC_SRT_CFLAGS_OTHER}"
+      INTERFACE_INCLUDE_DIRECTORIES "${SRT_INCLUDE_DIR}"
   )
-  if(WIN32)
-    set_property(
-      TARGET SRT::SRT APPEND PROPERTY
-      INTERFACE_COMPILE_DEFINITIONS SRT_DYNAMIC
+  if(UNIX AND "${SRT_LIBRARY}" MATCHES "\\.a$")
+    set(_SRT_STATIC_LIBRARIES "${PC_SRT_STATIC_LIBRARIES}")
+    list(REMOVE_ITEM _SRT_STATIC_LIBRARIES srt)
+    set_target_properties(
+      SRT::SRT
+      PROPERTIES
+        INTERFACE_LINK_DIRECTORIES "${PC_SRT_STATIC_LIBRARY_DIRS}"
+        INTERFACE_LINK_LIBRARIES "${_SRT_STATIC_LIBRARIES}"
+        INTERFACE_LINK_OPTIONS "${PC_SRT_STATIC_LDFLAGS_OTHER}"
     )
   endif()
 endif()

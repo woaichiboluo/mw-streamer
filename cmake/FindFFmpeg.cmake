@@ -159,6 +159,7 @@ find_package_handle_standard_args(
   FFmpeg
   REQUIRED_VARS FFMPEG_LIBRARIES FFMPEG_INCLUDE_DIRS
   HANDLE_COMPONENTS
+  REASON_FAILURE_MESSAGE "Install the FFmpeg development libraries"
 )
 set(FFMPEG_FOUND ${FFmpeg_FOUND})
 
@@ -169,10 +170,24 @@ foreach(_component IN LISTS _FFMPEG_FOUND_COMPONENTS)
     set_target_properties(
       FFmpeg::${_lower_component}
       PROPERTIES
-        IMPORTED_LOCATION "${${_component}_LIBRARY}"
-        INTERFACE_COMPILE_OPTIONS "${${_component}_DEFINITIONS}"
-        INTERFACE_INCLUDE_DIRECTORIES "${${_component}_INCLUDE_DIR}"
+          IMPORTED_LOCATION "${${_component}_LIBRARY}"
+          INTERFACE_COMPILE_OPTIONS "${${_component}_DEFINITIONS}"
+          INTERFACE_INCLUDE_DIRECTORIES "${${_component}_INCLUDE_DIR}"
     )
+    if(UNIX AND "${${_component}_LIBRARY}" MATCHES "\\.a$")
+      set(_static_libraries "${PC_${_component}_STATIC_LIBRARIES}")
+      list(REMOVE_ITEM _static_libraries "${_library_name}")
+      set_target_properties(
+        FFmpeg::${_lower_component}
+        PROPERTIES
+          INTERFACE_LINK_DIRECTORIES
+            "${PC_${_component}_STATIC_LIBRARY_DIRS}"
+          INTERFACE_LINK_LIBRARIES
+            "${_static_libraries}"
+          INTERFACE_LINK_OPTIONS
+            "${PC_${_component}_STATIC_LDFLAGS_OTHER}"
+      )
+    endif()
   endif()
 endforeach()
 

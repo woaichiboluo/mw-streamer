@@ -41,7 +41,17 @@ if(NOT TARGET spdlog::spdlog)
     FetchContent_MakeAvailable(spdlog)
 endif()
 
-if(BUILD_TESTING AND NOT TARGET Catch2::Catch2WithMain)
+if(NOT TARGET tomlplusplus::tomlplusplus)
+    FetchContent_Declare(
+        tomlplusplus
+        GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
+        GIT_TAG 30172438cee64926dc41fdd9c11fb3ba5b2ba9de # v3.4.0
+        GIT_PROGRESS TRUE
+    )
+    FetchContent_MakeAvailable(tomlplusplus)
+endif()
+
+if(BUILD_TESTS AND NOT TARGET Catch2::Catch2WithMain)
     set(CATCH_INSTALL_DOCS OFF CACHE BOOL "Install Catch2 documentation" FORCE)
     set(CATCH_INSTALL_EXTRAS OFF CACHE BOOL "Install Catch2 extras" FORCE)
     set(CATCH_DEVELOPMENT_BUILD OFF CACHE BOOL "Build Catch2 self-tests" FORCE)
