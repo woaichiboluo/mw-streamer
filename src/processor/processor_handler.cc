@@ -110,22 +110,6 @@ class ProcessorHandler::Impl final {
     }
   }
 
-  void InvokeVideoCallback(const std::function<void()>& callback) const {
-    if (!hardware_context_) {
-      callback();
-      return;
-    }
-
-    const auto current_scope = hardware_context_->MakeCurrent();
-    try {
-      callback();
-    } catch (...) {
-      SynchronizeHardwareAfterCallbackFailure();
-      throw;
-    }
-    hardware_context_->Synchronize();
-  }
-
   const MwStreamerProcessorSourceInfo& source_info() const noexcept {
     return source_info_;
   }
@@ -139,16 +123,6 @@ class ProcessorHandler::Impl final {
   }
 
  private:
-  void SynchronizeHardwareAfterCallbackFailure() const noexcept {
-    try {
-      hardware_context_->Synchronize();
-    } catch (const std::exception& error) {
-      Log::Error("Processor视频回调异常后的硬件同步失败：{}", error.what());
-    } catch (...) {
-      Log::Error("Processor视频回调异常后的硬件同步失败：未知异常");
-    }
-  }
-
   MwStreamerProcessorSourceInfo source_info_{};
   std::optional<ffmpeg::HardwareContext> hardware_context_;
   MwStreamerExecutionContext execution_{};
@@ -195,11 +169,6 @@ void ProcessorHandler::MarkStarted(
 void ProcessorHandler::ValidateVideoInput(
     const AVFrame& input, const MwStreamerVideoFrameView& view) const {
   impl_->ValidateVideoInput(input, view);
-}
-
-void ProcessorHandler::InvokeVideoCallback(
-    const std::function<void()>& callback) const {
-  impl_->InvokeVideoCallback(callback);
 }
 
 const MwStreamerProcessorSourceInfo& ProcessorHandler::source_info()

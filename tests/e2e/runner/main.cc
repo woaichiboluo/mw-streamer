@@ -303,6 +303,8 @@ struct ProcessorObserver {
   std::chrono::milliseconds video_jitter_min{0};
   std::chrono::milliseconds video_jitter_max{0};
   MwStreamerExecutionContext execution{};
+  CUcontext cuda_context = nullptr;
+  CUstream cuda_stream = nullptr;
   std::uint64_t video_frame_count = 0;
   std::uint64_t video_jitter_count = 0;
 };
@@ -392,6 +394,28 @@ MwStreamerProcessorStartResult OnProcessorStart(
     return kMwStreamerProcessorStartFailed;
   }
   observer->execution = *request->execution;
+  if (observer->execution.type == kMwStreamerExecutionCuda) {
+    CUdevice cuda_device = 0;
+    if (cuInit(0) != CUDA_SUCCESS ||
+        cuDeviceGet(&cuda_device, 0) != CUDA_SUCCESS ||
+        cuCtxCreate(&observer->cuda_context, CU_CTX_SCHED_AUTO, cuda_device) !=
+            CUDA_SUCCESS) {
+      return kMwStreamerProcessorStartFailed;
+    }
+
+    CUcontext popped_context = nullptr;
+    if (cuStreamCreate(&observer->cuda_stream, CU_STREAM_NON_BLOCKING) !=
+            CUDA_SUCCESS ||
+        cuCtxPopCurrent(&popped_context) != CUDA_SUCCESS ||
+        popped_context != observer->cuda_context) {
+      if (observer->cuda_context) {
+        cuCtxDestroy(observer->cuda_context);
+        observer->cuda_context = nullptr;
+      }
+      observer->cuda_stream = nullptr;
+      return kMwStreamerProcessorStartFailed;
+    }
+  }
 
   observer->events->Write(
       "processor_started",
@@ -445,15 +469,15 @@ void CopyCudaVideo(const MwStreamerVideoBufferView& input,
       throw std::invalid_argument("E2E CUDA视频平面stride无效");
     }
     CUDA_MEMCPY2D copy{};
-    copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+    copy.srcMemoryType = CU_MEMORYTYPE_UNIFIED;
     copy.srcDevice = static_cast<CUdeviceptr>(source.address);
     copy.srcPitch = static_cast<std::size_t>(source.stride_bytes);
-    copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+    copy.dstMemoryType = CU_MEMORYTYPE_UNIFIED;
     copy.dstDevice = static_cast<CUdeviceptr>(destination.address);
     copy.dstPitch = static_cast<std::size_t>(destination.stride_bytes);
     copy.WidthInBytes = source.row_bytes;
     copy.Height = source.row_count;
-    ThrowIfCudaError(cuMemcpy2DAsync(&copy, stream), "异步复制E2E CUDA视频帧");
+    ThrowIfCudaError(cuMemcpy2DAsync(&copy, stream), "复制E2E CUDA视频帧");
   }
 }
 
@@ -502,11 +526,22 @@ void ProcessVideo(const MwStreamerStreamingVideoProcessRequest* request,
   }
   if (input.memory_type != kMwStreamerMemoryCuda ||
       observer->execution.type != kMwStreamerExecutionCuda ||
-      observer->execution.native_handle == 0) {
+      !observer->cuda_context || !observer->cuda_stream) {
     throw std::invalid_argument("E2E视频透传收到未知执行上下文");
   }
-  CopyCudaVideo(input, output,
-                reinterpret_cast<CUstream>(observer->execution.native_handle));
+  CUcontext popped_context = nullptr;
+  ThrowIfCudaError(cuCtxPushCurrent(observer->cuda_context),
+                   "设置E2E用户CUDA上下文");
+  try {
+    CopyCudaVideo(input, output, observer->cuda_stream);
+    ThrowIfCudaError(cuStreamSynchronize(observer->cuda_stream),
+                     "等待E2E用户CUDA复制完成");
+  } catch (...) {
+    cuStreamSynchronize(observer->cuda_stream);
+    cuCtxPopCurrent(&popped_context);
+    throw;
+  }
+  ThrowIfCudaError(cuCtxPopCurrent(&popped_context), "恢复E2E用户CUDA上下文");
 }
 
 void OnProcessorBoundary(MwStreamerProcessorBoundaryReason reason,
@@ -539,7 +574,15 @@ void OnProcessorBoundary(MwStreamerProcessorBoundaryReason reason,
 
 void OnProcessorStop(void* user_context) {
   auto* observer = static_cast<ProcessorObserver*>(user_context);
-  if (observer && observer->events) {
+  if (!observer) {
+    return;
+  }
+  if (observer->cuda_context) {
+    cuCtxDestroy(observer->cuda_context);
+    observer->cuda_context = nullptr;
+    observer->cuda_stream = nullptr;
+  }
+  if (observer->events) {
     observer->events->Write("processor_stopped");
   }
 }

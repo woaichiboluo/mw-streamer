@@ -1,10 +1,7 @@
-#include <cuda.h>
-
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 #include <cstring>
 #include <exception>
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -13,7 +10,6 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
-#include <libavutil/hwcontext_cuda.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/samplefmt.h>
 }
@@ -203,7 +199,6 @@ TEST_CASE("StreamingProcessorHandler冻结构造信息并执行完整生命周�
   CHECK(state.initial_config == "initial");
   CHECK(state.source_info.video.width == 64);
   CHECK(state.execution.type == kMwStreamerExecutionCpu);
-  CHECK(state.execution.native_handle == 0);
 
   auto video_input = MakeSoftwareVideoFrame();
   video_input->crop_top = 2;
@@ -308,188 +303,6 @@ TEST_CASE("StreamingProcessorHandler拒绝运行期视频结构变化") {
   CHECK_THROWS_AS(handler.ProcessVideo(changed_format), std::invalid_argument);
 }
 
-struct CudaCallbackState {
-  CUcontext expected_context = nullptr;
-  CUstream stream = nullptr;
-  CUevent completion_event = nullptr;
-  CUresult current_result = CUDA_ERROR_UNKNOWN;
-  CUresult write_result = CUDA_ERROR_UNKNOWN;
-  CUresult event_result = CUDA_ERROR_UNKNOWN;
-  bool current_context_matches = false;
-  bool throw_after_submit = false;
-};
-
-MwStreamerProcessorStartResult CaptureCudaExecution(
-    const MwStreamerStreamingProcessorStartRequest* request,
-    void* user_context) {
-  auto* state = static_cast<CudaCallbackState*>(user_context);
-  state->stream = reinterpret_cast<CUstream>(request->execution->native_handle);
-  return kMwStreamerProcessorStartSuccess;
-}
-
-void ProcessCudaVideo(const MwStreamerStreamingVideoProcessRequest* request,
-                      void* user_context) {
-  auto* state = static_cast<CudaCallbackState*>(user_context);
-  CUcontext current_context = nullptr;
-  state->current_result = cuCtxGetCurrent(&current_context);
-  state->current_context_matches = current_context == state->expected_context;
-
-  state->write_result = CUDA_SUCCESS;
-  for (std::uint32_t plane = 0;
-       plane < request->output->storage.linear.plane_count; ++plane) {
-    const auto& output_plane = request->output->storage.linear.planes[plane];
-    const auto result =
-        cuMemsetD8Async(static_cast<CUdeviceptr>(output_plane.address), 0x5a,
-                        static_cast<std::size_t>(output_plane.stride_bytes) *
-                            output_plane.row_count,
-                        state->stream);
-    if (result != CUDA_SUCCESS) {
-      state->write_result = result;
-      return;
-    }
-  }
-  if (state->completion_event) {
-    state->event_result = cuEventRecord(state->completion_event, state->stream);
-  }
-  if (state->throw_after_submit) {
-    throw std::runtime_error("CUDA Processor回调失败");
-  }
-}
-
-TEST_CASE("StreamingProcessorHandler复制CUDA上下文并等待框架Stream") {
-  Frame input;
-  const AVCUDADeviceContext* cuda_context = nullptr;
-  std::unique_ptr<StreamingProcessorHandler> handler;
-  {
-    const auto hardware_context = HardwareContext::CreateCuda(0);
-    AVBufferRef* frames_ref =
-        av_hwframe_ctx_alloc(const_cast<AVBufferRef*>(hardware_context.get()));
-    REQUIRE(frames_ref != nullptr);
-
-    auto* frames_context =
-        reinterpret_cast<AVHWFramesContext*>(frames_ref->data);
-    frames_context->format = AV_PIX_FMT_CUDA;
-    frames_context->sw_format = AV_PIX_FMT_NV12;
-    frames_context->width = 64;
-    frames_context->height = 32;
-    REQUIRE(av_hwframe_ctx_init(frames_ref) >= 0);
-
-    const int allocation_result =
-        av_hwframe_get_buffer(frames_ref, input.get(), 0);
-    av_buffer_unref(&frames_ref);
-    REQUIRE(allocation_result >= 0);
-
-    const auto* device_context = reinterpret_cast<const AVHWDeviceContext*>(
-        hardware_context.get()->data);
-    cuda_context =
-        static_cast<const AVCUDADeviceContext*>(device_context->hwctx);
-    REQUIRE(cuda_context != nullptr);
-
-    const auto source_info = MakeSourceInfo(true, false);
-    handler = std::make_unique<StreamingProcessorHandler>(source_info,
-                                                          &hardware_context);
-  }
-  input->pts = 90;
-  input->duration = 1;
-  input->time_base = {1, 25};
-
-  CudaCallbackState state;
-  state.expected_context = cuda_context->cuda_ctx;
-  MwStreamerStreamingProcessorCallbacks callbacks{};
-  callbacks.user_context = &state;
-  callbacks.on_start = CaptureCudaExecution;
-  callbacks.process_video = ProcessCudaVideo;
-  const MwStreamerStreamingProcessorConfig config = {
-      32,
-      16,
-      "",
-  };
-  REQUIRE(handler->Start(config, callbacks) ==
-          kMwStreamerProcessorStartSuccess);
-
-  auto output = handler->ProcessVideo(input);
-  CHECK(state.current_result == CUDA_SUCCESS);
-  CHECK(state.current_context_matches);
-  CHECK(state.stream == cuda_context->stream);
-  CHECK(state.write_result == CUDA_SUCCESS);
-  CHECK(cuStreamQuery(cuda_context->stream) == CUDA_SUCCESS);
-  CHECK(output->format == AV_PIX_FMT_CUDA);
-  CHECK(output->width == 32);
-  CHECK(output->height == 16);
-  CHECK(output->pts == 90);
-
-  std::uint8_t first_byte = 0;
-  {
-    const auto inspection_context = HardwareContext::CreateCuda(0);
-    const auto current_scope = inspection_context.MakeCurrent();
-    REQUIRE(cuMemcpyDtoH(&first_byte,
-                         reinterpret_cast<CUdeviceptr>(output->data[0]),
-                         sizeof(first_byte)) == CUDA_SUCCESS);
-  }
-  CHECK(first_byte == 0x5a);
-}
-
-TEST_CASE("StreamingProcessorHandler在CUDA视频回调异常后同步并保留原异常") {
-  const auto hardware_context = HardwareContext::CreateCuda(0);
-  AVBufferRef* frames_ref =
-      av_hwframe_ctx_alloc(const_cast<AVBufferRef*>(hardware_context.get()));
-  REQUIRE(frames_ref != nullptr);
-
-  auto* frames_context = reinterpret_cast<AVHWFramesContext*>(frames_ref->data);
-  frames_context->format = AV_PIX_FMT_CUDA;
-  frames_context->sw_format = AV_PIX_FMT_NV12;
-  frames_context->width = 64;
-  frames_context->height = 32;
-  REQUIRE(av_hwframe_ctx_init(frames_ref) >= 0);
-
-  Frame input;
-  const int allocation_result =
-      av_hwframe_get_buffer(frames_ref, input.get(), 0);
-  av_buffer_unref(&frames_ref);
-  REQUIRE(allocation_result >= 0);
-  input->time_base = {1, 25};
-
-  const auto* device_context =
-      reinterpret_cast<const AVHWDeviceContext*>(hardware_context.get()->data);
-  const auto* cuda_context =
-      static_cast<const AVCUDADeviceContext*>(device_context->hwctx);
-  REQUIRE(cuda_context != nullptr);
-
-  CudaCallbackState state;
-  state.expected_context = cuda_context->cuda_ctx;
-  state.throw_after_submit = true;
-  {
-    const auto current_scope = hardware_context.MakeCurrent();
-    REQUIRE(cuEventCreate(&state.completion_event, CU_EVENT_DISABLE_TIMING) ==
-            CUDA_SUCCESS);
-  }
-
-  const auto source_info = MakeSourceInfo(true, false);
-  StreamingProcessorHandler handler(source_info, &hardware_context);
-  MwStreamerStreamingProcessorCallbacks callbacks{};
-  callbacks.user_context = &state;
-  callbacks.on_start = CaptureCudaExecution;
-  callbacks.process_video = ProcessCudaVideo;
-  const MwStreamerStreamingProcessorConfig config = {
-      32,
-      16,
-      "",
-  };
-  REQUIRE(handler.Start(config, callbacks) == kMwStreamerProcessorStartSuccess);
-
-  CheckRuntimeError([&]() { handler.ProcessVideo(input); },
-                    "CUDA Processor回调失败");
-  CHECK(state.current_result == CUDA_SUCCESS);
-  CHECK(state.current_context_matches);
-  CHECK(state.write_result == CUDA_SUCCESS);
-  CHECK(state.event_result == CUDA_SUCCESS);
-  {
-    const auto current_scope = hardware_context.MakeCurrent();
-    CHECK(cuEventQuery(state.completion_event) == CUDA_SUCCESS);
-    CHECK(cuEventDestroy(state.completion_event) == CUDA_SUCCESS);
-  }
-}
-
 TEST_CASE("StreamingProcessorHandler生成CUDA默认黑帧") {
   const auto hardware_context = HardwareContext::CreateCuda(0);
   AVBufferRef* frames_ref =
@@ -527,11 +340,8 @@ TEST_CASE("StreamingProcessorHandler生成CUDA默认黑帧") {
   software_output->format = AV_PIX_FMT_NV12;
   software_output->width = 32;
   software_output->height = 16;
-  {
-    const auto current_scope = hardware_context.MakeCurrent();
-    REQUIRE(av_hwframe_transfer_data(software_output.get(), output.get(), 0) >=
-            0);
-  }
+  REQUIRE(av_hwframe_transfer_data(software_output.get(), output.get(), 0) >=
+          0);
 
   CHECK(software_output->data[0][0] == 16);
   CHECK(software_output->data[1][0] == 128);

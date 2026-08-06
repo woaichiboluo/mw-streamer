@@ -190,7 +190,6 @@ int main(void) {
   };
   const MwStreamerExecutionContext execution = {
       .type = kMwStreamerExecutionCuda,
-      .native_handle = (uintptr_t)5,
   };
   const MwStreamerStreamingProcessorStartRequest start_request = {
       .source_info = &source_info,

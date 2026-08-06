@@ -1,5 +1,3 @@
-#include <cuda.h>
-
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 #include <stdexcept>
@@ -7,7 +5,6 @@
 extern "C" {
 #include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
-#include <libavutil/hwcontext_cuda.h>
 }
 
 #include "mw/ffmpeg/frame.h"
@@ -17,106 +14,44 @@ namespace {
 
 using mw::streamer::ffmpeg::HardwareContext;
 
-const AVCUDADeviceContext* GetCudaContext(const HardwareContext& context) {
-  const auto* device_context =
-      reinterpret_cast<const AVHWDeviceContext*>(context.get()->data);
-  return static_cast<const AVCUDADeviceContext*>(device_context->hwctx);
-}
-
-TEST_CASE("HardwareContext共享CUDA Primary Context并创建独立流") {
+TEST_CASE("HardwareContext通过FFmpeg在指定设备创建CUDA上下文") {
   const auto context = HardwareContext::CreateCuda(0);
   const auto other_context = HardwareContext::CreateCuda(0);
-  const auto* cuda_context = GetCudaContext(context);
-  const auto* other_cuda_context = GetCudaContext(other_context);
 
   CHECK(context.type() == AV_HWDEVICE_TYPE_CUDA);
   CHECK(context.device_index() == 0);
-  REQUIRE(cuda_context != nullptr);
-  REQUIRE(other_cuda_context != nullptr);
-  CHECK(cuda_context->cuda_ctx != nullptr);
-  CHECK(cuda_context->stream != nullptr);
-  CHECK(cuda_context->cuda_ctx == other_cuda_context->cuda_ctx);
-  CHECK(cuda_context->stream != other_cuda_context->stream);
-  CHECK(context.native_handle() ==
-        reinterpret_cast<std::uintptr_t>(cuda_context->stream));
+  REQUIRE(context.get() != nullptr);
+  REQUIRE(context.get()->data != nullptr);
+  REQUIRE(other_context.get() != nullptr);
+  CHECK(other_context.get()->data != context.get()->data);
 }
 
-TEST_CASE("HardwareContext拷贝共享底层CUDA资源") {
+TEST_CASE("HardwareContext拷贝共享FFmpeg硬件设备上下文") {
   const auto original = HardwareContext::CreateCuda(0);
   const auto copy = original;
 
   CHECK(copy.get() != original.get());
   CHECK(copy.get()->data == original.get()->data);
-  CHECK(copy.native_handle() == original.native_handle());
   CHECK(copy.device_index() == original.device_index());
 }
 
 TEST_CASE("FFmpeg引用可独立维持HardwareContext资源生命周期") {
   AVBufferRef* retained_context = nullptr;
-  std::uintptr_t stream = 0;
   {
     const auto context = HardwareContext::CreateCuda(0);
     retained_context = av_buffer_ref(context.get());
     REQUIRE(retained_context != nullptr);
-    stream = context.native_handle();
   }
 
   const auto* device_context =
       reinterpret_cast<const AVHWDeviceContext*>(retained_context->data);
-  const auto* cuda_context =
-      static_cast<const AVCUDADeviceContext*>(device_context->hwctx);
-  CHECK(reinterpret_cast<std::uintptr_t>(cuda_context->stream) == stream);
-  CHECK(cuda_context->cuda_ctx != nullptr);
+  REQUIRE(device_context != nullptr);
+  CHECK(device_context->type == AV_HWDEVICE_TYPE_CUDA);
 
   av_buffer_unref(&retained_context);
 }
 
-TEST_CASE("HardwareContext在作用域内切换并恢复当前上下文") {
-  const auto context = HardwareContext::CreateCuda(0);
-  const auto* cuda_context = GetCudaContext(context);
-
-  CUcontext previous = nullptr;
-  REQUIRE(cuCtxGetCurrent(&previous) == CUDA_SUCCESS);
-  {
-    const auto current_scope = context.MakeCurrent();
-    CUcontext current = nullptr;
-    REQUIRE(cuCtxGetCurrent(&current) == CUDA_SUCCESS);
-    CHECK(current == cuda_context->cuda_ctx);
-  }
-
-  CUcontext restored = nullptr;
-  REQUIRE(cuCtxGetCurrent(&restored) == CUDA_SUCCESS);
-  CHECK(restored == previous);
-}
-
-TEST_CASE("HardwareContext同步自身执行流并恢复当前上下文") {
-  const auto context = HardwareContext::CreateCuda(0);
-  const auto* cuda_context = GetCudaContext(context);
-  REQUIRE(cuda_context != nullptr);
-
-  CUevent completion = nullptr;
-  {
-    const auto current_scope = context.MakeCurrent();
-    REQUIRE(cuEventCreate(&completion, CU_EVENT_DISABLE_TIMING) ==
-            CUDA_SUCCESS);
-    REQUIRE(cuEventRecord(completion, cuda_context->stream) == CUDA_SUCCESS);
-  }
-
-  CUcontext previous = nullptr;
-  REQUIRE(cuCtxGetCurrent(&previous) == CUDA_SUCCESS);
-  context.Synchronize();
-  CHECK(cuEventQuery(completion) == CUDA_SUCCESS);
-
-  CUcontext restored = nullptr;
-  REQUIRE(cuCtxGetCurrent(&restored) == CUDA_SUCCESS);
-  CHECK(restored == previous);
-  {
-    const auto current_scope = context.MakeCurrent();
-    CHECK(cuEventDestroy(completion) == CUDA_SUCCESS);
-  }
-}
-
-TEST_CASE("HardwareContext可供FFmpeg分配CUDA帧") {
+TEST_CASE("HardwareContext可供FFmpeg分配并传输CUDA帧") {
   const auto context = HardwareContext::CreateCuda(0);
   AVBufferRef* frames_ref =
       av_hwframe_ctx_alloc(const_cast<AVBufferRef*>(context.get()));
@@ -138,21 +73,33 @@ TEST_CASE("HardwareContext可供FFmpeg分配CUDA帧") {
   mw::streamer::ffmpeg::Frame frame;
   const int allocate_result = av_hwframe_get_buffer(frames_ref, frame.get(), 0);
   av_buffer_unref(&frames_ref);
-
   REQUIRE(allocate_result >= 0);
-  CHECK(frame->format == AV_PIX_FMT_CUDA);
-  CHECK(frame->hw_frames_ctx != nullptr);
-  const auto* mapped_context = HardwareContext::GetFramesContext(*frame.get());
-  REQUIRE(mapped_context != nullptr);
-  CHECK(mapped_context->sw_format == AV_PIX_FMT_NV12);
+
+  mw::streamer::ffmpeg::Frame source;
+  source->format = AV_PIX_FMT_NV12;
+  source->width = 64;
+  source->height = 64;
+  REQUIRE(av_frame_get_buffer(source.get(), 32) >= 0);
+  REQUIRE(av_frame_make_writable(source.get()) >= 0);
+  source->data[0][0] = 0x5a;
+  source->data[1][0] = 0xa5;
+  REQUIRE(av_hwframe_transfer_data(frame.get(), source.get(), 0) >= 0);
+
+  mw::streamer::ffmpeg::Frame restored;
+  restored->format = AV_PIX_FMT_NV12;
+  restored->width = 64;
+  restored->height = 64;
+  REQUIRE(av_frame_get_buffer(restored.get(), 32) >= 0);
+  REQUIRE(av_hwframe_transfer_data(restored.get(), frame.get(), 0) >= 0);
+
+  CHECK(restored->data[0][0] == 0x5a);
+  CHECK(restored->data[1][0] == 0xa5);
+  CHECK(HardwareContext::GetFramesContext(*frame.get()) != nullptr);
   CHECK(context.IsCompatible(*frame.get()));
 
   const auto other_context = HardwareContext::CreateCuda(0);
   CHECK_FALSE(other_context.IsCompatible(*frame.get()));
-
-  mw::streamer::ffmpeg::Frame software_frame;
-  software_frame->format = AV_PIX_FMT_NV12;
-  CHECK(HardwareContext::GetFramesContext(*software_frame.get()) == nullptr);
+  CHECK(HardwareContext::GetFramesContext(*source.get()) == nullptr);
 }
 
 TEST_CASE("HardwareContext拒绝无效CUDA设备索引") {

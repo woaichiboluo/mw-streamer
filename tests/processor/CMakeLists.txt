@@ -48,7 +48,6 @@ add_executable(mw_processor_handler_tests
 target_link_libraries(mw_processor_handler_tests
     PRIVATE
         Catch2::Catch2WithMain
-        CUDA::cuda_driver
         mw::streamer_test
 )
 

@@ -2,6 +2,7 @@ set(MW_STREAMER_TEST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 set(MW_STREAMER_TEST_DATA_DIR "${MW_STREAMER_TEST_ROOT}/data")
 
 add_subdirectory(api)
+add_subdirectory(cmake)
 add_subdirectory(config)
 add_subdirectory(processor)
 add_subdirectory(media)

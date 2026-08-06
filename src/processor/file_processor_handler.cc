@@ -65,10 +65,8 @@ void FileProcessorHandler::ProcessVideo(const ffmpeg::Frame& input) {
   const internal::VideoFrameAdapter input_adapter(input);
   ValidateVideoInput(*input.get(), input_adapter.view());
   if (impl_->callbacks.process_video) {
-    InvokeVideoCallback([&]() {
-      impl_->callbacks.process_video(&input_adapter.view(),
-                                     impl_->callbacks.user_context);
-    });
+    impl_->callbacks.process_video(&input_adapter.view(),
+                                   impl_->callbacks.user_context);
   }
 }
 

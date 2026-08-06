@@ -112,9 +112,7 @@ ffmpeg::Frame StreamingProcessorHandler::ProcessVideo(
         &input_adapter.view(),
         &output_view,
     };
-    InvokeVideoCallback([&]() {
-      impl_->callbacks.process_video(&request, impl_->callbacks.user_context);
-    });
+    impl_->callbacks.process_video(&request, impl_->callbacks.user_context);
   }
 
   output.CopyPropertiesFrom(input);

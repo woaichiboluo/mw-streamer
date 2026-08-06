@@ -1,7 +1,6 @@
 #ifndef MW_STREAMER_INCLUDE_MW_PROCESSOR_PROCESSOR_HANDLER_H_
 #define MW_STREAMER_INCLUDE_MW_PROCESSOR_PROCESSOR_HANDLER_H_
 
-#include <functional>
 #include <memory>
 #include <string>
 
@@ -37,7 +36,6 @@ class ProcessorHandler {
                    MwStreamerProcessorStopCallback on_stop);
   void ValidateVideoInput(const AVFrame& input,
                           const MwStreamerVideoFrameView& view) const;
-  void InvokeVideoCallback(const std::function<void()>& callback) const;
 
   const MwStreamerProcessorSourceInfo& source_info() const noexcept;
   const MwStreamerExecutionContext& execution() const noexcept;

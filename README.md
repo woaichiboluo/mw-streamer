@@ -17,19 +17,27 @@
 ```bash
 # C ABI交付模式，默认生成so或dll，只导出mw_*接口。
 cmake -S . -B build-shared -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=ON
+  -DBUILD_SHARED_LIBS=ON \
+  -DFFMPEG_LINKAGE=SHARED \
+  -DSRT_LINKAGE=SHARED
 cmake --build build-shared --parallel
 
 # C++集成模式，生成包含Pipeline公开API的静态库。
 cmake -S . -B build-static -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=OFF
+  -DBUILD_SHARED_LIBS=OFF \
+  -DFFMPEG_LINKAGE=SHARED \
+  -DSRT_LINKAGE=SHARED
 cmake --build build-static --parallel
 ```
 
 两种模式互斥，一个构建目录只生成一种 `mw-streamer` 库，默认使用 `SHARED`。
 动态模式只公开 `mw/c_api.h` 中的 C ABI；静态模式供 C++ 调用方直接使用 Pipeline
-等公开类型。FFmpeg、SRT 和 OpenSSL 在两种模式下都由用户预先安装；CMake 按平台
-默认顺序优先查找共享库，也接受用户提供的静态库，不对依赖的许可证策略做判断。
+等公开类型。FFmpeg、SRT 和 OpenSSL 在两种模式下都由用户预先安装。FFmpeg 和 SRT
+分别通过 `FFMPEG_LINKAGE`、`SRT_LINKAGE` 明确选择 `SHARED` 或 `STATIC`，不能根据
+Windows 的 `.lib` 后缀推断；必要时可用 `FFmpeg_ROOT`、`SRT_ROOT` 指定安装目录。
+FFmpeg 要求安装 `pkg-config` 或兼容的 `pkgconf`，并为所用组件提供 `.pc` 文件；
+静态 FFmpeg 的私有依赖由各组件的 `.pc` 传递。静态 SRT 的私有链接依赖由
+`SRT::SRT` 根据匹配的 `srt.pc` 或 Windows 官方包中的 `libsrt.props` 传递。
 ZLMediaKit 固定源码位于
 `third_party/ZLMediaKit`，其上游版本和裁剪边界记录在该目录的文档及 Git 历史中。
 
@@ -38,6 +46,8 @@ ZLMediaKit 固定源码位于
 ```bash
 cmake -S . -B build \
   -DBUILD_SHARED_LIBS=ON \
+  -DFFMPEG_LINKAGE=SHARED \
+  -DSRT_LINKAGE=SHARED \
   -DBUILD_TESTS=ON \
   -DBUILD_EXAMPLES=ON
 cmake --build build --parallel

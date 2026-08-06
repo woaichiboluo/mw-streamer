@@ -445,7 +445,8 @@ void SrtCaller::drainReceive(int32_t fd,
         }
 
         buffer->setSize(0);
-        SRT_MSGCTRL control = srt_msgctrl_default;
+        SRT_MSGCTRL control;
+        srt_msgctrl_init(&control);
         int received = SRT_ERROR;
         int error = SRT_SUCCESS;
         bool transport_stale = false;
@@ -655,7 +656,8 @@ void SrtCaller::drainSend(int32_t fd,
             packet = _send_queue.front();
         }
 
-        SRT_MSGCTRL control = srt_msgctrl_default;
+        SRT_MSGCTRL control;
+        srt_msgctrl_init(&control);
         int sent = SRT_ERROR;
         int error = SRT_SUCCESS;
         {

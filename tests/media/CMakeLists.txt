@@ -118,7 +118,6 @@ add_executable(mw_hardware_context_tests
 target_link_libraries(mw_hardware_context_tests
     PRIVATE
         Catch2::Catch2WithMain
-        CUDA::cuda_driver
         mw::streamer_test
 )
 

@@ -289,14 +289,12 @@ void StandbyVideoFrame::Prepare(
     }
     auto software = ConvertCanvas(canvas, frames_context->sw_format);
     ffmpeg::Frame hardware;
-    const auto current_scope = hardware_context->MakeCurrent();
     ffmpeg::ThrowIfError(
         av_hwframe_get_buffer(prototype->hw_frames_ctx, hardware.get(), 0),
         "分配CUDA备播视频帧");
     ffmpeg::ThrowIfError(
         av_hwframe_transfer_data(hardware.get(), software.get(), 0),
         "上传CUDA备播视频帧");
-    hardware_context->Synchronize();
     frame_ = std::move(hardware);
   }
 

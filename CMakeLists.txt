@@ -35,9 +35,7 @@ find_package(FFmpeg REQUIRED COMPONENTS
     SWRESAMPLE
     SWSCALE
 )
-find_package(CUDAToolkit REQUIRED)
 find_package(SRT REQUIRED)
-find_package(OpenSSL REQUIRED)
 
 add_subdirectory(third_party/ZLMediaKit)
 add_subdirectory(third_party/HdrHistogram_c)
@@ -120,7 +118,6 @@ function(mw_configure_static_interface target)
             fmt::fmt
         PRIVATE
             SRT::SRT
-            CUDA::cuda_driver
             HdrHistogram::HdrHistogram
             ZLMediaKit::ext-codec
             ZLMediaKit::SRT
@@ -183,7 +180,6 @@ if(BUILD_SHARED_LIBS)
     target_link_libraries(mw_streamer
         PRIVATE
             SRT::SRT
-            CUDA::cuda_driver
             HdrHistogram::HdrHistogram
             ZLMediaKit::MediaKit
             ZLMediaKit::ToolKit

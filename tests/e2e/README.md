@@ -48,7 +48,9 @@ FFprobe 和 MediaMTX，媒体配置只需要填写一个目录。
 ## 构建运行器
 
 ```bash
-cmake -S . -B build -DBUILD_TESTS=ON
+cmake -S . -B build -DBUILD_TESTS=ON \
+  -DFFMPEG_LINKAGE=SHARED \
+  -DSRT_LINKAGE=SHARED
 cmake --build build --target mw_streamer_e2e_runner -j
 ```
 
@@ -57,6 +59,8 @@ cmake --build build --target mw_streamer_e2e_runner -j
 
 ```bash
 cmake -S . -B build -DBUILD_TESTS=ON \
+  -DFFMPEG_LINKAGE=SHARED \
+  -DSRT_LINKAGE=SHARED \
   -DFFmpeg_ROOT=/absolute/path/to/ffmpeg
 ```
 

@@ -180,7 +180,6 @@ TEST_CASE("CUDA video decoder emits CUDA frames on the configured device") {
   REQUIRE(decoder.hardware_context() != nullptr);
   CHECK(decoder.config().backend == VideoDecoderBackend::kCuda);
   CHECK(decoder.hardware_context()->device_index() == 0);
-  CHECK(decoder.hardware_context()->native_handle() != 0);
 
   std::size_t decoded_frames = 0;
   bool valid_frames = true;

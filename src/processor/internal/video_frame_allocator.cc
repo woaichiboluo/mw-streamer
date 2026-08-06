@@ -92,9 +92,7 @@ ffmpeg::Frame VideoFrameAllocator::GetBlackFrame(
     throw std::invalid_argument("CUDA黑帧分配缺少兼容的硬件上下文");
   }
 
-  const auto current_scope = hardware_context->MakeCurrent();
   black_frame_ = AllocateBlackFrame(input);
-  hardware_context->Synchronize();
   return black_frame_->Ref();
 }
 

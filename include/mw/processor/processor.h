@@ -123,12 +123,8 @@ typedef enum MwStreamerProcessorBoundaryReason {
   kMwStreamerProcessorEndOfInput,
 } MwStreamerProcessorBoundaryReason;
 
-// The native handle is backend-specific and borrowed for the Processor
-// lifetime. It is zero for synchronous CPU execution and a
-// cudaStream_t-compatible value for CUDA execution.
 typedef struct MwStreamerExecutionContext {
   MwStreamerExecutionType type;
-  uintptr_t native_handle;
 } MwStreamerExecutionContext;
 
 typedef struct MwStreamerVideoPlaneView {
@@ -277,9 +273,9 @@ typedef MwStreamerProcessorStartResult (*MwStreamerFileProcessorStartCallback)(
     const MwStreamerFileProcessorStartRequest* request, void* user_context);
 
 // Every Streaming callback must completely produce one output for one input.
-// CPU output is ready when the callback returns. For asynchronous backends,
-// the final output write must have been submitted to the supplied execution
-// sequence.
+// All writes to output must be complete when the callback returns. A Processor
+// using an asynchronous backend is responsible for waiting only for its own
+// final output write before returning.
 typedef void (*MwStreamerStreamingProcessVideoCallback)(
     const MwStreamerStreamingVideoProcessRequest* request, void* user_context);
 
