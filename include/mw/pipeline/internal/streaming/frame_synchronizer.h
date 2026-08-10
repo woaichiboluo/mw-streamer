@@ -98,7 +98,7 @@ class FrameSynchronizer final {
   OutputFrame TakeRepeatedVideo(bool force_key_frame);
   OutputFrame TakeStandbyVideo(bool force_key_frame);
   bool DropLateFrames(std::deque<TimedFrame>& queue, TrackState& track,
-                      std::int64_t duration_us);
+                      AVMediaType media_type, std::int64_t duration_us);
   std::int64_t DesiredTimeUs(const TimedFrame& frame) const;
   bool AudioDueBeforeVideo() const noexcept;
   std::optional<Clock::time_point> MissingTrackDeadline() const noexcept;
@@ -131,6 +131,9 @@ class FrameSynchronizer final {
   bool standby_ = false;
   bool transition_ = false;
   bool force_next_real_video_ = false;
+  std::uint64_t dropped_audio_frames_ = 0;
+  std::uint64_t dropped_video_frames_ = 0;
+  std::uint64_t repeated_video_frames_ = 0;
 };
 
 }  // namespace mw::streamer::pipeline::internal::streaming

@@ -14,11 +14,14 @@ extern "C" {
 
 #include "mw/ffmpeg/error.h"
 #include "mw/ffmpeg/hardware_context.h"
+#include "mw/log/logging.h"
 
 namespace mw::streamer::pipeline::internal::streaming {
 namespace {
 
 constexpr AVRational kMicroseconds{1, AV_TIME_BASE};
+
+using Log = log::Module<log::LogModule::kStreamer>;
 
 std::int64_t AudioFrameDurationUs(const ffmpeg::Frame& frame) {
   return av_rescale_q(frame->nb_samples, AVRational{1, frame->sample_rate},
@@ -369,9 +372,11 @@ std::optional<FrameSynchronizer::OutputFrame> FrameSynchronizer::TakeRealFrame(
           ? av_rescale_q(video_duration_, video_.time_base, kMicroseconds)
           : 0;
   const bool dropped_audio =
-      has_audio_ && DropLateFrames(audio_frames_, audio_, audio_duration_us);
+      has_audio_ && DropLateFrames(audio_frames_, audio_, AVMEDIA_TYPE_AUDIO,
+                                   audio_duration_us);
   const bool dropped_video =
-      has_video_ && DropLateFrames(video_frames_, video_, video_duration_us);
+      has_video_ && DropLateFrames(video_frames_, video_, AVMEDIA_TYPE_VIDEO,
+                                   video_duration_us);
   if (finished()) {
     return std::nullopt;
   }
@@ -472,6 +477,14 @@ FrameSynchronizer::TakeStandbyFrame(Clock::time_point now) {
 }
 
 FrameSynchronizer::OutputFrame FrameSynchronizer::TakeAudio(bool silence) {
+  if (!silence && dropped_audio_frames_ > 0) {
+    Log::Info(
+        "FrameSynchronizer音频帧恢复: dropped_frames={}, desired_pts_us={}, "
+        "output_pts_us={}",
+        dropped_audio_frames_, DesiredTimeUs(audio_frames_.front()),
+        TimeUs(audio_));
+    dropped_audio_frames_ = 0;
+  }
   ffmpeg::Frame frame =
       silence ? silence_frame_->Ref() : std::move(audio_frames_.front().frame);
   if (!silence) {
@@ -490,6 +503,19 @@ FrameSynchronizer::OutputFrame FrameSynchronizer::TakeAudio(bool silence) {
 
 FrameSynchronizer::OutputFrame FrameSynchronizer::TakeRealVideo(
     bool force_key_frame) {
+  if (dropped_video_frames_ > 0 || repeated_video_frames_ > 0) {
+    const auto source_pts_us = video_frames_.front().source_pts_us;
+    const auto desired_pts_us = DesiredTimeUs(video_frames_.front());
+    const auto output_pts_us = TimeUs(video_);
+    Log::Info(
+        "FrameSynchronizer恢复输出真实视频帧: dropped_frames={}, "
+        "repeated_frames={}, source_pts_us={}, desired_pts_us={}, "
+        "output_pts_us={}, gap_us={}",
+        dropped_video_frames_, repeated_video_frames_, source_pts_us,
+        desired_pts_us, output_pts_us, desired_pts_us - output_pts_us);
+    dropped_video_frames_ = 0;
+    repeated_video_frames_ = 0;
+  }
   auto frame = std::move(video_frames_.front().frame);
   video_frames_.pop_front();
   frame->time_base = video_.time_base;
@@ -502,6 +528,23 @@ FrameSynchronizer::OutputFrame FrameSynchronizer::TakeRealVideo(
 
 FrameSynchronizer::OutputFrame FrameSynchronizer::TakeRepeatedVideo(
     bool force_key_frame) {
+  if (repeated_video_frames_ == 0) {
+    const auto output_pts_us = TimeUs(video_);
+    if (video_frames_.empty()) {
+      Log::Warning(
+          "FrameSynchronizer开始重复上一视频帧: output_pts_us={}, "
+          "next_frame_missing=true",
+          output_pts_us);
+    } else {
+      const auto next_desired_pts_us = DesiredTimeUs(video_frames_.front());
+      Log::Warning(
+          "FrameSynchronizer开始重复上一视频帧: output_pts_us={}, "
+          "next_desired_pts_us={}, gap_us={}",
+          output_pts_us, next_desired_pts_us,
+          next_desired_pts_us - output_pts_us);
+    }
+  }
+  ++repeated_video_frames_;
   auto frame = last_video_frame_->Ref();
   frame->time_base = video_.time_base;
   frame->pts = video_.next_pts;
@@ -522,14 +565,36 @@ FrameSynchronizer::OutputFrame FrameSynchronizer::TakeStandbyVideo(
 
 bool FrameSynchronizer::DropLateFrames(std::deque<TimedFrame>& queue,
                                        TrackState& track,
+                                       AVMediaType media_type,
                                        std::int64_t duration_us) {
-  bool dropped = false;
+  std::uint64_t dropped = 0;
+  std::int64_t first_desired_pts_us = AV_NOPTS_VALUE;
+  std::int64_t last_desired_pts_us = AV_NOPTS_VALUE;
   while (!queue.empty() &&
          DesiredTimeUs(queue.front()) + duration_us / 2 < TimeUs(track)) {
+    if (dropped == 0) {
+      first_desired_pts_us = DesiredTimeUs(queue.front());
+    }
+    last_desired_pts_us = DesiredTimeUs(queue.front());
     queue.pop_front();
-    dropped = true;
+    ++dropped;
   }
-  return dropped;
+  if (dropped == 0) {
+    return false;
+  }
+
+  auto& episode_count = media_type == AVMEDIA_TYPE_AUDIO
+                            ? dropped_audio_frames_
+                            : dropped_video_frames_;
+  if (episode_count == 0) {
+    Log::Warning(
+        "FrameSynchronizer开始丢弃过期{}帧: dropped_frames={}, "
+        "first_desired_pts_us={}, last_desired_pts_us={}, output_pts_us={}",
+        media_type == AVMEDIA_TYPE_AUDIO ? "音频" : "视频", dropped,
+        first_desired_pts_us, last_desired_pts_us, TimeUs(track));
+  }
+  episode_count += dropped;
+  return true;
 }
 
 std::int64_t FrameSynchronizer::DesiredTimeUs(const TimedFrame& frame) const {

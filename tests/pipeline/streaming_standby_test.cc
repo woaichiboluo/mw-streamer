@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -18,6 +19,7 @@ extern "C" {
 #include "mw/ffmpeg/error.h"
 #include "mw/ffmpeg/frame.h"
 #include "mw/ffmpeg/hardware_context.h"
+#include "mw/log/logging.h"
 #include "mw/pipeline/internal/streaming/frame_synchronizer.h"
 #include "mw/pipeline/internal/streaming/standby_video_frame.h"
 
@@ -261,6 +263,56 @@ TEST_CASE("FrameSynchronizer拒绝没有产生帧的轨道") {
 
   CHECK_THROWS_AS(synchronizer.TakeReady(FrameSynchronizer::Clock::now()),
                   std::runtime_error);
+}
+
+TEST_CASE("FrameSynchronizer限频记录重复帧和丢帧") {
+  const auto suffix =
+      std::chrono::steady_clock::now().time_since_epoch().count();
+  const auto log_path =
+      std::filesystem::temp_directory_path() /
+      ("mw-frame-sync-log-test-" + std::to_string(suffix) + ".log");
+  mw::streamer::log::LogConfig log_config;
+  log_config.console.enabled = false;
+  log_config.rotating_file.enabled = true;
+  log_config.rotating_file.path = log_path.string();
+  log_config.rotating_file.max_files = 1;
+
+  {
+    mw::streamer::log::Logging logging(log_config);
+    FrameSynchronizer synchronizer(false, true, {25, 1},
+                                   std::chrono::milliseconds(200), false, "",
+                                   nullptr);
+    synchronizer.PushVideo(MakeVideoFrame(0));
+    REQUIRE(synchronizer.TakeReady(FrameSynchronizer::Clock::now()));
+
+    synchronizer.PushVideo(MakeVideoFrame(18000, 2));
+    for (int index = 0; index < 4; ++index) {
+      REQUIRE(synchronizer.TakeReady(FrameSynchronizer::Clock::now()));
+    }
+    REQUIRE(synchronizer.TakeReady(FrameSynchronizer::Clock::now()));
+
+    synchronizer.PushVideo(MakeVideoFrame(18000, 3));
+    REQUIRE(synchronizer.TakeReady(FrameSynchronizer::Clock::now()));
+    synchronizer.PushVideo(MakeVideoFrame(21600, 4));
+    REQUIRE(synchronizer.TakeReady(FrameSynchronizer::Clock::now()));
+    synchronizer.PushVideo(MakeVideoFrame(32400, 5));
+    REQUIRE(synchronizer.TakeReady(FrameSynchronizer::Clock::now()));
+    REQUIRE(synchronizer.TakeReady(FrameSynchronizer::Clock::now()));
+  }
+
+  std::ifstream stream(log_path);
+  std::ostringstream buffer;
+  buffer << stream.rdbuf();
+  const auto content = buffer.str();
+  std::error_code error;
+  std::filesystem::remove(log_path, error);
+
+  CHECK(content.find("FrameSynchronizer开始重复上一视频帧") !=
+        std::string::npos);
+  CHECK(content.find("FrameSynchronizer开始丢弃过期视频帧") !=
+        std::string::npos);
+  CHECK(content.find("FrameSynchronizer恢复输出真实视频帧: dropped_frames=2, "
+                     "repeated_frames=3") != std::string::npos);
 }
 
 TEST_CASE("built-in standby image is prepared once in encoder format") {
