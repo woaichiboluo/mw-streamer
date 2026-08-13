@@ -131,6 +131,32 @@ Frame MakeCudaVideoFrame() {
   }
 }
 
+Frame MakeHostNv12VideoFrame(std::int64_t pts) {
+  constexpr int kHostWidth = 256;
+  constexpr int kHostHeight = 144;
+  Frame frame;
+  frame->format = AV_PIX_FMT_NV12;
+  frame->width = kHostWidth;
+  frame->height = kHostHeight;
+  frame->time_base = kTimeBase;
+  frame->pts = pts;
+  frame->duration = 1;
+  frame->sample_aspect_ratio = {1, 1};
+  frame->color_range = AVCOL_RANGE_MPEG;
+  frame->colorspace = AVCOL_SPC_BT709;
+  frame->color_primaries = AVCOL_PRI_BT709;
+  frame->color_trc = AVCOL_TRC_BT709;
+  frame->chroma_location = AVCHROMA_LOC_LEFT;
+  ThrowIfError(av_frame_get_buffer(frame.get(), 32), "分配测试Host NV12视频帧");
+  ThrowIfError(av_frame_make_writable(frame.get()), "写入测试Host NV12视频帧");
+
+  std::memset(frame->data[0], 16,
+              static_cast<std::size_t>(frame->linesize[0]) * kHostHeight);
+  std::memset(frame->data[1], 128,
+              static_cast<std::size_t>(frame->linesize[1]) * (kHostHeight / 2));
+  return frame;
+}
+
 }  // namespace
 
 TEST_CASE("software video encoder emits decodable H264 without B frames") {
@@ -279,6 +305,35 @@ TEST_CASE("CUDA video encoder reuses the Processor hardware frame pool") {
   }
   decoder.Drain();
   CHECK(decoded_frames == kFrameCount);
+}
+
+TEST_CASE("NVENC accepts Host NV12 video frames") {
+  VideoEncoderConfig config;
+  config.codec = kMwStreamerCodecH264;
+  config.encoder_name = "h264_nvenc";
+  config.frame_rate = {25, 1};
+  config.properties = {
+      {"preset", "p1"},
+      {"tune", "ull"},
+  };
+  VideoEncoder encoder(config, 6);
+  std::vector<Packet> packets;
+  encoder.SetOnPacket(
+      [&](const Packet& packet) { packets.push_back(packet.Ref()); });
+
+  constexpr std::int64_t kFrameCount = 3;
+  auto prototype = MakeHostNv12VideoFrame(0);
+  REQUIRE(prototype->hw_frames_ctx == nullptr);
+  encoder.Open(prototype);
+  for (std::int64_t pts = 0; pts < kFrameCount; ++pts) {
+    encoder.Encode(MakeHostNv12VideoFrame(pts));
+  }
+  encoder.Drain();
+
+  REQUIRE(packets.size() == kFrameCount);
+  CHECK(encoder.stream_info().codec_parameters.get()->codec_id ==
+        AV_CODEC_ID_H264);
+  CHECK(StartsWithAnnexB(packets.front()));
 }
 
 TEST_CASE("software video encoder supports H265") {

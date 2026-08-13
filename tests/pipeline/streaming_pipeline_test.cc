@@ -178,6 +178,42 @@ TEST_CASE("StreamingPipeline完成音视频处理并生成fMP4") {
   CHECK(demuxer.getDurationMS() >= 1800);
 }
 
+TEST_CASE("StreamingPipeline软件解码后使用NVENC硬件编码") {
+  TestDirectory directory;
+  auto config = MakeSoftwareConfig(SamplePath("h264_video.mp4"),
+                                   directory.path() / "result.mp4");
+  config.processor.output_width = 256;
+  config.processor.output_height = 144;
+  config.video_encoder.encoder_name = "h264_nvenc";
+  config.video_encoder.properties = {
+      {"preset", "p1"},
+      {"tune", "ull"},
+  };
+
+  std::mutex mutex;
+  std::condition_variable condition;
+  StreamingPipeline pipeline(std::move(config));
+  pipeline.SetOnStatus(
+      [&](StreamingPipelineStatus) { condition.notify_all(); });
+
+  pipeline.Start();
+  WaitForTerminalStatus(pipeline, condition, mutex);
+  REQUIRE(pipeline.status() == StreamingPipelineStatus::kStopped);
+
+  const auto performance = pipeline.CollectPerformance();
+  CHECK(performance.video.decode.frames == 20);
+  CHECK(performance.video.process.frames == 20);
+  CHECK(performance.video.encode.frames == 20);
+  pipeline.Stop();
+
+  const auto output_path = FindRecordedMp4(directory.path());
+  REQUIRE_FALSE(output_path.empty());
+  mediakit::MP4Demuxer demuxer;
+  demuxer.openMP4(output_path.string());
+  CHECK(demuxer.getTracks(true).size() == 1);
+  CHECK(demuxer.getDurationMS() >= 1800);
+}
+
 TEST_CASE("StreamingPipeline无输出目标时编码后丢弃数据") {
   TestDirectory directory;
   auto config = MakeSoftwareConfig(SamplePath("h264_aac.mp4"),

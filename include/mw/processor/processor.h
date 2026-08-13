@@ -35,6 +35,8 @@ typedef enum MwStreamerVideoPixelFormat {
   kMwStreamerVideoPixelFormatYuv420p10le,
   kMwStreamerVideoPixelFormatYuv422p10le,
   kMwStreamerVideoPixelFormatYuv444p10le,
+  kMwStreamerVideoPixelFormatP016,
+  kMwStreamerVideoPixelFormatYuv444p16le,
 } MwStreamerVideoPixelFormat;
 
 typedef enum MwStreamerColorRange {

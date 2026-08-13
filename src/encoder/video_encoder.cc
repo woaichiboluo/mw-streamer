@@ -88,10 +88,6 @@ const AVCodec* FindEncoder(const VideoEncoderConfig& config,
     throw std::invalid_argument(fmt::format(
         "CUDA视频帧不能交给该编码器: encoder_name={}", codec->name));
   }
-  if (!cuda && (codec->capabilities & AV_CODEC_CAP_HARDWARE) != 0) {
-    throw std::invalid_argument(fmt::format(
-        "软件视频帧不能交给硬件编码器: encoder_name={}", codec->name));
-  }
   if (!SupportsPixelFormat(*codec, pixel_format)) {
     throw std::invalid_argument(fmt::format(
         "视频编码器不支持输入像素格式: encoder_name={}, pixel_format={}",

@@ -45,6 +45,10 @@ MwStreamerVideoPixelFormat MapPixelFormat(AVPixelFormat format) {
       return kMwStreamerVideoPixelFormatYuv422p10le;
     case AV_PIX_FMT_YUV444P10LE:
       return kMwStreamerVideoPixelFormatYuv444p10le;
+    case AV_PIX_FMT_P016LE:
+      return kMwStreamerVideoPixelFormatP016;
+    case AV_PIX_FMT_YUV444P16LE:
+      return kMwStreamerVideoPixelFormatYuv444p16le;
     default:
       throw std::invalid_argument(fmt::format("Processor不支持视频像素格式: {}",
                                               PixelFormatName(format)));

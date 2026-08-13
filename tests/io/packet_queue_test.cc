@@ -346,10 +346,21 @@ TEST_CASE("packet queue honors representative cache durations") {
   std::mutex mutex;
   std::condition_variable condition;
   std::atomic_size_t output_count = 0;
+  bool starved = false;
 
   queue->SetPlaybackRate(20.0);
   queue->SetOnPacket([&](std::uint64_t, const Packet&) {
     ++output_count;
+    condition.notify_all();
+  });
+  queue->SetOnState([&](std::uint64_t generation, PacketQueueState state) {
+    if (generation != 1 || state != PacketQueueState::kStarved) {
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      starved = true;
+    }
     condition.notify_all();
   });
 
@@ -374,8 +385,9 @@ TEST_CASE("packet queue honors representative cache durations") {
 
   const auto expected_packets =
       static_cast<std::size_t>((cache_duration_ms / 100 + 1) * streams.size());
-  REQUIRE(WaitFor(condition, mutex,
-                  [&]() { return output_count.load() == expected_packets; }));
+  REQUIRE(WaitFor(condition, mutex, [&]() {
+    return output_count.load() == expected_packets && starved;
+  }));
   CHECK(queue->state() == PacketQueueState::kStarved);
 
   StopAndWait(queue);

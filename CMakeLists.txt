@@ -6,6 +6,7 @@ project(mw_streamer VERSION 0.1.0 LANGUAGES C CXX)
 
 option(BUILD_TESTS "Build mw-streamer tests" ${PROJECT_IS_TOP_LEVEL})
 option(BUILD_EXAMPLES "Build mw-streamer examples" OFF)
+option(BUILD_OPENCV_ADAPTER "Build the optional OpenCV adapter" OFF)
 option(BUILD_SHARED_LIBS "Build mw-streamer as a shared library" ON)
 
 set(_MW_STREAMER_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
@@ -211,6 +212,10 @@ elseif(BUILD_SHARED_LIBS)
             FFmpeg::swresample
             FFmpeg::swscale
     )
+endif()
+
+if(BUILD_OPENCV_ADAPTER)
+    add_subdirectory(adapters/opencv)
 endif()
 
 if(BUILD_TESTS)

@@ -89,6 +89,14 @@ TEST_CASE("VideoFrameAdapter映射常用软件YUV格式") {
                       kMwStreamerVideoPixelFormatYuv444p10le,
                       {128, 128, 128},
                       {32, 32, 32}},
+      PixelFormatCase{AV_PIX_FMT_P016LE,
+                      kMwStreamerVideoPixelFormatP016,
+                      {128, 128},
+                      {32, 16}},
+      PixelFormatCase{AV_PIX_FMT_YUV444P16LE,
+                      kMwStreamerVideoPixelFormatYuv444p16le,
+                      {128, 128, 128},
+                      {32, 32, 32}},
   };
 
   for (const auto& test_case : cases) {
@@ -169,49 +177,66 @@ TEST_CASE("VideoFrameAdapter拒绝不支持的像素格式和无效时间基") {
 
 TEST_CASE("VideoFrameAdapter映射CUDA线性硬件帧") {
   const auto hardware_context = HardwareContext::CreateCuda(0);
-  AVBufferRef* frames_ref =
-      av_hwframe_ctx_alloc(const_cast<AVBufferRef*>(hardware_context.get()));
-  REQUIRE(frames_ref != nullptr);
+  const std::array cases = {
+      PixelFormatCase{
+          AV_PIX_FMT_NV12, kMwStreamerVideoPixelFormatNv12, {64, 64}, {32, 16}},
+      PixelFormatCase{AV_PIX_FMT_P016LE,
+                      kMwStreamerVideoPixelFormatP016,
+                      {128, 128},
+                      {32, 16}},
+      PixelFormatCase{AV_PIX_FMT_YUV444P16LE,
+                      kMwStreamerVideoPixelFormatYuv444p16le,
+                      {128, 128, 128},
+                      {32, 32, 32}},
+  };
 
-  auto* frames_context = reinterpret_cast<AVHWFramesContext*>(frames_ref->data);
-  frames_context->format = AV_PIX_FMT_CUDA;
-  frames_context->sw_format = AV_PIX_FMT_NV12;
-  frames_context->width = 64;
-  frames_context->height = 32;
-  frames_context->initial_pool_size = 1;
+  for (const auto& test_case : cases) {
+    AVBufferRef* frames_ref =
+        av_hwframe_ctx_alloc(const_cast<AVBufferRef*>(hardware_context.get()));
+    REQUIRE(frames_ref != nullptr);
 
-  const int init_result = av_hwframe_ctx_init(frames_ref);
-  if (init_result < 0) {
+    auto* frames_context =
+        reinterpret_cast<AVHWFramesContext*>(frames_ref->data);
+    frames_context->format = AV_PIX_FMT_CUDA;
+    frames_context->sw_format = test_case.ffmpeg_format;
+    frames_context->width = 64;
+    frames_context->height = 32;
+    frames_context->initial_pool_size = 1;
+
+    const int init_result = av_hwframe_ctx_init(frames_ref);
+    if (init_result < 0) {
+      av_buffer_unref(&frames_ref);
+    }
+    REQUIRE(init_result >= 0);
+
+    Frame frame;
+    const int allocation_result =
+        av_hwframe_get_buffer(frames_ref, frame.get(), 0);
     av_buffer_unref(&frames_ref);
+    REQUIRE(allocation_result >= 0);
+    frame->pts = 10;
+    frame->duration = 1;
+    frame->time_base = {1, 25};
+
+    const VideoFrameAdapter adapter(frame);
+    const auto& view = adapter.view();
+
+    CHECK(view.buffer.memory_type == kMwStreamerMemoryCuda);
+    CHECK(view.buffer.storage_type == kMwStreamerVideoStorageLinear);
+    CHECK(view.buffer.pixel_format == test_case.processor_format);
+    REQUIRE(view.buffer.storage.linear.plane_count ==
+            test_case.row_bytes.size());
+    for (std::size_t plane = 0; plane < test_case.row_bytes.size(); ++plane) {
+      CHECK(view.buffer.storage.linear.planes[plane].address ==
+            reinterpret_cast<std::uintptr_t>(frame->data[plane]));
+      CHECK(view.buffer.storage.linear.planes[plane].stride_bytes ==
+            frame->linesize[plane]);
+      CHECK(view.buffer.storage.linear.planes[plane].row_bytes ==
+            test_case.row_bytes[plane]);
+      CHECK(view.buffer.storage.linear.planes[plane].row_count ==
+            test_case.row_counts[plane]);
+    }
   }
-  REQUIRE(init_result >= 0);
-
-  Frame frame;
-  const int allocation_result =
-      av_hwframe_get_buffer(frames_ref, frame.get(), 0);
-  av_buffer_unref(&frames_ref);
-  REQUIRE(allocation_result >= 0);
-  frame->pts = 10;
-  frame->duration = 1;
-  frame->time_base = {1, 25};
-
-  const VideoFrameAdapter adapter(frame);
-  const auto& view = adapter.view();
-
-  CHECK(view.buffer.memory_type == kMwStreamerMemoryCuda);
-  CHECK(view.buffer.storage_type == kMwStreamerVideoStorageLinear);
-  CHECK(view.buffer.pixel_format == kMwStreamerVideoPixelFormatNv12);
-  REQUIRE(view.buffer.storage.linear.plane_count == 2);
-  CHECK(view.buffer.storage.linear.planes[0].address ==
-        reinterpret_cast<std::uintptr_t>(frame->data[0]));
-  CHECK(view.buffer.storage.linear.planes[1].address ==
-        reinterpret_cast<std::uintptr_t>(frame->data[1]));
-  CHECK(view.buffer.storage.linear.planes[0].stride_bytes ==
-        frame->linesize[0]);
-  CHECK(view.buffer.storage.linear.planes[1].stride_bytes ==
-        frame->linesize[1]);
-  CHECK(view.buffer.storage.linear.planes[0].row_bytes == 64);
-  CHECK(view.buffer.storage.linear.planes[1].row_count == 16);
 }
 
 TEST_CASE("音频Adapter映射48kHz float32交错帧") {
