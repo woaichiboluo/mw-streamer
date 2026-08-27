@@ -17,7 +17,7 @@ extern "C" {
 #include "mw/ffmpeg/hardware_context.h"
 #include "mw/ffmpeg/pixel_format.h"
 
-namespace mw::streamer::processor::internal {
+namespace mw::streamer {
 namespace {
 
 constexpr int kProcessorAudioSampleRate = 48000;
@@ -313,7 +313,8 @@ void ValidateAudioStorage(const AVFrame& frame) {
 
 }  // namespace
 
-VideoFrameAdapter::VideoFrameAdapter(const ffmpeg::Frame& frame) {
+ffmpeg::VideoFrameViewAdapter::VideoFrameViewAdapter(
+    const ffmpeg::Frame& frame) {
   if (!frame.get()) {
     throw std::invalid_argument("不能映射空视频Frame");
   }
@@ -322,22 +323,26 @@ VideoFrameAdapter::VideoFrameAdapter(const ffmpeg::Frame& frame) {
   view_.timestamp = MapTimestamp(*frame.get());
 }
 
-const MwStreamerVideoFrameView& VideoFrameAdapter::view() const noexcept {
+const MwStreamerVideoFrameView& ffmpeg::VideoFrameViewAdapter::view()
+    const noexcept {
   return view_;
 }
 
-VideoBufferAdapter::VideoBufferAdapter(ffmpeg::Frame& frame) {
+processor::internal::VideoBufferAdapter::VideoBufferAdapter(
+    ffmpeg::Frame& frame) {
   if (!frame.get()) {
     throw std::invalid_argument("不能映射空视频Frame");
   }
   MapVideoBuffer(*frame.get(), &planes_, &view_);
 }
 
-const MwStreamerVideoBufferView& VideoBufferAdapter::view() const noexcept {
+const MwStreamerVideoBufferView& processor::internal::VideoBufferAdapter::view()
+    const noexcept {
   return view_;
 }
 
-AudioFrameAdapter::AudioFrameAdapter(const ffmpeg::Frame& frame) {
+ffmpeg::AudioFrameViewAdapter::AudioFrameViewAdapter(
+    const ffmpeg::Frame& frame) {
   if (!frame.get()) {
     throw std::invalid_argument("不能映射空音频Frame");
   }
@@ -351,11 +356,13 @@ AudioFrameAdapter::AudioFrameAdapter(const ffmpeg::Frame& frame) {
   };
 }
 
-const MwStreamerAudioFrameView& AudioFrameAdapter::view() const noexcept {
+const MwStreamerAudioFrameView& ffmpeg::AudioFrameViewAdapter::view()
+    const noexcept {
   return view_;
 }
 
-AudioBufferAdapter::AudioBufferAdapter(ffmpeg::Frame& frame) {
+processor::internal::AudioBufferAdapter::AudioBufferAdapter(
+    ffmpeg::Frame& frame) {
   if (!frame.get()) {
     throw std::invalid_argument("不能映射空音频Frame");
   }
@@ -367,8 +374,9 @@ AudioBufferAdapter::AudioBufferAdapter(ffmpeg::Frame& frame) {
   };
 }
 
-const MwStreamerAudioBufferView& AudioBufferAdapter::view() const noexcept {
+const MwStreamerAudioBufferView& processor::internal::AudioBufferAdapter::view()
+    const noexcept {
   return view_;
 }
 
-}  // namespace mw::streamer::processor::internal
+}  // namespace mw::streamer

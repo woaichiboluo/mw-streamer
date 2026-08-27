@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 
+#include "mw/output/output_sink.h"
 #include "mw/performance/snapshot.h"
 #include "mw/pipeline/config.h"
 #include "mw/processor/processor.h"
@@ -19,6 +20,12 @@ enum class StreamingPipelineStatus {
   // Natural end reports kStopped when media processing completes. The external
   // owner must still call Stop to join workers and release retained resources.
   kStopped,
+};
+
+enum class OutputEventSubmitResult {
+  kAccepted,
+  kQueueFull,
+  kUnavailable,
 };
 
 class StreamingPipeline final {
@@ -38,18 +45,26 @@ class StreamingPipeline final {
   // thread that performs the transition and should return promptly.
   void SetProcessorCallbacks(
       const MwStreamerStreamingProcessorCallbacks& callbacks);
+  // Registers one independently scheduled raw output flow. sink_id must be
+  // non-empty and unique. Registration transfers ownership and is allowed only
+  // before Start.
+  void AddOutputSink(std::string sink_id,
+                     std::unique_ptr<output::OutputSink> sink);
   void SetOnStatus(OnStatus callback);
 
-  // Start is asynchronous. kRunning is reported after every present encoder
-  // and, when configured, the shared OutputSession has opened. Without output
-  // targets, encoded packets are discarded. Runtime failures transition to
-  // kFailed and stop data production without rebuilding the chain. The
-  // external owner must then call Stop before destroying or recreating it.
+  // Start is asynchronous. kRunning is reported after every enabled Sink is
+  // ready. The encoded Sink opens its encoders and, when configured, the
+  // shared OutputSession; without targets its packets are discarded. Runtime
+  // failure of one Sink is isolated while another Sink remains available.
+  // Shared-chain failures transition to kFailed and require an explicit Stop.
   void Start();
   // Before Start, this replaces the initial Processor configuration delivered
   // through on_start. While starting or running, an initialized Processor
   // receives the update through update_config.
   void UpdateProcessorConfig(std::string config);
+  // Thread-safe and non-blocking. Event strings and payload are copied before
+  // this call returns. Acceptance does not mean the Processor handled it yet.
+  OutputEventSubmitResult SubmitOutputEvent(const MwStreamerOutputEvent& event);
   void Stop() noexcept;
 
   StreamingPipelineStatus status() const noexcept;

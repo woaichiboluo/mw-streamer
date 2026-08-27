@@ -105,9 +105,23 @@ void WaitForTerminal(Handle* handle, StatusState& state,
 struct ProcessorState {
   std::atomic_size_t starts = 0;
   std::atomic_size_t updates = 0;
+  std::atomic_size_t events = 0;
   std::mutex mutex;
+  std::condition_variable condition;
   std::string config;
   std::string updated_config;
+  std::string event_sink_id;
+  std::string event_type;
+};
+
+struct RawOutputState {
+  MwStreaming* streaming = nullptr;
+  bool notify_on_start = false;
+  std::atomic<MwResult> notify_result{kMwResultInvalidState};
+  std::atomic_size_t starts = 0;
+  std::atomic_size_t stops = 0;
+  std::atomic_size_t video_frames = 0;
+  std::atomic_size_t audio_frames = 0;
 };
 
 MwStreamerProcessorStartResult OnStreamingProcessorStart(
@@ -140,6 +154,46 @@ void OnProcessorConfigUpdate(const char* config, void* user_context) {
     state.updated_config = config;
   }
   state.updates.fetch_add(1, std::memory_order_relaxed);
+}
+
+void OnProcessorOutputEvent(const MwStreamerOutputEvent* event,
+                            void* user_context) {
+  auto& state = *static_cast<ProcessorState*>(user_context);
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.event_sink_id = event->sink_id;
+    state.event_type = event->type;
+  }
+  state.events.fetch_add(1, std::memory_order_relaxed);
+  state.condition.notify_all();
+}
+
+void OnRawVideo(const MwStreamerVideoFrameView*, void* user_context) {
+  static_cast<RawOutputState*>(user_context)
+      ->video_frames.fetch_add(1, std::memory_order_relaxed);
+}
+
+void OnRawAudio(const MwStreamerAudioFrameView*, void* user_context) {
+  static_cast<RawOutputState*>(user_context)
+      ->audio_frames.fetch_add(1, std::memory_order_relaxed);
+}
+
+void OnRawStart(void* user_context) {
+  auto& state = *static_cast<RawOutputState*>(user_context);
+  state.starts.fetch_add(1, std::memory_order_relaxed);
+  if (state.notify_on_start) {
+    const char payload[] = "ready";
+    const MwStreamerOutputEvent event = {
+        "preview", "started", payload, sizeof(payload) - 1, 0, {}};
+    state.notify_result.store(
+        mw_streaming_submit_output_event(state.streaming, &event),
+        std::memory_order_relaxed);
+  }
+}
+
+void OnRawStop(void* user_context) {
+  static_cast<RawOutputState*>(user_context)
+      ->stops.fetch_add(1, std::memory_order_relaxed);
 }
 
 std::filesystem::path SamplePath() {
@@ -201,10 +255,37 @@ tune = "zerolatency"
     callbacks.user_context = &processor_state;
     callbacks.on_start = OnStreamingProcessorStart;
     callbacks.update_config = OnProcessorConfigUpdate;
+    callbacks.on_output_event = OnProcessorOutputEvent;
     REQUIRE(mw_streaming_set_processor(streaming.get(), &callbacks) ==
+            kMwResultSuccess);
+    RawOutputState raw_output_state;
+    raw_output_state.streaming = streaming.get();
+    raw_output_state.notify_on_start = true;
+    const MwStreamerOutputSinkCallbacks raw_callbacks = {
+        &raw_output_state, OnRawStart, OnRawVideo, OnRawAudio, OnRawStop,
+    };
+    CHECK(mw_streaming_add_output_sink(streaming.get(), nullptr,
+                                       &raw_callbacks) ==
+          kMwResultInvalidArgument);
+    CHECK(mw_streaming_add_output_sink(streaming.get(), "", &raw_callbacks) ==
+          kMwResultInvalidArgument);
+    REQUIRE(mw_streaming_add_output_sink(streaming.get(), "preview",
+                                         &raw_callbacks) == kMwResultSuccess);
+    CHECK(mw_streaming_add_output_sink(streaming.get(), "preview",
+                                       &raw_callbacks) ==
+          kMwResultInvalidArgument);
+    RawOutputState secondary_output_state;
+    const MwStreamerOutputSinkCallbacks secondary_callbacks = {
+        &secondary_output_state, OnRawStart, OnRawVideo, OnRawAudio, OnRawStop,
+    };
+    REQUIRE(mw_streaming_add_output_sink(streaming.get(), "secondary",
+                                         &secondary_callbacks) ==
             kMwResultSuccess);
 
     REQUIRE(mw_streaming_start(streaming.get()) == kMwResultSuccess);
+    CHECK(
+        mw_streaming_add_output_sink(streaming.get(), "late", &raw_callbacks) ==
+        kMwResultInvalidState);
     {
       std::unique_lock<std::mutex> lock(status_state.mutex);
       REQUIRE(status_state.condition.wait_for(lock, 10s, [&]() {
@@ -212,6 +293,14 @@ tune = "zerolatency"
                    status_state.statuses.begin(), status_state.statuses.end(),
                    kMwPipelineStatusRunning) != status_state.statuses.end();
       }));
+    }
+    {
+      std::unique_lock<std::mutex> lock(processor_state.mutex);
+      REQUIRE(processor_state.condition.wait_for(lock, 2s, [&]() {
+        return processor_state.events.load(std::memory_order_relaxed) == 1;
+      }));
+      CHECK(processor_state.event_sink_id == "preview");
+      CHECK(processor_state.event_type == "started");
     }
     directory.Write("streaming.toml", MakeStreamingConfig("auto_ptz"));
     REQUIRE(mw_streaming_reload(streaming.get()) == kMwResultSuccess);
@@ -239,6 +328,15 @@ tune = "zerolatency"
     REQUIRE(status == kMwPipelineStatusStopped);
     CheckNaturalStatuses(status_state);
     CHECK(processor_state.starts.load() == 1);
+    CHECK(raw_output_state.starts.load() == 1);
+    CHECK(raw_output_state.stops.load() == 1);
+    CHECK(raw_output_state.notify_result.load() == kMwResultSuccess);
+    CHECK(raw_output_state.video_frames.load() > 0);
+    CHECK(raw_output_state.audio_frames.load() > 0);
+    CHECK(secondary_output_state.starts.load() == 1);
+    CHECK(secondary_output_state.stops.load() == 1);
+    CHECK(secondary_output_state.video_frames.load() > 0);
+    CHECK(secondary_output_state.audio_frames.load() > 0);
     {
       std::lock_guard<std::mutex> lock(processor_state.mutex);
       CHECK(processor_state.config.find("mode = 'preview'") !=
@@ -250,8 +348,8 @@ tune = "zerolatency"
     REQUIRE(stats != nullptr);
     CHECK(stats->has_video == 1);
     CHECK(stats->has_audio == 1);
-    CHECK(stats->video.encode.frames > 0);
-    CHECK(stats->audio.encode.samples > 0);
+    CHECK(stats->video.encode.frames == 0);
+    CHECK(stats->audio.encode.samples == 0);
     mw_streaming_stats_destroy(stats);
     directory.Write("streaming.toml", MakeStreamingConfig("stopped"));
     CHECK(mw_streaming_reload(streaming.get()) == kMwResultInvalidState);

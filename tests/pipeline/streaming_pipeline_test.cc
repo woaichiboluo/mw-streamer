@@ -7,13 +7,21 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
 #include <vector>
 
+extern "C" {
+#include <libavutil/avutil.h>
+#include <libavutil/pixfmt.h>
+#include <libavutil/samplefmt.h>
+}
+
 #include "Extension/Track.h"
 #include "Record/MP4Demuxer.h"
+#include "mw/ffmpeg/frame_view.h"
 
 #ifdef CHECK
 #undef CHECK
@@ -25,9 +33,116 @@ namespace {
 
 using namespace std::chrono_literals;
 using mw::streamer::decoder::VideoDecoderBackend;
+using mw::streamer::ffmpeg::AudioFrameViewAdapter;
+using mw::streamer::ffmpeg::VideoFrameViewAdapter;
+using mw::streamer::output::OutputSink;
 using mw::streamer::pipeline::StreamingPipeline;
 using mw::streamer::pipeline::StreamingPipelineConfig;
 using mw::streamer::pipeline::StreamingPipelineStatus;
+
+struct RawOutputState {
+  std::atomic_size_t video_frames = 0;
+  std::atomic_size_t audio_frames = 0;
+  std::atomic_size_t invalid_frames = 0;
+};
+
+void OnRawVideo(const MwStreamerVideoFrameView* frame, void* user_context) {
+  auto& state = *static_cast<RawOutputState*>(user_context);
+  if (!frame || frame->buffer.width == 0 || frame->buffer.height == 0 ||
+      frame->timestamp.time_base.num <= 0 ||
+      frame->timestamp.time_base.den <= 0) {
+    state.invalid_frames.fetch_add(1, std::memory_order_relaxed);
+  }
+  state.video_frames.fetch_add(1, std::memory_order_relaxed);
+}
+
+void OnRawAudio(const MwStreamerAudioFrameView* frame, void* user_context) {
+  auto& state = *static_cast<RawOutputState*>(user_context);
+  if (!frame || !frame->data || frame->sample_rate != 48000 ||
+      frame->channel_count == 0 || frame->samples_per_channel == 0 ||
+      frame->timestamp.time_base.num <= 0 ||
+      frame->timestamp.time_base.den <= 0) {
+    state.invalid_frames.fetch_add(1, std::memory_order_relaxed);
+  }
+  state.audio_frames.fetch_add(1, std::memory_order_relaxed);
+}
+
+struct TestOutputSinkState : RawOutputState {
+  std::atomic_size_t start_calls = 0;
+  std::atomic_size_t stop_calls = 0;
+  std::atomic<bool> event_accepted = false;
+  std::mutex mutex;
+  std::thread::id event_submit_thread;
+};
+
+class TestOutputSink final : public OutputSink {
+ public:
+  explicit TestOutputSink(TestOutputSinkState& state) : state_(state) {}
+
+  void Start() override {
+    state_.start_calls.fetch_add(1, std::memory_order_relaxed);
+    {
+      std::lock_guard<std::mutex> lock(state_.mutex);
+      state_.event_submit_thread = std::this_thread::get_id();
+    }
+    const std::string payload = "pointer-down";
+    state_.event_accepted.store(
+        NotifyEvent("interaction", payload.data(), payload.size(),
+                    MwStreamerMediaTimestamp{5, 1, {1, 10}}),
+        std::memory_order_relaxed);
+  }
+
+  void WriteAudio(mw::streamer::ffmpeg::Frame frame) override {
+    if (!frame.get() || !frame->data[0] || frame->sample_rate != 48000 ||
+        frame->ch_layout.nb_channels == 0 || frame->nb_samples == 0 ||
+        frame->format != AV_SAMPLE_FMT_FLT || frame->pts == AV_NOPTS_VALUE ||
+        frame->time_base.num <= 0 || frame->time_base.den <= 0) {
+      state_.invalid_frames.fetch_add(1, std::memory_order_relaxed);
+    }
+    const AudioFrameViewAdapter adapter(frame);
+    OnRawAudio(&adapter.view(), static_cast<RawOutputState*>(&state_));
+  }
+
+  void WriteVideo(mw::streamer::ffmpeg::Frame frame) override {
+    if (!frame.get() || !frame->data[0] || frame->width == 0 ||
+        frame->height == 0 || frame->format == AV_PIX_FMT_NONE ||
+        frame->pts == AV_NOPTS_VALUE || frame->time_base.num <= 0 ||
+        frame->time_base.den <= 0) {
+      state_.invalid_frames.fetch_add(1, std::memory_order_relaxed);
+    }
+    const VideoFrameViewAdapter adapter(frame);
+    OnRawVideo(&adapter.view(), static_cast<RawOutputState*>(&state_));
+  }
+
+  void Stop() noexcept override {
+    state_.stop_calls.fetch_add(1, std::memory_order_relaxed);
+  }
+
+ private:
+  TestOutputSinkState& state_;
+};
+
+class FailingOutputSink final : public OutputSink {
+ public:
+  explicit FailingOutputSink(TestOutputSinkState& state) : state_(state) {}
+
+  void Start() override {
+    state_.start_calls.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void WriteAudio(mw::streamer::ffmpeg::Frame) override {}
+
+  void WriteVideo(mw::streamer::ffmpeg::Frame) override {
+    throw std::runtime_error("preview render failed");
+  }
+
+  void Stop() noexcept override {
+    state_.stop_calls.fetch_add(1, std::memory_order_relaxed);
+  }
+
+ private:
+  TestOutputSinkState& state_;
+};
 
 class TestDirectory final {
  public:
@@ -103,6 +218,7 @@ TEST_CASE("StreamingPipeline完成音视频处理并生成fMP4") {
     std::atomic_size_t* end_of_input_calls;
     std::atomic_size_t* stop_calls;
   } callback_state{&end_of_input_calls, &stop_calls};
+  TestOutputSinkState sink_state;
   StreamingPipeline pipeline(std::move(config));
   MwStreamerStreamingProcessorCallbacks callbacks{};
   callbacks.user_context = &callback_state;
@@ -117,6 +233,8 @@ TEST_CASE("StreamingPipeline完成音视频处理并生成fMP4") {
     static_cast<CallbackState*>(user_context)->stop_calls->fetch_add(1);
   };
   pipeline.SetProcessorCallbacks(callbacks);
+  pipeline.AddOutputSink("preview",
+                         std::make_unique<TestOutputSink>(sink_state));
   pipeline.SetOnStatus([&](StreamingPipelineStatus status) {
     {
       std::lock_guard<std::mutex> lock(mutex);
@@ -151,6 +269,9 @@ TEST_CASE("StreamingPipeline完成音视频处理并生成fMP4") {
   CHECK(performance.audio.encode.latency.sample_count == 95);
   CHECK(performance.video.dropped_packets == 0);
   CHECK(performance.audio.dropped_packets == 0);
+  CHECK(sink_state.video_frames.load(std::memory_order_relaxed) > 0);
+  CHECK(sink_state.audio_frames.load(std::memory_order_relaxed) > 0);
+  CHECK(sink_state.invalid_frames.load(std::memory_order_relaxed) == 0);
 
   const auto empty_performance = pipeline.CollectPerformance();
   CHECK(empty_performance.video.decode.frames == 0);
@@ -176,6 +297,134 @@ TEST_CASE("StreamingPipeline完成音视频处理并生成fMP4") {
   demuxer.openMP4(output_path.string());
   CHECK(demuxer.getTracks(true).size() == 2);
   CHECK(demuxer.getDurationMS() >= 1800);
+}
+
+TEST_CASE("StreamingPipeline仅Raw输出并异步通知Processor事件") {
+  TestDirectory directory;
+  auto config = MakeSoftwareConfig(SamplePath("h264_aac.mp4"),
+                                   directory.path() / "unused.mp4");
+  config.output_targets.clear();
+
+  struct CallbackState {
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::size_t event_calls = 0;
+    std::string sink_id;
+    std::string type;
+    std::string payload;
+    std::thread::id callback_thread;
+  } callback_state;
+  TestOutputSinkState sink_state;
+  std::mutex status_mutex;
+  std::condition_variable status_condition;
+  StreamingPipeline pipeline(std::move(config));
+
+  MwStreamerStreamingProcessorCallbacks processor_callbacks{};
+  processor_callbacks.user_context = &callback_state;
+  processor_callbacks.on_output_event = [](const MwStreamerOutputEvent* event,
+                                           void* user_context) {
+    auto& state = *static_cast<CallbackState*>(user_context);
+    {
+      std::lock_guard<std::mutex> lock(state.mutex);
+      ++state.event_calls;
+      state.sink_id = event->sink_id;
+      state.type = event->type;
+      state.payload.assign(static_cast<const char*>(event->payload),
+                           event->payload_size);
+      state.callback_thread = std::this_thread::get_id();
+    }
+    state.condition.notify_all();
+  };
+  pipeline.SetProcessorCallbacks(processor_callbacks);
+  CHECK_THROWS_AS(
+      pipeline.AddOutputSink("", std::make_unique<TestOutputSink>(sink_state)),
+      std::invalid_argument);
+  CHECK_THROWS_AS(pipeline.AddOutputSink("null", std::unique_ptr<OutputSink>{}),
+                  std::invalid_argument);
+  pipeline.AddOutputSink("preview",
+                         std::make_unique<TestOutputSink>(sink_state));
+  CHECK_THROWS_AS(pipeline.AddOutputSink(
+                      "preview", std::make_unique<TestOutputSink>(sink_state)),
+                  std::invalid_argument);
+  pipeline.SetOnStatus(
+      [&](StreamingPipelineStatus) { status_condition.notify_all(); });
+
+  pipeline.Start();
+  CHECK_THROWS_AS(pipeline.AddOutputSink(
+                      "late", std::make_unique<TestOutputSink>(sink_state)),
+                  std::logic_error);
+  {
+    std::unique_lock<std::mutex> lock(status_mutex);
+    REQUIRE(status_condition.wait_for(lock, 10s, [&pipeline]() {
+      return pipeline.status() == StreamingPipelineStatus::kRunning ||
+             pipeline.status() == StreamingPipelineStatus::kFailed;
+    }));
+  }
+  REQUIRE(pipeline.status() == StreamingPipelineStatus::kRunning);
+
+  {
+    std::unique_lock<std::mutex> lock(callback_state.mutex);
+    REQUIRE(callback_state.condition.wait_for(lock, 2s, [&callback_state]() {
+      return callback_state.event_calls == 1;
+    }));
+    CHECK(callback_state.sink_id == "preview");
+    CHECK(callback_state.type == "interaction");
+    CHECK(callback_state.payload == "pointer-down");
+    std::lock_guard<std::mutex> sink_lock(sink_state.mutex);
+    CHECK(callback_state.callback_thread != sink_state.event_submit_thread);
+  }
+
+  WaitForTerminalStatus(pipeline, status_condition, status_mutex);
+  REQUIRE(pipeline.status() == StreamingPipelineStatus::kStopped);
+  const auto performance = pipeline.CollectPerformance();
+  CHECK(performance.video.process.frames > 0);
+  CHECK(performance.audio.process.samples > 0);
+  CHECK(performance.video.encode.frames == 0);
+  CHECK(performance.audio.encode.samples == 0);
+  CHECK(sink_state.start_calls.load(std::memory_order_relaxed) == 1);
+  CHECK(sink_state.stop_calls.load(std::memory_order_relaxed) == 1);
+  CHECK(sink_state.event_accepted.load(std::memory_order_relaxed));
+  CHECK(sink_state.video_frames.load(std::memory_order_relaxed) > 0);
+  CHECK(sink_state.audio_frames.load(std::memory_order_relaxed) > 0);
+  CHECK(sink_state.invalid_frames.load(std::memory_order_relaxed) == 0);
+  CHECK(std::filesystem::is_empty(directory.path()));
+  pipeline.Stop();
+  CHECK(sink_state.stop_calls.load(std::memory_order_relaxed) == 1);
+}
+
+TEST_CASE("StreamingPipeline隔离失败Sink并继续向健康Sink输出") {
+  TestDirectory directory;
+  auto config = MakeSoftwareConfig(SamplePath("h264_aac.mp4"),
+                                   directory.path() / "unused.mp4");
+  config.output_targets.clear();
+
+  TestOutputSinkState failing_state;
+  TestOutputSinkState healthy_state;
+  std::mutex status_mutex;
+  std::condition_variable status_condition;
+  StreamingPipeline pipeline(std::move(config));
+  pipeline.AddOutputSink("failing",
+                         std::make_unique<FailingOutputSink>(failing_state));
+  pipeline.AddOutputSink("healthy",
+                         std::make_unique<TestOutputSink>(healthy_state));
+  pipeline.SetOnStatus(
+      [&](StreamingPipelineStatus) { status_condition.notify_all(); });
+
+  pipeline.Start();
+  WaitForTerminalStatus(pipeline, status_condition, status_mutex);
+
+  REQUIRE(pipeline.status() == StreamingPipelineStatus::kStopped);
+  CHECK(failing_state.start_calls.load(std::memory_order_relaxed) == 1);
+  CHECK(failing_state.stop_calls.load(std::memory_order_relaxed) == 1);
+  CHECK(healthy_state.start_calls.load(std::memory_order_relaxed) == 1);
+  CHECK(healthy_state.stop_calls.load(std::memory_order_relaxed) == 1);
+  CHECK(healthy_state.video_frames.load(std::memory_order_relaxed) > 0);
+  CHECK(healthy_state.audio_frames.load(std::memory_order_relaxed) > 0);
+  CHECK(healthy_state.invalid_frames.load(std::memory_order_relaxed) == 0);
+  CHECK(std::filesystem::is_empty(directory.path()));
+  pipeline.Stop();
+  CHECK(failing_state.stop_calls.load(std::memory_order_relaxed) == 1);
+  CHECK(healthy_state.stop_calls.load(std::memory_order_relaxed) == 1);
 }
 
 TEST_CASE("StreamingPipeline软件解码后使用NVENC硬件编码") {
@@ -214,7 +463,7 @@ TEST_CASE("StreamingPipeline软件解码后使用NVENC硬件编码") {
   CHECK(demuxer.getDurationMS() >= 1800);
 }
 
-TEST_CASE("StreamingPipeline无输出目标时编码后丢弃数据") {
+TEST_CASE("StreamingPipeline没有Sink时不编码并正常结束") {
   TestDirectory directory;
   auto config = MakeSoftwareConfig(SamplePath("h264_aac.mp4"),
                                    directory.path() / "unused.mp4");
@@ -239,11 +488,11 @@ TEST_CASE("StreamingPipeline无输出目标时编码后丢弃数据") {
   REQUIRE(performance.has_video);
   REQUIRE(performance.has_audio);
   CHECK(performance.video.process.frames == 20);
-  CHECK(performance.video.encode.frames == 21);
+  CHECK(performance.video.encode.frames == 0);
   CHECK(performance.audio.process.samples > 0);
-  CHECK(performance.audio.encode.samples > 0);
-  CHECK(performance.video.encode.latency.sample_count == 21);
-  CHECK(performance.audio.encode.latency.sample_count > 0);
+  CHECK(performance.audio.encode.samples == 0);
+  CHECK(performance.video.encode.latency.sample_count == 0);
+  CHECK(performance.audio.encode.latency.sample_count == 0);
   CHECK(performance.outputs.empty());
   CHECK(std::filesystem::is_empty(directory.path()));
 

@@ -1,6 +1,7 @@
 #ifndef MW_STREAMER_INCLUDE_MW_PROCESSOR_PROCESSOR_H_
 #define MW_STREAMER_INCLUDE_MW_PROCESSOR_PROCESSOR_H_
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "mw/media/types.h"
@@ -305,6 +306,22 @@ typedef void (*MwStreamerProcessorUpdateConfigCallback)(const char* config,
 
 typedef void (*MwStreamerProcessorStopCallback)(void* user_context);
 
+// An event produced by an output consumer. All fields are borrowed for the
+// callback. timestamp describes the output media observed when the event was
+// produced; it is informational and does not impose ordering with media frame
+// callbacks.
+typedef struct MwStreamerOutputEvent {
+  const char* sink_id;
+  const char* type;
+  const void* payload;
+  size_t payload_size;
+  uint8_t has_timestamp;
+  MwStreamerMediaTimestamp timestamp;
+} MwStreamerOutputEvent;
+
+typedef void (*MwStreamerProcessorOutputEventCallback)(
+    const MwStreamerOutputEvent* event, void* user_context);
+
 typedef struct MwStreamerStreamingProcessorCallbacks {
   // Borrowed user data returned unchanged to every callback. The framework
   // never reads or releases it.
@@ -332,6 +349,11 @@ typedef struct MwStreamerStreamingProcessorCallbacks {
   // their submitted output work have completed. Exceptions are logged and
   // suppressed by the framework.
   MwStreamerProcessorStopCallback on_stop;
+
+  // Optional. Output events are delivered asynchronously in submission order
+  // and may run concurrently with audio and video processing. The event and
+  // all referenced data are borrowed for the callback.
+  MwStreamerProcessorOutputEventCallback on_output_event;
 } MwStreamerStreamingProcessorCallbacks;
 
 typedef struct MwStreamerFileProcessorCallbacks {

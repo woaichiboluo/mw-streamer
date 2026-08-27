@@ -94,3 +94,28 @@ target_link_libraries(mw_source_output_worker_tests
 )
 
 add_test(NAME mw_source_output_worker_tests COMMAND mw_source_output_worker_tests)
+
+add_executable(mw_output_event_mailbox_tests
+    output_event_mailbox_test.cc
+)
+
+target_link_libraries(mw_output_event_mailbox_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        mw::streamer_test
+)
+
+add_test(NAME mw_output_event_mailbox_tests COMMAND mw_output_event_mailbox_tests)
+
+add_executable(mw_output_sink_worker_tests
+    output_sink_worker_test.cc
+)
+
+target_link_libraries(mw_output_sink_worker_tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        FFmpeg::avutil
+        mw::streamer_test
+)
+
+add_test(NAME mw_output_sink_worker_tests COMMAND mw_output_sink_worker_tests)

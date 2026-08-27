@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "mw/init/init.h"
+#include "mw/output/output_sink.h"
 #include "mw/pipeline/file_pipeline.h"
 #include "mw/pipeline/remux_pipeline.h"
 #include "mw/pipeline/streaming_pipeline.h"
@@ -28,6 +29,7 @@ namespace {
 
 using namespace std::chrono_literals;
 using mw::streamer::decoder::VideoDecoderBackend;
+using mw::streamer::output::OutputSink;
 using mw::streamer::pipeline::FilePipeline;
 using mw::streamer::pipeline::FilePipelineStatus;
 using mw::streamer::pipeline::LocalFilePipelineConfig;
@@ -149,6 +151,7 @@ struct Arguments {
   bool passthrough_video = false;
   bool software_video = false;
   bool standby = false;
+  bool local_sink = false;
 };
 
 std::string RequireValue(int argc, char* argv[], int& index) {
@@ -252,6 +255,8 @@ Arguments ParseArguments(int argc, char* argv[]) {
       arguments.software_video = true;
     } else if (option == "--standby") {
       arguments.standby = true;
+    } else if (option == "--local-sink") {
+      arguments.local_sink = true;
     } else {
       throw std::invalid_argument("未知参数: " + option);
     }
@@ -273,6 +278,9 @@ Arguments ParseArguments(int argc, char* argv[]) {
   if (arguments.pipeline == PipelineKind::kFile &&
       (!arguments.outputs.empty() || !arguments.input_outputs.empty())) {
     throw std::invalid_argument("FilePipeline不支持输出目标");
+  }
+  if (arguments.pipeline != PipelineKind::kStreaming && arguments.local_sink) {
+    throw std::invalid_argument("只有StreamingPipeline支持--local-sink");
   }
   if ((arguments.output_width == 0) != (arguments.output_height == 0)) {
     throw std::invalid_argument("视频输出宽高必须同时为0或同时大于0");
@@ -307,6 +315,54 @@ struct ProcessorObserver {
   CUstream cuda_stream = nullptr;
   std::uint64_t video_frame_count = 0;
   std::uint64_t video_jitter_count = 0;
+};
+
+struct LocalSinkObserver {
+  EventWriter* events = nullptr;
+  std::atomic_uint64_t starts{0};
+  std::atomic_uint64_t stops{0};
+  std::atomic_uint64_t video_frames{0};
+  std::atomic_uint64_t audio_frames{0};
+  std::atomic_uint64_t invalid_frames{0};
+};
+
+class ObservingOutputSink final : public OutputSink {
+ public:
+  explicit ObservingOutputSink(LocalSinkObserver& observer)
+      : observer_(observer) {}
+
+  void Start() override {
+    observer_.starts.fetch_add(1, std::memory_order_relaxed);
+    observer_.events->Write("local_sink_started");
+  }
+
+  void WriteAudio(mw::streamer::ffmpeg::Frame frame) override {
+    if (!frame.get() || !frame->data[0] || frame->sample_rate <= 0 ||
+        frame->ch_layout.nb_channels <= 0 || frame->nb_samples <= 0 ||
+        frame->pts == AV_NOPTS_VALUE || frame->time_base.num <= 0 ||
+        frame->time_base.den <= 0) {
+      observer_.invalid_frames.fetch_add(1, std::memory_order_relaxed);
+    }
+    observer_.audio_frames.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void WriteVideo(mw::streamer::ffmpeg::Frame frame) override {
+    if (!frame.get() || !frame->data[0] || frame->width <= 0 ||
+        frame->height <= 0 || frame->format == AV_PIX_FMT_NONE ||
+        frame->pts == AV_NOPTS_VALUE || frame->time_base.num <= 0 ||
+        frame->time_base.den <= 0) {
+      observer_.invalid_frames.fetch_add(1, std::memory_order_relaxed);
+    }
+    observer_.video_frames.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void Stop() noexcept override {
+    observer_.stops.fetch_add(1, std::memory_order_relaxed);
+    observer_.events->Write("local_sink_stopped");
+  }
+
+ private:
+  LocalSinkObserver& observer_;
 };
 
 struct FileProcessorObserver {
@@ -592,6 +648,8 @@ int RunStreaming(const Arguments& arguments, EventWriter& events) {
   observer.events = &events;
   observer.video_jitter_min = arguments.video_jitter_min;
   observer.video_jitter_max = arguments.video_jitter_max;
+  LocalSinkObserver local_sink_observer;
+  local_sink_observer.events = &events;
 
   StreamingPipelineConfig config;
   config.input_url = arguments.input;
@@ -611,6 +669,10 @@ int RunStreaming(const Arguments& arguments, EventWriter& events) {
   config.standby.enabled = arguments.standby;
 
   StreamingPipeline pipeline(std::move(config));
+  if (arguments.local_sink) {
+    pipeline.AddOutputSink(
+        "local", std::make_unique<ObservingOutputSink>(local_sink_observer));
+  }
   MwStreamerStreamingProcessorCallbacks callbacks{};
   callbacks.user_context = &observer;
   callbacks.on_start = OnProcessorStart;
@@ -653,18 +715,26 @@ int RunStreaming(const Arguments& arguments, EventWriter& events) {
   pipeline.Stop();
   const auto final_status = pipeline.status();
   const auto performance = pipeline.CollectPerformance();
-  events.Write("summary",
-               {{"running_seen", running_seen.load() ? "1" : "0"},
-                {"failed_seen", failed_seen.load() ? "1" : "0"},
-                {"final_status", ToString(final_status)},
-                {"timeline_reset_count",
-                 std::to_string(observer.timeline_reset_count.load())},
-                {"has_audio", performance.has_audio ? "1" : "0"},
-                {"has_video", performance.has_video ? "1" : "0"},
-                {"audio_encode_samples",
-                 std::to_string(performance.audio.encode.samples)},
-                {"video_encode_frames",
-                 std::to_string(performance.video.encode.frames)}});
+  events.Write(
+      "summary",
+      {{"running_seen", running_seen.load() ? "1" : "0"},
+       {"failed_seen", failed_seen.load() ? "1" : "0"},
+       {"final_status", ToString(final_status)},
+       {"timeline_reset_count",
+        std::to_string(observer.timeline_reset_count.load())},
+       {"has_audio", performance.has_audio ? "1" : "0"},
+       {"has_video", performance.has_video ? "1" : "0"},
+       {"audio_encode_samples",
+        std::to_string(performance.audio.encode.samples)},
+       {"video_encode_frames", std::to_string(performance.video.encode.frames)},
+       {"local_sink_starts", std::to_string(local_sink_observer.starts.load())},
+       {"local_sink_stops", std::to_string(local_sink_observer.stops.load())},
+       {"local_sink_video_frames",
+        std::to_string(local_sink_observer.video_frames.load())},
+       {"local_sink_audio_frames",
+        std::to_string(local_sink_observer.audio_frames.load())},
+       {"local_sink_invalid_frames",
+        std::to_string(local_sink_observer.invalid_frames.load())}});
 
   return running_seen.load() && !failed_seen.load() ? 0 : 2;
 }

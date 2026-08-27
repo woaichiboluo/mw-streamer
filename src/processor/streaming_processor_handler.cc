@@ -146,4 +146,12 @@ ffmpeg::Frame StreamingProcessorHandler::ProcessAudio(
   return output;
 }
 
+void StreamingProcessorHandler::NotifyOutputEvent(
+    const MwStreamerOutputEvent& event) {
+  RequireStarted("通知Processor输出事件");
+  if (impl_->callbacks.on_output_event) {
+    impl_->callbacks.on_output_event(&event, impl_->callbacks.user_context);
+  }
+}
+
 }  // namespace mw::streamer::processor

@@ -13,17 +13,18 @@ extern "C" {
 }
 
 #include "mw/ffmpeg/frame.h"
+#include "mw/ffmpeg/frame_view.h"
 #include "mw/ffmpeg/hardware_context.h"
 #include "mw/processor/internal/frame_adapter.h"
 
 namespace {
 
+using mw::streamer::ffmpeg::AudioFrameViewAdapter;
 using mw::streamer::ffmpeg::Frame;
 using mw::streamer::ffmpeg::HardwareContext;
+using mw::streamer::ffmpeg::VideoFrameViewAdapter;
 using mw::streamer::processor::internal::AudioBufferAdapter;
-using mw::streamer::processor::internal::AudioFrameAdapter;
 using mw::streamer::processor::internal::VideoBufferAdapter;
-using mw::streamer::processor::internal::VideoFrameAdapter;
 
 struct PixelFormatCase {
   AVPixelFormat ffmpeg_format;
@@ -101,7 +102,7 @@ TEST_CASE("VideoFrameAdapter映射常用软件YUV格式") {
 
   for (const auto& test_case : cases) {
     auto frame = CreateSoftwareVideoFrame(test_case.ffmpeg_format);
-    const VideoFrameAdapter adapter(frame);
+    const VideoFrameViewAdapter adapter(frame);
     const auto& view = adapter.view();
 
     CHECK(view.buffer.memory_type == kMwStreamerMemoryHost);
@@ -131,7 +132,7 @@ TEST_CASE("VideoFrameAdapter映射颜色和时间戳") {
   frame->color_trc = AVCOL_TRC_SMPTE2084;
   frame->chroma_location = AVCHROMA_LOC_TOPLEFT;
 
-  const VideoFrameAdapter adapter(frame);
+  const VideoFrameViewAdapter adapter(frame);
   const auto& view = adapter.view();
 
   CHECK(view.color.range == kMwStreamerColorRangeFull);
@@ -160,19 +161,20 @@ TEST_CASE("VideoBufferAdapter暴露同一软件帧的可写存储") {
 
 TEST_CASE("VideoFrameAdapter拒绝不支持的像素格式和无效时间基") {
   auto rgb_frame = CreateSoftwareVideoFrame(AV_PIX_FMT_RGB24);
-  CHECK_THROWS_AS(VideoFrameAdapter(rgb_frame), std::invalid_argument);
+  CHECK_THROWS_AS(VideoFrameViewAdapter(rgb_frame), std::invalid_argument);
 
   Frame unsupported_hardware_frame;
   unsupported_hardware_frame->format = AV_PIX_FMT_VAAPI;
   unsupported_hardware_frame->width = 64;
   unsupported_hardware_frame->height = 32;
   unsupported_hardware_frame->time_base = {1, 25};
-  CHECK_THROWS_AS(VideoFrameAdapter(unsupported_hardware_frame),
+  CHECK_THROWS_AS(VideoFrameViewAdapter(unsupported_hardware_frame),
                   std::invalid_argument);
 
   auto missing_time_base = CreateSoftwareVideoFrame(AV_PIX_FMT_YUV420P);
   missing_time_base->time_base = {0, 1};
-  CHECK_THROWS_AS(VideoFrameAdapter(missing_time_base), std::invalid_argument);
+  CHECK_THROWS_AS(VideoFrameViewAdapter(missing_time_base),
+                  std::invalid_argument);
 }
 
 TEST_CASE("VideoFrameAdapter映射CUDA线性硬件帧") {
@@ -218,7 +220,7 @@ TEST_CASE("VideoFrameAdapter映射CUDA线性硬件帧") {
     frame->duration = 1;
     frame->time_base = {1, 25};
 
-    const VideoFrameAdapter adapter(frame);
+    const VideoFrameViewAdapter adapter(frame);
     const auto& view = adapter.view();
 
     CHECK(view.buffer.memory_type == kMwStreamerMemoryCuda);
@@ -244,7 +246,7 @@ TEST_CASE("音频Adapter映射48kHz float32交错帧") {
   auto* samples = reinterpret_cast<float*>(frame->extended_data[0]);
   samples[0] = 0.25F;
 
-  const AudioFrameAdapter input_adapter(frame);
+  const AudioFrameViewAdapter input_adapter(frame);
   const auto& input = input_adapter.view();
   CHECK(input.data == samples);
   CHECK(input.sample_rate == 48000);
@@ -263,7 +265,7 @@ TEST_CASE("音频Adapter映射48kHz float32交错帧") {
 TEST_CASE("音频Adapter拒绝非Processor标准格式") {
   auto frame = CreateAudioFrame();
   frame->sample_rate = 44100;
-  CHECK_THROWS_AS(AudioFrameAdapter(frame), std::invalid_argument);
+  CHECK_THROWS_AS(AudioFrameViewAdapter(frame), std::invalid_argument);
   CHECK_THROWS_AS(AudioBufferAdapter(frame), std::invalid_argument);
 }
 

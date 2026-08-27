@@ -72,6 +72,8 @@ set(MW_STREAMER_CORE_SOURCES
     src/input/player_proxy.cc
     src/log/logging.cc
     src/media/internal/codec_bridge.cc
+    src/output/internal/output_sink_worker.cc
+    src/output/output_sink.cc
     src/output/output_session.cc
     src/output/recording_target.cc
     src/performance/internal/local_file_collector.cc
@@ -82,7 +84,9 @@ set(MW_STREAMER_CORE_SOURCES
     src/pipeline/internal/remux/source_output_worker.cc
     src/pipeline/internal/streaming/audio_processing_chain.cc
     src/pipeline/internal/streaming/audio_worker.cc
+    src/pipeline/internal/streaming/encoded_output_sink.cc
     src/pipeline/internal/streaming/frame_synchronizer.cc
+    src/pipeline/internal/streaming/output_event_mailbox.cc
     src/pipeline/internal/streaming/output_worker.cc
     src/pipeline/internal/streaming/standby_video_frame.cc
     src/pipeline/internal/streaming/video_worker.cc

@@ -9,7 +9,7 @@ max_track_wait_ms = 500
 # 也可以填写推流地址，例如rtmp://127.0.0.1/live/source。
 input_targets = ["./input.mp4"]
 
-# 处理、编码后的输出目标；空数组表示编码后直接丢弃。
+# 处理、编码后的输出目标；空数组表示不创建编码Sink。
 # 还支持RTMP、RTSP、SRT以及m3u8等OutputSession目标。
 output_targets = ["./output.mp4"]
 

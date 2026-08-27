@@ -25,6 +25,7 @@ class StreamingProcessorHandler final : public ProcessorHandler {
   // processing returns only after the framework execution handle completes.
   ffmpeg::Frame ProcessVideo(const ffmpeg::Frame& input);
   ffmpeg::Frame ProcessAudio(const ffmpeg::Frame& input);
+  void NotifyOutputEvent(const MwStreamerOutputEvent& event);
 
  private:
   class Impl;

@@ -49,9 +49,9 @@ struct StreamingPipelineConfig {
   std::vector<std::string> input_targets;
 
   // Optional RTMP, RTSP, SRT, fragmented MP4, and HLS-fMP4 targets accepted by
-  // OutputSession. When empty, processed frames are still encoded and the
-  // encoded packets are discarded. Encoded StreamInfo is produced at runtime
-  // and deliberately does not belong to this configuration.
+  // OutputSession. An empty list disables the encoded Sink. Encoded StreamInfo
+  // is produced at runtime and deliberately does not belong to this
+  // configuration.
   std::vector<std::string> output_targets;
 };
 

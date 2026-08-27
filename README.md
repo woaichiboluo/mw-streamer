@@ -138,6 +138,19 @@ mw_shutdown();
 生成的 `const char*` 只在 Processor 的 `update_config` 回调期间有效，需要异步使用时
 由 Processor 自行复制。
 
+StreamingPipeline 在统一输出时间线后将 Frame 分发给彼此隔离的 Raw 与 Encoded
+Sink。C++ 调用方实现 `mw::streamer::output::OutputSink`，并在启动前通过
+`AddOutputSink()` 转移所有权；每个 Sink 使用独立队列和线程，`Start()` 不接收事件
+参数，音视频 `ffmpeg::Frame` 按值转移一个引用，Sink 可以持有到渲染完成。公开的
+FrameView Adapter 可在需要时生成不复制媒体数据的借用 View。Sink 可通过 protected
+`NotifyEvent()` 将事件异步投递给 Processor，事件来源自动使用注册时的 `sink_id`；
+队列积压时只丢弃该 Sink 的旧帧，不阻塞其他 Sink 或编码分支。
+
+`output_targets` 非空时 Pipeline 自动创建 Encoded Sink，为空时不编码。Pipeline
+允许零个或多个 Sink，没有 Sink 时仍会正常处理并自然结束。C 调用方通过
+`mw_streaming_add_output_sink()` 注册带 `sink_id` 的独立 Sink，并可通过
+`mw_streaming_submit_output_event()` 反向提交带类型、payload 和可选输出时间戳的事件。
+
 ## 日志
 
 日志模块使用一个活动的 spdlog logger 统一接收 `mw-streamer`、Processor、

@@ -12,7 +12,9 @@
 #include <vector>
 
 #include "mw/config/toml.h"
+#include "mw/ffmpeg/frame_view.h"
 #include "mw/init/init.h"
+#include "mw/output/output_sink.h"
 #include "mw/performance/snapshot.h"
 #include "mw/pipeline/file_pipeline.h"
 #include "mw/pipeline/remux_pipeline.h"
@@ -326,6 +328,41 @@ MwFileStats* MakeStats(const performance::LocalFilePipelineSnapshot& source) {
   return stats.release();
 }
 
+class CallbackOutputSink final : public mw::streamer::output::OutputSink {
+ public:
+  explicit CallbackOutputSink(MwStreamerOutputSinkCallbacks callbacks)
+      : callbacks_(callbacks) {}
+
+  void Start() override {
+    if (callbacks_.start) {
+      callbacks_.start(callbacks_.user_context);
+    }
+  }
+
+  void WriteAudio(mw::streamer::ffmpeg::Frame frame) override {
+    if (callbacks_.write_audio) {
+      const mw::streamer::ffmpeg::AudioFrameViewAdapter adapter(frame);
+      callbacks_.write_audio(&adapter.view(), callbacks_.user_context);
+    }
+  }
+
+  void WriteVideo(mw::streamer::ffmpeg::Frame frame) override {
+    if (callbacks_.write_video) {
+      const mw::streamer::ffmpeg::VideoFrameViewAdapter adapter(frame);
+      callbacks_.write_video(&adapter.view(), callbacks_.user_context);
+    }
+  }
+
+  void Stop() noexcept override {
+    if (callbacks_.stop) {
+      callbacks_.stop(callbacks_.user_context);
+    }
+  }
+
+ private:
+  const MwStreamerOutputSinkCallbacks callbacks_;
+};
+
 }  // namespace
 
 extern "C" {
@@ -388,6 +425,20 @@ MwResult mw_streaming_set_processor(
   });
 }
 
+MwResult mw_streaming_add_output_sink(
+    MwStreaming* streaming, const char* sink_id,
+    const MwStreamerOutputSinkCallbacks* callbacks) {
+  return Guard([&]() {
+    if (!sink_id) {
+      throw std::invalid_argument("Output Sink ID不能为空");
+    }
+    auto sink = std::make_unique<CallbackOutputSink>(
+        Require(callbacks, "Output Sink回调"));
+    Require(streaming, "Streaming句柄")
+        .pipeline.AddOutputSink(sink_id, std::move(sink));
+  });
+}
+
 MwResult mw_streaming_start(MwStreaming* streaming) {
   return Guard([&]() { Require(streaming, "Streaming句柄").pipeline.Start(); });
 }
@@ -405,6 +456,31 @@ MwResult mw_streaming_reload(MwStreaming* streaming) {
         streaming->pipeline.UpdateProcessorConfig(
             std::move(config.processor.config));
       });
+}
+
+MwResult mw_streaming_submit_output_event(MwStreaming* streaming,
+                                          const MwStreamerOutputEvent* event) {
+  pipeline::OutputEventSubmitResult result =
+      pipeline::OutputEventSubmitResult::kUnavailable;
+  const auto call_result = Guard([&]() {
+    result = Require(streaming, "Streaming句柄")
+                 .pipeline.SubmitOutputEvent(Require(event, "Output Event"));
+  });
+  if (call_result != kMwResultSuccess) {
+    return call_result;
+  }
+  switch (result) {
+    case pipeline::OutputEventSubmitResult::kAccepted:
+      return kMwResultSuccess;
+    case pipeline::OutputEventSubmitResult::kQueueFull:
+      SetError("Processor输出事件队列已满");
+      return kMwResultQueueFull;
+    case pipeline::OutputEventSubmitResult::kUnavailable:
+      SetError("Processor输出事件当前不可用");
+      return kMwResultInvalidState;
+  }
+  SetError("未知Output Event提交结果");
+  return kMwResultInternalError;
 }
 
 MwResult mw_streaming_status(const MwStreaming* streaming,

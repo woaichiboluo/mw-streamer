@@ -4,28 +4,12 @@
 #include <array>
 
 #include "mw/ffmpeg/frame.h"
+#include "mw/ffmpeg/frame_view.h"
 #include "mw/processor/processor.h"
 
 namespace mw::streamer::processor::internal {
 
-// Adapters expose borrowed AVFrame storage through the Processor C ABI. They
-// must remain alive for every use of the returned view and never retain the
-// underlying frame.
-class VideoFrameAdapter final {
- public:
-  explicit VideoFrameAdapter(const ffmpeg::Frame& frame);
-
-  VideoFrameAdapter(const VideoFrameAdapter&) = delete;
-  VideoFrameAdapter& operator=(const VideoFrameAdapter&) = delete;
-  VideoFrameAdapter(VideoFrameAdapter&&) = delete;
-  VideoFrameAdapter& operator=(VideoFrameAdapter&&) = delete;
-
-  const MwStreamerVideoFrameView& view() const noexcept;
-
- private:
-  std::array<MwStreamerVideoPlaneView, 4> planes_{};
-  MwStreamerVideoFrameView view_{};
-};
+using VideoFrameAdapter = ffmpeg::VideoFrameViewAdapter;
 
 class VideoBufferAdapter final {
  public:
@@ -43,15 +27,7 @@ class VideoBufferAdapter final {
   MwStreamerVideoBufferView view_{};
 };
 
-class AudioFrameAdapter final {
- public:
-  explicit AudioFrameAdapter(const ffmpeg::Frame& frame);
-
-  const MwStreamerAudioFrameView& view() const noexcept;
-
- private:
-  MwStreamerAudioFrameView view_{};
-};
+using AudioFrameAdapter = ffmpeg::AudioFrameViewAdapter;
 
 class AudioBufferAdapter final {
  public:

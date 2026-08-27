@@ -24,6 +24,7 @@ class Runner:
         passthrough_video: bool = False,
         software_video: bool = False,
         standby: bool = False,
+        local_sink: bool = False,
         video_jitter_ms: tuple[int, int] | None = None,
     ) -> None:
         if pipeline not in {"streaming", "remux", "file"}:
@@ -78,6 +79,8 @@ class Runner:
                 command.append("--software-video")
             if standby:
                 command.append("--standby")
+            if local_sink:
+                command.append("--local-sink")
             if video_jitter_ms is not None:
                 minimum, maximum = video_jitter_ms
                 if minimum < 0 or maximum < minimum:

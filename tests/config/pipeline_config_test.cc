@@ -24,7 +24,6 @@ static_assert(std::is_move_constructible_v<LocalFilePipelineConfig>);
 
 TEST_CASE("streaming pipeline config owns the complete streaming setup") {
   StreamingPipelineConfig config;
-
   CHECK(config.input_url.empty());
   CHECK(config.zlm.player.connect_timeout == std::chrono::seconds(10));
   CHECK(config.zlm.player.media_timeout == std::chrono::seconds(5));

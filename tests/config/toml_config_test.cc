@@ -304,6 +304,11 @@ TEST_CASE("TOML严格拒绝未知字段") {
     CHECK_THROWS_AS(LoadStreamingPipelineConfigFromToml(file.path()),
                     std::invalid_argument);
   }
+  SECTION("已移除的编码开关") {
+    TemporaryToml file("encoded_output_enabled = true\n");
+    CHECK_THROWS_AS(LoadStreamingPipelineConfigFromToml(file.path()),
+                    std::invalid_argument);
+  }
   SECTION("嵌套字段") {
     TemporaryToml file("[zlm.player]\nmedia_timeout = 1000\n");
     CHECK_THROWS_AS(LoadRemuxPipelineConfigFromToml(file.path()),

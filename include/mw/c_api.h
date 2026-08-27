@@ -31,6 +31,7 @@ typedef enum MwResult {
   kMwResultInvalidState,
   kMwResultOutOfMemory,
   kMwResultInternalError,
+  kMwResultQueueFull,
 } MwResult;
 
 typedef enum MwPipelineStatus {
@@ -44,6 +45,20 @@ typedef enum MwPipelineStatus {
 typedef struct MwStreaming MwStreaming;
 typedef struct MwRemux MwRemux;
 typedef struct MwFile MwFile;
+
+// One independently scheduled raw output flow. The callback table is copied
+// during registration; user_context remains caller-owned and must stay valid
+// until stop returns. All callbacks are serialized on this Sink's dedicated
+// thread. Frame views and their storage are borrowed for the callback duration.
+typedef struct MwStreamerOutputSinkCallbacks {
+  void* user_context;
+  void (*start)(void* user_context);
+  void (*write_video)(const MwStreamerVideoFrameView* frame,
+                      void* user_context);
+  void (*write_audio)(const MwStreamerAudioFrameView* frame,
+                      void* user_context);
+  void (*stop)(void* user_context);
+} MwStreamerOutputSinkCallbacks;
 
 // Status callbacks run synchronously on the thread that changes the state.
 // They must return promptly and must not call control or destroy functions.
@@ -170,12 +185,21 @@ MW_STREAMER_API MwResult mw_streaming_on_status(MwStreaming* streaming,
 MW_STREAMER_API MwResult mw_streaming_set_processor(
     MwStreaming* streaming,
     const MwStreamerStreamingProcessorCallbacks* callbacks);
+// Registers one independent Sink before start. sink_id must be non-empty and
+// unique. Callback function pointers may be null.
+MW_STREAMER_API MwResult
+mw_streaming_add_output_sink(MwStreaming* streaming, const char* sink_id,
+                             const MwStreamerOutputSinkCallbacks* callbacks);
 // Start only reports whether the asynchronous request was accepted. Runtime
 // failures are reported through kMwPipelineStatusFailed.
 MW_STREAMER_API MwResult mw_streaming_start(MwStreaming* streaming);
 // Reloads the TOML file supplied to create and applies only processor.config.
 // Parsing failures leave the current Processor configuration unchanged.
 MW_STREAMER_API MwResult mw_streaming_reload(MwStreaming* streaming);
+// Deep-copies and asynchronously delivers one event to the Processor. Success
+// means accepted by the mailbox, not handled by the Processor.
+MW_STREAMER_API MwResult mw_streaming_submit_output_event(
+    MwStreaming* streaming, const MwStreamerOutputEvent* event);
 MW_STREAMER_API MwResult mw_streaming_status(const MwStreaming* streaming,
                                              MwPipelineStatus* output);
 // A successful collection allocates an independent snapshot. The caller must

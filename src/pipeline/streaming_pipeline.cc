@@ -31,9 +31,11 @@ extern "C" {
 #include "mw/input/player_proxy.h"
 #include "mw/log/logging.h"
 #include "mw/output/output_session.h"
+#include "mw/output/output_sink.h"
 #include "mw/performance/internal/streaming_collector.h"
 #include "mw/pipeline/internal/remux/source_output_worker.h"
 #include "mw/pipeline/internal/streaming/audio_worker.h"
+#include "mw/pipeline/internal/streaming/output_event_mailbox.h"
 #include "mw/pipeline/internal/streaming/output_worker.h"
 #include "mw/pipeline/internal/streaming/video_worker.h"
 #include "mw/processor/internal/source_info_adapter.h"
@@ -45,8 +47,11 @@ namespace {
 using Log = log::Module<log::LogModule::kStreamer>;
 using internal::remux::SourceOutputWorker;
 using internal::streaming::AudioWorker;
+using internal::streaming::OutputEventMailbox;
 using internal::streaming::OutputWorker;
 using internal::streaming::VideoWorker;
+
+constexpr std::size_t kOutputEventQueueCapacity = 256;
 
 bool IsNetworkInput(const std::string& url) {
   return url.find("://") != std::string::npos;
@@ -64,6 +69,42 @@ class StreamingPipeline::Impl final {
       const MwStreamerStreamingProcessorCallbacks& callbacks) {
     RequireIdle("设置Processor回调");
     processor_callbacks_ = callbacks;
+  }
+
+  void AddOutputSink(std::string sink_id,
+                     std::unique_ptr<output::OutputSink> sink) {
+    RequireIdle("注册Output Sink");
+    if (sink_id.empty()) {
+      throw std::invalid_argument("Output Sink ID不能为空");
+    }
+    if (!sink) {
+      throw std::invalid_argument("Output Sink不能为空");
+    }
+    const auto duplicate =
+        std::find_if(output_sinks_.begin(), output_sinks_.end(),
+                     [&sink_id](const RegisteredOutputSink& registered) {
+                       return registered.id == sink_id;
+                     });
+    if (duplicate != output_sinks_.end()) {
+      throw std::invalid_argument("Output Sink ID不能重复");
+    }
+    output::internal::OutputSinkAccess::BindEventSubmitter(
+        *sink,
+        [this, sink_id](std::string_view type, const void* payload,
+                        std::size_t payload_size,
+                        std::optional<MwStreamerMediaTimestamp> timestamp) {
+          const std::string event_type(type);
+          const MwStreamerOutputEvent event = {
+              sink_id.c_str(),
+              event_type.c_str(),
+              payload,
+              payload_size,
+              static_cast<std::uint8_t>(timestamp.has_value()),
+              timestamp.value_or(MwStreamerMediaTimestamp{}),
+          };
+          return SubmitOutputEvent(event) == OutputEventSubmitResult::kAccepted;
+        });
+    output_sinks_.push_back({std::move(sink_id), std::move(sink)});
   }
 
   void SetOnStatus(OnStatus callback) {
@@ -129,6 +170,26 @@ class StreamingPipeline::Impl final {
     throw std::logic_error("StreamingPipeline包含未知状态");
   }
 
+  OutputEventSubmitResult SubmitOutputEvent(
+      const MwStreamerOutputEvent& event) {
+    ValidateOutputEvent(event);
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    if (!output_event_mailbox_ ||
+        (status() != StreamingPipelineStatus::kStarting &&
+         status() != StreamingPipelineStatus::kRunning)) {
+      return OutputEventSubmitResult::kUnavailable;
+    }
+    switch (output_event_mailbox_->Submit(event)) {
+      case internal::streaming::OutputEventSubmitResult::kAccepted:
+        return OutputEventSubmitResult::kAccepted;
+      case internal::streaming::OutputEventSubmitResult::kQueueFull:
+        return OutputEventSubmitResult::kQueueFull;
+      case internal::streaming::OutputEventSubmitResult::kStopped:
+        return OutputEventSubmitResult::kUnavailable;
+    }
+    return OutputEventSubmitResult::kUnavailable;
+  }
+
   void Stop() noexcept {
     StopSnapshot snapshot;
     {
@@ -162,6 +223,9 @@ class StreamingPipeline::Impl final {
     if (snapshot.source_output_worker) {
       snapshot.source_output_worker->Stop();
     }
+    if (snapshot.output_event_mailbox) {
+      snapshot.output_event_mailbox->Stop();
+    }
     if (player_stopped.valid()) {
       player_stopped.wait();
     }
@@ -174,6 +238,7 @@ class StreamingPipeline::Impl final {
     std::unique_ptr<processor::StreamingProcessorHandler> processor;
     std::unique_ptr<common::Barrier> boundary_barrier;
     std::unique_ptr<OutputWorker> output_worker;
+    std::unique_ptr<OutputEventMailbox> output_event_mailbox;
     std::unique_ptr<SourceOutputWorker> source_output_worker;
     std::unique_ptr<AudioWorker> audio_worker;
     std::unique_ptr<VideoWorker> video_worker;
@@ -184,6 +249,7 @@ class StreamingPipeline::Impl final {
       processor = std::move(processor_);
       boundary_barrier = std::move(boundary_barrier_);
       output_worker = std::move(output_worker_);
+      output_event_mailbox = std::move(output_event_mailbox_);
       source_output_worker = std::move(source_output_worker_);
       audio_worker = std::move(audio_worker_);
       video_worker = std::move(video_worker_);
@@ -202,6 +268,7 @@ class StreamingPipeline::Impl final {
     video_worker.reset();
     audio_worker.reset();
     output_worker.reset();
+    output_event_mailbox.reset();
     source_output_worker.reset();
     boundary_barrier.reset();
     processor.reset();
@@ -291,6 +358,21 @@ class StreamingPipeline::Impl final {
     }
   }
 
+  static void ValidateOutputEvent(const MwStreamerOutputEvent& event) {
+    if (!event.sink_id || event.sink_id[0] == '\0' || !event.type ||
+        event.type[0] == '\0') {
+      throw std::invalid_argument("Output Event缺少sink_id或type");
+    }
+    if ((event.payload_size == 0) != (event.payload == nullptr)) {
+      throw std::invalid_argument("Output Event payload与长度不匹配");
+    }
+    if (event.has_timestamp > 1 ||
+        (event.has_timestamp && (event.timestamp.time_base.num <= 0 ||
+                                 event.timestamp.time_base.den <= 0))) {
+      throw std::invalid_argument("Output Event时间戳无效");
+    }
+  }
+
   void BindInputCallbacks() {
     packet_queue_->SetOnPacket(
         [this](std::uint64_t generation, const ffmpeg::Packet& packet) {
@@ -335,6 +417,7 @@ class StreamingPipeline::Impl final {
           auto chains = BuildChains(streams);
           processor_ = std::move(chains.processor);
           boundary_barrier_ = std::move(chains.boundary_barrier);
+          output_event_mailbox_ = std::move(chains.output_event_mailbox);
           output_worker_ = std::move(chains.output_worker);
           audio_worker_ = std::move(chains.audio_worker);
           video_worker_ = std::move(chains.video_worker);
@@ -343,6 +426,9 @@ class StreamingPipeline::Impl final {
           audio_stream_index_ = chains.audio_stream_index;
           video_stream_index_ = chains.video_stream_index;
 
+          if (output_event_mailbox_) {
+            output_event_mailbox_->Start();
+          }
           output_worker_->Start();
           if (audio_worker_) {
             audio_worker_->Start();
@@ -363,6 +449,7 @@ class StreamingPipeline::Impl final {
   struct Chains {
     std::unique_ptr<processor::StreamingProcessorHandler> processor;
     std::unique_ptr<common::Barrier> boundary_barrier;
+    std::unique_ptr<OutputEventMailbox> output_event_mailbox;
     std::unique_ptr<OutputWorker> output_worker;
     std::unique_ptr<AudioWorker> audio_worker;
     std::unique_ptr<VideoWorker> video_worker;
@@ -370,6 +457,9 @@ class StreamingPipeline::Impl final {
     int video_stream_index = -1;
 
     ~Chains() {
+      if (output_event_mailbox) {
+        output_event_mailbox->Stop();
+      }
       if (processor) {
         processor->Stop();
       }
@@ -380,6 +470,11 @@ class StreamingPipeline::Impl final {
     Chains& operator=(Chains&&) noexcept = default;
     Chains(const Chains&) = delete;
     Chains& operator=(const Chains&) = delete;
+  };
+
+  struct RegisteredOutputSink {
+    std::string id;
+    std::unique_ptr<output::OutputSink> sink;
   };
 
   Chains BuildChains(const std::vector<ffmpeg::StreamInfo>& streams) {
@@ -405,7 +500,7 @@ class StreamingPipeline::Impl final {
     }
     if (video_stream && (config_.video_encoder.frame_rate.num <= 0 ||
                          config_.video_encoder.frame_rate.den <= 0)) {
-      throw std::invalid_argument("视频处理链路必须配置正数编码帧率");
+      throw std::invalid_argument("视频输出时间线必须配置正数帧率");
     }
 
     std::unique_ptr<decoder::VideoDecoder> video_decoder;
@@ -427,6 +522,10 @@ class StreamingPipeline::Impl final {
         kMwStreamerProcessorStartSuccess) {
       throw std::runtime_error("Processor拒绝启动");
     }
+    if (processor_callbacks_.on_output_event) {
+      chains.output_event_mailbox = std::make_unique<OutputEventMailbox>(
+          kOutputEventQueueCapacity, *chains.processor);
+    }
 
     const auto startup_packet_capacity =
         std::max(config_.audio_queue_capacity, config_.video_queue_capacity);
@@ -435,11 +534,17 @@ class StreamingPipeline::Impl final {
         static_cast<std::size_t>(video_stream.has_value()));
     const auto* hardware_context =
         video_decoder ? video_decoder->hardware_context() : nullptr;
+    std::vector<std::unique_ptr<output::OutputSink>> output_sinks;
+    output_sinks.reserve(output_sinks_.size());
+    for (auto& registered : output_sinks_) {
+      output_sinks.push_back(std::move(registered.sink));
+    }
+    output_sinks_.clear();
     chains.output_worker = std::make_unique<OutputWorker>(
         audio_stream ? audio_stream->stream_index : -1,
         video_stream ? video_stream->stream_index : -1, config_.audio_encoder,
-        config_.video_encoder, config_.output_targets, config_.zlm.output,
-        startup_packet_capacity, config_.max_track_wait,
+        config_.video_encoder, std::move(output_sinks), config_.output_targets,
+        config_.zlm.output, startup_packet_capacity, config_.max_track_wait,
         config_.standby.enabled, config_.standby.image_path, hardware_context,
         audio_stream ? &performance_.audio() : nullptr,
         video_stream ? &performance_.video() : nullptr, poller_,
@@ -476,6 +581,9 @@ class StreamingPipeline::Impl final {
       if (stopping_.load(std::memory_order_acquire) ||
           status() == StreamingPipelineStatus::kFailed) {
         return;
+      }
+      if (output_event_mailbox_) {
+        output_event_mailbox_->RequestStop();
       }
       const auto previous = status_.exchange(StreamingPipelineStatus::kStopped,
                                              std::memory_order_acq_rel);
@@ -631,6 +739,7 @@ class StreamingPipeline::Impl final {
     processor::StreamingProcessorHandler* processor = nullptr;
     common::Barrier* boundary_barrier = nullptr;
     OutputWorker* output_worker = nullptr;
+    OutputEventMailbox* output_event_mailbox = nullptr;
     SourceOutputWorker* source_output_worker = nullptr;
     AudioWorker* audio_worker = nullptr;
     VideoWorker* video_worker = nullptr;
@@ -644,6 +753,7 @@ class StreamingPipeline::Impl final {
         processor_.get(),
         boundary_barrier_.get(),
         output_worker_.get(),
+        output_event_mailbox_.get(),
         source_output_worker_.get(),
         audio_worker_.get(),
         video_worker_.get(),
@@ -662,6 +772,9 @@ class StreamingPipeline::Impl final {
     }
     if (snapshot.output_worker) {
       snapshot.output_worker->RequestStop();
+    }
+    if (snapshot.output_event_mailbox) {
+      snapshot.output_event_mailbox->RequestStop();
     }
     if (snapshot.source_output_worker) {
       snapshot.source_output_worker->RequestStop();
@@ -683,6 +796,7 @@ class StreamingPipeline::Impl final {
 
   StreamingPipelineConfig config_;
   MwStreamerStreamingProcessorCallbacks processor_callbacks_{};
+  std::vector<RegisteredOutputSink> output_sinks_;
   OnStatus on_status_;
 
   std::atomic<StreamingPipelineStatus> status_{StreamingPipelineStatus::kIdle};
@@ -695,6 +809,7 @@ class StreamingPipeline::Impl final {
   std::unique_ptr<cache::PacketQueue> packet_queue_;
   std::unique_ptr<processor::StreamingProcessorHandler> processor_;
   std::unique_ptr<common::Barrier> boundary_barrier_;
+  std::unique_ptr<OutputEventMailbox> output_event_mailbox_;
   std::unique_ptr<OutputWorker> output_worker_;
   std::unique_ptr<SourceOutputWorker> source_output_worker_;
   std::unique_ptr<AudioWorker> audio_worker_;
@@ -723,6 +838,11 @@ void StreamingPipeline::SetProcessorCallbacks(
   impl_->SetProcessorCallbacks(callbacks);
 }
 
+void StreamingPipeline::AddOutputSink(
+    std::string sink_id, std::unique_ptr<output::OutputSink> sink) {
+  impl_->AddOutputSink(std::move(sink_id), std::move(sink));
+}
+
 void StreamingPipeline::SetOnStatus(OnStatus callback) {
   impl_->SetOnStatus(std::move(callback));
 }
@@ -731,6 +851,11 @@ void StreamingPipeline::Start() { impl_->Start(); }
 
 void StreamingPipeline::UpdateProcessorConfig(std::string config) {
   impl_->UpdateProcessorConfig(std::move(config));
+}
+
+OutputEventSubmitResult StreamingPipeline::SubmitOutputEvent(
+    const MwStreamerOutputEvent& event) {
+  return impl_->SubmitOutputEvent(event);
 }
 
 void StreamingPipeline::Stop() noexcept { impl_->Stop(); }

@@ -9,6 +9,8 @@
 - RTSP、RTMP、SRT 稳定推流；
 - 输出连接被服务端主动断开后的自动重连；
 - 同一输入同时稳定推送到三个协议；
+- 拉流后同时分发到本地Raw Sink和一个Encoded Sink，编码目标覆盖FILE、RTMP、
+  RTSP、SRT；
 - RemuxPipeline将源压缩流同时转推并录制为本地MP4；
 - StreamingPipeline将源输入同时旁路转推和录像，并保持处理后输出；
 - FilePipeline全速处理本地音视频文件，并验证自然EOF、Processor生命周期、
@@ -89,7 +91,7 @@ python3 -m venv .cache/e2e-venv
 ```
 
 RemuxPipeline始终配置至少一个真实输出目标；StreamingPipeline可以不配置处理后输出，
-此时仍完成编码并丢弃编码包；FilePipeline直接处理本地文件且不创建输出。Pipeline 是否
+此时不创建编码Sink；FilePipeline直接处理本地文件且不创建输出。Pipeline 是否
 成功由其公共状态事件判断，媒体轨道和持续输出则由 FFmpeg 从输出端实际读取验证；测试
 不再依赖 PlayerProxy 或 PacketQueue 的内部状态。
 
