@@ -32,7 +32,8 @@ void MP4Demuxer::openMP4(const string &file) {
     _mp4_file->openFile(file.data(), "rb");
     _mov_reader = _mp4_file->createReader();
     getAllTracks();
-    _duration_ms = mov_reader_getduration(_mov_reader.get());
+    _timestamp_offset = std::max<int64_t>(0, -mov_reader_getstarttime(_mov_reader.get()));
+    _duration_ms = mov_reader_getduration(_mov_reader.get()) + _timestamp_offset;
 }
 
 void MP4Demuxer::closeMP4() {
@@ -84,10 +85,11 @@ void MP4Demuxer::onAudioTrack(uint32_t track, uint8_t object, int channel_count,
 }
 
 int64_t MP4Demuxer::seekTo(int64_t stamp_ms) {
+    stamp_ms -= _timestamp_offset;
     if(0 != mov_reader_seek(_mov_reader.get(),&stamp_ms)){
         return -1;
     }
-    return stamp_ms;
+    return stamp_ms + _timestamp_offset;
 }
 
 struct Context {
@@ -130,7 +132,7 @@ Frame::Ptr MP4Demuxer::readFrame(bool &keyFrame, bool &eof, int *error) {
 
         case 1 : {
             keyFrame = ctx.flags & MOV_AV_FLAG_KEYFREAME;
-            return makeFrame(ctx.track_id, ctx.buffer, ctx.pts, ctx.dts);
+            return makeFrame(ctx.track_id, ctx.buffer, ctx.pts + _timestamp_offset, ctx.dts + _timestamp_offset);
         }
 
         default : {

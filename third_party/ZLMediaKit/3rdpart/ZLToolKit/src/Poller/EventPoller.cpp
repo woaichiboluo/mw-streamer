@@ -8,6 +8,8 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include <algorithm>
+
 #include "SelectWrap.h"
 #include "EventPoller.h"
 #include "Util/util.h"
@@ -519,20 +521,32 @@ EventPoller::DelayTask::Ptr EventPoller::doDelayTask(uint64_t delay_ms, function
 ///////////////////////////////////////////////
 
 static size_t s_pool_size = 0;
-static bool s_enable_cpu_affinity = true;
+static atomic<bool> s_enable_cpu_affinity { true };
 
 INSTANCE_IMP(EventPollerPool)
 
 EventPoller::Ptr EventPollerPool::getFirstPoller() {
-    return static_pointer_cast<EventPoller>(_threads.front());
+    return static_pointer_cast<EventPoller>(getFirstExecutor());
 }
 
 EventPoller::Ptr EventPollerPool::getPoller(bool prefer_current_thread) {
     auto poller = EventPoller::getCurrentPoller();
-    if (prefer_current_thread && _prefer_current_thread && poller) {
-        return poller;
+    if (prefer_current_thread && _prefer_current_thread.load() && poller) {
+        if (auto shared = getSharedExecutor(poller)) {
+            return static_pointer_cast<EventPoller>(shared);
+        }
     }
     return static_pointer_cast<EventPoller>(getExecutor());
+}
+
+EventPoller::Ptr EventPollerPool::extractPoller() {
+    if (auto executor = extractUnusedExecutor()) {
+        return static_pointer_cast<EventPoller>(executor);
+    }
+    static atomic<size_t> next_id { 0 };
+    auto id = next_id.fetch_add(1);
+    auto cpus = max<size_t>(1, thread::hardware_concurrency());
+    return static_pointer_cast<EventPoller>(createPoller("exclusive poller " + to_string(id), ThreadPool::PRIORITY_HIGHEST, true, s_enable_cpu_affinity.load(), id % cpus));
 }
 
 void EventPollerPool::preferCurrentThread(bool flag) {
@@ -542,7 +556,7 @@ void EventPollerPool::preferCurrentThread(bool flag) {
 const std::string EventPollerPool::kOnStarted = "kBroadcastEventPollerPoolStarted";
 
 EventPollerPool::EventPollerPool() {
-    auto size = addPoller("event poller", s_pool_size, ThreadPool::PRIORITY_HIGHEST, true, s_enable_cpu_affinity);
+    auto size = addPoller("event poller", s_pool_size, ThreadPool::PRIORITY_HIGHEST, true, s_enable_cpu_affinity.load());
     NOTICE_EMIT(EventPollerPoolOnStartedArgs, kOnStarted, *this, size);
     InfoL << "EventPoller created size: " << size;
 }

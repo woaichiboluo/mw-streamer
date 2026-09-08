@@ -5,11 +5,12 @@ from pathlib import Path
 import pytest
 
 from mw_e2e.config import probe_media_file
-from mw_e2e.events import assert_pipeline_succeeded, read_events
+from mw_e2e.events import assert_pipeline_succeeded, final_performance, read_events
 from mw_e2e.models import E2EConfig
 from mw_e2e.runner import Runner
 
 
+# FileInput retains FFmpeg Skip Samples side data and trims AAC priming.
 SAMPLES = (
     ("h264_aac.mp4", 20, 94, 96256),
     ("h265_aac.mp4", 20, 94, 96256),
@@ -53,7 +54,7 @@ def test_file_pipeline_processes_local_file_to_natural_eof(
         [],
         e2e_config.tests.startup_timeout_seconds,
         artifact_directory,
-        pipeline="file",
+        scenario="file",
     )
 
     runner.start()
@@ -101,20 +102,20 @@ def test_file_pipeline_processes_local_file_to_natural_eof(
     assert int(summary["video_decode_frames"]) == expected_video_frames
     assert int(summary["video_process_frames"]) == expected_video_frames
     assert int(summary["audio_process_samples"]) == expected_audio_samples
-    if asset.has_audio:
-        assert int(summary["audio_decode_samples"]) > 0
-    else:
-        assert int(summary["audio_decode_samples"]) == 0
+    assert int(summary["audio_decode_samples"]) == expected_audio_samples
     assert summary["has_audio"] == ("1" if asset.has_audio else "0")
     assert summary["has_video"] == ("1" if asset.has_video else "0")
     assert summary["end_of_input_count"] == "1"
     assert summary["processor_stop_count"] == "1"
-    assert summary["progress_available"] == "1"
-    assert int(summary["duration_us"]) > 0
-    assert summary["processed_position_us"] == summary["duration_us"]
-    assert float(summary["progress"]) == pytest.approx(1.0)
-    assert summary["processing_speed_available"] == "1"
-    assert float(summary["processing_speed"]) > 0.0
+    decoders = final_performance(events, "video_decoder")
+    processors = final_performance(events, "video_processor")
+    assert len(decoders) == len(processors) == 1
+    assert int(decoders[0]["output_count"]) == expected_video_frames
+    assert int(processors[0]["input_count"]) == expected_video_frames
+    assert processors[0]["failed_calls"] == "0"
+    assert processors[0]["in_flight"] == "0"
+    assert not final_performance(events, "video_encoder")
+    assert not final_performance(events, "remux")
 
     boundary_index = _event_index(events, "processor_boundary")
     processor_stopped_index = _event_index(events, "processor_stopped")

@@ -1,8 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
-#include <chrono>
 #include <cstdint>
 #include <exception>
-#include <future>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -15,9 +13,7 @@ extern "C" {
 }
 
 #include "Extension/Track.h"
-#include "Poller/EventPoller.h"
 #include "Record/MP4Demuxer.h"
-#include "mw/cache/packet_queue.h"
 #include "mw/converter/zlm_codec_parameters_converter.h"
 #include "mw/converter/zlm_packet_converter.h"
 #include "mw/decoder/video_decoder.h"
@@ -29,7 +25,6 @@ using mediakit::Frame;
 using mediakit::FrameWriterInterface;
 using mediakit::MP4Demuxer;
 using mediakit::Track;
-using mw::streamer::cache::PacketQueue;
 using mw::streamer::converter::ZlmCodecParametersConverter;
 using mw::streamer::converter::ZlmPacketConverter;
 using mw::streamer::decoder::VideoDecoder;
@@ -39,7 +34,6 @@ using mw::streamer::ffmpeg::CodecParameters;
 using mw::streamer::ffmpeg::Packet;
 using mw::streamer::ffmpeg::StreamInfo;
 using mw::streamer::processor::internal::VideoFrameAdapter;
-using namespace std::chrono_literals;
 
 struct VideoSample {
   StreamInfo stream_info;
@@ -225,174 +219,6 @@ TEST_CASE("CUDA video decoder emits CUDA frames on the configured device") {
 
   CHECK(valid_frames);
   CHECK(decoded_frames == sample.packets.size());
-}
-
-TEST_CASE("packet queue output connects directly to the CUDA video decoder") {
-  const auto sample = LoadVideoSample();
-  VideoDecoder decoder(sample.stream_info);
-  auto queue = std::make_shared<PacketQueue>(1s);
-
-  std::size_t output_packets = 0;
-  std::size_t decoded_frames = 0;
-  bool callback_on_poller = true;
-  bool completion_set = false;
-  std::promise<void> completion;
-  auto completed = completion.get_future();
-
-  decoder.SetOnFrame([&](const mw::streamer::ffmpeg::Frame& frame) {
-    callback_on_poller =
-        callback_on_poller && queue->poller()->isCurrentThread();
-    if (frame->format == AV_PIX_FMT_CUDA) {
-      ++decoded_frames;
-    }
-  });
-
-  queue->poller()->async(
-      [&]() {
-        try {
-          queue->SetOnPacket(
-              [&](std::uint64_t generation, const Packet& packet) {
-                try {
-                  if (generation != 1) {
-                    throw std::runtime_error("PacketQueue输出了错误generation");
-                  }
-                  decoder.Decode(packet);
-                  ++output_packets;
-                } catch (...) {
-                  if (!completion_set) {
-                    completion.set_exception(std::current_exception());
-                    completion_set = true;
-                  }
-                }
-              });
-          queue->SetOnGenerationEnd([&](std::uint64_t generation) {
-            try {
-              if (generation != 1 || output_packets != sample.packets.size()) {
-                throw std::runtime_error(
-                    "PacketQueue在压缩包输出完成前结束了generation");
-              }
-              decoder.Drain();
-              completion.set_value();
-              completion_set = true;
-            } catch (...) {
-              if (!completion_set) {
-                completion.set_exception(std::current_exception());
-                completion_set = true;
-              }
-            }
-          });
-          queue->SetStreams(1, {sample.stream_info});
-          queue->SetPlaybackRate(20.0);
-          for (const auto& packet : sample.packets) {
-            if (!queue->Input(1, packet)) {
-              throw std::runtime_error("PacketQueue拒绝了测试视频包");
-            }
-          }
-          queue->EndInput(1);
-        } catch (...) {
-          if (!completion_set) {
-            completion.set_exception(std::current_exception());
-            completion_set = true;
-          }
-        }
-      },
-      false);
-
-  const bool ready = completed.wait_for(5s) == std::future_status::ready;
-  std::exception_ptr failure;
-  if (ready) {
-    try {
-      completed.get();
-    } catch (...) {
-      failure = std::current_exception();
-    }
-  }
-  queue->Stop();
-  queue.reset();
-
-  REQUIRE(ready);
-  if (failure) {
-    std::rethrow_exception(failure);
-  }
-  CHECK(callback_on_poller);
-  CHECK(output_packets == sample.packets.size());
-  CHECK(decoded_frames == sample.packets.size());
-}
-
-TEST_CASE("new packet generation flushes and reuses the same video decoder") {
-  const auto sample = LoadVideoSample();
-  VideoDecoderConfig config;
-  config.backend = VideoDecoderBackend::kSoftware;
-  config.decoder_name = "h264";
-  VideoDecoder decoder(sample.stream_info, config);
-  auto queue = std::make_shared<PacketQueue>(0ms);
-
-  std::uint64_t decoding_generation = 0;
-  std::size_t generation_two_packets = 0;
-  std::size_t generation_two_frames = 0;
-  std::size_t timeline_resets = 0;
-  std::vector<std::uint64_t> ended_generations;
-  std::exception_ptr failure;
-
-  decoder.SetOnFrame([&](const mw::streamer::ffmpeg::Frame&) {
-    if (decoding_generation == 2) {
-      ++generation_two_frames;
-    }
-  });
-
-  queue->poller()->sync([&]() {
-    try {
-      queue->SetOnPacket([&](std::uint64_t generation, const Packet& packet) {
-        decoding_generation = generation;
-        decoder.Decode(packet);
-        if (generation == 2) {
-          ++generation_two_packets;
-        }
-      });
-      queue->SetOnTimelineReset([&](std::uint64_t generation) {
-        if (generation != 2) {
-          throw std::runtime_error("PacketQueue输出了错误的时间线generation");
-        }
-        decoder.Flush();
-        ++timeline_resets;
-      });
-      queue->SetOnGenerationEnd([&](std::uint64_t generation) {
-        decoding_generation = generation;
-        decoder.Drain();
-        ended_generations.push_back(generation);
-      });
-
-      const std::vector<StreamInfo> streams{sample.stream_info};
-      queue->SetStreams(1, streams);
-      for (std::size_t index = 0; index < sample.packets.size() / 2; ++index) {
-        if (!queue->Input(1, sample.packets[index])) {
-          throw std::runtime_error("PacketQueue拒绝了第一代测试视频包");
-        }
-      }
-
-      queue->SetStreams(2, streams);
-      for (const auto& packet : sample.packets) {
-        if (!queue->Input(2, packet)) {
-          throw std::runtime_error("PacketQueue拒绝了第二代测试视频包");
-        }
-      }
-      queue->EndInput(2);
-    } catch (...) {
-      failure = std::current_exception();
-    }
-  });
-
-  if (failure) {
-    std::rethrow_exception(failure);
-  }
-  CHECK(timeline_resets == 1);
-  CHECK(generation_two_packets == sample.packets.size());
-  CHECK(generation_two_frames == sample.packets.size());
-  CHECK(ended_generations == std::vector<std::uint64_t>{2});
-  CHECK(queue->state() == mw::streamer::cache::PacketQueueState::kStarved);
-
-  queue->Stop();
-  queue.reset();
 }
 
 TEST_CASE("video decoder rejects invalid decoder selections") {

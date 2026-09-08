@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from mw_e2e.config import ConfigurationError, discover_media
-from mw_e2e.events import assert_pipeline_succeeded, read_events, wait_for_event
+from mw_e2e.events import (
+    assert_pipeline_succeeded,
+    final_performance,
+    read_events,
+    wait_for_event,
+)
 from mw_e2e.ffmpeg import MediaProbe, MediaPublisher
 from mw_e2e.mediamtx import MediaEnvironment
 from mw_e2e.models import E2EConfig, MediaAsset
@@ -56,6 +61,13 @@ def _assert_local_sink(
         assert summary.get("audio_encode_samples") == "0"
     assert summary.get("local_sink_invalid_frames") == "0"
     assert int(summary.get("video_encode_frames", "0")) > 0
+    encoders = final_performance(events, "video_encoder")
+    assert len(encoders) == 1
+    assert int(encoders[0]["input_count"]) == int(summary["video_encode_frames"])
+    assert encoders[0]["failed_calls"] == "0"
+    assert encoders[0]["in_flight"] == "0"
+    assert len(final_performance(events, "synchronizer")) == 1
+    assert len(final_performance(events, "remux")) == 1
 
 
 @pytest.mark.smoke

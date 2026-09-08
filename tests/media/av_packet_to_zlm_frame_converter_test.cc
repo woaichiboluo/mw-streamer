@@ -2,6 +2,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -189,6 +190,25 @@ TEST_CASE("AVPacket转换器拒绝错误的流和时间戳") {
   auto avcc_packet = MakePacket({0x00, 0x00, 0x00, 0x01, 0x65}, 0, 0, 0);
   avcc_packet.get()->data[3] = 0x02;
   CHECK(converter.Convert(avcc_packet).empty());
+}
+
+TEST_CASE("AVPacket转换器使用共同起点保留负时间戳和跨轨时间差") {
+  auto parameters = MakeCodecParameters(AV_CODEC_ID_H264);
+  AvPacketToZlmFrameConverter converter(parameters, AVRational{1, 90000}, 0);
+  const std::vector<std::uint8_t> payload{0x00, 0x00, 0x00, 0x01, 0x65};
+  auto packet = MakePacket(payload, 0, -1800, 900);
+  auto frames = converter.Convert(packet, -25);
+  REQUIRE(frames.size() == 1);
+  CHECK(frames.front()->dts() == 5);
+  CHECK(frames.front()->pts() == 35);
+  CHECK(packet->dts == -1800);
+  CHECK(packet->pts == 900);
+  CHECK(converter.Convert(packet, -19).empty());
+
+  AvPacketToZlmFrameConverter milliseconds(parameters, AVRational{1, 1000}, 0);
+  const auto maximum = std::numeric_limits<std::int64_t>::max();
+  auto overflow = MakePacket(payload, 0, maximum, maximum);
+  CHECK(milliseconds.Convert(overflow, -1).empty());
 }
 
 TEST_CASE("H264和H265 AVPacket按Annex-B NALU拆分为多个ZLM Frame") {

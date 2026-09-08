@@ -28,7 +28,6 @@ class ProcessorHandler {
   ProcessorHandler(const MwStreamerProcessorSourceInfo& source_info,
                    const ffmpeg::HardwareContext* hardware_context);
 
-  void RequireReady(const char* operation) const;
   void RequireStarted(const char* operation) const;
   void MarkStarted(void* user_context,
                    MwStreamerProcessorBoundaryCallback on_boundary,

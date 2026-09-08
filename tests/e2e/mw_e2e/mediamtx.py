@@ -79,6 +79,7 @@ class MediaMtx:
         self.record = record
         self.ports = ServerPorts.allocate()
         self._process: ManagedProcess | None = None
+        self._start_count = 0
 
     @property
     def api_address(self) -> str:
@@ -94,13 +95,34 @@ class MediaMtx:
         self.root.mkdir(parents=True, exist_ok=True)
         config_path = self.root / "mediamtx.yml"
         config_path.write_text(self._render_config(), encoding="utf-8")
+        log_name = (
+            "mediamtx.log" if self._start_count == 0
+            else f"mediamtx-restart-{self._start_count}.log"
+        )
+        self._start_count += 1
         self._process = ManagedProcess(
             [str(self.config.tools.mediamtx), str(config_path)],
-            self.root / "mediamtx.log",
+            self.root / log_name,
             cwd=self.root,
         )
-        self._process.start()
-        self._wait_for_api(self.config.tests.startup_timeout_seconds)
+        try:
+            self._process.start()
+            self._wait_for_api(self.config.tests.startup_timeout_seconds)
+        except Exception:
+            self.stop()
+            raise
+
+    def ensure_running(self) -> None:
+        if self._process is None:
+            raise ProcessError(f"MediaMTX {self.name} 未启动")
+        self._process.ensure_running()
+
+    def prepare_for_test(self) -> None:
+        # Recover only between tests; a crash within a test must remain a failure.
+        if self._process is None or self._process.returncode is not None:
+            self.restart()
+        else:
+            self._wait_for_api(self.config.tests.startup_timeout_seconds)
 
     def stop(self) -> None:
         if self._process is not None:
@@ -305,3 +327,11 @@ class MediaEnvironment:
     def stop(self) -> None:
         for server in reversed([self.source, *self.sinks.values()]):
             server.stop()
+
+    def prepare_for_test(self) -> None:
+        for server in [self.source, *self.sinks.values()]:
+            server.prepare_for_test()
+
+    def ensure_running(self) -> None:
+        for server in [self.source, *self.sinks.values()]:
+            server.ensure_running()

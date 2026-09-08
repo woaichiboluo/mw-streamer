@@ -60,7 +60,8 @@ public:
      
      * [AUTO-TRANSLATED:5dd23423]
      */
-    RtmpMediaSource(const MediaTuple& tuple, int ring_size = RTMP_GOP_SIZE): MediaSource(RTMP_SCHEMA, tuple), _ring_size(ring_size) {}
+    RtmpMediaSource(const MediaTuple& tuple, int ring_size = RTMP_GOP_SIZE, bool preserve_startup_packets = false)
+        : MediaSource(RTMP_SCHEMA, tuple), _ring_size(ring_size), _preserve_startup_packets(preserve_startup_packets) {}
 
     ~RtmpMediaSource() override {
         try {
@@ -185,6 +186,7 @@ private:
     bool _have_video = false;
     bool _have_audio = false;
     int _ring_size;
+    const bool _preserve_startup_packets;
     uint32_t _track_stamps[TrackMax] = {0};
     AMFValue _metadata;
     RingType::Ptr _ring;

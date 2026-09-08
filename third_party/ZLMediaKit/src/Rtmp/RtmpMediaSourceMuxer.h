@@ -25,7 +25,7 @@ public:
                          const ProtocolOption &option,
                          const TitleMeta::Ptr &title = nullptr) : RtmpMuxer(title) {
         _option = option;
-        _media_src = std::make_shared<RtmpMediaSource>(tuple);
+        _media_src = std::make_shared<RtmpMediaSource>(tuple, RTMP_GOP_SIZE, option.preserve_startup_packets);
         getRtmpRing()->setDelegate(_media_src);
     }
 

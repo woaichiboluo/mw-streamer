@@ -11,6 +11,7 @@
 #ifndef EventPoller_h
 #define EventPoller_h
 
+#include <atomic>
 #include <mutex>
 #include <thread>
 #include <string>
@@ -382,16 +383,27 @@ public:
 
     /**
      * 根据负载情况获取轻负载的实例
-     * 如果优先返回当前线程，那么会返回当前线程
+     * 如果当前线程仍属于公共池，可优先返回当前线程
      * 返回当前线程的目的是为了提高线程安全性
      * @param prefer_current_thread 是否优先获取当前线程
      * Get a lightly loaded instance based on the load
-     * If prioritizing the current thread, it will return the current thread
+     * The current thread is preferred only while it belongs to the shared pool
      * The purpose of returning the current thread is to improve thread safety
      * @param prefer_current_thread Whether to prioritize getting the current thread
      * [AUTO-TRANSLATED:f0830806]
      */
     EventPoller::Ptr getPoller(bool prefer_current_thread = true);
+
+    // Removes an instance never handed out by the shared pool and transfers
+    // its lifetime to the caller. Always leaves at least one shared instance.
+    // If only one remains, or all have been handed out, creates a new private
+    // instance. No shared getter (including current-thread preference) returns
+    // it afterwards. Independent calls return different live instances.
+    // Returned references belong to the owner's execution graph; explicitly
+    // sharing them with another owner forfeits exclusivity. There is no return
+    // to the pool. Releasing the last reference shuts down the private loop;
+    // release from its own callback defers destruction to a joining thread.
+    EventPoller::Ptr extractPoller();
 
     /**
      * 设置 getPoller() 是否优先返回当前线程
@@ -410,7 +422,7 @@ private:
     EventPollerPool();
 
 private:
-    bool _prefer_current_thread = true;
+    std::atomic<bool> _prefer_current_thread { true };
 };
 
 } // namespace toolkit

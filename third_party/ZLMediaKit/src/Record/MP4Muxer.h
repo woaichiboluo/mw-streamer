@@ -30,6 +30,10 @@ public:
      */
     bool addTrack(const Track::Ptr &track) override;
 
+    // Configure before adding tracks. Preserve every input frame and its timestamps
+    // instead of applying live-recording keyframe and timestamp correction policies.
+    void setPreservePackets(bool preserve_packets) { _preserve_packets = preserve_packets; }
+
     /**
      * 输入帧
      * Input frame
@@ -88,11 +92,13 @@ public:
 
 protected:
     virtual MP4FileIO::Writer createWriter() = 0;
+    bool preservePackets() const { return _preserve_packets; }
 
 private:
     void stampSync();
 
 private:
+    bool _preserve_packets = false;
     bool _started = false;
     bool _have_video = false;
     MP4FileIO::Writer _mov_writter;
@@ -168,6 +174,8 @@ public:
      * [AUTO-TRANSLATED:c91b5ec6]
      */
     bool inputFrame(const Frame::Ptr &frame) override;
+
+    void flush() override;
 
     /**
      * 获取fmp4 init segment

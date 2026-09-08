@@ -40,15 +40,3 @@ add_test(
     NAME mw_processor_enum_converter_tests
     COMMAND mw_processor_enum_converter_tests
 )
-
-add_executable(mw_processor_handler_tests
-    processor_handler_test.cc
-)
-
-target_link_libraries(mw_processor_handler_tests
-    PRIVATE
-        Catch2::Catch2WithMain
-        mw::streamer_test
-)
-
-add_test(NAME mw_processor_handler_tests COMMAND mw_processor_handler_tests)

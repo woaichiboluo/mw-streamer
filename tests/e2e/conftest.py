@@ -104,13 +104,24 @@ def artifact_root() -> Path:
 
 
 @pytest.fixture(scope="session")
-def media_environment(
+def shared_media_environment(
     e2e_config: E2EConfig, artifact_root: Path
 ) -> MediaEnvironment:
     environment = MediaEnvironment(e2e_config, artifact_root / "servers")
     environment.start()
-    yield environment
-    environment.stop()
+    try:
+        yield environment
+    finally:
+        environment.stop()
+
+
+@pytest.fixture
+def media_environment(shared_media_environment: MediaEnvironment) -> MediaEnvironment:
+    shared_media_environment.prepare_for_test()
+    yield shared_media_environment
+    # Check after dependent fixtures have stopped their publishers and runners.
+    # Never recover here: the test responsible for a crash must report it.
+    shared_media_environment.ensure_running()
 
 
 @pytest.fixture

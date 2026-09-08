@@ -3,10 +3,13 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 extern "C" {
@@ -15,21 +18,52 @@ extern "C" {
 
 #include "Poller/EventPoller.h"
 #include "mw/input/player_proxy.h"
+#include "mw/sink/packet_sink.h"
 
 namespace {
 
 using namespace std::chrono_literals;
 using mw::streamer::ffmpeg::Packet;
+using mw::streamer::ffmpeg::StreamInfo;
 using mw::streamer::input::ControlResult;
 using mw::streamer::input::PlayerProxy;
 using mw::streamer::input::PlayerState;
 using mw::streamer::input::ReconnectPolicy;
 using mw::streamer::input::TimelineResetReason;
+using mw::streamer::sink::PacketSink;
 using mw::streamer::zlm::PlayerConfig;
 using toolkit::Err_eof;
 using toolkit::Err_other;
 using toolkit::ErrCode;
 using toolkit::SockException;
+
+class ObservingPacketSink final : public PacketSink {
+ public:
+  using PacketObserver = std::function<void(std::uint64_t, const Packet&)>;
+  using StreamsObserver =
+      std::function<void(std::uint64_t, const std::vector<StreamInfo>&)>;
+
+  explicit ObservingPacketSink(PacketObserver on_packet,
+                               StreamsObserver on_streams = {})
+      : on_packet_(std::move(on_packet)), on_streams_(std::move(on_streams)) {}
+
+  void SetStreams(std::uint64_t generation,
+                  const std::vector<StreamInfo>& streams) noexcept override {
+    if (on_streams_) {
+      on_streams_(generation, streams);
+    }
+  }
+
+  void Write(std::uint64_t generation, const Packet& packet) noexcept override {
+    on_packet_(generation, packet);
+  }
+
+  void EndInput(std::uint64_t) noexcept override {}
+
+ private:
+  PacketObserver on_packet_;
+  StreamsObserver on_streams_;
+};
 
 std::string SamplePath(const std::string& name = "h264_aac.mp4") {
   return std::string(MW_INPUT_PLAYER_PROXY_TEST_DATA_DIR) + "/" + name;
@@ -84,7 +118,23 @@ TEST_CASE(
   std::atomic_bool ended = false;
   std::atomic<ErrCode> end_reason = Err_other;
 
-  proxy->SetOnStreamsReady(
+  proxy->AddPacketSink(std::make_unique<ObservingPacketSink>(
+      [&](std::uint64_t generation, const Packet& packet) {
+        if (generation != 1 || !packet.get() || !packet->buf || !packet->data ||
+            packet->size <= 0 || packet->dts == AV_NOPTS_VALUE ||
+            packet->pts == AV_NOPTS_VALUE || packet->time_base.num != 1 ||
+            packet->time_base.den != 1000) {
+          valid_packets = false;
+          return;
+        }
+        if (packet->stream_index == 0) {
+          ++video_packets;
+        } else if (packet->stream_index == 1) {
+          ++audio_packets;
+        } else {
+          valid_packets = false;
+        }
+      },
       [&](std::uint64_t generation,
           const std::vector<mw::streamer::ffmpeg::StreamInfo>& streams) {
         if (generation != 1) {
@@ -99,24 +149,7 @@ TEST_CASE(
           }
           stream_types.emplace_back(stream.codec_parameters.get()->codec_type);
         }
-      });
-  proxy->SetOnPacket([&](std::uint64_t generation, const Packet& packet) {
-    if (generation != 1 || !packet.get() || !packet->buf || !packet->data ||
-        packet->size <= 0 || packet->dts == AV_NOPTS_VALUE ||
-        packet->pts == AV_NOPTS_VALUE || packet->time_base.num != 1 ||
-        packet->time_base.den != 1000) {
-      valid_packets = false;
-      return false;
-    }
-    if (packet->stream_index == 0) {
-      ++video_packets;
-    } else if (packet->stream_index == 1) {
-      ++audio_packets;
-    } else {
-      valid_packets = false;
-    }
-    return true;
-  });
+      }));
   proxy->SetOnState([&](std::uint64_t generation, PlayerState state,
                         const SockException& reason, bool will_retry) {
     if (generation != 1 || will_retry) {
@@ -158,15 +191,15 @@ TEST_CASE("file input preserves the original cross-track PTS offset") {
   std::atomic<std::int64_t> first_video_pts = AV_NOPTS_VALUE;
   std::atomic<std::int64_t> first_audio_pts = AV_NOPTS_VALUE;
 
-  proxy->SetOnPacket([&](std::uint64_t, const Packet& packet) {
-    auto expected = std::int64_t{AV_NOPTS_VALUE};
-    if (packet->stream_index == 0) {
-      first_video_pts.compare_exchange_strong(expected, packet->pts);
-    } else if (packet->stream_index == 1) {
-      first_audio_pts.compare_exchange_strong(expected, packet->pts);
-    }
-    return true;
-  });
+  proxy->AddPacketSink(std::make_unique<ObservingPacketSink>(
+      [&](std::uint64_t, const Packet& packet) {
+        auto expected = std::int64_t{AV_NOPTS_VALUE};
+        if (packet->stream_index == 0) {
+          first_video_pts.compare_exchange_strong(expected, packet->pts);
+        } else if (packet->stream_index == 1) {
+          first_audio_pts.compare_exchange_strong(expected, packet->pts);
+        }
+      }));
   proxy->SetOnState(
       [&](std::uint64_t, PlayerState state, const SockException&, bool) {
         if (state == PlayerState::kEnded) {
@@ -194,14 +227,11 @@ TEST_CASE("input player proxy does not retry a failed finite input") {
   std::atomic_size_t streams_ready = 0;
   std::atomic_size_t packets = 0;
 
-  proxy->SetOnStreamsReady(
+  proxy->AddPacketSink(std::make_unique<ObservingPacketSink>(
+      [&](std::uint64_t, const Packet&) { ++packets; },
       [&](std::uint64_t, const std::vector<mw::streamer::ffmpeg::StreamInfo>&) {
         ++streams_ready;
-      });
-  proxy->SetOnPacket([&](std::uint64_t, const Packet&) {
-    ++packets;
-    return true;
-  });
+      }));
   proxy->SetOnState([&](std::uint64_t, PlayerState state, const SockException&,
                         bool will_retry) {
     retried = retried || will_retry;
@@ -233,7 +263,8 @@ TEST_CASE("explicit restart establishes a new stream description baseline") {
   std::atomic<AVCodecID> second_video_codec = AV_CODEC_ID_NONE;
   std::atomic_bool valid_streams = true;
 
-  proxy->SetOnStreamsReady(
+  proxy->AddPacketSink(std::make_unique<ObservingPacketSink>(
+      [](std::uint64_t, const Packet&) {},
       [&](std::uint64_t generation,
           const std::vector<mw::streamer::ffmpeg::StreamInfo>& streams) {
         if (generation == 1) {
@@ -259,8 +290,7 @@ TEST_CASE("explicit restart establishes a new stream description baseline") {
           valid_streams = false;
         }
         ++streams_ready;
-      });
-  proxy->SetOnPacket([](std::uint64_t, const Packet&) { return true; });
+      }));
   proxy->SetOnState([&](std::uint64_t generation, PlayerState state,
                         const SockException&, bool will_retry) {
     if (will_retry) {
@@ -443,11 +473,11 @@ TEST_CASE(
   std::atomic<ControlResult> pause_result = ControlResult::kFailed;
   std::atomic<ControlResult> resume_result = ControlResult::kFailed;
 
-  proxy->SetOnPacket([&](std::uint64_t, const Packet&) {
-    ++packet_count;
-    condition.notify_all();
-    return true;
-  });
+  proxy->AddPacketSink(
+      std::make_unique<ObservingPacketSink>([&](std::uint64_t, const Packet&) {
+        ++packet_count;
+        condition.notify_all();
+      }));
   proxy->SetOnState(
       [&](std::uint64_t, PlayerState state, const SockException&, bool) {
         if (state == PlayerState::kReady) {
@@ -520,24 +550,25 @@ TEST_CASE("file seek starts a clean timeline generation") {
     }
     reset_seen = true;
   });
-  proxy->SetOnPacket([&](std::uint64_t generation, const Packet& packet) {
-    if (seek_completed && generation != 2) {
-      valid_timeline = false;
-    }
-    if (generation == 2) {
-      if (!reset_seen) {
-        valid_timeline = false;
-      }
-      if (packet->stream_index == 0) {
-        ++generation_two_video_packets;
-        auto expected = AV_NOPTS_VALUE;
-        if (first_video_dts.compare_exchange_strong(expected, packet->dts)) {
-          first_video_flags = packet->flags;
+  proxy->AddPacketSink(std::make_unique<ObservingPacketSink>(
+      [&](std::uint64_t generation, const Packet& packet) {
+        if (seek_completed && generation != 2) {
+          valid_timeline = false;
         }
-      }
-    }
-    return true;
-  });
+        if (generation == 2) {
+          if (!reset_seen) {
+            valid_timeline = false;
+          }
+          if (packet->stream_index == 0) {
+            ++generation_two_video_packets;
+            auto expected = AV_NOPTS_VALUE;
+            if (first_video_dts.compare_exchange_strong(expected,
+                                                        packet->dts)) {
+              first_video_flags = packet->flags;
+            }
+          }
+        }
+      }));
   proxy->SetOnState([&](std::uint64_t generation, PlayerState state,
                         const SockException& reason, bool) {
     if (state == PlayerState::kReady) {
@@ -605,14 +636,14 @@ TEST_CASE("file playback rate changes pacing without changing generation") {
       [&](std::uint64_t, TimelineResetReason, std::chrono::milliseconds) {
         reset_seen = true;
       });
-  proxy->SetOnPacket([&](std::uint64_t generation, const Packet& packet) {
-    if (generation == 1 && packet->stream_index == 0) {
-      ++video_packets;
-    } else if (generation == 1 && packet->stream_index == 1) {
-      ++audio_packets;
-    }
-    return true;
-  });
+  proxy->AddPacketSink(std::make_unique<ObservingPacketSink>(
+      [&](std::uint64_t generation, const Packet& packet) {
+        if (generation == 1 && packet->stream_index == 0) {
+          ++video_packets;
+        } else if (generation == 1 && packet->stream_index == 1) {
+          ++audio_packets;
+        }
+      }));
   proxy->SetOnState(
       [&](std::uint64_t, PlayerState state, const SockException&, bool) {
         if (state == PlayerState::kReady) {

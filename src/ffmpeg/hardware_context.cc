@@ -10,7 +10,6 @@
 #include "mw/ffmpeg/pixel_format.h"
 
 namespace mw::streamer::ffmpeg {
-
 HardwareContext HardwareContext::CreateCuda(int device_index) {
   if (device_index < 0) {
     throw std::invalid_argument("CUDA设备索引不能为负数");

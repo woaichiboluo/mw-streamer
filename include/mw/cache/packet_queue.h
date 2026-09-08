@@ -2,95 +2,65 @@
 #define MW_STREAMER_INCLUDE_MW_CACHE_PACKET_QUEUE_H_
 
 #include <chrono>
-#include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <memory>
-#include <vector>
+#include <string>
 
-#include "mw/ffmpeg/packet.h"
-#include "mw/ffmpeg/stream_info.h"
-
-namespace toolkit {
-class EventPoller;
-}
+#include "mw/sink/sink.h"
 
 namespace mw::streamer::cache {
 
-enum class PacketQueueState {
-  kFilling,
-  kPlaying,
-  kPaused,
-  kStarved,
-  kStopped,
-};
-
+// Owns its scheduling thread and separate audio/video caches sharing one clock.
+// Input notifications are copied and processed in submission order. Zero cache
+// duration forwards immediately on that thread; otherwise each track buffers
+// one to thirty seconds of DTS coverage before synchronized playback begins.
+// Once started, temporary starvation preserves that generation's media clock;
+// late packets resume immediately without refilling or reanchoring the cache.
 class PacketQueue final {
  public:
-  using Ptr = std::shared_ptr<PacketQueue>;
-  using OnPacket = std::function<void(std::uint64_t generation,
-                                      const ffmpeg::Packet& packet)>;
-  using OnState =
-      std::function<void(std::uint64_t generation, PacketQueueState state)>;
-  using OnTimelineReset = std::function<void(std::uint64_t generation)>;
-  using OnGenerationEnd = std::function<void(std::uint64_t generation)>;
-
-  // A zero duration enables immediate forwarding. Other supported durations
-  // are from one to thirty seconds, inclusive.
-  explicit PacketQueue(std::chrono::milliseconds cache_duration,
-                       std::shared_ptr<toolkit::EventPoller> poller = nullptr);
+  // Borrows consumer until Stop completes and never calls consumer.Stop().
+  // Notifications are serialized on the queue thread without holding the input
+  // queue lock. Consumer callbacks may Abort, but must not Stop or destroy this
+  // queue. EOF/interruption is delivered after cached tail packets; source
+  // stopped/failed discards the cache before delivering its end notification.
+  // Invalid durations throw before the thread starts. Asynchronous scheduling
+  // errors are retained in error()/state(); an open generation receives one
+  // failed end notification after the error has been published.
+  PacketQueue(std::chrono::milliseconds cache_duration, sink::Sink& consumer);
   ~PacketQueue();
 
   PacketQueue(const PacketQueue&) = delete;
   PacketQueue& operator=(const PacketQueue&) = delete;
 
-  // All callbacks are serialized on the owner poller. Packet ownership remains
-  // with the queue and is valid only for OnPacket. Copy or call Ref to retain
-  // it.
-  void SetOnPacket(OnPacket callback);
-  void SetOnState(OnState callback);
-  // Called when a newer generation atomically discards the previous timeline.
-  // Downstream timeline-local state should be flushed here.
-  void SetOnTimelineReset(OnTimelineReset callback);
-  // Called exactly once after EndInput when every cached packet in that
-  // generation has been delivered. Replacing a generation does not emit this
-  // callback for the discarded generation. Downstream decoders may drain here.
-  void SetOnGenerationEnd(OnGenerationEnd callback);
+  // Copy/reference acquisition can throw synchronously. Calls after Abort are
+  // ignored. Streams must precede packets; every replacement generation must
+  // have a preceding reset. Stale and duplicate notifications are ignored.
+  void OnStreamsReady(const media::StreamsReady& streams);
+  void OnPacket(const media::PacketReady& packet);
+  void OnTimelineReset(const media::TimelineReset& reset);
+  void OnInputEnded(const media::StreamEnded& end);
 
-  // One audio stream, one video stream, or one of each is required. Calling
-  // SetStreams with a newer generation atomically clears the previous
-  // timeline. Non-audio/video streams are ignored.
-  void SetStreams(std::uint64_t generation,
-                  const std::vector<ffmpeg::StreamInfo>& streams);
+  // Discards pending input and wakes the scheduler without waiting for it.
+  // Thread-safe, including from callbacks or decoder workers. It does not
+  // interrupt an already running consumer callback.
+  void Abort() noexcept;
+  // Abort and join; idempotent. Call outside the queue thread. No consumer
+  // callbacks remain after return. Stop upstream delivery before destruction.
+  void Stop() noexcept;
 
-  // The packet is referenced before this method returns. Invalid packets,
-  // unknown streams, decreasing per-stream DTS, and stale generations are
-  // discarded. The return value reports synchronous validation and reference
-  // success; Poller side timeline validation may still discard a queued packet.
-  bool Input(std::uint64_t generation, const ffmpeg::Packet& packet);
-
-  // Marks the generation as having no more input. Cached packets keep playing,
-  // including the unmatched tail of any configured track.
-  void EndInput(std::uint64_t generation);
-
-  // Callers controlling a PlayerProxy should apply the same pause and rate to
-  // both components. Immediate-forwarding mode drops packets received while
-  // paused instead of buffering them, and playback rate does not pace packets.
-  void Pause(bool paused);
-  void SetPlaybackRate(double rate);
-
-  // Clears cached packets, cancels the pending output task, and rejects future
-  // input until SetStreams is called again.
-  void Stop();
-
-  PacketQueueState state() const noexcept;
+  // Thread-safe queue snapshots. kDraining lasts from processing the source end
+  // command until its consumer notification returns. kEnded means cached
+  // delivery is complete, not that the downstream consumer has finished.
+  // A reset publishes its new generation immediately, even before replacement
+  // streams arrive. Abort and Stop preserve a failure and its diagnostic;
+  // snapshots remain readable.
+  sink::PacketSinkState state() const noexcept;
   std::uint64_t generation() const noexcept;
-  std::size_t packet_count() const noexcept;
-  std::shared_ptr<toolkit::EventPoller> poller() const;
+  std::string error() const;
 
  private:
   class Impl;
-  std::shared_ptr<Impl> impl_;
+  std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace mw::streamer::cache

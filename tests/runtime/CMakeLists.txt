@@ -16,7 +16,8 @@ target_link_libraries(mw_common_tests
 add_test(NAME mw_common_tests COMMAND mw_common_tests)
 
 add_executable(mw_performance_tests
-    performance_test.cc
+    operation_recorder_test.cc
+    pipeline_snapshot_test.cc
 )
 
 target_link_libraries(mw_performance_tests
@@ -40,6 +41,12 @@ endif()
 add_test(NAME mw_performance_tests COMMAND mw_performance_tests)
 
 include(Catch)
+
+add_executable(mw_startup_ring_tests startup_ring_test.cc)
+target_link_libraries(mw_startup_ring_tests PRIVATE
+    Catch2::Catch2WithMain ZLMediaKit::ToolKit)
+add_test(NAME mw_startup_ring_tests COMMAND mw_startup_ring_tests)
+set_tests_properties(mw_startup_ring_tests PROPERTIES TIMEOUT 30)
 
 add_executable(mw_logging_tests
     logging_test.cc
@@ -94,3 +101,15 @@ add_test(
     NAME mw_zlm_logger_lifecycle_tests
     COMMAND mw_zlm_logger_lifecycle_tests
 )
+
+# Separate processes give each singleton pool an independent initial size.
+foreach(pool_size IN ITEMS 1 3)
+    add_executable(mw_poller_extract_${pool_size}_tests poller_extract_test.cc)
+    target_compile_definitions(mw_poller_extract_${pool_size}_tests PRIVATE
+        MW_POLLER_TEST_POOL_SIZE=${pool_size})
+    target_link_libraries(mw_poller_extract_${pool_size}_tests PRIVATE
+        Catch2::Catch2WithMain ZLMediaKit::ToolKit)
+    add_test(NAME mw_poller_extract_${pool_size}_tests
+        COMMAND mw_poller_extract_${pool_size}_tests)
+    set_tests_properties(mw_poller_extract_${pool_size}_tests PROPERTIES TIMEOUT 30)
+endforeach()

@@ -370,9 +370,14 @@ size_t HlsPlayer::getRecvTotalBytes() {
 }
 //////////////////////////////////////////////////////////////////////////
 
-void HlsDemuxer::start(const EventPoller::Ptr &poller, TrackListener *listener) {
+void HlsDemuxer::start(const EventPoller::Ptr &poller, TrackListener *listener, bool buffered) {
+    _buffered = buffered;
+    _timer.reset();
     _frame_cache.clear();
     _delegate.setTrackListener(listener);
+    if (!_buffered) {
+        return;
+    }
 
     // 每50毫秒执行一次  [AUTO-TRANSLATED:e32f2140]
     // Execute once every 50 milliseconds
@@ -389,6 +394,10 @@ void HlsDemuxer::start(const EventPoller::Ptr &poller, TrackListener *listener) 
 }
 
 void HlsDemuxer::pushTask(std::function<void()> task) {
+    if (!_buffered) {
+        task();
+        return;
+    }
     int64_t stamp = 0;
     if (!_frame_cache.empty()) {
         stamp = _frame_cache.back().first;
@@ -400,7 +409,7 @@ bool HlsDemuxer::inputFrame(const Frame::Ptr &frame) {
     // 为了避免track准备时间过长, 因此在没准备好之前, 直接消费掉所有的帧  [AUTO-TRANSLATED:72b35430]
     // To avoid the track preparation time being too long, all frames are directly consumed before it is ready
     // In order to avoid the track preparation time is too long, so before it is ready, all frames are consumed directly
-    if (!_delegate.isAllTrackReady()) {
+    if (!_buffered || !_delegate.isAllTrackReady()) {
         _delegate.inputFrame(frame);
         return true;
     }

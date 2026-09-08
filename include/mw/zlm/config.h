@@ -44,11 +44,6 @@ struct OutputConfig {
   RecordingConfig recording;
 };
 
-struct PipelineConfig {
-  PlayerConfig player;
-  OutputConfig output;
-};
-
 }  // namespace mw::streamer::zlm
 
 #endif  // MW_STREAMER_INCLUDE_MW_ZLM_CONFIG_H_

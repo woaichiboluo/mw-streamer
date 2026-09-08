@@ -31,7 +31,9 @@ size_t mov_write_tfdt(const struct mov_t* mov)
     if (mov->track->sample_count < 1)
         return 0;
 
-    baseMediaDecodeTime = mov->track->samples[0].dts - mov->track->start_dts;
+    baseMediaDecodeTime = mov->track->samples[0].dts;
+    if (0 == (mov->flags & MOV_FLAG_PRESERVE_TIMESTAMPS))
+        baseMediaDecodeTime -= mov->track->start_dts;
     version = baseMediaDecodeTime > INT32_MAX ? 1 : 0;
 
     mov_buffer_w32(&mov->io, 0 == version ? 16 : 20); /* size */

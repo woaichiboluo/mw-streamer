@@ -1,6 +1,8 @@
 #include "mw/converter/av_packet_to_zlm_frame_converter.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -74,7 +76,7 @@ AvPacketToZlmFrameConverter::AvPacketToZlmFrameConverter(
 }
 
 std::vector<mediakit::Frame::Ptr> AvPacketToZlmFrameConverter::Convert(
-    ffmpeg::Packet packet) const {
+    ffmpeg::Packet packet, std::int64_t timestamp_origin_ms) const {
   const auto* raw_packet = packet.get();
   if (!raw_packet || !raw_packet->data || raw_packet->size <= 0 ||
       raw_packet->stream_index != stream_index_ ||
@@ -82,13 +84,16 @@ std::vector<mediakit::Frame::Ptr> AvPacketToZlmFrameConverter::Convert(
     return {};
   }
 
-  const auto dts =
-      av_rescale_q(raw_packet->dts, time_base_, internal::kZlmTimeBase);
-  const auto pts =
-      av_rescale_q(raw_packet->pts, time_base_, internal::kZlmTimeBase);
-  if (dts < 0 || pts < 0) {
+  auto dts = av_rescale_q(raw_packet->dts, time_base_, internal::kZlmTimeBase);
+  auto pts = av_rescale_q(raw_packet->pts, time_base_, internal::kZlmTimeBase);
+  if (dts < timestamp_origin_ms || pts < timestamp_origin_ms ||
+      (timestamp_origin_ms < 0 &&
+       std::max(dts, pts) >
+           std::numeric_limits<std::int64_t>::max() + timestamp_origin_ms)) {
     return {};
   }
+  dts -= timestamp_origin_ms;
+  pts -= timestamp_origin_ms;
 
   toolkit::Buffer::Ptr buffer = AvPacketBuffer::Create(std::move(packet));
   if (!buffer) {

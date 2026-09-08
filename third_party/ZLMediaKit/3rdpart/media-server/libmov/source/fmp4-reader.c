@@ -49,6 +49,7 @@ int mov_fragment_seek(struct mov_t* mov, int64_t* timestamp)
 {
 	int i;
 	uint64_t clock;
+	int64_t media_clock, edit_offset;
 	size_t idx, start, end;
 	struct mov_track_t* track;
 	struct mov_fragment_t* frag, *prev, *next;
@@ -60,7 +61,10 @@ int mov_fragment_seek(struct mov_t* mov, int64_t* timestamp)
 	idx = start = 0;
 	end = track->frag_count;
 	assert(track->frag_count > 0);
-	clock = (uint64_t)(*timestamp) * track->mdhd.timescale / 1000; // mvhd timescale
+	// tfra uses media time; public seek timestamps include the edit mapping.
+	edit_offset = mov_edit_offset(track, mov->mvhd.timescale);
+	media_clock = *timestamp * track->mdhd.timescale / 1000 - edit_offset;
+	clock = media_clock > 0 ? (uint64_t)media_clock : 0;
 
 	while (start < end)
 	{
@@ -83,7 +87,7 @@ int mov_fragment_seek(struct mov_t* mov, int64_t* timestamp)
 	if (DIFF(next->time, clock) < DIFF(frag->time, clock))
 		frag = next;
 
-	*timestamp = frag->time * 1000 / track->mdhd.timescale;
+	*timestamp = ((int64_t)frag->time + edit_offset) * 1000 / track->mdhd.timescale;
 	
 	// clear samples and seek
 	for (i = 0; i < mov->track_count; i++)

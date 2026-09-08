@@ -181,6 +181,9 @@ class HostFrame::Impl final {
 
     ThrowIfCudaError(cuCtxPushCurrent(source_context), "设置CUDA视频帧context");
     try {
+      // The view carries no producer stream. A synchronous default-stream
+      // download alone does not wait for writes on non-blocking streams.
+      ThrowIfCudaError(cuCtxSynchronize(), "等待源CUDA视频帧写入完成");
       const auto& source_linear = source.buffer.storage.linear;
       for (std::uint32_t plane_index = 0; plane_index < plane_count_;
            ++plane_index) {

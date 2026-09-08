@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 extern "C" {
 #include <libavutil/channel_layout.h>
@@ -23,6 +25,7 @@ extern "C" {
 #include "mw/converter/zlm_codec_parameters_converter.h"
 #include "mw/converter/zlm_packet_converter.h"
 #include "mw/input/internal/zlm_timestamp_reviser.h"
+#include "mw/sink/packet_sink.h"
 #include "mw/zlm/internal/config_validator.h"
 
 namespace mw::streamer::input {
@@ -211,22 +214,25 @@ class PlayerProxy::Impl final
     ValidatePolicy(reconnect_policy_);
   }
 
-  void SetOnPacket(OnPacket callback) {
+  void AddPacketSink(std::unique_ptr<sink::PacketSink> sink) {
+    if (!sink) {
+      throw std::invalid_argument("PacketSink不能为空");
+    }
+    std::exception_ptr error;
     auto self = shared_from_this();
-    poller_->async(
-        [self, callback = std::move(callback)]() mutable {
-          self->on_packet_ = std::move(callback);
-        },
-        false);
-  }
-
-  void SetOnStreamsReady(OnStreamsReady callback) {
-    auto self = shared_from_this();
-    poller_->async(
-        [self, callback = std::move(callback)]() mutable {
-          self->on_streams_ready_ = std::move(callback);
-        },
-        false);
+    poller_->sync([self, &sink, &error]() {
+      try {
+        if (self->started_.load(std::memory_order_relaxed)) {
+          throw std::logic_error("PacketSink只能在首次启动输入前注册");
+        }
+        self->packet_sinks_.push_back(std::move(sink));
+      } catch (...) {
+        error = std::current_exception();
+      }
+    });
+    if (error) {
+      std::rethrow_exception(error);
+    }
   }
 
   void SetOnState(OnState callback) {
@@ -249,6 +255,7 @@ class PlayerProxy::Impl final
 
   void Start(std::string url, zlm::PlayerConfig config) {
     zlm::internal::ValidatePlayerConfig(config);
+    started_.store(true, std::memory_order_relaxed);
     auto self = shared_from_this();
     poller_->async(
         [self, url = std::move(url), config = std::move(config)]() mutable {
@@ -346,6 +353,7 @@ class PlayerProxy::Impl final
     bool revise_timestamps = false;
     bool paused = false;
     std::shared_ptr<mediakit::MediaPlayer> player;
+    std::vector<ffmpeg::StreamInfo> streams;
     std::vector<Binding> bindings;
   };
 
@@ -585,6 +593,7 @@ class PlayerProxy::Impl final
     ResetBindingsOnPoller(attempt);
     const auto new_generation = NextGenerationOnPoller();
     attempt->generation.store(new_generation, std::memory_order_release);
+    SetSinkStreamsOnPoller(new_generation, attempt->streams);
     if (on_timeline_reset_) {
       on_timeline_reset_(new_generation, TimelineResetReason::kSeek, position);
     }
@@ -795,7 +804,10 @@ class PlayerProxy::Impl final
             }
             const auto generation =
                 current_attempt->generation.load(std::memory_order_acquire);
-            return !self->on_packet_ || self->on_packet_(generation, packet);
+            for (const auto& sink : self->packet_sinks_) {
+              sink->Write(generation, packet);
+            }
+            return true;
           });
 
       ffmpeg::StreamInfo stream;
@@ -839,9 +851,8 @@ class PlayerProxy::Impl final
         }
       }
     }
-    if (on_streams_ready_) {
-      on_streams_ready_(AttemptGeneration(attempt), streams);
-    }
+    attempt->streams = std::move(streams);
+    SetSinkStreamsOnPoller(AttemptGeneration(attempt), attempt->streams);
 
     for (std::size_t index = 0; index < attempt->bindings.size(); ++index) {
       auto& binding = attempt->bindings[index];
@@ -951,11 +962,11 @@ class PlayerProxy::Impl final
 
   void DisposeOnPoller() {
     CancelRetryOnPoller();
-    on_packet_ = nullptr;
-    on_streams_ready_ = nullptr;
     on_state_ = nullptr;
     on_timeline_reset_ = nullptr;
     TeardownAttemptOnPoller();
+    EndPacketSinksOnPoller();
+    packet_sinks_.clear();
     consecutive_failures_ = 0;
     state_.store(PlayerState::kStopped, std::memory_order_relaxed);
   }
@@ -965,8 +976,33 @@ class PlayerProxy::Impl final
                            const toolkit::SockException& reason,
                            bool will_retry) {
     state_.store(new_state, std::memory_order_relaxed);
+    if (new_state == PlayerState::kWaitingRetry ||
+        new_state == PlayerState::kEnded || new_state == PlayerState::kFailed ||
+        new_state == PlayerState::kStopped) {
+      EndPacketSinksOnPoller();
+    }
     if (on_state_) {
       on_state_(event_generation, new_state, reason, will_retry);
+    }
+  }
+
+  void SetSinkStreamsOnPoller(
+      std::uint64_t generation,
+      const std::vector<ffmpeg::StreamInfo>& streams) noexcept {
+    sink_generation_ = generation;
+    for (const auto& sink : packet_sinks_) {
+      sink->SetStreams(generation, streams);
+    }
+  }
+
+  void EndPacketSinksOnPoller() noexcept {
+    if (!sink_generation_) {
+      return;
+    }
+    const auto generation = *sink_generation_;
+    sink_generation_.reset();
+    for (const auto& sink : packet_sinks_) {
+      sink->EndInput(generation);
     }
   }
 
@@ -985,12 +1021,14 @@ class PlayerProxy::Impl final
   std::shared_ptr<Attempt> attempt_;
   toolkit::TaskCancelableImp<std::uint64_t()>::Ptr retry_task_;
 
-  OnPacket on_packet_;
-  OnStreamsReady on_streams_ready_;
+  std::vector<std::unique_ptr<sink::PacketSink>> packet_sinks_;
+  std::optional<std::uint64_t> sink_generation_;
+
   OnState on_state_;
   OnTimelineReset on_timeline_reset_;
 
   std::atomic<PlayerState> state_{PlayerState::kIdle};
+  std::atomic_bool started_{false};
   std::atomic<std::uint64_t> generation_{0};
   std::atomic<std::uint64_t> reconnect_count_{0};
   int consecutive_failures_ = 0;
@@ -1006,12 +1044,8 @@ PlayerProxy::~PlayerProxy() {
   }
 }
 
-void PlayerProxy::SetOnPacket(OnPacket callback) {
-  impl_->SetOnPacket(std::move(callback));
-}
-
-void PlayerProxy::SetOnStreamsReady(OnStreamsReady callback) {
-  impl_->SetOnStreamsReady(std::move(callback));
+void PlayerProxy::AddPacketSink(std::unique_ptr<sink::PacketSink> sink) {
+  impl_->AddPacketSink(std::move(sink));
 }
 
 void PlayerProxy::SetOnState(OnState callback) {

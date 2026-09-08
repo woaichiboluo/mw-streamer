@@ -2,6 +2,9 @@
 #define MW_STREAMER_INCLUDE_MW_INPUT_CONFIG_H_
 
 #include <chrono>
+#include <string>
+
+#include "mw/zlm/config.h"
 
 namespace mw::streamer::input {
 
@@ -12,6 +15,16 @@ struct ReconnectPolicy {
   std::chrono::milliseconds min_delay{2000};
   std::chrono::milliseconds max_delay{60000};
   std::chrono::milliseconds delay_step{3000};
+};
+
+struct FileInputConfig {
+  std::string path;
+};
+
+struct ZlmInputConfig {
+  std::string url;
+  input::ReconnectPolicy reconnect_policy;
+  zlm::PlayerConfig player;
 };
 
 }  // namespace mw::streamer::input

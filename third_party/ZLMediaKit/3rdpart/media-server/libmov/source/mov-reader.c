@@ -20,6 +20,7 @@ struct mov_reader_t
 {
 	int flags;
 	int have_read_mfra;
+	int64_t start_time;
 	
 	struct mov_t mov;
 };
@@ -394,6 +395,7 @@ static int mov_reader_init(struct mov_reader_t* reader)
 
 struct mov_reader_t* mov_reader_create(const struct mov_buffer_t* buffer, void* param)
 {
+	int i, have_start = 0;
 	struct mov_reader_t* reader;
 	reader = (struct mov_reader_t*)calloc(1, sizeof(*reader));
 	if (NULL == reader)
@@ -417,6 +419,18 @@ struct mov_reader_t* mov_reader_create(const struct mov_buffer_t* buffer, void* 
 	{
 		mov_reader_destroy(reader);
 		return NULL;
+	}
+	for (i = 0; i < reader->mov.track_count; i++)
+	{
+		const struct mov_track_t* track = reader->mov.tracks + i;
+		int64_t start;
+		if (track->sample_count == 0 || track->mdhd.timescale == 0)
+			continue;
+		start = track->samples[0].dts < track->samples[0].pts ? track->samples[0].dts : track->samples[0].pts;
+		start = start * 1000 / track->mdhd.timescale;
+		if (!have_start || start < reader->start_time)
+			reader->start_time = start;
+		have_start = 1;
 	}
 	return reader;
 }
@@ -534,6 +548,16 @@ int mov_reader_seek(struct mov_reader_t* reader, int64_t* timestamp)
 		&& reader->mov.track_count > 0 && reader->mov.tracks[0].frag_count > 0)
 		return mov_fragment_seek(&reader->mov, timestamp);
 
+	// Seeking to the beginning must retain preroll on every track, including
+	// samples before the first video keyframe.
+	if (!(MOV_READER_FLAG_FMP4_FAST & reader->flags) && *timestamp <= reader->start_time)
+	{
+		for (i = 0; i < reader->mov.track_count; i++)
+			reader->mov.tracks[i].sample_offset = 0;
+		*timestamp = reader->start_time;
+		return 0;
+	}
+
 	// seek video track(s)
 	for (i = 0; i < reader->mov.track_count; i++)
 	{
@@ -598,6 +622,11 @@ int mov_reader_getinfo(struct mov_reader_t* reader, struct mov_reader_trackinfo_
 uint64_t mov_reader_getduration(struct mov_reader_t* reader)
 {
 	return 0 != reader->mov.mvhd.timescale ? reader->mov.mvhd.duration * 1000 / reader->mov.mvhd.timescale : 0;
+}
+
+int64_t mov_reader_getstarttime(struct mov_reader_t* reader)
+{
+	return reader->start_time;
 }
 
 #define DIFF(a, b) ((a) > (b) ? ((a) - (b)) : ((b) - (a)))

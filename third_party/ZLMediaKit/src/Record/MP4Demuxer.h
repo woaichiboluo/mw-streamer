@@ -104,6 +104,9 @@ private:
     MP4FileDisk::Ptr _mp4_file;
     MP4FileDisk::Reader _mov_reader;
     uint64_t _duration_ms = 0;
+    // ZLM frames use unsigned timestamps; shift every track together so
+    // negative MP4 preroll remains representable without losing A/V offsets.
+    int64_t _timestamp_offset = 0;
     std::unordered_map<int, Track::Ptr> _tracks;
     toolkit::ResourcePool<toolkit::BufferRaw> _buffer_pool;
 };

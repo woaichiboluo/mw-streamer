@@ -222,7 +222,8 @@ void SrtPlayerImp::onSRTData(const toolkit::Buffer::Ptr &buffer) {
         GET_CONFIG(bool, add_mute_audio, Protocol::kAddMuteAudio);
         auto &add_mute_audio_option = (*this)[Protocol::kAddMuteAudio];
         demuxer->enableMuteAudio(add_mute_audio_option.empty() ? add_mute_audio : add_mute_audio_option.as<bool>());
-        demuxer->start(getPoller(), this);
+        // SRT is already paced by transport; do not grow the HLS playback cache.
+        demuxer->start(getPoller(), this, false);
         _demuxer = std::move(demuxer);
     }
 

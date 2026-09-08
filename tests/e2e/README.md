@@ -1,20 +1,28 @@
 # 真实推拉流端到端测试
 
-本目录通过 `StreamingPipeline` 使用真实的 FFmpeg、MediaMTX 和媒体文件验证以下
-能力：
+本目录通过新的 `pipeline::Pipeline` 使用真实的 FFmpeg、MediaMTX 和媒体文件验证以下
+能力。运行器只在组装时依赖 `pipeline`；Input、Sink 和具体处理节点使用各自模块的
+公开接口：`mw/input/`、`mw/sink/`、`mw/decoder/`、`mw/processor/`、
+`mw/synchronizer/`、`mw/encoder/` 和 `mw/output/`。模块名也是
+`mw::streamer` 下的命名空间。共用投递参数位于 `media`，输入状态位于 `input`，
+消息和 Fatal 位于 `sink`；节点参数来自各自的 `config.h`。测试观察节点继承
+`sink::Sink`，通过 `media::PacketReady`、`media::FrameReady` 等参数接收数据。
+
+运行器按测试场景构建不同的 Sink 链路，全部使用同一个 Pipeline 类型：
 
 - `0s / 1s / 5s / 15s / 30s` 压缩包缓存边界与代表值；
 - RTSP、RTMP、SRT 稳定拉流；
 - 输入连接被服务端主动断开后的自动重连；
+- Processor Fatal 错误自动停止链路，运行器报告失败并返回非零退出码；
 - RTSP、RTMP、SRT 稳定推流；
 - 输出连接被服务端主动断开后的自动重连；
 - 同一输入同时稳定推送到三个协议；
-- 拉流后同时分发到本地Raw Sink和一个Encoded Sink，编码目标覆盖FILE、RTMP、
+- 同步后的 Frame 同时交给本地观察 Sink 和 EncoderSink，编码目标覆盖 FILE、RTMP、
   RTSP、SRT；
-- RemuxPipeline将源压缩流同时转推并录制为本地MP4；
-- StreamingPipeline将源输入同时旁路转推和录像，并保持处理后输出；
-- FilePipeline全速处理本地音视频文件，并验证自然EOF、Processor生命周期、
-  处理进度和当前处理倍速；
+- Input 连接多个独立 RemuxSink，将源压缩流同时转推并录制为本地 MP4；
+- 原流 Remux 旁路与解码、处理、同步、编码链路同时运行；
+- FileInput 全速读取本地文件，经 DecoderSink 和 AnalysisProcessorSink 验证自然 EOF、
+  音视频计数及 Processor 生命周期；
 - 多推过程中单个输出故障后的隔离和恢复。
 - H.264/H.265 专用白闪与音频脉冲媒体的内容级音画同步；
 - FILE、RTMP、RTSP、SRT 输入到 FILE、RTMP、RTSP、SRT 输出的完整同步矩阵；每种输入在一次 Pipeline 中同时输出四种目标，每组连续运行 5 分钟；
@@ -90,10 +98,32 @@ python3 -m venv .cache/e2e-venv
   --e2e-runner build/tests/e2e/mw_streamer_e2e_runner
 ```
 
-RemuxPipeline始终配置至少一个真实输出目标；StreamingPipeline可以不配置处理后输出，
-此时不创建编码Sink；FilePipeline直接处理本地文件且不创建输出。Pipeline 是否
-成功由其公共状态事件判断，媒体轨道和持续输出则由 FFmpeg 从输出端实际读取验证；测试
-不再依赖 PlayerProxy 或 PacketQueue 的内部状态。
+运行器的 `--scenario streaming|remux|file` 只选择测试链路：
+
+- `streaming`：ZlmInput → DecoderSink → TransformProcessorSink →
+  SynchronizerSink → EncoderSink → 每个输出目标各自的 RemuxSink。本地观察 Sink
+  接在 SynchronizerSink 后；原流输出直接接在 Input 后。没有处理后输出和本地观察
+  Sink 时，使用 AnalysisProcessorSink，避免创建无消费者的编码节点。
+- `remux`：ZlmInput → 每个输出目标各自的 RemuxSink，至少需要一个目标。
+- `file`：FileInput → 软件 DecoderSink → AnalysisProcessorSink。FileInput 通过
+  FFmpeg 全速读取文件，解码队列有界等待，不主动丢包；保留 Skip Samples 等
+  packet side data，两份 AAC 样本精确验证 94 帧、96256 个音频样本。
+  等待解码排空后停止 Pipeline；输入 EOF 本身不代表下游已经完成。
+  音视频处理回调可并发。此场景验证帧数和结束边界，不提供文件进度或媒体处理倍速。
+
+SynchronizerSink 自带实时调度和备播，不再使用旧 `--standby` 开关。测试环境的
+`e2e.local.toml` 仍用于配置工具、媒体和测试时长，与库的 Pipeline TOML 用途不同。
+
+运行器检查 Pipeline、输入及各工作 Sink 的状态；实际网络输出仍由媒体服务和 FFmpeg
+探针验证。缓存测试通过 `--observe-cache` 加入同步转发的测试观察 Sink，比较每个轨道
+输入最新 DTS 与首个解码帧 PTS 的媒体时间差；播放器启动时批量交付积累的帧，不代表
+缓存必须再等待等长的墙钟时间。0 缓存仍检查首帧启动延迟。
+`runner_started` 的 `pipeline_api=unified` 标记用于防止测试误用旧版本运行器。
+
+`performance` 事件来自 `Pipeline::GetPerformance()`，按 `node_id` 和固定 `type`
+区分节点及音视频操作。运行期间通过相邻快照计算速率，停止后输出 `phase=final`
+的累计计数。输入旁路不会产生编码统计；Remux 的计数表示本地封装处理，不代表远端
+已经收到数据。`summary` 保留测试需要的汇总字段，其编解码和处理计数来自新快照。
 
 ## 运行十分钟 Bench
 

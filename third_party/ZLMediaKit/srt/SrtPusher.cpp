@@ -98,7 +98,19 @@ void SrtPusher::doPublish() {
         reportSrtError(SockException(Err_eof, "the media source was released"));
         return;
     }
-    _wait_for_key = true;
+    // Only bypass the key gate for a retained startup prefix. After normal
+    // GOP replacement or cache overflow, reconnects still wait for a key.
+    bool has_prefix = false;
+    bool checked_first = false;
+    if (src->preserveStartupPackets()) {
+        src->getRing()->flushGop([&](const TSMediaSource::RingDataType &batch) {
+            if (!checked_first && !batch->empty()) {
+                has_prefix = !batch->front()->key_pos;
+                checked_first = true;
+            }
+        });
+    }
+    _wait_for_key = !has_prefix;
     // 异步查找直播流
     std::weak_ptr<SrtPusher> weak_self = static_pointer_cast<SrtPusher>(shared_from_this());
     _ts_reader = src->getRing()->attach(getPoller());

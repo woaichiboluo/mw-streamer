@@ -203,6 +203,10 @@ public:
     // Timestamp type
     int modify_stamp;
 
+    // Programmatic output option: retain bounded pre-IDR packets in the first GOP.
+    // Not a server-wide setting; normal live GOP replacement remains unchanged.
+    bool preserve_startup_packets = false;
+
     // 转协议是否开启音频  [AUTO-TRANSLATED:220dddfa]
     // Whether to enable audio for protocol conversion
     bool enable_audio;

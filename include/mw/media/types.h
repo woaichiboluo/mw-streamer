@@ -12,6 +12,12 @@ typedef struct MwStreamerRational {
   int32_t den;
 } MwStreamerRational;
 
+typedef struct MwStreamerMediaTimestamp {
+  int64_t pts;
+  int64_t duration;
+  MwStreamerRational time_base;
+} MwStreamerMediaTimestamp;
+
 typedef enum MwStreamerCodec {
   kMwStreamerCodecUnknown = 0,
   kMwStreamerCodecH264,

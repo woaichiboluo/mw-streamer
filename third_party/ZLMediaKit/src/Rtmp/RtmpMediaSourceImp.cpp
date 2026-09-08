@@ -81,7 +81,7 @@ void RtmpMediaSource::onWrite(RtmpPacket::Ptr pkt, bool /*= true*/) {
         // GOP defaults to buffering 512 groups of RTMP packets, each group of RTMP packets has the same timestamp (if merge writing is enabled, then each group is the RTMP packet within the merge writing time),
         // 每次遇到关键帧第一个RTMP包，则会清空GOP缓存(因为有新的关键帧了，同样可以实现秒开)  [AUTO-TRANSLATED:dee67297]
         // Every time a key frame's first RTMP packet is encountered, the GOP cache will be cleared (because there is a new key frame, which can also achieve instant opening)
-        _ring = std::make_shared<RingType>(_ring_size, std::move(lam));
+        _ring = std::make_shared<RingType>(_ring_size, std::move(lam), 1, _preserve_startup_packets);
         if (_metadata) {
             regist();
         }

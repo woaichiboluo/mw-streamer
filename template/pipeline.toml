@@ -1,0 +1,87 @@
+# 单输入：原始流录像，同时处理后推流与录像。
+# 相对路径以本 TOML 所在目录为基准；所有 Sink ID 必须唯一。
+[input]
+type = "zlm"
+url = "rtsp://127.0.0.1/live/camera"
+downstream = ["decoder", "original_recording"]
+
+[input.player]
+connect_timeout_ms = 10000
+media_timeout_ms = 5000
+
+[input.reconnect_policy]
+max_retries = -1
+min_delay_ms = 2000
+max_delay_ms = 60000
+delay_step_ms = 3000
+
+[[sinks]]
+id = "original_recording"
+type = "remux"
+target = "./recordings/original.mp4"
+
+[[sinks]]
+id = "decoder"
+type = "decoder"
+downstream = ["processor"]
+cache_duration_ms = 1000
+audio_decode_queue_capacity = 256
+video_decode_queue_capacity = 128
+
+[sinks.video_decoder]
+backend = "cuda"
+device_index = 0
+
+[[sinks]]
+id = "processor"
+type = "transform_processor"
+downstream = ["synchronizer"]
+output_width = 1920
+output_height = 1080
+
+# 库把此表序列化后交给宿主按 processor ID 绑定的业务回调。
+[sinks.config]
+mode = "passthrough"
+
+[[sinks]]
+id = "synchronizer"
+type = "synchronizer"
+downstream = ["encoder"]
+video_frame_rate = { num = 25, den = 1 }
+frame_queue_capacity = 128
+max_frame_lateness_ms = 100
+standby_timeout_ms = 500
+standby_image_path = ""
+
+[[sinks]]
+id = "encoder"
+type = "encoder"
+downstream = ["publish", "processed_recording"]
+# 单个接收者；省略则不绑定，不会自动产生或转发消息。
+message_receiver = "processor"
+frame_queue_capacity = 256
+startup_packet_capacity = 256
+
+[sinks.audio_encoder.properties]
+b = "128k"
+
+[sinks.video_encoder]
+codec = "h264"
+encoder_name = "h264_nvenc"
+frame_rate = { num = 25, den = 1 }
+
+[[sinks]]
+id = "publish"
+type = "remux"
+target = "rtmp://127.0.0.1/live/processed"
+
+[sinks.zlm.pusher]
+connect_timeout_ms = 10000
+
+[[sinks]]
+id = "processed_recording"
+type = "remux"
+target = "./recordings/processed.mp4"
+
+[sinks.zlm.recording]
+file_buffer_size = 65536

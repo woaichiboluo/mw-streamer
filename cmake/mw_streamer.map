@@ -1,6 +1,0 @@
-MW_STREAMER_0.1 {
-  global:
-    mw_*;
-  local:
-    *;
-};

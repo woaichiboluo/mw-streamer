@@ -80,10 +80,11 @@ bool StartsWithAnnexB(const Packet& packet) {
           (raw_packet->data[2] == 0 && raw_packet->data[3] == 1));
 }
 
-Frame MakeCudaVideoFrame() {
+Frame MakeCudaVideoFrame(const HardwareContext& hardware_context,
+                         AVPixelFormat format = AV_PIX_FMT_NV12,
+                         std::uint8_t luma = 16) {
   constexpr int kCudaWidth = 256;
   constexpr int kCudaHeight = 144;
-  const auto hardware_context = HardwareContext::CreateCuda(0);
   AVBufferRef* frames_ref =
       av_hwframe_ctx_alloc(const_cast<AVBufferRef*>(hardware_context.get()));
   if (!frames_ref) {
@@ -92,7 +93,7 @@ Frame MakeCudaVideoFrame() {
 
   auto* frames_context = reinterpret_cast<AVHWFramesContext*>(frames_ref->data);
   frames_context->format = AV_PIX_FMT_CUDA;
-  frames_context->sw_format = AV_PIX_FMT_NV12;
+  frames_context->sw_format = format;
   frames_context->width = kCudaWidth;
   frames_context->height = kCudaHeight;
   frames_context->initial_pool_size = 4;
@@ -100,15 +101,20 @@ Frame MakeCudaVideoFrame() {
     ThrowIfError(av_hwframe_ctx_init(frames_ref), "初始化测试CUDA视频帧池");
 
     Frame software;
-    software->format = AV_PIX_FMT_NV12;
+    software->format = format;
     software->width = kCudaWidth;
     software->height = kCudaHeight;
     ThrowIfError(av_frame_get_buffer(software.get(), 32), "分配测试CUDA上传帧");
-    std::memset(software->data[0], 16,
+    std::memset(software->data[0], luma,
                 static_cast<std::size_t>(software->linesize[0]) * kCudaHeight);
     std::memset(
         software->data[1], 128,
         static_cast<std::size_t>(software->linesize[1]) * (kCudaHeight / 2));
+    if (format == AV_PIX_FMT_YUV420P) {
+      std::memset(
+          software->data[2], 128,
+          static_cast<std::size_t>(software->linesize[2]) * (kCudaHeight / 2));
+    }
 
     Frame cuda;
     ThrowIfError(av_hwframe_get_buffer(frames_ref, cuda.get(), 0),
@@ -246,9 +252,11 @@ TEST_CASE("video encoder validates codec and prototype") {
   CHECK_THROWS_AS(invalid_frame_encoder.Open(frame), std::invalid_argument);
 }
 
-TEST_CASE("CUDA video encoder reuses the Processor hardware frame pool") {
+TEST_CASE("CUDA video encoder accepts compatible frame pool changes") {
   VideoEncoderConfig config;
   config.codec = kMwStreamerCodecH264;
+  SECTION("H264") {}
+  SECTION("H265") { config.codec = kMwStreamerCodecH265; }
   config.frame_rate = {25, 1};
   config.properties = {
       {"preset", "p1"},
@@ -257,21 +265,34 @@ TEST_CASE("CUDA video encoder reuses the Processor hardware frame pool") {
       {"forced-idr", "0"},
   };
   VideoEncoder encoder(config, 4);
-  auto prototype = MakeCudaVideoFrame();
+  const auto device = HardwareContext::CreateCuda(0);
+  auto prototype = MakeCudaVideoFrame(device);
+  auto replacement = MakeCudaVideoFrame(device, AV_PIX_FMT_NV12, 80);
   REQUIRE(prototype->format == AV_PIX_FMT_CUDA);
   REQUIRE(prototype->hw_frames_ctx != nullptr);
+  REQUIRE(prototype->hw_frames_ctx->data != replacement->hw_frames_ctx->data);
 
   std::vector<Packet> packets;
   encoder.SetOnPacket(
       [&](const Packet& packet) { packets.push_back(packet.Ref()); });
   encoder.Open(prototype);
   CHECK(encoder.stream_info().codec_parameters.get()->codec_id ==
-        AV_CODEC_ID_H264);
+        (config.codec == kMwStreamerCodecH264 ? AV_CODEC_ID_H264
+                                              : AV_CODEC_ID_HEVC));
   CHECK(encoder.stream_info().codec_parameters.get()->video_delay == 0);
+
+  auto incompatible = MakeCudaVideoFrame(HardwareContext::CreateCuda(0));
+  incompatible->pts = 0;
+  CHECK_THROWS_AS(encoder.Encode(incompatible), std::invalid_argument);
+  auto different_format = MakeCudaVideoFrame(device, AV_PIX_FMT_YUV420P);
+  different_format->pts = 0;
+  CHECK_THROWS_AS(encoder.Encode(different_format), std::invalid_argument);
 
   constexpr std::int64_t kFrameCount = 6;
   for (std::int64_t pts = 0; pts < kFrameCount; ++pts) {
-    auto frame = prototype.Ref();
+    // Returning to the original pool also covers an old standby frame after
+    // receiving live frames from a replacement decoder pool.
+    auto frame = (pts % 2 == 0 ? prototype : replacement).Ref();
     frame->pts = pts;
     encoder.Encode(frame, pts == 3 ? VideoEncodeMode::kForceKeyFrame
                                    : VideoEncodeMode::kAutomatic);
@@ -292,12 +313,16 @@ TEST_CASE("CUDA video encoder reuses the Processor hardware frame pool") {
 
   VideoDecoderConfig decoder_config;
   decoder_config.backend = VideoDecoderBackend::kSoftware;
-  decoder_config.decoder_name = "h264";
+  decoder_config.decoder_name =
+      config.codec == kMwStreamerCodecH264 ? "h264" : "hevc";
   VideoDecoder decoder(encoder.stream_info(), decoder_config);
   std::size_t decoded_frames = 0;
   decoder.SetOnFrame([&](const Frame& frame) {
     CHECK(frame->width == 256);
     CHECK(frame->height == 144);
+    const int expected_luma = decoded_frames % 2 == 0 ? 16 : 80;
+    CHECK(frame->data[0][0] >= expected_luma - 3);
+    CHECK(frame->data[0][0] <= expected_luma + 3);
     ++decoded_frames;
   });
   for (const auto& packet : packets) {

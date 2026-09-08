@@ -50,6 +50,8 @@
 /// MOV flags
 #define MOV_FLAG_FASTSTART			0x00000001
 #define MOV_FLAG_SEGMENT			0x00000002 // fmp4_writer only
+// fMP4: caller supplies nonnegative timestamps on one common track timeline.
+#define MOV_FLAG_PRESERVE_TIMESTAMPS 0x00000004
 
 /// MOV av stream flag
 #define MOV_AV_FLAG_KEYFREAME		0x0001

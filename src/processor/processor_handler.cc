@@ -151,10 +151,6 @@ void ProcessorHandler::UpdateConfig(std::string config) {
 
 void ProcessorHandler::Stop() noexcept { impl_->Stop(); }
 
-void ProcessorHandler::RequireReady(const char* operation) const {
-  impl_->RequireReady(operation);
-}
-
 void ProcessorHandler::RequireStarted(const char* operation) const {
   impl_->RequireStarted(operation);
 }

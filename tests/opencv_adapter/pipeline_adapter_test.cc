@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <opencv2/core.hpp>
 #include <opencv2/core/cuda.hpp>
@@ -25,7 +26,7 @@ extern "C" {
 #include "mw/ffmpeg/stream_info.h"
 #include "mw/opencv_adapter/cuda_mat_adapter.h"
 #include "mw/opencv_adapter/host_mat_adapter.h"
-#include "mw/pipeline/streaming_pipeline.h"
+#include "mw/pipeline/pipeline_builder.h"
 #include "mw/processor/internal/frame_adapter.h"
 
 namespace {
@@ -40,9 +41,8 @@ using mw::streamer::ffmpeg::Packet;
 using mw::streamer::ffmpeg::StreamInfo;
 using mw::streamer::opencv_adapter::CudaMatAdapter;
 using mw::streamer::opencv_adapter::HostMatAdapter;
-using mw::streamer::pipeline::StreamingPipeline;
-using mw::streamer::pipeline::StreamingPipelineConfig;
-using mw::streamer::pipeline::StreamingPipelineStatus;
+namespace pipeline = mw::streamer::pipeline;
+using mw::streamer::performance::PerformanceType;
 using mw::streamer::processor::internal::VideoFrameAdapter;
 
 constexpr std::uint32_t kWidth = 160;
@@ -255,23 +255,42 @@ void ProcessVideo(const MwStreamerStreamingVideoProcessRequest* request,
   state->condition.notify_all();
 }
 
-StreamingPipelineConfig MakePipelineConfig(
+pipeline::PipelineConfig MakePipelineConfig(
     const PipelineCase& test_case, const std::filesystem::path& output) {
-  StreamingPipelineConfig config;
-  config.input_url = SamplePath().string();
-  config.output_targets = {output.string()};
-  config.processor.output_width = kWidth;
-  config.processor.output_height = kHeight;
-  config.video_decoder.backend = test_case.decoder;
-  config.video_encoder.codec = kMwStreamerCodecH264;
-  config.video_encoder.encoder_name = test_case.encoder_name;
-  config.video_encoder.frame_rate = {10, 1};
+  pipeline::PipelineConfig config;
+  config.input.options.url = SamplePath().string();
+  config.input.downstream = {"decode"};
+  auto decoder = std::make_unique<pipeline::DecoderNodeConfig>("decode");
+  decoder->options.video_decoder.backend = test_case.decoder;
+  decoder->downstream = {"process"};
+  auto processor =
+      std::make_unique<pipeline::TransformProcessorNodeConfig>("process");
+  processor->options.output_width = kWidth;
+  processor->options.output_height = kHeight;
+  processor->downstream = {"sync"};
+  auto synchronizer =
+      std::make_unique<pipeline::SynchronizerNodeConfig>("sync");
+  synchronizer->options.video_frame_rate = {10, 1};
+  synchronizer->downstream = {"encode"};
+  auto encoder = std::make_unique<pipeline::EncoderNodeConfig>("encode");
+  encoder->downstream = {"record"};
+  auto& video = encoder->options.video_encoder;
+  video.codec = kMwStreamerCodecH264;
+  video.encoder_name = test_case.encoder_name;
+  video.frame_rate = {10, 1};
   if (std::string_view(test_case.encoder_name).find("_nvenc") !=
       std::string_view::npos) {
-    config.video_encoder.properties = {{"preset", "p1"}, {"tune", "ull"}};
+    video.properties = {{"preset", "p1"}, {"tune", "ull"}};
   } else {
-    config.video_encoder.properties = {{"tune", "zerolatency"}};
+    video.properties = {{"tune", "zerolatency"}};
   }
+  auto recording = std::make_unique<pipeline::RemuxNodeConfig>("record");
+  recording->options.target = output.string();
+  config.sinks.push_back(std::move(decoder));
+  config.sinks.push_back(std::move(processor));
+  config.sinks.push_back(std::move(synchronizer));
+  config.sinks.push_back(std::move(encoder));
+  config.sinks.push_back(std::move(recording));
   return config;
 }
 
@@ -323,48 +342,42 @@ TEST_CASE("OpenCV Adapter通过Pipeline叠加OSD并写回软硬件输出") {
       TestDirectory directory;
       ProcessorState state;
       state.test_case = &test_case;
-      StreamingPipeline pipeline(
-          MakePipelineConfig(test_case, directory.path() / "processed.mp4"));
       MwStreamerStreamingProcessorCallbacks callbacks{};
       callbacks.user_context = &state;
       callbacks.on_start = OnProcessorStart;
       callbacks.process_video = ProcessVideo;
-      pipeline.SetProcessorCallbacks(callbacks);
-      pipeline.SetOnStatus(
-          [&](StreamingPipelineStatus) { state.condition.notify_all(); });
-
-      pipeline.Start();
-      {
-        std::unique_lock<std::mutex> lock(state.mutex);
-        REQUIRE(state.condition.wait_for(lock, 15s, [&]() {
-          const auto status = pipeline.status();
-          return status == StreamingPipelineStatus::kRunning ||
-                 status == StreamingPipelineStatus::kFailed ||
-                 status == StreamingPipelineStatus::kStopped;
-        }));
-      }
-      REQUIRE(pipeline.status() == StreamingPipelineStatus::kRunning);
-      const auto frames_at_running =
-          state.processed_frames.load(std::memory_order_acquire);
+      pipeline::ProcessorBindings bindings;
+      bindings.transform["process"] = callbacks;
+      auto chain = pipeline::BuildPipeline(
+          MakePipelineConfig(test_case, directory.path() / "processed.mp4"),
+          bindings);
+      chain->Start();
       {
         std::unique_lock<std::mutex> lock(state.mutex);
         REQUIRE(state.condition.wait_for(lock, 15s, [&]() {
           return state.processed_frames.load(std::memory_order_acquire) >=
-                     frames_at_running + kFramesAfterRunning ||
-                 pipeline.status() == StreamingPipelineStatus::kFailed ||
-                 pipeline.status() == StreamingPipelineStatus::kStopped;
+                     kFramesAfterRunning ||
+                 chain->state() == pipeline::PipelineState::kFailed;
         }));
       }
+      INFO(chain->error());
+      REQUIRE(chain->state() != pipeline::PipelineState::kFailed);
       REQUIRE(state.processed_frames.load(std::memory_order_acquire) >=
-              frames_at_running + kFramesAfterRunning);
+              kFramesAfterRunning);
 
-      pipeline.Stop();
-      REQUIRE(pipeline.status() == StreamingPipelineStatus::kStopped);
-      const auto performance = pipeline.CollectPerformance();
-      CHECK(performance.video.decode.frames > 0);
-      CHECK(performance.video.process.frames ==
+      chain->Stop();
+      REQUIRE(chain->state() == pipeline::PipelineState::kStopped);
+      const auto performance = chain->GetPerformance();
+      const auto decoded = performance.Find(PerformanceType::kVideoDecoder);
+      const auto processed = performance.Find(PerformanceType::kVideoProcessor);
+      const auto encoded = performance.Find(PerformanceType::kVideoEncoder);
+      REQUIRE(decoded.size() == 1);
+      REQUIRE(processed.size() == 1);
+      REQUIRE(encoded.size() == 1);
+      CHECK(decoded[0].operation->output_count > 0);
+      CHECK(processed[0].operation->completed_calls ==
             state.processed_frames.load(std::memory_order_acquire));
-      CHECK(performance.video.encode.frames > 0);
+      CHECK(encoded[0].operation->output_count > 0);
 
       const auto output_path = FindRecordedMp4(directory.path());
       REQUIRE_FALSE(output_path.empty());

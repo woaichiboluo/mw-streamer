@@ -8,7 +8,9 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include <algorithm>
 #include <memory>
+#include <stdexcept>
 #include <atomic>
 #include "TaskExecutor.h"
 #include "Poller/EventPoller.h"
@@ -127,6 +129,10 @@ TaskExecutor::TaskExecutor(uint64_t max_size, uint64_t max_usec) : ThreadLoadCou
 //////////////////////////////////////////////////////////////////
 
 TaskExecutor::Ptr TaskExecutorGetterImp::getExecutor() {
+    lock_guard<mutex> lock(_executor_mutex);
+    if (_threads.empty()) {
+        throw logic_error("Executor pool is empty");
+    }
     auto thread_pos = _thread_pos;
     if (thread_pos >= _threads.size()) {
         thread_pos = 0;
@@ -153,27 +159,30 @@ TaskExecutor::Ptr TaskExecutorGetterImp::getExecutor() {
         }
     }
     _thread_pos = thread_pos;
+    _issued_executors.emplace(executor_min_load.get());
     return executor_min_load;
 }
 
 vector<int> TaskExecutorGetterImp::getExecutorLoad() {
-    vector<int> vec(_threads.size());
+    auto threads = snapshotExecutors();
+    vector<int> vec(threads.size());
     int i = 0;
-    for (auto &executor : _threads) {
+    for (auto &executor : threads) {
         vec[i++] = executor->load();
     }
     return vec;
 }
 
 void TaskExecutorGetterImp::getExecutorDelay(const function<void(const vector<int> &)> &callback) {
-    std::shared_ptr<vector<int> > delay_vec = std::make_shared<vector<int>>(_threads.size());
+    auto threads = snapshotExecutors();
+    std::shared_ptr<vector<int> > delay_vec = std::make_shared<vector<int>>(threads.size());
     shared_ptr<void> finished(nullptr, [callback, delay_vec](void *) {
         //此析构回调触发时，说明已执行完毕所有async任务  [AUTO-TRANSLATED:8adf8212]
         //When this destructor callback is triggered, it means all async tasks have been executed
         callback((*delay_vec));
     });
     int index = 0;
-    for (auto &th : _threads) {
+    for (auto &th : threads) {
         std::shared_ptr<Ticker> delay_ticker = std::make_shared<Ticker>();
         th->async([finished, delay_vec, index, delay_ticker]() {
             (*delay_vec)[index] = (int) delay_ticker->elapsedTime();
@@ -202,53 +211,94 @@ private:
 
 void TaskExecutorGetterImp::getExecutor(const onGetExecutor &cb) {
     auto callback = std::make_shared<onGetExecutorCB>(cb);
-    auto thread_pos = _thread_pos;
-    if (thread_pos >= _threads.size()) {
-        thread_pos = 0;
-    }
-    for (size_t i = 0; i < _threads.size(); ++i) {
-        ++thread_pos;
-        if (thread_pos >= _threads.size()) {
-            thread_pos = 0;
-        }
-        auto &th = _threads[thread_pos];
+    auto threads = snapshotExecutors();
+    for (auto &th : threads) {
         th->async([th, callback]() mutable { (*callback)(th); }, false);
     }
-    _thread_pos = thread_pos;
 }
 
 void TaskExecutorGetterImp::for_each(const function<void(const TaskExecutor::Ptr &)> &cb) {
-    for (auto &th : _threads) {
+    auto threads = snapshotExecutors();
+    for (auto &th : threads) {
         cb(th);
     }
 }
 
 size_t TaskExecutorGetterImp::getExecutorSize() const {
+    lock_guard<mutex> lock(_executor_mutex);
     return _threads.size();
 }
 
+TaskExecutor::Ptr TaskExecutorGetterImp::getFirstExecutor() {
+    lock_guard<mutex> lock(_executor_mutex);
+    if (_threads.empty()) {
+        throw logic_error("Executor pool is empty");
+    }
+    _issued_executors.emplace(_threads.front().get());
+    return _threads.front();
+}
+
+TaskExecutor::Ptr TaskExecutorGetterImp::getSharedExecutor(const TaskExecutor::Ptr &executor) {
+    lock_guard<mutex> lock(_executor_mutex);
+    auto it = find(_threads.begin(), _threads.end(), executor);
+    if (it == _threads.end()) {
+        return nullptr;
+    }
+    _issued_executors.emplace(executor.get());
+    return *it;
+}
+
+vector<TaskExecutor::Ptr> TaskExecutorGetterImp::snapshotExecutors() {
+    lock_guard<mutex> lock(_executor_mutex);
+    for (const auto &executor : _threads) {
+        _issued_executors.emplace(executor.get());
+    }
+    return _threads;
+}
+
+TaskExecutor::Ptr TaskExecutorGetterImp::extractUnusedExecutor() {
+    lock_guard<mutex> lock(_executor_mutex);
+    if (_threads.size() <= 1) {
+        return nullptr;
+    }
+    for (auto it = _threads.begin(); it != _threads.end(); ++it) {
+        if (_issued_executors.count(it->get()) == 0) {
+            auto executor = std::move(*it);
+            _threads.erase(it);
+            _thread_pos = 0;
+            return executor;
+        }
+    }
+    return nullptr;
+}
+
+TaskExecutor::Ptr TaskExecutorGetterImp::createPoller(const string &name, int priority, bool register_thread, bool enable_cpu_affinity, size_t cpu_index) {
+    EventPoller::Ptr poller(new EventPoller(name), [](EventPoller *poller) {
+        // runLoop borrows this. A last reference released by its own callback
+        // must be reclaimed elsewhere, after shutdown has joined the loop.
+        if (poller->isCurrentThread()) {
+            thread([poller]() { delete poller; }).detach();
+        } else {
+            delete poller;
+        }
+    });
+    poller->runLoop(false, register_thread);
+    poller->async([cpu_index, name, priority, enable_cpu_affinity]() {
+        ThreadPool::setPriority((ThreadPool::Priority)priority);
+        setThreadName(name.data());
+        if (enable_cpu_affinity) {
+            setThreadAffinity(cpu_index);
+        }
+    });
+    return poller;
+}
+
 size_t TaskExecutorGetterImp::addPoller(const string &name, size_t size, int priority, bool register_thread, bool enable_cpu_affinity) {
-    auto cpus = thread::hardware_concurrency();
+    auto cpus = max<size_t>(1, thread::hardware_concurrency());
     size = size > 0 ? size : cpus;
+    lock_guard<mutex> lock(_executor_mutex);
     for (size_t i = 0; i < size; ++i) {
-        auto full_name = name + " " + to_string(i);
-        auto cpu_index = i % cpus;
-        EventPoller::Ptr poller(new EventPoller(full_name));
-        poller->runLoop(false, register_thread);
-        poller->async([cpu_index, full_name, priority, enable_cpu_affinity]() {
-            // 设置线程优先级  [AUTO-TRANSLATED:2966f860]
-            //Set thread priority
-            ThreadPool::setPriority((ThreadPool::Priority)priority);
-            // 设置线程名  [AUTO-TRANSLATED:f5eb4704]
-            //Set thread name
-            setThreadName(full_name.data());
-            // 设置cpu亲和性  [AUTO-TRANSLATED:ba213aed]
-            //Set CPU affinity
-            if (enable_cpu_affinity) {
-                setThreadAffinity(cpu_index);
-            }
-        });
-        _threads.emplace_back(std::move(poller));
+        _threads.emplace_back(createPoller(name + " " + to_string(i), priority, register_thread, enable_cpu_affinity, i % cpus));
     }
     return size;
 }

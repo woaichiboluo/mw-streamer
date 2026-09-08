@@ -318,8 +318,6 @@ def _match_markers(
             candidate_indices, key=lambda value: abs(available[value] - video)
         )
         offset = available[index] - video
-        if abs(offset) > _MAXIMUM_MARKER_DURATION_SECONDS:
-            continue
         offsets.append(offset)
         available.pop(index)
     return offsets

@@ -43,6 +43,42 @@ TEST_CASE("BlockingQueue支持move-only数据并在关闭后排空") {
   CHECK_FALSE(queue.WaitPop().has_value());
 }
 
+TEST_CASE("BlockingQueue非阻塞出队保留move-only数据与关闭后的积压") {
+  BlockingQueue<std::unique_ptr<int>> queue;
+  CHECK_FALSE(queue.TryPop());
+  REQUIRE(queue.Push(std::make_unique<int>(7)));
+  REQUIRE(queue.Push(std::make_unique<int>(9)));
+  auto first = queue.TryPop();
+  REQUIRE(first);
+  CHECK(**first == 7);
+  queue.Close();
+  auto last = queue.TryPop();
+  REQUIRE(last);
+  CHECK(**last == 9);
+  CHECK_FALSE(queue.TryPop());
+}
+
+TEST_CASE("BlockingQueue观察队头返回独立副本且关闭后仍可观察积压") {
+  BlockingQueue<std::string> queue;
+  const auto& read_only_queue = queue;
+  CHECK_FALSE(read_only_queue.TryPeek());
+  REQUIRE(queue.Push("first"));
+  REQUIRE(queue.Push("second"));
+  auto first = read_only_queue.TryPeek();
+  REQUIRE(first);
+  CHECK(*first == "first");
+  *first = "changed";
+  CHECK(read_only_queue.TryPeek() == "first");
+  CHECK(queue.size() == 2);
+
+  queue.Close();
+  CHECK(read_only_queue.TryPeek() == "first");
+  CHECK(queue.TryPop() == "first");
+  CHECK(read_only_queue.TryPeek() == "second");
+  CHECK(queue.TryPop() == "second");
+  CHECK_FALSE(read_only_queue.TryPeek());
+}
+
 TEST_CASE("BlockingQueue关闭会唤醒等待线程") {
   BlockingQueue<int> queue;
   std::promise<bool> completed;
@@ -56,6 +92,32 @@ TEST_CASE("BlockingQueue关闭会唤醒等待线程") {
   REQUIRE(result.wait_for(1s) == std::future_status::ready);
   CHECK_FALSE(result.get());
   consumer.Join();
+}
+
+TEST_CASE("BlockingQueue有界等待由出队或关闭唤醒") {
+  BlockingQueue<int> queue;
+  REQUIRE(queue.Push(1));
+  auto pending = std::async(std::launch::async, [&] {
+    return queue.WaitPush(2, 1, [](int value) { return value > 0; });
+  });
+  CHECK(pending.wait_for(30ms) == std::future_status::timeout);
+  SECTION("pop makes room while control messages do not consume quota") {
+    REQUIRE(queue.Push(-1));
+    CHECK(queue.TryPop() == 1);
+    const auto status = pending.wait_for(1s);
+    queue.Close();
+    REQUIRE(status == std::future_status::ready);
+    CHECK(pending.get());
+    CHECK(queue.TryPop() == -1);
+    CHECK(queue.TryPop() == 2);
+  }
+  SECTION("close cancels the producer without consuming queued data") {
+    queue.Close();
+    REQUIRE(pending.wait_for(1s) == std::future_status::ready);
+    CHECK_FALSE(pending.get());
+    CHECK(queue.TryPop() == 1);
+    CHECK_FALSE(queue.TryPop());
+  }
 }
 
 TEST_CASE("BlockingQueue支持带截止时间的等待") {
@@ -90,6 +152,102 @@ TEST_CASE("BlockingQueue只对TryPush应用调用方容量限制") {
   REQUIRE(queue.WaitPop() == 1);
   REQUIRE(queue.WaitPop() == 3);
   queue.Close();
+}
+
+TEST_CASE("BlockingQueue按匹配项限流并在出队或删除后恢复额度") {
+  BlockingQueue<int> queue;
+  const auto is_data = [](const int& value) { return value > 0; };
+  REQUIRE(queue.TryPush(-1, 2, is_data));
+  REQUIRE(queue.TryPush(1, 2, is_data));
+  REQUIRE(queue.TryPush(-2, 2, is_data));
+  REQUIRE(queue.TryPush(2, 2, is_data));
+  CHECK_FALSE(queue.TryPush(3, 2, is_data));
+  REQUIRE(queue.TryPush(-3, 2, is_data));
+  REQUIRE(queue.WaitPop() == -1);
+  REQUIRE(queue.WaitPop() == 1);
+  REQUIRE(queue.TryPush(3, 2, is_data));
+  CHECK(queue.EraseIf([](const int& value) { return value == 2; }) == 1);
+  REQUIRE(queue.TryPush(4, 2, is_data));
+  CHECK_FALSE(queue.TryPush(5, 2, is_data));
+  queue.Close();
+  std::vector<int> remaining;
+  while (auto value = queue.WaitPop()) {
+    remaining.push_back(*value);
+  }
+  CHECK(remaining == std::vector<int>{-2, -3, 3, 4});
+}
+
+TEST_CASE("BlockingQueue零匹配额度仍允许控制项但关闭后一律拒绝") {
+  BlockingQueue<int> queue;
+  const auto is_data = [](const int& value) { return value > 0; };
+  CHECK_FALSE(queue.TryPush(1, 0, is_data));
+  REQUIRE(queue.TryPush(-1, 0, is_data));
+  queue.Close();
+  CHECK_FALSE(queue.TryPush(1, 2, is_data));
+  CHECK_FALSE(queue.TryPush(-2, 0, is_data));
+  REQUIRE(queue.WaitPop() == -1);
+  CHECK_FALSE(queue.WaitPop().has_value());
+}
+
+TEST_CASE("BlockingQueue筛选move-only元素并保持剩余顺序") {
+  BlockingQueue<std::unique_ptr<int>> queue;
+  const auto is_data = [](const std::unique_ptr<int>& value) {
+    return *value > 0;
+  };
+  REQUIRE(queue.TryPush(std::make_unique<int>(1), 2, is_data));
+  REQUIRE(queue.TryPush(std::make_unique<int>(-1), 2, is_data));
+  REQUIRE(queue.TryPush(std::make_unique<int>(2), 2, is_data));
+  REQUIRE(queue.TryPush(std::make_unique<int>(-2), 2, is_data));
+  CHECK_FALSE(queue.TryPush(std::make_unique<int>(3), 2, is_data));
+  CHECK(queue.EraseIf(is_data) == 2);
+  CHECK(queue.EraseIf(is_data) == 0);
+  REQUIRE(queue.TryPush(std::make_unique<int>(3), 2, is_data));
+  queue.Close();
+  std::vector<int> remaining;
+  while (auto value = queue.WaitPop()) {
+    REQUIRE(*value);
+    remaining.push_back(**value);
+  }
+  CHECK(remaining == std::vector<int>{-1, -2, 3});
+}
+
+TEST_CASE("BlockingQueue多生产者同时投递不会超出匹配项总额度") {
+  constexpr std::size_t kProducers = 8;
+  constexpr std::size_t kAttempts = 32;
+  constexpr std::size_t kCapacity = 7;
+  BlockingQueue<int> queue;
+  Barrier start(kProducers + 1);
+  std::atomic<std::size_t> accepted_data = 0;
+  std::atomic<std::size_t> accepted_control = 0;
+  const auto is_data = [](const int& value) { return value > 0; };
+  std::vector<std::unique_ptr<Thread>> producers;
+  for (std::size_t i = 0; i < kProducers; ++i) {
+    producers.push_back(std::make_unique<Thread>("mw-queue-producer", [&] {
+      if (!start.ArriveAndWait([] {})) {
+        return;
+      }
+      for (std::size_t attempt = 0; attempt < kAttempts; ++attempt) {
+        accepted_data.fetch_add(queue.TryPush(1, kCapacity, is_data));
+        accepted_control.fetch_add(queue.TryPush(-1, kCapacity, is_data));
+      }
+    }));
+  }
+  const bool started = start.ArriveAndWait([] {});
+  for (const auto& producer : producers) {
+    producer->Join();
+  }
+  REQUIRE(started);
+  CHECK(accepted_data.load() == kCapacity);
+  CHECK(accepted_control.load() == kProducers * kAttempts);
+  CHECK(queue.size() == kCapacity + kProducers * kAttempts);
+  CHECK(queue.EraseIf(is_data) == kCapacity);
+  queue.Close();
+  std::size_t controls = 0;
+  while (auto value = queue.WaitPop()) {
+    CHECK(*value == -1);
+    ++controls;
+  }
+  CHECK(controls == kProducers * kAttempts);
 }
 
 TEST_CASE("Thread设置名称并支持显式Join") {

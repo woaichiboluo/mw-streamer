@@ -33,6 +33,8 @@ class VideoEncoder final {
   // Encoding and callbacks are synchronous on the calling thread. The packet
   // is borrowed for OnPacket; copy or call Ref to retain it.
   void SetOnPacket(OnPacket callback);
+  // CUDA frame pools may change while the FFmpeg device context, underlying
+  // pixel format, frame dimensions and time_base remain unchanged.
   void Encode(const ffmpeg::Frame& frame,
               VideoEncodeMode mode = VideoEncodeMode::kAutomatic);
 

@@ -55,6 +55,7 @@ def test_cache_duration(
         + settings.stability_seconds,
         artifact_directory,
         cache_duration_ms=cache_duration_ms,
+        observe_cache=True,
     )
     probe = MediaProbe(
         e2e_config,
@@ -79,23 +80,39 @@ def test_cache_duration(
             "processor_started",
             settings.startup_timeout_seconds,
         )
-        running = wait_for_event(
-            runner.process,
-            runner.events_path,
-            "pipeline_status",
-            cache_duration_seconds + settings.reconnect_timeout_seconds,
-            lambda event: event.get("state") == "running",
-        )
-        buffered_ms = int(running["ts_ms"]) - int(processor_started["ts_ms"])
-        if cache_duration_ms == 0:
-            assert buffered_ms <= 500, (
-                f"0 缓存输出延迟过大: {buffered_ms}ms > 500ms"
+        tracks = []
+        if media_asset.has_video:
+            tracks.append("video")
+        if media_asset.has_audio:
+            tracks.append("audio")
+        for track in tracks:
+            first_frame = wait_for_event(
+                runner.process,
+                runner.events_path,
+                "processor_first_frame",
+                cache_duration_seconds + settings.reconnect_timeout_seconds,
+                lambda event: event.get("track") == track,
             )
-        else:
-            assert buffered_ms >= cache_duration_ms - 250, (
-                f"缓存过早开始输出: {buffered_ms}ms < "
-                f"{cache_duration_ms - 250}ms"
-            )
+            if cache_duration_ms == 0:
+                startup_ms = (
+                    int(first_frame["ts_ms"]) - int(processor_started["ts_ms"])
+                )
+                assert startup_ms <= 500, (
+                    f"0 缓存{track}首帧延迟过大: {startup_ms}ms > 500ms"
+                )
+            else:
+                # Startup can deliver a buffered burst from the player. Check
+                # media age, not elapsed wall time after Processor startup.
+                # Video reordering makes decoded PTS differ from packet DTS.
+                media_age_us = int(first_frame["media_age_us"])
+                assert media_age_us == (
+                    int(first_frame["input_latest_dts_us"])
+                    - int(first_frame["source_pts_us"])
+                )
+                assert media_age_us >= (cache_duration_ms - 250) * 1000, (
+                    f"{track}媒体缓存不足: {media_age_us / 1000:.3f}ms < "
+                    f"{cache_duration_ms - 250}ms"
+                )
 
         probe.wait(
             cache_duration_seconds

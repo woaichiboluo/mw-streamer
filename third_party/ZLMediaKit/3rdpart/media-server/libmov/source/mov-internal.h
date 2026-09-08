@@ -307,6 +307,8 @@ uint32_t mov_build_stts(struct mov_track_t* track);
 uint32_t mov_build_ctts(struct mov_track_t* track);
 uint32_t mov_build_stco(struct mov_track_t* track);
 void mov_apply_stco(struct mov_track_t* track);
+// Movie timeline offset in track timescale units, including leading edits.
+int64_t mov_edit_offset(const struct mov_track_t *track, uint32_t timescale);
 void mov_apply_elst(struct mov_track_t *track, uint32_t timescale);
 void mov_apply_stts(struct mov_track_t* track);
 void mov_apply_ctts(struct mov_track_t* track);

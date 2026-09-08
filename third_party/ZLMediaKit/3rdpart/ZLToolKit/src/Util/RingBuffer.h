@@ -129,7 +129,8 @@ class _RingStorage {
 public:
     using Ptr = std::shared_ptr<_RingStorage>;
     using GopType = List<List<std::pair<bool, T>>>;
-    _RingStorage(size_t max_size, size_t max_gop_size) {
+    _RingStorage(size_t max_size, size_t max_gop_size, bool preserve_first_gop = false) {
+        _preserve_first_gop = preserve_first_gop;
         // gop缓存个数不能小于32  [AUTO-TRANSLATED:63d52404]
         //The number of GOP caches cannot be less than 32
         if (max_size < RING_MIN_SIZE) {
@@ -156,9 +157,12 @@ public:
      */
     void write(T in, bool is_key = true) {
         if (is_key) {
+            // The first GOP may start with audio received before the first IDR.
+            // Keep that prefix only at startup; later GOP eviction is unchanged.
+            bool keep_prefix = _preserve_first_gop && !_started;
             _have_idr = true;
             _started = true;
-            if (!_data_cache.back().empty()) {
+            if (!keep_prefix && !_data_cache.back().empty()) {
                 //当前gop列队还没收到任意缓存  [AUTO-TRANSLATED:81e257d0]
                 //The current GOP queue has not received any cache
                 _data_cache.emplace_back();
@@ -194,6 +198,7 @@ public:
 
     Ptr clone() const {
         Ptr ret(new _RingStorage());
+        ret->_preserve_first_gop = _preserve_first_gop;
         ret->_size = _size;
         ret->_have_idr = _have_idr;
         ret->_started = _started;
@@ -226,6 +231,7 @@ private:
     }
 
 private:
+    bool _preserve_first_gop = false;
     bool _started = false;
     bool _have_idr;
     size_t _size;
@@ -369,8 +375,8 @@ public:
     using onReaderChanged = std::function<void(int size)>;
     using onGetInfoCB = std::function<void(std::list<Any> &info_list)>;
 
-    RingBuffer(size_t max_size = 1024, onReaderChanged cb = nullptr, size_t max_gop_size = 1) {
-        _storage = std::make_shared<RingStorage>(max_size, max_gop_size);
+    RingBuffer(size_t max_size = 1024, onReaderChanged cb = nullptr, size_t max_gop_size = 1, bool preserve_first_gop = false) {
+        _storage = std::make_shared<RingStorage>(max_size, max_gop_size, preserve_first_gop);
         _on_reader_changed = cb ? std::move(cb) : [](int size) {};
         //先触发无人观看  [AUTO-TRANSLATED:34c64fef]
         //First trigger no one watching

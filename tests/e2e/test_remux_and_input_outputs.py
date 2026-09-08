@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 
 from mw_e2e.config import probe_media_file
-from mw_e2e.events import assert_pipeline_succeeded, read_events, wait_for_event
+from mw_e2e.events import (
+    assert_pipeline_succeeded,
+    final_performance,
+    read_events,
+    wait_for_event,
+)
 from mw_e2e.ffmpeg import MediaProbe
 from mw_e2e.mediamtx import MediaEnvironment
 from mw_e2e.models import E2EConfig, MediaAsset, PublishedMedia
@@ -55,8 +60,17 @@ def test_streaming_pipeline_records_input_without_processed_output(
     assert ready_events[-1]["target_count"] == "0"
     assert ready_events[-1]["input_target_count"] == "1"
     summary = [event for event in events if event.get("event") == "summary"][-1]
-    assert int(summary["video_encode_frames"]) > 0
-    assert int(summary["audio_encode_samples"]) > 0
+    assert int(summary["video_encode_frames"]) == 0
+    assert int(summary["audio_encode_samples"]) == 0
+    assert int(summary["video_process_frames"]) > 0
+    assert int(summary["audio_process_samples"]) > 0
+    assert not final_performance(events, "video_encoder")
+    assert not final_performance(events, "audio_encoder")
+    remux = final_performance(events, "remux")
+    assert len(remux) == 1
+    assert int(remux[0]["output_count"]) > 0
+    assert remux[0]["failed_calls"] == "0"
+    assert remux[0]["in_flight"] == "0"
 
     recording = probe_media_file(e2e_config, find_recording(recording_target))
     _assert_source_spec(recording, asset)
@@ -87,7 +101,7 @@ def test_remux_pipeline_simultaneously_pushes_and_records_source(
         ],
         settings.startup_timeout_seconds * 3 + settings.stability_seconds,
         artifact_directory,
-        pipeline="remux",
+        scenario="remux",
     )
     probe: MediaProbe | None = None
     runner.start()
@@ -122,6 +136,15 @@ def test_remux_pipeline_simultaneously_pushes_and_records_source(
     events = read_events(runner.events_path)
     assert_pipeline_succeeded(events)
     assert all(event.get("event") != "processor_started" for event in events)
+    assert not final_performance(events, "video_decoder")
+    assert not final_performance(events, "audio_encoder")
+    remux = final_performance(events, "remux")
+    assert len(remux) == 2
+    assert len({event["node_id"] for event in remux}) == 2
+    for operation in remux:
+        assert int(operation["output_count"]) > 0
+        assert operation["failed_calls"] == "0"
+        assert operation["in_flight"] == "0"
     recording = probe_media_file(e2e_config, find_recording(recording_target))
     _assert_source_spec(recording, published_media.asset)
     assert recording.duration_seconds >= settings.stability_seconds - 1.0

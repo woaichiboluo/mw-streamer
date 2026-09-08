@@ -32,7 +32,9 @@ class VideoDecoder final {
 
   // Decoding and callbacks are synchronous on the calling thread. One packet
   // may produce zero or more frames. The frame is borrowed for OnFrame; copy or
-  // call Ref to retain it.
+  // call Ref to retain it. GPU consumers using another context/stream must
+  // establish input readiness before reading; decoding does not wait on GPU
+  // work on the host.
   void SetOnFrame(OnFrame callback);
   VideoDecodeResult Decode(const ffmpeg::Packet& packet);
 

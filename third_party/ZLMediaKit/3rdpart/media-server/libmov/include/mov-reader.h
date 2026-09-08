@@ -27,6 +27,10 @@ int mov_reader_getinfo(mov_reader_t* mov, struct mov_reader_trackinfo_t *ontrack
 
 uint64_t mov_reader_getduration(mov_reader_t* mov);
 
+/// Earliest initial track DTS/PTS in milliseconds, including edit-list preroll.
+/// The value remains stable across reads and seeks.
+int64_t mov_reader_getstarttime(mov_reader_t* mov);
+
 /// audio: AAC raw data, don't include ADTS/AudioSpecificConfig
 /// video: 4-byte data length(don't include self length) + H.264 NALU(don't include 0x00000001)
 /// @param[in] flags MOV_AV_FLAG_xxx, such as: MOV_AV_FLAG_KEYFREAME

@@ -10,12 +10,6 @@
 extern "C" {
 #endif
 
-typedef struct MwStreamerMediaTimestamp {
-  int64_t pts;
-  int64_t duration;
-  MwStreamerRational time_base;
-} MwStreamerMediaTimestamp;
-
 typedef enum MwStreamerMemoryType {
   kMwStreamerMemoryHost = 0,
   kMwStreamerMemoryCuda,
@@ -277,8 +271,10 @@ typedef MwStreamerProcessorStartResult (*MwStreamerFileProcessorStartCallback)(
 
 // Every Streaming callback must completely produce one output for one input.
 // All writes to output must be complete when the callback returns. A Processor
-// using an asynchronous backend is responsible for waiting only for its own
-// final output write before returning.
+// using an asynchronous backend must establish input readiness before reading
+// GPU memory and finish its output writes before returning. The core does not
+// wait for GPU work before invoking callbacks; the provided adapters handle
+// synchronization at their copy boundaries.
 typedef void (*MwStreamerStreamingProcessVideoCallback)(
     const MwStreamerStreamingVideoProcessRequest* request, void* user_context);
 
@@ -288,7 +284,8 @@ typedef void (*MwStreamerStreamingProcessAudioCallback)(
     const MwStreamerStreamingAudioProcessRequest* request, void* user_context);
 
 // File callbacks consume decoded input without allocating or producing an
-// output media frame.
+// output media frame. GPU input access has the same synchronization contract
+// as Streaming video callbacks.
 typedef void (*MwStreamerFileProcessVideoCallback)(
     const MwStreamerVideoFrameView* input, void* user_context);
 typedef void (*MwStreamerFileProcessAudioCallback)(
@@ -306,21 +303,20 @@ typedef void (*MwStreamerProcessorUpdateConfigCallback)(const char* config,
 
 typedef void (*MwStreamerProcessorStopCallback)(void* user_context);
 
-// An event produced by an output consumer. All fields are borrowed for the
-// callback. timestamp describes the output media observed when the event was
-// produced; it is informational and does not impose ordering with media frame
-// callbacks.
-typedef struct MwStreamerOutputEvent {
+// A message produced by a Sink. All fields are borrowed for the callback.
+// timestamp describes observed media; it is informational and does not impose
+// ordering with media frame callbacks.
+typedef struct MwStreamerMessage {
   const char* sink_id;
   const char* type;
   const void* payload;
   size_t payload_size;
   uint8_t has_timestamp;
   MwStreamerMediaTimestamp timestamp;
-} MwStreamerOutputEvent;
+} MwStreamerMessage;
 
-typedef void (*MwStreamerProcessorOutputEventCallback)(
-    const MwStreamerOutputEvent* event, void* user_context);
+typedef void (*MwStreamerProcessorMessageCallback)(
+    const MwStreamerMessage* message, void* user_context);
 
 typedef struct MwStreamerStreamingProcessorCallbacks {
   // Borrowed user data returned unchanged to every callback. The framework
@@ -350,10 +346,10 @@ typedef struct MwStreamerStreamingProcessorCallbacks {
   // suppressed by the framework.
   MwStreamerProcessorStopCallback on_stop;
 
-  // Optional. Output events are delivered asynchronously in submission order
-  // and may run concurrently with audio and video processing. The event and
-  // all referenced data are borrowed for the callback.
-  MwStreamerProcessorOutputEventCallback on_output_event;
+  // Optional. Messages are delivered asynchronously in submission order and
+  // may run concurrently with audio and video processing. The message and all
+  // referenced data are borrowed for the callback.
+  MwStreamerProcessorMessageCallback on_message;
 } MwStreamerStreamingProcessorCallbacks;
 
 typedef struct MwStreamerFileProcessorCallbacks {
@@ -375,6 +371,10 @@ typedef struct MwStreamerFileProcessorCallbacks {
 
   // Called once after a successful on_start and all processing has completed.
   MwStreamerProcessorStopCallback on_stop;
+
+  // Optional. AnalysisProcessorSink delivers messages asynchronously, with the
+  // same lifetime and concurrency contract as the Streaming on_message hook.
+  MwStreamerProcessorMessageCallback on_message;
 } MwStreamerFileProcessorCallbacks;
 
 #ifdef __cplusplus

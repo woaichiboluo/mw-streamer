@@ -47,6 +47,12 @@ def wait_for_event(
 
 
 def assert_pipeline_succeeded(events: list[Event]) -> None:
+    if not any(
+        event.get("event") == "runner_started"
+        and event.get("pipeline_api") == "unified"
+        for event in events
+    ):
+        raise AssertionError("runner 未使用新的统一 Pipeline，请重新构建运行器")
     summaries = [event for event in events if event.get("event") == "summary"]
     if not summaries:
         raise AssertionError("runner 缺少 summary 事件")
@@ -59,3 +65,17 @@ def assert_pipeline_succeeded(events: list[Event]) -> None:
         raise AssertionError(
             f"Pipeline 最终状态不是 stopped: {summary.get('final_status')}"
         )
+
+
+def final_performance(
+    events: list[Event], performance_type: str, *, node_id: str | None = None
+) -> list[Event]:
+    """Select owned node statistics emitted after Pipeline.Stop()."""
+    return [
+        event
+        for event in events
+        if event.get("event") == "performance"
+        and event.get("phase") == "final"
+        and event.get("type") == performance_type
+        and (node_id is None or event.get("node_id") == node_id)
+    ]

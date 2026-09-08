@@ -1,14 +1,20 @@
+#include <cuda.h>
+
 #include <array>
 #include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 extern "C" {
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_cuda.h>
 }
 
 #include "mw/ffmpeg/error.h"
@@ -140,7 +146,7 @@ TEST_CASE("HostFrame深拷贝带padding和负stride的Host帧") {
         reinterpret_cast<std::uintptr_t>(copied_y));
 }
 
-TEST_CASE("HostFrame同步下载CUDA帧并脱离源帧生命周期") {
+TEST_CASE("HostFrame等待非阻塞流写入后下载并脱离源帧生命周期") {
   constexpr int kWidth = 64;
   constexpr int kHeight = 64;
   auto cached = [&]() {
@@ -163,9 +169,9 @@ TEST_CASE("HostFrame同步下载CUDA帧并脱离源帧生命周期") {
     source->width = kWidth;
     source->height = kHeight;
     ThrowIfError(av_frame_get_buffer(source.get(), 32), "分配测试Host源帧");
-    std::memset(source->data[0], 0x5a,
+    std::memset(source->data[0], 0,
                 static_cast<std::size_t>(source->linesize[0]) * kHeight);
-    std::memset(source->data[1], 0xa5,
+    std::memset(source->data[1], 0,
                 static_cast<std::size_t>(source->linesize[1]) * (kHeight / 2));
 
     Frame cuda;
@@ -178,6 +184,49 @@ TEST_CASE("HostFrame同步下载CUDA帧并脱离源帧生命周期") {
     cuda->pts = 7;
     cuda->duration = 1;
     cuda->colorspace = AVCOL_SPC_BT709;
+
+    const auto* device = reinterpret_cast<const AVHWDeviceContext*>(
+        hardware_context.get()->data);
+    const auto* cuda_device =
+        static_cast<const AVCUDADeviceContext*>(device->hwctx);
+    REQUIRE(cuCtxPushCurrent(cuda_device->cuda_ctx) == CUDA_SUCCESS);
+    CUstream stream = nullptr;
+    const auto create_result = cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING);
+    if (create_result != CUDA_SUCCESS) {
+      CUcontext popped = nullptr;
+      cuCtxPopCurrent(&popped);
+      REQUIRE(create_result == CUDA_SUCCESS);
+    }
+    const auto destroy_stream = [context =
+                                     cuda_device->cuda_ctx](CUstream value) {
+      cuCtxPushCurrent(context);
+      cuStreamDestroy(value);
+      CUcontext popped = nullptr;
+      cuCtxPopCurrent(&popped);
+    };
+    const std::unique_ptr<std::remove_pointer_t<CUstream>,
+                          decltype(destroy_stream)>
+        producer(stream, destroy_stream);
+    // Delay the producer so downloading on the default stream without waiting
+    // for this non-blocking stream can observe the old zero-filled pixels.
+    const auto delay_result = cuLaunchHostFunc(
+        stream,
+        [](void*) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        },
+        nullptr);
+    const auto y_result =
+        cuMemsetD2D8Async(reinterpret_cast<CUdeviceptr>(cuda->data[0]),
+                          cuda->linesize[0], 0x5a, kWidth, kHeight, stream);
+    const auto uv_result =
+        cuMemsetD2D8Async(reinterpret_cast<CUdeviceptr>(cuda->data[1]),
+                          cuda->linesize[1], 0xa5, kWidth, kHeight / 2, stream);
+    CUcontext popped = nullptr;
+    const auto pop_result = cuCtxPopCurrent(&popped);
+    REQUIRE(delay_result == CUDA_SUCCESS);
+    REQUIRE(y_result == CUDA_SUCCESS);
+    REQUIRE(uv_result == CUDA_SUCCESS);
+    REQUIRE(pop_result == CUDA_SUCCESS);
 
     const VideoFrameAdapter adapter(cuda);
     REQUIRE(adapter.view().buffer.memory_type == kMwStreamerMemoryCuda);

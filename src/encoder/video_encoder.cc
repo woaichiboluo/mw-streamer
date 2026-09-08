@@ -305,10 +305,17 @@ class VideoEncoder::Impl final {
       throw std::invalid_argument(
           "当前VideoEncoder不支持动态改变尺寸、像素格式或time_base");
     }
-    if (input_format_ == AV_PIX_FMT_CUDA &&
-        (!frame->hw_frames_ctx ||
-         frame->hw_frames_ctx->data != context_->get()->hw_frames_ctx->data)) {
-      throw std::invalid_argument("当前VideoEncoder只接受打开时的CUDA硬件帧池");
+    if (input_format_ == AV_PIX_FMT_CUDA) {
+      const auto& frames = ValidateCudaPrototype(*frame);
+      const auto* opened_frames = reinterpret_cast<const AVHWFramesContext*>(
+          context_->get()->hw_frames_ctx->data);
+      // Reconnects can replace the decoder's pool without changing its device
+      // or storage format. NVENC registers each frame's own GPU allocation.
+      if (frames.device_ref->data != opened_frames->device_ref->data ||
+          frames.sw_format != opened_frames->sw_format) {
+        throw std::invalid_argument(
+            "当前VideoEncoder不支持改变CUDA设备上下文或底层像素格式");
+      }
     }
   }
 

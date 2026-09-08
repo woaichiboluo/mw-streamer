@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -14,6 +15,7 @@
 #include "Player/FilePlayerImp.h"
 #include "Player/MediaPlayer.h"
 #include "Player/PlayerProxy.h"
+#include "Record/MP4Demuxer.h"
 #include "Util/onceToken.h"
 
 namespace {
@@ -357,6 +359,73 @@ TEST_CASE("file proxy does not retry a failed finite input") {
   CHECK(close_count == 1);
   CHECK(disconnect_count == 0);
   CHECK(proxy->getRePullCount() == 0);
+}
+
+TEST_CASE("MP4 reader preserves AAC edit-list preroll timestamps") {
+  for (const auto *name : {"h264_aac.mp4", "h265_aac.mp4"}) {
+    CAPTURE(name);
+    auto file = std::make_shared<mediakit::MP4FileDisk>();
+    file->openFile(SamplePath(name).c_str(), "rb");
+    auto reader = file->createReader();
+    struct Observation {
+      std::vector<char> data;
+      std::optional<std::int64_t> earliest;
+    } observation;
+    const auto read = [](void *opaque, std::uint32_t, std::size_t bytes,
+                         std::int64_t, std::int64_t dts, int) -> void * {
+      auto &result = *static_cast<Observation *>(opaque);
+      if (!result.earliest || dts < *result.earliest) result.earliest = dts;
+      result.data.resize(bytes);
+      return result.data.data();
+    };
+    int result;
+    while ((result = mov_reader_read2(reader.get(), read, &observation)) > 0) {
+    }
+    REQUIRE(result == 0);
+    REQUIRE(observation.earliest);
+    // Both fixtures contain 1024 AAC preroll samples at 48 kHz; HEVC also
+    // has 200 ms of video decode preroll for reordering. libmov truncates ms.
+    CHECK(*observation.earliest ==
+          (std::string(name) == "h265_aac.mp4" ? -200 : -21));
+  }
+}
+
+TEST_CASE("MP4 demuxer uses one nonnegative origin and retains preroll") {
+  for (const auto *name : {"h264_aac.mp4", "h265_aac.mp4"}) {
+    CAPTURE(name);
+    mediakit::MP4Demuxer demuxer;
+    demuxer.openMP4(SamplePath(name));
+    for (int pass = 0; pass < 2; ++pass) {
+      CAPTURE(pass);
+      if (pass != 0) REQUIRE(demuxer.seekTo(0) == 0);
+      std::optional<std::uint64_t> first_audio;
+      std::optional<std::uint64_t> first_video;
+      std::optional<std::uint64_t> first_video_pts;
+      std::size_t audio_count = 0;
+      bool eof = false;
+      while (!eof) {
+        bool key = false;
+        int error = 0;
+        auto frame = demuxer.readFrame(key, eof, &error);
+        REQUIRE(error == 0);
+        if (!frame) continue;
+        REQUIRE(frame->dts() < 3000);
+        if (frame->getTrackType() == mediakit::TrackAudio) {
+          if (!first_audio) first_audio = frame->dts();
+          ++audio_count;
+        } else if (!first_video) {
+          first_video = frame->dts();
+          first_video_pts = frame->pts();
+        }
+      }
+      REQUIRE(first_audio);
+      REQUIRE(first_video);
+      CHECK(std::min(*first_audio, *first_video) == 0);
+      REQUIRE(first_video_pts);
+      CHECK(*first_video_pts == *first_audio + 21);
+      CHECK(audio_count == 95);
+    }
+  }
 }
 
 TEST_CASE("file proxy closes once at EOF without repulling") {

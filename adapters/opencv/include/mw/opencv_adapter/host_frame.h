@@ -14,6 +14,8 @@ class HostMatAdapter;
 // callback or its storage lifetime.
 class HostFrame final {
  public:
+  // CUDA downloads wait for pending work in the source context before reading
+  // its pixels. The caller must not submit concurrent writes during this copy.
   static HostFrame CopyFrom(const MwStreamerVideoFrameView& source);
 
   ~HostFrame();

@@ -1,6 +1,7 @@
 #ifndef MW_STREAMER_INCLUDE_MW_CONVERTER_AV_PACKET_TO_ZLM_FRAME_CONVERTER_H_
 #define MW_STREAMER_INCLUDE_MW_CONVERTER_AV_PACKET_TO_ZLM_FRAME_CONVERTER_H_
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -25,7 +26,10 @@ class AvPacketToZlmFrameConverter final {
   // Takes ownership of packet's reference. The returned frames keep the
   // payload alive. H264/H265 packets must use Annex-B framing and produce one
   // ZLM Frame per NAL unit.
-  std::vector<mediakit::Frame::Ptr> Convert(ffmpeg::Packet packet) const;
+  // Subtracts one caller-selected origin from both timestamps after conversion
+  // to milliseconds. Use the same origin for all tracks to preserve AV timing.
+  std::vector<mediakit::Frame::Ptr> Convert(
+      ffmpeg::Packet packet, std::int64_t timestamp_origin_ms = 0) const;
 
  private:
   mediakit::CodecId codec_id_;

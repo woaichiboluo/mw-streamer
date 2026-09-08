@@ -1,7 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
-#include <chrono>
 #include <cstdint>
-#include <exception>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -14,9 +12,7 @@ extern "C" {
 }
 
 #include "Extension/Track.h"
-#include "Poller/EventPoller.h"
 #include "Record/MP4Demuxer.h"
-#include "mw/cache/packet_queue.h"
 #include "mw/converter/zlm_codec_parameters_converter.h"
 #include "mw/converter/zlm_packet_converter.h"
 #include "mw/decoder/audio_decoder.h"
@@ -28,8 +24,6 @@ using mediakit::Frame;
 using mediakit::FrameWriterInterface;
 using mediakit::MP4Demuxer;
 using mediakit::Track;
-using mw::streamer::cache::PacketQueue;
-using mw::streamer::cache::PacketQueueState;
 using mw::streamer::converter::ZlmCodecParametersConverter;
 using mw::streamer::converter::ZlmPacketConverter;
 using mw::streamer::decoder::AudioDecoder;
@@ -80,12 +74,9 @@ TEST_CASE("audio decoder decodes drains and flushes an AAC stream") {
   std::size_t decoded_frames = 0;
   std::int64_t decoded_samples = 0;
   std::int64_t previous_pts = AV_NOPTS_VALUE;
-  std::uint64_t decoding_generation = 0;
-  std::size_t generation_two_frames = 0;
   std::size_t resampled_frames = 0;
   std::int64_t resampled_samples = 0;
   std::int64_t previous_resampled_pts = AV_NOPTS_VALUE;
-  std::size_t generation_two_resampled_frames = 0;
   bool valid_frames = true;
   bool valid_resampled_frames = true;
   resampler.SetOnFrame([&](const mw::streamer::ffmpeg::Frame& output) {
@@ -105,9 +96,6 @@ TEST_CASE("audio decoder decodes drains and flushes an AAC stream") {
     previous_resampled_pts = frame->pts;
     ++resampled_frames;
     resampled_samples += frame->nb_samples;
-    if (decoding_generation == 2) {
-      ++generation_two_resampled_frames;
-    }
   });
   decoder.SetOnFrame([&](const mw::streamer::ffmpeg::Frame& decoded_frame) {
     const auto* frame = decoded_frame.get();
@@ -124,9 +112,6 @@ TEST_CASE("audio decoder decodes drains and flushes an AAC stream") {
     previous_pts = frame->pts;
     ++decoded_frames;
     decoded_samples += frame->nb_samples;
-    if (decoding_generation == 2) {
-      ++generation_two_frames;
-    }
     resampler.Resample(decoded_frame);
   });
 
@@ -189,77 +174,6 @@ TEST_CASE("audio decoder decodes drains and flushes an AAC stream") {
   CHECK(resampled_frames == first_pass_resampled_frames * 2);
   CHECK(resampled_samples == first_pass_resampled_samples * 2);
 
-  decoder.Flush();
-  resampler.Flush();
-  previous_pts = AV_NOPTS_VALUE;
-  previous_resampled_pts = AV_NOPTS_VALUE;
-  auto queue = std::make_shared<PacketQueue>(std::chrono::milliseconds{0});
-  std::size_t generation_two_packets = 0;
-  std::size_t timeline_resets = 0;
-  std::vector<std::uint64_t> ended_generations;
-  std::exception_ptr failure;
-
-  queue->poller()->sync([&]() {
-    try {
-      queue->SetOnPacket([&](std::uint64_t generation, const Packet& packet) {
-        decoding_generation = generation;
-        decoder.Decode(packet);
-        if (generation == 2) {
-          ++generation_two_packets;
-        }
-      });
-      queue->SetOnTimelineReset([&](std::uint64_t generation) {
-        if (generation != 2) {
-          throw std::runtime_error("PacketQueue输出了错误的时间线generation");
-        }
-        decoder.Flush();
-        resampler.Flush();
-        previous_pts = AV_NOPTS_VALUE;
-        previous_resampled_pts = AV_NOPTS_VALUE;
-        ++timeline_resets;
-      });
-      queue->SetOnGenerationEnd([&](std::uint64_t generation) {
-        decoding_generation = generation;
-        decoder.Drain();
-        resampler.Drain();
-        ended_generations.push_back(generation);
-      });
-
-      const std::vector<StreamInfo> streams{stream_info};
-      queue->SetStreams(1, streams);
-      for (std::size_t index = 0; index < retained_packets.size() / 2;
-           ++index) {
-        if (!queue->Input(1, retained_packets[index])) {
-          throw std::runtime_error("PacketQueue拒绝了第一代测试音频包");
-        }
-      }
-
-      queue->SetStreams(2, streams);
-      for (const auto& packet : retained_packets) {
-        if (!queue->Input(2, packet)) {
-          throw std::runtime_error("PacketQueue拒绝了第二代测试音频包");
-        }
-      }
-      queue->EndInput(2);
-    } catch (...) {
-      failure = std::current_exception();
-    }
-  });
-
-  if (failure) {
-    std::rethrow_exception(failure);
-  }
-  CHECK(timeline_resets == 1);
-  CHECK(valid_frames);
-  CHECK(valid_resampled_frames);
-  CHECK(generation_two_packets == retained_packets.size());
-  CHECK(generation_two_frames == retained_packets.size());
-  CHECK(generation_two_resampled_frames == retained_packets.size());
-  CHECK(ended_generations == std::vector<std::uint64_t>{2});
-  CHECK(queue->state() == PacketQueueState::kStarved);
-
-  queue->Stop();
-  queue.reset();
   audio_track->delDelegate(delegate);
   demuxer.closeMP4();
 }

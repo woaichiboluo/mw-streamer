@@ -23,7 +23,7 @@ public:
 
     TSMediaSourceMuxer(const MediaTuple& tuple, const ProtocolOption &option) : MpegMuxer(false) {
         _option = option;
-        _media_src = std::make_shared<TSMediaSource>(tuple);
+        _media_src = std::make_shared<TSMediaSource>(tuple, TS_GOP_SIZE, option.preserve_startup_packets);
     }
 
     ~TSMediaSourceMuxer() override {
@@ -49,6 +49,23 @@ public:
             _clear_cache = true;
         }
         MediaSourceEventInterceptor::onReaderChanged(sender, size);
+    }
+
+    bool addTrack(const Track::Ptr &track) override {
+        if (!MpegMuxer::addTrack(track)) {
+            return false;
+        }
+        if (_option.preserve_startup_packets && track->getTrackType() == TrackVideo) {
+            _media_src->setHaveVideo(true);
+        }
+        return true;
+    }
+
+    void resetTracks() override {
+        MpegMuxer::resetTracks();
+        if (_option.preserve_startup_packets) {
+            _media_src->setHaveVideo(false);
+        }
     }
 
     bool inputFrame(const Frame::Ptr &frame) override {

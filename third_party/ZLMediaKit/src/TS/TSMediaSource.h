@@ -41,7 +41,13 @@ public:
     using RingDataType = std::shared_ptr<toolkit::List<TSPacket::Ptr> >;
     using RingType = toolkit::RingBuffer<RingDataType>;
 
-    TSMediaSource(const MediaTuple& tuple, int ring_size = TS_GOP_SIZE): MediaSource(TS_SCHEMA, tuple), _ring_size(ring_size) {}
+    TSMediaSource(const MediaTuple& tuple, int ring_size = TS_GOP_SIZE, bool preserve_startup_packets = false)
+        : MediaSource(TS_SCHEMA, tuple), _ring_size(ring_size), _preserve_startup_packets(preserve_startup_packets) {}
+
+    // Set from configured tracks before packets arrive, rather than inferring
+    // an audio-only source while the first video frame is still being merged.
+    void setHaveVideo(bool have_video) { _have_video = have_video; }
+    bool preserveStartupPackets() const { return _preserve_startup_packets; }
 
     ~TSMediaSource() override {
         try {
@@ -119,7 +125,7 @@ private:
                 return;
             }
             strong_self->onReaderChanged(size);
-        });
+        }, 1, _preserve_startup_packets);
         // 注册媒体源  [AUTO-TRANSLATED:b87b5ac4]
         // Register media source
         regist();
@@ -144,6 +150,7 @@ private:
 private:
     bool _have_video = false;
     int _ring_size;
+    const bool _preserve_startup_packets;
     RingType::Ptr _ring;
 };
 

@@ -389,7 +389,6 @@ def test_standby_recovery_av_sync(
         ),
         artifact_directory,
         passthrough_video=True,
-        standby=True,
     )
     runner.start()
     probe = None

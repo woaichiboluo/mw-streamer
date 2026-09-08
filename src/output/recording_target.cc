@@ -146,8 +146,11 @@ void AddTracks(Recorder& recorder,
 
 class Fmp4FileTarget::Muxer final : public mediakit::MP4MuxerInterface {
  public:
-  Muxer(const std::filesystem::path& path, std::size_t file_buffer_size)
-      : file_(std::make_shared<BufferedMP4File>(path, file_buffer_size)) {}
+  Muxer(const std::filesystem::path& path, std::size_t file_buffer_size,
+        bool preserve_packets)
+      : file_(std::make_shared<BufferedMP4File>(path, file_buffer_size)) {
+    setPreservePackets(preserve_packets);
+  }
 
   void Close() {
     resetTracks();
@@ -156,7 +159,8 @@ class Fmp4FileTarget::Muxer final : public mediakit::MP4MuxerInterface {
 
  protected:
   mediakit::MP4FileIO::Writer createWriter() override {
-    return file_->createWriter(0, true);
+    const auto flags = preservePackets() ? MOV_FLAG_PRESERVE_TIMESTAMPS : 0;
+    return file_->createWriter(flags, true);
   }
 
  private:
@@ -166,13 +170,16 @@ class Fmp4FileTarget::Muxer final : public mediakit::MP4MuxerInterface {
 class HlsFmp4FileTarget::Recorder final : public mediakit::MP4MuxerMemory {
  public:
   Recorder(const std::filesystem::path& path,
-           const zlm::RecordingConfig& config)
-      : path_(path),
+           const zlm::RecordingConfig& config, bool preserve_packets)
+      : preserve_packets_(preserve_packets),
+        path_(path),
         hls_(std::make_shared<mediakit::HlsMakerImp>(
             true, path.string(), std::string(),
             static_cast<std::uint32_t>(config.file_buffer_size),
             static_cast<float>(config.hls_segment_duration.count()) / 1000.0F,
-            kHlsRecordingSegmentCount, false, ".mp4")) {}
+            kHlsRecordingSegmentCount, false, ".mp4")) {
+    setPreservePackets(preserve_packets);
+  }
 
   ~Recorder() override {
     try {
@@ -195,9 +202,15 @@ class HlsFmp4FileTarget::Recorder final : public mediakit::MP4MuxerMemory {
       hls_->inputData(nullptr, 0, timestamp, key_position);
       return;
     }
-    hls_->inputData(buffer.data(), buffer.size(), timestamp, key_position);
+    // The first fragment may contain only audio. Open its file immediately;
+    // this boundary flag does not change the encoded samples' keyframe flags.
+    hls_->inputData(buffer.data(), buffer.size(), timestamp,
+                    key_position || (preserve_packets_ && !segment_started_));
+    segment_started_ = true;
   }
 
+  const bool preserve_packets_;
+  bool segment_started_ = false;
   std::filesystem::path path_;
   std::shared_ptr<mediakit::HlsMakerImp> hls_;
 };
@@ -205,10 +218,13 @@ class HlsFmp4FileTarget::Recorder final : public mediakit::MP4MuxerMemory {
 Fmp4FileTarget::Fmp4FileTarget(const std::filesystem::path& requested_path,
                                const std::vector<mediakit::Track::Ptr>& tracks,
                                zlm::RecordingConfig config,
-                               std::chrono::system_clock::time_point start_time)
-    : path_(MakeTimestampedFilePath(requested_path, start_time)) {
+                               std::chrono::system_clock::time_point start_time,
+                               bool preserve_packets)
+    : preserve_packets_(preserve_packets),
+      path_(MakeTimestampedFilePath(requested_path, start_time)) {
   zlm::internal::ValidateRecordingConfig(config);
-  muxer_ = std::make_shared<Muxer>(path_, config.file_buffer_size);
+  muxer_ =
+      std::make_shared<Muxer>(path_, config.file_buffer_size, preserve_packets);
   try {
     AddTracks(*muxer_, tracks);
   } catch (...) {
@@ -228,7 +244,9 @@ Fmp4FileTarget::~Fmp4FileTarget() {
 
 void Fmp4FileTarget::Write(const mediakit::Frame::Ptr& frame) {
   if (muxer_ && frame) {
-    muxer_->inputFrame(frame);
+    if (!muxer_->inputFrame(frame) && preserve_packets_) {
+      throw std::runtime_error("fMP4录像器拒绝编码帧");
+    }
   }
 }
 
@@ -249,10 +267,11 @@ HlsFmp4FileTarget::HlsFmp4FileTarget(
     const std::filesystem::path& requested_path,
     const std::vector<mediakit::Track::Ptr>& tracks,
     zlm::RecordingConfig config,
-    std::chrono::system_clock::time_point start_time)
-    : path_(MakeTimestampedHlsPath(requested_path, start_time)) {
+    std::chrono::system_clock::time_point start_time, bool preserve_packets)
+    : preserve_packets_(preserve_packets),
+      path_(MakeTimestampedHlsPath(requested_path, start_time)) {
   zlm::internal::ValidateRecordingConfig(config);
-  recorder_ = std::make_shared<Recorder>(path_, config);
+  recorder_ = std::make_shared<Recorder>(path_, config, preserve_packets);
   try {
     AddTracks(*recorder_, tracks);
   } catch (...) {
@@ -271,7 +290,9 @@ HlsFmp4FileTarget::~HlsFmp4FileTarget() {
 
 void HlsFmp4FileTarget::Write(const mediakit::Frame::Ptr& frame) {
   if (recorder_ && frame) {
-    recorder_->inputFrame(frame);
+    if (!recorder_->inputFrame(frame) && preserve_packets_) {
+      throw std::runtime_error("HLS-fMP4录像器拒绝编码帧");
+    }
   }
 }
 

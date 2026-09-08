@@ -12,8 +12,8 @@ struct InitConfig {
 };
 
 // Initializes process-wide mw-streamer modules once. Call this from the
-// application thread before creating PlayerProxy, PacketQueue, OutputSession,
-// or Pipeline objects so ZLToolKit thread-pool settings take effect. The first
+// application thread before creating PlayerProxy, RemuxSink, or Pipeline
+// objects so ZLToolKit thread-pool settings take effect. The first
 // successful call owns the configuration; later calls are no-ops. Streamer
 // logging remains available through its lazy default logger before this call.
 void Init(const InitConfig& config = {});

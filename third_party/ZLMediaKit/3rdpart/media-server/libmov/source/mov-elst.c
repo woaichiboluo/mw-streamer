@@ -105,32 +105,34 @@ size_t mov_write_elst(const struct mov_t* mov)
 	return size;
 }
 
-void mov_apply_elst(struct mov_track_t *track, uint32_t timescale)
+int64_t mov_edit_offset(const struct mov_track_t *track, uint32_t timescale)
 {
     size_t i;
-
-    // edit list
-    track->samples[0].dts = 0;
-    track->samples[0].pts = 0;
+    int64_t offset = 0;
+    // Map the first media edit onto the movie timeline. Preserve preroll
+    // with negative timestamps rather than moving each track to zero.
     for (i = 0; i < track->elst_count; i++)
     {
         if (-1 == track->elst[i].media_time)
         {
-            track->samples[0].dts = track->elst[i].segment_duration * track->mdhd.timescale / timescale; // movie timescale -> track timescale
-            track->samples[0].pts = track->samples[0].dts;
+            offset += track->elst[i].segment_duration * track->mdhd.timescale / timescale;
+        }
+        else
+        {
+            offset -= track->elst[i].media_time;
+            break;
         }
     }
+    return offset;
+}
+
+void mov_apply_elst(struct mov_track_t *track, uint32_t timescale)
+{
+    track->samples[0].dts = mov_edit_offset(track, timescale);
+    track->samples[0].pts = track->samples[0].dts;
 }
 
 void mov_apply_elst_tfdt(struct mov_track_t *track, uint32_t timescale)
 {
-    size_t i;
-
-    for (i = 0; i < track->elst_count; i++)
-    {
-        if (-1 == track->elst[i].media_time)
-        {
-            track->tfdt_dts += track->elst[i].segment_duration * track->mdhd.timescale / timescale; // movie timescale -> track timescale
-        }
-    }
+    track->tfdt_dts += mov_edit_offset(track, timescale);
 }

@@ -6,16 +6,17 @@
 #include <functional>
 #include <memory>
 #include <string>
-#include <vector>
 
 #include "Network/Socket.h"
-#include "mw/ffmpeg/packet.h"
-#include "mw/ffmpeg/stream_info.h"
 #include "mw/input/config.h"
 #include "mw/zlm/config.h"
 
 namespace toolkit {
 class EventPoller;
+}
+
+namespace mw::streamer::sink {
+class PacketSink;
 }
 
 namespace mw::streamer::input {
@@ -45,11 +46,6 @@ enum class TimelineResetReason {
 class PlayerProxy final {
  public:
   using Ptr = std::shared_ptr<PlayerProxy>;
-  using OnPacket = std::function<bool(std::uint64_t generation,
-                                      const ffmpeg::Packet& packet)>;
-  using OnStreamsReady =
-      std::function<void(std::uint64_t generation,
-                         const std::vector<ffmpeg::StreamInfo>& streams)>;
   using OnState = std::function<void(
       std::uint64_t generation, PlayerState state,
       const toolkit::SockException& reason, bool will_retry)>;
@@ -67,13 +63,22 @@ class PlayerProxy final {
   PlayerProxy(const PlayerProxy&) = delete;
   PlayerProxy& operator=(const PlayerProxy&) = delete;
 
+  // Registers a Sink synchronously on the owner poller, only before the first
+  // Start. A null Sink throws invalid_argument; registration after Start
+  // throws logic_error. Registration transfers exclusive ownership to the
+  // proxy until asynchronous disposal, including across Stop and later Start.
+  // Sinks receive streams, packets, and generation-end notifications in
+  // registration order on the owner poller. The input state is updated before
+  // EndInput, and SetOnState is notified afterwards. No queue or worker is
+  // added. Sink methods must not control or
+  // destroy this proxy or register another Sink from inside a delivery call.
+  void AddPacketSink(std::unique_ptr<sink::PacketSink> sink);
+
   // Callback setters and control methods are serialized on the owner poller.
-  // Callbacks are invoked on that poller. Packet ownership remains with the
-  // proxy and is valid only for the duration of OnPacket. Copy or call Ref to
-  // retain a packet after the callback.
-  void SetOnPacket(OnPacket callback);
-  void SetOnStreamsReady(OnStreamsReady callback);
+  // Callbacks are invoked on that poller. Media delivery belongs to PacketSink;
+  // these callbacks report input state and playback-control details.
   void SetOnState(OnState callback);
+  // Reports the accepted seek position after Sinks receive the new generation.
   void SetOnTimelineReset(OnTimelineReset callback);
 
   // One proxy manages one active URL. Start again only after stop completes or

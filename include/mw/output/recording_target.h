@@ -13,14 +13,16 @@
 namespace mw::streamer::output {
 
 // Internal recording targets. Construction, Write(), and Close() must be
-// serialized on the same thread.
+// serialized on the same thread. preserve_packets disables first-keyframe
+// filtering and timestamp correction, and reports rejected frames as errors.
 class Fmp4FileTarget final {
  public:
   Fmp4FileTarget(const std::filesystem::path& requested_path,
                  const std::vector<mediakit::Track::Ptr>& tracks,
                  zlm::RecordingConfig config = {},
                  std::chrono::system_clock::time_point start_time =
-                     std::chrono::system_clock::now());
+                     std::chrono::system_clock::now(),
+                 bool preserve_packets = false);
   ~Fmp4FileTarget();
 
   Fmp4FileTarget(const Fmp4FileTarget&) = delete;
@@ -34,6 +36,7 @@ class Fmp4FileTarget final {
  private:
   class Muxer;
 
+  const bool preserve_packets_;
   std::filesystem::path path_;
   std::shared_ptr<Muxer> muxer_;
 };
@@ -44,7 +47,8 @@ class HlsFmp4FileTarget final {
                     const std::vector<mediakit::Track::Ptr>& tracks,
                     zlm::RecordingConfig config = {},
                     std::chrono::system_clock::time_point start_time =
-                        std::chrono::system_clock::now());
+                        std::chrono::system_clock::now(),
+                    bool preserve_packets = false);
   ~HlsFmp4FileTarget();
 
   HlsFmp4FileTarget(const HlsFmp4FileTarget&) = delete;
@@ -58,6 +62,7 @@ class HlsFmp4FileTarget final {
  private:
   class Recorder;
 
+  const bool preserve_packets_;
   std::filesystem::path path_;
   std::shared_ptr<Recorder> recorder_;
 };

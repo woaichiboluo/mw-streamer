@@ -28,7 +28,8 @@ public:
     ~HlsDemuxer() override { _timer = nullptr; }
 
     void enableMuteAudio(bool flag) { _delegate.enableMuteAudio(flag); }
-    void start(const toolkit::EventPoller::Ptr &poller, TrackListener *listener);
+    // Live transports can bypass HLS pacing while retaining track preparation.
+    void start(const toolkit::EventPoller::Ptr &poller, TrackListener *listener, bool buffered = true);
     bool inputFrame(const Frame::Ptr &frame) override;
     bool addTrack(const Track::Ptr &track) override { return _delegate.addTrack(track); }
     void addTrackCompleted() override { _delegate.addTrackCompleted(); }
@@ -44,6 +45,7 @@ private:
     void setPlayPosition(int64_t pos);
 
 private:
+    bool _buffered = true;
     int64_t _ticker_offset = 0;
     toolkit::Ticker _ticker;
     toolkit::Timer::Ptr _timer;

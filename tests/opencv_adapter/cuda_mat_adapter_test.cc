@@ -146,8 +146,9 @@ void CheckMatsNear(const cv::Mat& expected, const cv::Mat& actual,
   if (expected.depth() == CV_8U) {
     CAPTURE(expected.at<cv::Vec3b>(0, 0), actual.at<cv::Vec3b>(0, 0));
   } else {
-    CAPTURE(expected.at<cv::Vec<std::uint16_t, 3>>(0, 0),
-            actual.at<cv::Vec<std::uint16_t, 3>>(0, 0));
+    const auto expected_pixel = expected.at<cv::Vec<std::uint16_t, 3>>(0, 0);
+    const auto actual_pixel = actual.at<cv::Vec<std::uint16_t, 3>>(0, 0);
+    CAPTURE(expected_pixel, actual_pixel);
   }
   CHECK(maximum_error <= tolerance);
 }

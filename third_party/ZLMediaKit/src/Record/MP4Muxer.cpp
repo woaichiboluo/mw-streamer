@@ -13,6 +13,8 @@
 #include "MP4Muxer.h"
 #include "Common/config.h"
 
+#include <stdexcept>
+
 using namespace std;
 using namespace toolkit;
 
@@ -52,11 +54,17 @@ void MP4Muxer::resetTracks() {
 /////////////////////////////////////////// MP4MuxerInterface /////////////////////////////////////////////
 
 void MP4MuxerInterface::saveSegment() {
-    mp4_writer_save_segment(_mov_writter.get());
+    auto result = mp4_writer_save_segment(_mov_writter.get());
+    if (_preserve_packets && result != 0) {
+        throw std::runtime_error("MP4 segment write failed");
+    }
 }
 
 void MP4MuxerInterface::initSegment() {
-    mp4_writer_init_segment(_mov_writter.get());
+    auto result = mp4_writer_init_segment(_mov_writter.get());
+    if (_preserve_packets && result != 0) {
+        throw std::runtime_error("MP4 init segment write failed");
+    }
 }
 
 bool MP4MuxerInterface::haveVideo() const {
@@ -84,6 +92,9 @@ void MP4MuxerInterface::flush() {
     for (auto &pr : _tracks) {
         pr.second.merger.flush();
     }
+    if (_preserve_packets && _mov_writter) {
+        saveSegment();
+    }
 }
 
 bool MP4MuxerInterface::inputFrame(const Frame::Ptr &frame) {
@@ -97,7 +108,7 @@ bool MP4MuxerInterface::inputFrame(const Frame::Ptr &frame) {
     if (!_started) {
         // 该逻辑确保含有视频时，第一帧为关键帧  [AUTO-TRANSLATED:04f177fb]
         // This logic ensures that the first frame is a keyframe when there is video
-        if (_have_video && !frame->keyFrame()) {
+        if (!_preserve_packets && _have_video && !frame->keyFrame()) {
             // 含有视频，但是不是关键帧，那么前面的帧丢弃  [AUTO-TRANSLATED:5f0ba99e]
             // Contains video, but not a keyframe, then the previous frames are discarded
             return false;
@@ -132,16 +143,32 @@ bool MP4MuxerInterface::inputFrame(const Frame::Ptr &frame) {
             // The code logic here is to package frames with the same timestamp, such as SPS, PPS, and IDR, as one frame,
             track.merger.inputFrame(frame, [this, &track](uint64_t dts, uint64_t pts, const Buffer::Ptr &buffer, bool have_idr) {
                 int64_t dts_out, pts_out;
-                track.stamp.revise(dts, pts, dts_out, pts_out);
-                mp4_writer_write(_mov_writter.get(), track.track_id, buffer->data(), buffer->size(), pts_out, dts_out, have_idr ? MOV_AV_FLAG_KEYFREAME : 0);
+                if (_preserve_packets) {
+                    dts_out = dts;
+                    pts_out = pts;
+                } else {
+                    track.stamp.revise(dts, pts, dts_out, pts_out);
+                }
+                auto result = mp4_writer_write(_mov_writter.get(), track.track_id, buffer->data(), buffer->size(), pts_out, dts_out, have_idr ? MOV_AV_FLAG_KEYFREAME : 0);
+                if (_preserve_packets && result != 0) {
+                    throw std::runtime_error("MP4 video packet write failed");
+                }
             });
             break;
         }
 
         default: {
             int64_t dts_out, pts_out;
-            track.stamp.revise(frame->dts(), frame->pts(), dts_out, pts_out);
-            mp4_writer_write(_mov_writter.get(), track.track_id, frame->data() + frame->prefixSize(), frame->size() - frame->prefixSize(), pts_out, dts_out, frame->keyFrame() ? MOV_AV_FLAG_KEYFREAME : 0);
+            if (_preserve_packets) {
+                dts_out = frame->dts();
+                pts_out = frame->pts();
+            } else {
+                track.stamp.revise(frame->dts(), frame->pts(), dts_out, pts_out);
+            }
+            auto result = mp4_writer_write(_mov_writter.get(), track.track_id, frame->data() + frame->prefixSize(), frame->size() - frame->prefixSize(), pts_out, dts_out, frame->keyFrame() ? MOV_AV_FLAG_KEYFREAME : 0);
+            if (_preserve_packets && result != 0) {
+                throw std::runtime_error("MP4 audio packet write failed");
+            }
             break;
         }
     }
@@ -203,7 +230,9 @@ bool MP4MuxerInterface::addTrack(const Track::Ptr &track) {
 
     // 尝试音视频同步  [AUTO-TRANSLATED:5f8b8040]
     // Try audio and video synchronization
-    stampSync();
+    if (!_preserve_packets) {
+        stampSync();
+    }
     return true;
 }
 
@@ -214,7 +243,11 @@ MP4MuxerMemory::MP4MuxerMemory() {
 }
 
 MP4FileIO::Writer MP4MuxerMemory::createWriter() {
-    return _memory_file->createWriter(MOV_FLAG_SEGMENT, true);
+    auto flags = MOV_FLAG_SEGMENT;
+    if (preservePackets()) {
+        flags |= MOV_FLAG_PRESERVE_TIMESTAMPS;
+    }
+    return _memory_file->createWriter(flags, true);
 }
 
 const string &MP4MuxerMemory::getInitSegment() {
@@ -230,6 +263,18 @@ void MP4MuxerMemory::resetTracks() {
     MP4MuxerInterface::resetTracks();
     _memory_file = std::make_shared<MP4FileMemory>();
     _init_segment.clear();
+}
+
+void MP4MuxerMemory::flush() {
+    MP4MuxerInterface::flush();
+    if (!preservePackets() || _init_segment.empty()) {
+        return;
+    }
+    auto data = _memory_file->getAndClearMemory();
+    if (!data.empty()) {
+        onSegmentData(std::move(data), _last_dst, _key_frame);
+        _key_frame = false;
+    }
 }
 
 bool MP4MuxerMemory::inputFrame(const Frame::Ptr &frame) {

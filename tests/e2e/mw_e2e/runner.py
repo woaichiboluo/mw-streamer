@@ -8,6 +8,8 @@ from .process import ManagedProcess, ProcessError
 
 
 class Runner:
+    """Launch one Pipeline with the sink graph selected by the test scenario."""
+
     def __init__(
         self,
         config: E2EConfig,
@@ -19,27 +21,29 @@ class Runner:
         artifact_directory: Path,
         cache_duration_ms: int | None = None,
         *,
-        pipeline: Literal["streaming", "remux", "file"] = "streaming",
+        scenario: Literal["streaming", "remux", "file"] = "streaming",
         input_output_urls: Sequence[str] = (),
         passthrough_video: bool = False,
         software_video: bool = False,
-        standby: bool = False,
         local_sink: bool = False,
+        observe_cache: bool = False,
         video_jitter_ms: tuple[int, int] | None = None,
     ) -> None:
-        if pipeline not in {"streaming", "remux", "file"}:
-            raise ValueError(f"未知Pipeline类型: {pipeline}")
-        if pipeline == "remux" and not output_urls:
-            raise ValueError("RemuxPipeline E2E 至少需要一个输出目标")
-        if pipeline == "remux" and input_output_urls:
-            raise ValueError("RemuxPipeline请通过output_urls配置输出")
-        if pipeline == "file" and (output_urls or input_output_urls):
-            raise ValueError("FilePipeline不支持输出目标")
+        if scenario not in {"streaming", "remux", "file"}:
+            raise ValueError(f"未知测试场景: {scenario}")
+        if scenario == "remux" and not output_urls:
+            raise ValueError("Remux 场景 至少需要一个输出目标")
+        if scenario == "remux" and input_output_urls:
+            raise ValueError("Remux 场景请通过output_urls配置输出")
+        if scenario == "file" and (output_urls or input_output_urls):
+            raise ValueError("文件分析场景不支持输出目标")
+        if observe_cache and scenario != "streaming":
+            raise ValueError("缓存观测仅支持 streaming 场景")
         self.events_path = artifact_directory / "runner.events"
         command = [
             str(executable),
-            "--pipeline",
-            pipeline,
+            "--scenario",
+            scenario,
             "--input",
             input_url,
             "--events",
@@ -47,7 +51,7 @@ class Runner:
             "--duration-ms",
             str(int(duration_seconds * 1000)),
         ]
-        if pipeline == "streaming":
+        if scenario == "streaming":
             effective_cache_duration_ms = (
                 config.tests.cache_duration_ms
                 if cache_duration_ms is None
@@ -77,10 +81,10 @@ class Runner:
                 command.append("--passthrough-video")
             if software_video:
                 command.append("--software-video")
-            if standby:
-                command.append("--standby")
             if local_sink:
                 command.append("--local-sink")
+            if observe_cache:
+                command.append("--observe-cache")
             if video_jitter_ms is not None:
                 minimum, maximum = video_jitter_ms
                 if minimum < 0 or maximum < minimum:
