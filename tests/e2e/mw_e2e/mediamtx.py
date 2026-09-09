@@ -276,6 +276,8 @@ class MediaMtx:
         return f"""\
 logLevel: debug
 logDestinations: [stdout]
+# Large H265 keyframes can exceed 512 RTP packets in a single burst.
+writeQueueSize: 2048
 api: true
 apiAddress: 127.0.0.1:{self.ports.api}
 metrics: true
