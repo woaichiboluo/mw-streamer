@@ -23,10 +23,11 @@ void SavePipelineConfigToToml(const pipeline::PipelineConfig& config,
                               const std::filesystem::path& path);
 
 // Loads one configuration object from a TOML document. Missing fields retain
-// their C++ defaults. Unknown fields, invalid types, and integer values outside
-// the destination C++ type are rejected. Semantic validation remains owned by
-// the component that consumes the resulting config. The TOML implementation
-// is intentionally not exposed by this public API.
+// their C++ defaults. Unknown fields are ignored with a warning; invalid types
+// and integer values outside the destination C++ type are rejected. Semantic
+// validation remains owned by the component that consumes the resulting
+// config. The TOML implementation is intentionally not exposed by this public
+// API.
 InitConfig LoadInitConfigFromToml(const std::filesystem::path& path);
 
 }  // namespace mw::streamer::config

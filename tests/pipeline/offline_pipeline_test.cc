@@ -39,6 +39,8 @@ struct FileFrames {
   bool released = false;
   bool ended = false;
   bool fatal = false;
+  int video_frame_rate_num = 0;
+  int video_frame_rate_den = 1;
   StreamEndReason reason = StreamEndReason::kStopped;
 };
 
@@ -46,7 +48,18 @@ class FileCounter final : public Sink {
  public:
   explicit FileCounter(FileFrames& frames)
       : Sink("counter", SinkMediaType::kFrame), frames_(frames) {}
-  void OnStreamsReady(const FrameStreamsReady&) override {}
+  void OnStreamsReady(const FrameStreamsReady& streams) override {
+    for (const auto& stream : streams.source_streams) {
+      const auto* parameters = stream.codec_parameters.get();
+      if (parameters->codec_type != AVMEDIA_TYPE_VIDEO) {
+        continue;
+      }
+      std::lock_guard<std::mutex> lock(frames_.mutex);
+      frames_.video_frame_rate_num = parameters->framerate.num;
+      frames_.video_frame_rate_den = parameters->framerate.den;
+      return;
+    }
+  }
   void OnAudioFrame(const FrameReady& frame) override {
     Gate();
     frames_.audio_samples += frame.frame->nb_samples;
@@ -126,6 +139,8 @@ TEST_CASE(
   CHECK(error.empty());
   CHECK(frames.reason == StreamEndReason::kEof);
   CHECK(frames.video == 20);
+  CHECK(frames.video_frame_rate_num == 10);
+  CHECK(frames.video_frame_rate_den == 1);
   // FFmpeg packet side data removes AAC encoder priming before callbacks.
   CHECK(frames.audio_samples == 94 * 1024);
 }

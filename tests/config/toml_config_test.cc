@@ -2,10 +2,12 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <string_view>
 
 #include "mw/config/toml.h"
+#include "mw/log/logging.h"
 
 namespace {
 
@@ -30,6 +32,12 @@ class TemporaryToml final {
   }
 
   const std::filesystem::path& path() const noexcept { return path_; }
+
+  std::string Read() const {
+    std::ifstream input(path_, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(input),
+                       std::istreambuf_iterator<char>());
+  }
 
  private:
   std::filesystem::path path_;
@@ -103,12 +111,10 @@ TEST_CASE("Init模板与默认值保持一致") {
   CHECK(defaults.zlm.enable_cpu_affinity);
 }
 
-TEST_CASE("Init配置拒绝语法类型范围枚举和未知字段错误") {
+TEST_CASE("Init配置拒绝语法类型范围和枚举错误") {
   for (const auto text : {
            "[broken",
-           "unknown = 1",
            "[zlm]\nevent_poller_threads = 'two'",
-           "[zlm]\nunknown = 1",
            "[log.console]\nenabled = 1",
            "[log.console]\nlevel = 'invalid'",
            "[log.async]\nqueue_size = -1",
@@ -117,4 +123,32 @@ TEST_CASE("Init配置拒绝语法类型范围枚举和未知字段错误") {
     TemporaryToml file(text);
     CHECK_THROWS(LoadInitConfigFromToml(file.path()));
   }
+}
+
+TEST_CASE("Init配置忽略未知字段并记录警告") {
+  TemporaryToml config_file(R"(
+unknown = 1
+
+[zlm]
+event_poller_threads = 4
+unused = true
+)");
+  TemporaryToml log_file("");
+  mw::streamer::log::LogConfig log_config;
+  log_config.console.enabled = false;
+  log_config.rotating_file.enabled = true;
+  log_config.rotating_file.path = log_file.path().string();
+  log_config.rotating_file.max_files = 1;
+
+  {
+    mw::streamer::log::Logging logging(log_config);
+    const auto config = LoadInitConfigFromToml(config_file.path());
+    CHECK(config.zlm.event_poller_threads == 4);
+  }
+
+  const auto warnings = log_file.Read();
+  CHECK(warnings.find("[streamer] 忽略未知TOML配置项: unknown") !=
+        std::string::npos);
+  CHECK(warnings.find("[streamer] 忽略未知TOML配置项: zlm.unused") !=
+        std::string::npos);
 }

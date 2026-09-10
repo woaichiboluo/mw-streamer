@@ -116,8 +116,6 @@ struct Arguments {
   std::string events_path;
   std::chrono::milliseconds cache_duration{1000};
   std::chrono::milliseconds duration{10000};
-  std::uint32_t output_width = 0;
-  std::uint32_t output_height = 0;
   std::uint32_t frame_rate_num = 0;
   std::uint32_t frame_rate_den = 1;
   MwStreamerCodec video_codec = kMwStreamerCodecUnknown;
@@ -204,12 +202,6 @@ Arguments ParseArguments(int argc, char* argv[]) {
     } else if (option == "--duration-ms") {
       arguments.duration = ParseMilliseconds(RequireValue(argc, argv, index),
                                              "--duration-ms", 1);
-    } else if (option == "--output-width") {
-      arguments.output_width =
-          ParseUnsigned(RequireValue(argc, argv, index), "--output-width");
-    } else if (option == "--output-height") {
-      arguments.output_height =
-          ParseUnsigned(RequireValue(argc, argv, index), "--output-height");
     } else if (option == "--frame-rate-num") {
       arguments.frame_rate_num =
           ParseUnsigned(RequireValue(argc, argv, index), "--frame-rate-num");
@@ -260,16 +252,10 @@ Arguments ParseArguments(int argc, char* argv[]) {
   if (arguments.scenario != Scenario::kStreaming && arguments.observe_cache) {
     throw std::invalid_argument("只有Streaming场景支持--observe-cache");
   }
-  if ((arguments.output_width == 0) != (arguments.output_height == 0)) {
-    throw std::invalid_argument("视频输出宽高必须同时为0或同时大于0");
-  }
   if (arguments.frame_rate_den == 0 ||
-      (arguments.output_width == 0 && arguments.frame_rate_num != 0)) {
+      ((arguments.frame_rate_num == 0) !=
+       (arguments.video_codec == kMwStreamerCodecUnknown))) {
     throw std::invalid_argument("视频帧率参数无效");
-  }
-  if ((arguments.output_width == 0) !=
-      (arguments.video_codec == kMwStreamerCodecUnknown)) {
-    throw std::invalid_argument("视频输出尺寸与编码格式不匹配");
   }
   if (arguments.video_jitter_min > arguments.video_jitter_max) {
     throw std::invalid_argument("视频抖动最小值不能大于最大值");
@@ -277,7 +263,8 @@ Arguments ParseArguments(int argc, char* argv[]) {
   if (arguments.video_jitter_max > 0ms && !arguments.passthrough_video) {
     throw std::invalid_argument("视频抖动测试必须启用视频透传");
   }
-  if (arguments.passthrough_video && arguments.output_width == 0) {
+  if (arguments.passthrough_video &&
+      arguments.video_codec == kMwStreamerCodecUnknown) {
     throw std::invalid_argument("纯音频输入不能启用视频透传");
   }
   return arguments;
@@ -567,6 +554,13 @@ MwStreamerProcessorStartResult OnProcessorStart(
       !request->config || !request->execution) {
     return kMwStreamerProcessorStartFailed;
   }
+  if (request->source_info->has_video && !request->video_output_size) {
+    return kMwStreamerProcessorStartFailed;
+  }
+  if (request->video_output_size) {
+    request->video_output_size->width = request->source_info->video.width;
+    request->video_output_size->height = request->source_info->video.height;
+  }
   observer->has_audio.store(request->source_info->has_audio);
   observer->has_video.store(request->source_info->has_video);
   observer->execution = *request->execution;
@@ -599,8 +593,12 @@ MwStreamerProcessorStartResult OnProcessorStart(
        {"has_video", request->source_info->has_video ? "1" : "0"},
        {"source_width", std::to_string(request->source_info->video.width)},
        {"source_height", std::to_string(request->source_info->video.height)},
-       {"output_width", std::to_string(request->config->output_width)},
-       {"output_height", std::to_string(request->config->output_height)},
+       {"output_width", std::to_string(request->video_output_size
+                                           ? request->video_output_size->width
+                                           : 0)},
+       {"output_height", std::to_string(request->video_output_size
+                                            ? request->video_output_size->height
+                                            : 0)},
        {"execution", request->execution->type == kMwStreamerExecutionCuda
                          ? "cuda"
                          : "cpu"}});
@@ -979,8 +977,9 @@ MwStreamerProcessorStartResult OnAnalysisStart(
   if (!request) return kMwStreamerProcessorStartFailed;
   MwStreamerStreamingProcessorConfig config{};
   config.config = request->config->config;
+  MwStreamerVideoOutputSize video_output_size{};
   const MwStreamerStreamingProcessorStartRequest adapted{
-      request->source_info, &config, request->execution};
+      request->source_info, &config, request->execution, &video_output_size};
   return OnProcessorStart(&adapted, user_context);
 }
 
@@ -1008,14 +1007,9 @@ std::unique_ptr<mw::streamer::encoder::EncoderSink> MakeEncoder(
 std::unique_ptr<mw::streamer::synchronizer::SynchronizerSink> MakeSynchronizer(
     const Arguments& arguments, LocalSinkObserver& observer,
     std::vector<SinkProbe>& probes) {
-  mw::streamer::synchronizer::SynchronizerSinkConfig config;
-  if (arguments.frame_rate_num != 0) {
-    config.video_frame_rate = {static_cast<int>(arguments.frame_rate_num),
-                               static_cast<int>(arguments.frame_rate_den)};
-  }
   auto synchronizer =
       std::make_unique<mw::streamer::synchronizer::SynchronizerSink>(
-          "synchronizer", config);
+          "synchronizer");
   auto probe =
       MakeProbe(*synchronizer,
                 mw::streamer::synchronizer::SynchronizerSinkState::kRunning,
@@ -1033,7 +1027,10 @@ std::unique_ptr<mw::streamer::synchronizer::SynchronizerSink> MakeSynchronizer(
   probes.push_back(std::move(probe));
   if (!arguments.outputs.empty()) {
     synchronizer->AddSink(
-        MakeEncoder(arguments, config.video_frame_rate, probes));
+        MakeEncoder(arguments,
+                    {static_cast<int>(arguments.frame_rate_num),
+                     static_cast<int>(arguments.frame_rate_den)},
+                    probes));
   }
   if (arguments.local_sink) {
     synchronizer->AddSink(std::make_unique<ObservingFrameSink>(observer));
@@ -1060,12 +1057,10 @@ std::unique_ptr<mw::streamer::sink::Sink> MakeProcessor(
       arguments.passthrough_video ? ProcessVideo : nullptr;
   callbacks.on_boundary = OnProcessorBoundary;
   callbacks.on_stop = OnProcessorStop;
-  mw::streamer::processor::StreamingProcessorConfig config;
-  config.output_width = arguments.output_width;
-  config.output_height = arguments.output_height;
   auto processor =
       std::make_unique<mw::streamer::processor::TransformProcessorSink>(
-          "processor", config, callbacks);
+          "processor", mw::streamer::processor::StreamingProcessorConfig{},
+          callbacks);
   processor->AddSink(MakeSynchronizer(arguments, local_observer, probes));
   return processor;
 }

@@ -5,17 +5,12 @@
 #include <cstddef>
 #include <string>
 
-extern "C" {
-#include <libavutil/rational.h>
-}
-
 namespace mw::streamer::synchronizer {
 
 struct SynchronizerSinkConfig {
   // Positive per-track limits for ingress and scheduled frames separately.
   // Saturation discards older raw frames; producers never wait for capacity.
   std::size_t frame_queue_capacity = 128;
-  AVRational video_frame_rate{25, 1};
   // Common audio/video playout buffer and maximum source-frame age at a slot.
   // Release each slot this long after its source deadline so a small arrival
   // delay does not immediately synthesize silence or repeat the previous frame.

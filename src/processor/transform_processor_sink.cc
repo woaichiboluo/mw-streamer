@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <exception>
 #include <mutex>
 #include <optional>
@@ -20,6 +21,13 @@
 #include "mw/sink/fatal_error.h"
 
 namespace mw::streamer::processor {
+namespace {
+
+constexpr std::uint32_t kDefaultVideoOutputWidth = 1920;
+constexpr std::uint32_t kDefaultVideoOutputHeight = 1080;
+
+}  // namespace
+
 class TransformProcessorSink::Impl final {
  public:
   Impl(TransformProcessorSink& owner,
@@ -99,7 +107,6 @@ class TransformProcessorSink::Impl final {
     context.ValidateFrame(frame, true);
     video_performance_.AddInput(1);
     if (!callbacks_.process_video) {
-      ValidatePassthroughVideo(frame.frame, context);
       video_performance_.AddOutput(1);
       for (auto& output : outputs_) {
         output->OnVideoFrame(frame);
@@ -177,11 +184,12 @@ class TransformProcessorSink::Impl final {
       throw std::logic_error("TransformProcessorSink启动前至少需要一个下游");
     }
     auto context = std::make_unique<internal::ProcessorSinkContext>(streams);
-    PrepareAllocators(context->source_info());
-    const MwStreamerStreamingProcessorConfig config{
-        config_.output_width, config_.output_height, config_.config.c_str()};
+    const MwStreamerStreamingProcessorConfig config{config_.config.c_str()};
+    MwStreamerVideoOutputSize video_output_size{video_output_width_,
+                                                video_output_height_};
     const MwStreamerStreamingProcessorStartRequest request{
-        &context->source_info(), &config, &context->execution()};
+        &context->source_info(), &config, &context->execution(),
+        context->source_info().has_video ? &video_output_size : nullptr};
     const auto result =
         callbacks_.on_start
             ? callbacks_.on_start(&request, callbacks_.user_context)
@@ -189,23 +197,24 @@ class TransformProcessorSink::Impl final {
     if (result != kMwStreamerProcessorStartSuccess) {
       throw std::runtime_error("TransformProcessorSink拒绝启动");
     }
+    PrepareAllocators(context->source_info(), video_output_size);
     context->MarkStarted(callbacks_.user_context, callbacks_.on_boundary,
                          callbacks_.update_config, callbacks_.on_stop);
     context_ = std::move(context);
   }
 
-  void PrepareAllocators(const MwStreamerProcessorSourceInfo& source) {
+  void PrepareAllocators(const MwStreamerProcessorSourceInfo& source,
+                         MwStreamerVideoOutputSize video_output_size) {
     if (source.has_video) {
-      if (config_.output_width == 0 || config_.output_height == 0) {
+      if (video_output_size.width == 0 || video_output_size.height == 0) {
         throw std::invalid_argument(
             "TransformProcessorSink视频输出宽高必须有效");
       }
+      video_output_width_ = video_output_size.width;
+      video_output_height_ = video_output_size.height;
       if (callbacks_.process_video) {
-        video_allocator_.emplace(config_.output_width, config_.output_height);
+        video_allocator_.emplace(video_output_width_, video_output_height_);
       }
-    } else if (config_.output_width != 0 || config_.output_height != 0) {
-      throw std::invalid_argument(
-          "纯音频TransformProcessorSink输出宽高必须为0");
     }
     if (source.has_audio && callbacks_.process_audio) {
       audio_allocator_.emplace();
@@ -236,23 +245,17 @@ class TransformProcessorSink::Impl final {
     const MwStreamerStreamingVideoProcessRequest request{&input.view(),
                                                          &output_view};
     callbacks_.process_video(&request, callbacks_.user_context);
+    if (output_view.width != video_output_width_ ||
+        output_view.height != video_output_height_) {
+      throw sink::FatalError(
+          fmt::format("TransformProcessorSink视频输出尺寸在启动后变化：实际{}x{"
+                      "}，期望{}x{}",
+                      output_view.width, output_view.height,
+                      video_output_width_, video_output_height_));
+    }
     result.CopyPropertiesFrom(frame);
     result.ClearCrop();
     return result;
-  }
-
-  void ValidatePassthroughVideo(
-      const ffmpeg::Frame& frame,
-      const internal::ProcessorSinkContext& context) const {
-    context.ValidateVideoDevice(frame);
-    if (frame->width <= 0 || frame->height <= 0 ||
-        static_cast<std::uint32_t>(frame->width) != config_.output_width ||
-        static_cast<std::uint32_t>(frame->height) != config_.output_height) {
-      throw sink::FatalError(fmt::format(
-          "TransformProcessorSink视频透传尺寸不匹配：实际{}x{}，期望{}x{}",
-          frame->width, frame->height, config_.output_width,
-          config_.output_height));
-    }
   }
 
   internal::ProcessorSinkContext& Context() const {
@@ -289,6 +292,8 @@ class TransformProcessorSink::Impl final {
   std::unique_ptr<internal::ProcessorSinkContext> context_;
   std::optional<processor::internal::AudioFrameAllocator> audio_allocator_;
   std::optional<processor::internal::VideoFrameAllocator> video_allocator_;
+  std::uint32_t video_output_width_ = kDefaultVideoOutputWidth;
+  std::uint32_t video_output_height_ = kDefaultVideoOutputHeight;
   const std::vector<std::unique_ptr<sink::Sink>>& outputs_;
   std::atomic<bool> stopping_{false};
   bool stopped_ = false;

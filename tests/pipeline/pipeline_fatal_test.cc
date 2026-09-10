@@ -385,13 +385,17 @@ TEST_CASE("真实Processor链路fatal自动停止Pipeline及健康旁路") {
   auto* decoder_sink = decoder.get();
   auto output = std::make_unique<FrameCounter>(output_stop);
   const auto* frames = output.get();
-  bool dimension_failure = false;
-  SECTION("Transform透传视频尺寸不符") {
-    dimension_failure = true;
+  bool output_size_failure = false;
+  SECTION("Transform回调改变输出尺寸") {
+    output_size_failure = true;
+    MwStreamerStreamingProcessorCallbacks callbacks{};
+    callbacks.process_video =
+        [](const MwStreamerStreamingVideoProcessRequest* request, void*) {
+          request->output->width = 128;
+        };
     auto transform = std::make_unique<TransformProcessorSink>(
-        "processor",
-        mw::streamer::processor::StreamingProcessorConfig{128, 128, ""},
-        MwStreamerStreamingProcessorCallbacks{});
+        "processor", mw::streamer::processor::StreamingProcessorConfig{""},
+        callbacks);
     transform->AddSink(std::move(output));
     decoder->AddSink(std::move(transform));
   }
@@ -419,10 +423,10 @@ TEST_CASE("真实Processor链路fatal自动停止Pipeline及健康旁路") {
   CHECK(pipeline.state() == PipelineState::kFailed);
   CHECK(decoder_sink->state() == PacketSinkState::kFailed);
   CHECK(frames->videos() == 0);
-  if (dimension_failure) {
-    CHECK(pipeline.error().find("64x64") != std::string::npos);
-    CHECK(pipeline.error().find("128x128") != std::string::npos);
-    CHECK(decoder_sink->error().find("64x64") != std::string::npos);
+  if (output_size_failure) {
+    CHECK(pipeline.error().find("128x1080") != std::string::npos);
+    CHECK(pipeline.error().find("1920x1080") != std::string::npos);
+    CHECK(decoder_sink->error().find("128x1080") != std::string::npos);
   } else {
     CHECK(pipeline.error() == "processor callback fatal");
     CHECK(decoder_sink->error() == "processor callback fatal");
@@ -451,15 +455,15 @@ TEST_CASE("Processor异步消息fatal穿过Sink链路自动停止Pipeline") {
     throw FatalError("message callback fatal");
   };
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor",
-      mw::streamer::processor::StreamingProcessorConfig{64, 64, ""}, callbacks);
+      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
+      callbacks);
   auto message_source = std::make_unique<MessageSource>(output_stop);
   pipeline.SetMessageReceiver("message_source", "processor");
   processor->AddSink(std::move(message_source));
   SECTION("直接接入Decoder") { decoder->AddSink(std::move(processor)); }
   SECTION("经过另一层Transform转交fatal") {
     auto parent = std::make_unique<TransformProcessorSink>(
-        "parent", mw::streamer::processor::StreamingProcessorConfig{64, 64, ""},
+        "parent", mw::streamer::processor::StreamingProcessorConfig{""},
         MwStreamerStreamingProcessorCallbacks{});
     parent->AddSink(std::move(processor));
     decoder->AddSink(std::move(parent));

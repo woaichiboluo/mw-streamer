@@ -304,8 +304,7 @@ TEST_CASE("Pipeline按目标ID绕过中间媒体节点直达Processor") {
   MessageState state;
   MessageGraph graph;
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor",
-      mw::streamer::processor::StreamingProcessorConfig{64, 32, ""},
+      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
       Callbacks(state));
   auto middle = std::make_unique<MessageSink>("middle");
   auto leaf = std::make_unique<MessageSink>("leaf");
@@ -474,8 +473,8 @@ TEST_CASE("消息回调内再次发送仍异步执行且不会重入接收者") 
     state.done.set_value();
   };
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor",
-      mw::streamer::processor::StreamingProcessorConfig{64, 32, ""}, callbacks);
+      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
+      callbacks);
   auto sender = std::make_unique<MessageSink>("sender");
   state.sender = sender.get();
   processor->AddSink(std::move(sender));
@@ -555,8 +554,7 @@ TEST_CASE("Processor消息回调与媒体并发且媒体发送不等待消息处
   MessageGraph graph;
   ReleaseGuard release(state);
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor",
-      mw::streamer::processor::StreamingProcessorConfig{64, 32, ""},
+      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
       Callbacks(state));
   auto* processor_sink = processor.get();
   auto child = std::make_unique<MessageSink>("sender");
@@ -607,8 +605,7 @@ TEST_CASE("Pipeline消息Fatal沿接收方媒体树停止整条链路") {
   MessageState state;
   MessageGraph graph;
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor",
-      mw::streamer::processor::StreamingProcessorConfig{64, 32, ""},
+      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
       Callbacks(state));
   auto middle = std::make_unique<MessageSink>("middle");
   processor->AddSink(std::make_unique<MessageSink>("output"));
@@ -638,8 +635,7 @@ TEST_CASE("Pipeline停止丢弃积压并等待消息回调后才停止Processor"
   MessageGraph graph;
   ReleaseGuard release(state);
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor",
-      mw::streamer::processor::StreamingProcessorConfig{64, 32, ""},
+      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
       Callbacks(state));
   processor->AddSink(std::make_unique<MessageSink>("output"));
   graph.Add(std::move(processor));

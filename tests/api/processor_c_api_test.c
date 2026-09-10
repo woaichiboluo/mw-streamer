@@ -20,11 +20,15 @@ static MwStreamerProcessorStartResult OnStart(
   if (!request->source_info->has_video || !request->source_info->has_audio ||
       request->source_info->video.codec != kMwStreamerCodecH264 ||
       request->source_info->audio.codec != kMwStreamerCodecAac ||
-      request->config->output_width != 1920 ||
+      !request->video_output_size ||
+      request->video_output_size->width != 1920 ||
+      request->video_output_size->height != 1080 ||
       strcmp(request->config->config, "initial") != 0 ||
       request->execution->type != kMwStreamerExecutionCuda) {
     return kMwStreamerProcessorStartFailed;
   }
+  request->video_output_size->width = 1280;
+  request->video_output_size->height = 720;
   processor->execution = *request->execution;
   ++processor->start_calls;
   return kMwStreamerProcessorStartSuccess;
@@ -33,7 +37,8 @@ static MwStreamerProcessorStartResult OnStart(
 static void ProcessVideo(const MwStreamerStreamingVideoProcessRequest* request,
                          void* user_context) {
   TestProcessor* processor = user_context;
-  if (request->input->buffer.width == 3840 && request->output->width == 1920 &&
+  if (request->input->buffer.width == 3840 && request->output->width == 1280 &&
+      request->output->height == 720 &&
       request->input->buffer.storage_type == kMwStreamerVideoStorageLinear &&
       request->input->buffer.storage.linear.plane_count == 2 &&
       request->input->timestamp.pts == 9000 &&
@@ -116,8 +121,6 @@ int main(void) {
       .on_stop = OnStop,
   };
   const MwStreamerStreamingProcessorConfig config = {
-      .output_width = 1920,
-      .output_height = 1080,
       .config = "initial",
   };
   const MwStreamerProcessorSourceInfo source_info = {
@@ -150,11 +153,8 @@ int main(void) {
        .row_count = 1080},
   };
   const MwStreamerVideoPlaneView output_planes[] = {
-      {.address = 3,
-       .stride_bytes = 2048,
-       .row_bytes = 1920,
-       .row_count = 1080},
-      {.address = 4, .stride_bytes = 2048, .row_bytes = 1920, .row_count = 540},
+      {.address = 3, .stride_bytes = 1280, .row_bytes = 1280, .row_count = 720},
+      {.address = 4, .stride_bytes = 1280, .row_bytes = 1280, .row_count = 360},
   };
   const MwStreamerVideoFrameView video_input = {
       .buffer =
@@ -191,13 +191,18 @@ int main(void) {
   const MwStreamerExecutionContext execution = {
       .type = kMwStreamerExecutionCuda,
   };
+  MwStreamerVideoOutputSize video_output_size = {.width = 1920, .height = 1080};
   const MwStreamerStreamingProcessorStartRequest start_request = {
       .source_info = &source_info,
       .config = &config,
       .execution = &execution,
+      .video_output_size = &video_output_size,
   };
   if (callbacks.on_start(&start_request, callbacks.user_context) !=
       kMwStreamerProcessorStartSuccess) {
+    return 1;
+  }
+  if (video_output_size.width != 1280 || video_output_size.height != 720) {
     return 1;
   }
 
@@ -208,8 +213,8 @@ int main(void) {
               .memory_type = kMwStreamerMemoryCuda,
               .storage_type = kMwStreamerVideoStorageLinear,
               .pixel_format = kMwStreamerVideoPixelFormatNv12,
-              .width = config.output_width,
-              .height = config.output_height,
+              .width = video_output_size.width,
+              .height = video_output_size.height,
               .storage =
                   {
                       .linear =

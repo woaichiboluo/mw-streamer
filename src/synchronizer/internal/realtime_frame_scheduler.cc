@@ -82,6 +82,7 @@ bool SameStream(const ffmpeg::StreamInfo& left,
          av_cmp_q(left.time_base, right.time_base) == 0 &&
          a->codec_type == b->codec_type && a->codec_id == b->codec_id &&
          a->width == b->width && a->height == b->height &&
+         av_cmp_q(a->framerate, b->framerate) == 0 &&
          a->sample_rate == b->sample_rate &&
          av_channel_layout_compare(&a->ch_layout, &b->ch_layout) == 0;
 }
@@ -122,15 +123,8 @@ class RealtimeFrameScheduler::Impl final {
       : config_(std::move(config)), standby_video_(config_.standby_image_path) {
     if (config_.frame_queue_capacity == 0 ||
         config_.max_frame_lateness.count() < 0 ||
-        config_.standby_timeout.count() < 0 ||
-        config_.video_frame_rate.num <= 0 ||
-        config_.video_frame_rate.den <= 0) {
-      throw std::invalid_argument("实时同步队列、帧率或等待时长无效");
-    }
-    video_time_base_ = av_inv_q(config_.video_frame_rate);
-    video_duration_us_ = Rescale(1, video_time_base_, kMicroseconds);
-    if (video_duration_us_ <= 0) {
-      throw std::invalid_argument("实时同步视频帧率超过调度时钟精度");
+        config_.standby_timeout.count() < 0) {
+      throw std::invalid_argument("实时同步队列或等待时长无效");
     }
     lateness_us_ =
         Rescale(config_.max_frame_lateness.count(), {1, 1000}, kMicroseconds);
@@ -141,6 +135,7 @@ class RealtimeFrameScheduler::Impl final {
   void Configure(const media::FrameStreamsReady& streams) {
     bool audio = false;
     bool video = false;
+    const AVCodecParameters* video_parameters = nullptr;
     for (const auto& stream : streams.source_streams) {
       stream.Validate();
       const bool is_audio =
@@ -150,9 +145,14 @@ class RealtimeFrameScheduler::Impl final {
         throw std::invalid_argument("实时同步每类媒体只支持一路轨道");
       }
       declared = true;
+      if (!is_audio) video_parameters = stream.codec_parameters.get();
     }
     if (!audio && !video) {
       throw std::invalid_argument("实时同步缺少媒体轨道");
+    }
+    if (video && (video_parameters->framerate.num <= 0 ||
+                  video_parameters->framerate.den <= 0)) {
+      throw std::invalid_argument("实时同步视频轨道缺少有效帧率");
     }
     if (configured_) {
       if (streams_.size() != streams.source_streams.size()) {
@@ -180,6 +180,13 @@ class RealtimeFrameScheduler::Impl final {
       hardware_context_.reset();
     }
     streams_ = streams.source_streams;
+    if (video) {
+      video_time_base_ = av_inv_q(video_parameters->framerate);
+      video_duration_us_ = Rescale(1, video_time_base_, kMicroseconds);
+      if (video_duration_us_ <= 0) {
+        throw std::invalid_argument("实时同步视频帧率超过调度时钟精度");
+      }
+    }
     audio_.declared = audio;
     video_.declared = video;
     configured_ = true;

@@ -120,11 +120,9 @@ TEST_CASE("DecoderSink CUDA frames outlive the decoder context") {
     sink->AddSink(std::make_unique<CudaRecorder>("recording", recording));
   }
   SECTION("processor without a callback preserves CUDA storage") {
-    mw::streamer::processor::StreamingProcessorConfig config;
-    config.output_width = source_width;
-    config.output_height = source_height;
     auto processor = std::make_unique<TransformProcessorSink>(
-        "processor", config, MwStreamerStreamingProcessorCallbacks{});
+        "processor", mw::streamer::processor::StreamingProcessorConfig{},
+        MwStreamerStreamingProcessorCallbacks{});
     processor->AddSink(std::make_unique<CudaRecorder>("recording", recording));
     sink->AddSink(std::move(processor));
   }

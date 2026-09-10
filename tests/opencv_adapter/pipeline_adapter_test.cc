@@ -221,9 +221,17 @@ MwStreamerProcessorStartResult OnProcessorStart(
     const MwStreamerStreamingProcessorStartRequest* request,
     void* user_context) {
   const auto* state = static_cast<const ProcessorState*>(user_context);
-  if (!request || !request->execution || !state || !state->test_case ||
+  if (!request || !request->source_info || !request->execution || !state ||
+      !state->test_case ||
       request->execution->type != state->test_case->expected_execution) {
     return kMwStreamerProcessorStartFailed;
+  }
+  if (request->source_info->has_video && !request->video_output_size) {
+    return kMwStreamerProcessorStartFailed;
+  }
+  if (request->video_output_size) {
+    request->video_output_size->width = kWidth;
+    request->video_output_size->height = kHeight;
   }
   return kMwStreamerProcessorStartSuccess;
 }
@@ -265,12 +273,9 @@ pipeline::PipelineConfig MakePipelineConfig(
   decoder->downstream = {"process"};
   auto processor =
       std::make_unique<pipeline::TransformProcessorNodeConfig>("process");
-  processor->options.output_width = kWidth;
-  processor->options.output_height = kHeight;
   processor->downstream = {"sync"};
   auto synchronizer =
       std::make_unique<pipeline::SynchronizerNodeConfig>("sync");
-  synchronizer->options.video_frame_rate = {10, 1};
   synchronizer->downstream = {"encode"};
   auto encoder = std::make_unique<pipeline::EncoderNodeConfig>("encode");
   encoder->downstream = {"record"};

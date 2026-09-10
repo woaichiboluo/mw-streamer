@@ -221,15 +221,16 @@ typedef struct MwStreamerProcessorSourceInfo {
   MwStreamerAudioSourceInfo audio;
 } MwStreamerProcessorSourceInfo;
 
-// Output dimensions are fixed for the Streaming Processor lifetime. They are
-// zero when the stream has no video. config is a null-terminated opaque user
-// string; the Pipeline copies it during creation and updates only that field
-// while running.
+// config is a null-terminated opaque user string; the Pipeline copies it
+// during creation and updates it while running.
 typedef struct MwStreamerStreamingProcessorConfig {
-  uint32_t output_width;
-  uint32_t output_height;
   const char* config;
 } MwStreamerStreamingProcessorConfig;
+
+typedef struct MwStreamerVideoOutputSize {
+  uint32_t width;
+  uint32_t height;
+} MwStreamerVideoOutputSize;
 
 typedef struct MwStreamerFileProcessorConfig {
   const char* config;
@@ -251,6 +252,11 @@ typedef struct MwStreamerStreamingProcessorStartRequest {
   const MwStreamerProcessorSourceInfo* source_info;
   const MwStreamerStreamingProcessorConfig* config;
   const MwStreamerExecutionContext* execution;
+  // Non-null only when source_info->has_video is true. The framework
+  // initializes it to 1920x1080 before on_start. The callback may overwrite
+  // it before returning success; the resulting dimensions remain fixed for
+  // the Processor lifetime.
+  MwStreamerVideoOutputSize* video_output_size;
 } MwStreamerStreamingProcessorStartRequest;
 
 typedef struct MwStreamerFileProcessorStartRequest {
@@ -323,10 +329,10 @@ typedef struct MwStreamerStreamingProcessorCallbacks {
   // never reads or releases it.
   void* user_context;
 
-  // on_start receives source information, the fixed execution context, and the
-  // initial config before the first process callback. User code that needs the
-  // backend stream must copy it into user_context here. All request views are
-  // borrowed for the callback.
+  // on_start receives source information, execution context, initial config,
+  // and a writable default video output size before the first process callback.
+  // User code that needs the backend stream must copy it into user_context
+  // here. All request views are borrowed for the callback.
   MwStreamerStreamingProcessorStartCallback on_start;
   MwStreamerStreamingProcessVideoCallback process_video;
   MwStreamerStreamingProcessAudioCallback process_audio;

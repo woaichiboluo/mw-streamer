@@ -13,8 +13,9 @@ namespace mw::streamer::processor {
 
 // Synchronously transforms frames through Streaming Processor C callbacks and
 // fans out in registration order. Missing callbacks pass the original Frame;
-// each passthrough video frame must match the configured output dimensions.
-// A size mismatch throws FatalError to request Pipeline-wide shutdown.
+// on_start selects a fixed video output size, defaulting to 1920x1080. A
+// process callback that mutates its supplied output dimensions causes a
+// FatalError to request Pipeline-wide shutdown.
 // Callbacks write independent output buffers and finish all writes on return.
 // Audio/video may execute concurrently. Source metadata and hardware device
 // stay stable across generations; user_context remains borrowed until Stop.

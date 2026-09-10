@@ -36,8 +36,6 @@ device_index = 0
 id = "processor"
 type = "transform_processor"
 downstream = ["synchronizer"]
-output_width = 1920
-output_height = 1080
 
 # 库把此表序列化后交给宿主按 processor ID 绑定的业务回调。
 [sinks.config]
@@ -47,7 +45,6 @@ mode = "passthrough"
 id = "synchronizer"
 type = "synchronizer"
 downstream = ["encoder"]
-video_frame_rate = { num = 25, den = 1 }
 frame_queue_capacity = 128
 max_frame_lateness_ms = 100
 standby_timeout_ms = 500

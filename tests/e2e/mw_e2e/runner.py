@@ -61,10 +61,6 @@ class Runner:
                 [
                     "--cache-ms",
                     str(effective_cache_duration_ms),
-                    "--output-width",
-                    str(asset.video_width or 0),
-                    "--output-height",
-                    str(asset.video_height or 0),
                     "--frame-rate-num",
                     str(asset.video_frame_rate_num or 0),
                     "--frame-rate-den",

@@ -87,8 +87,6 @@ labels = ["left", "right"]
 id = "transform"
 type = "transform_processor"
 downstream = ["sync"]
-output_width = 1280
-output_height = 720
 [sinks.config]
 mode = "passthrough"
 [sinks.config.business]
@@ -98,7 +96,6 @@ threshold = 0.75
 id = "sync"
 type = "synchronizer"
 downstream = ["encode"]
-video_frame_rate = { num = 30000, den = 1001 }
 frame_queue_capacity = 41
 max_frame_lateness_ms = 42
 standby_timeout_ms = 430
@@ -234,15 +231,11 @@ TEST_CASE("统一配置完整参数双向转换并保持节点与连接顺序") 
   const auto& transform =
       FindNode<TransformProcessorNodeConfig>(config, "transform");
   CHECK(transform.type() == SinkType::kTransformProcessor);
-  CHECK(transform.options.output_width == 1280);
-  CHECK(transform.options.output_height == 720);
   CHECK(transform.options.config ==
         FindNode<TransformProcessorNodeConfig>(original, "transform")
             .options.config);
 
   const auto& sync = FindNode<SynchronizerNodeConfig>(config, "sync").options;
-  CHECK(sync.video_frame_rate.num == 30000);
-  CHECK(sync.video_frame_rate.den == 1001);
   CHECK(sync.frame_queue_capacity == 41);
   CHECK(sync.max_frame_lateness == 42ms);
   CHECK(sync.standby_timeout == 430ms);
@@ -302,25 +295,19 @@ type = "analysis_processor"
             .options.config.empty());
 }
 
-TEST_CASE("统一配置严格拒绝错误TOML结构与字段") {
+TEST_CASE("统一配置严格拒绝错误TOML结构") {
   const std::vector<std::string> invalid = {
       "",
       "[input",
       "input = 42",
       "sinks = 42",
-      "unknown = true\n[input]\ntype='zlm'\nurl='x'\ndownstream=[]",
       "[input]\ntype='other'\nurl='x'\ndownstream=[]",
       "[input]\ntype='zlm'\nurl=42\ndownstream=[]",
       "[input]\ntype='zlm'\nurl='x'\ndownstream=[1]",
       "[input]\ntype='zlm'\nurl='x'\ndownstream=['r']\n"
       "[[sinks]]\nid='r'\ntype='other'\ntarget='a.mp4'",
       "[input]\ntype='zlm'\nurl='x'\ndownstream=['r']\n"
-      "[[sinks]]\nid='r'\ntype='remux'\ntarget='a.mp4'\nunknown=1",
-      "[input]\ntype='zlm'\nurl='x'\ndownstream=['r']\n"
       "[[sinks]]\nid='r'\ntype='remux'\ntarget='a.mp4'\nmessage_receiver=['r']",
-      "[input]\ntype='zlm'\nurl='x'\ndownstream=['r']\n"
-      "[[sinks]]\nid='r'\ntype='remux'\ntarget='a.mp4'\n[sinks.zlm.pusher]"
-      "\nunknown=1",
   };
   for (const auto& text : invalid) {
     CAPTURE(text);
@@ -346,6 +333,32 @@ TEST_CASE("统一配置严格拒绝错误TOML结构与字段") {
                   "frame_queue_capacity = -1");
   }
   CHECK_THROWS(ParsePipelineConfigFromToml(valid));
+}
+
+TEST_CASE("统一配置忽略未知TOML字段") {
+  auto config = ParsePipelineConfigFromToml(R"(
+unknown = true
+
+[input]
+type = "zlm"
+url = "rtsp://127.0.0.1/live/camera"
+downstream = ["record"]
+unused = "value"
+
+[[sinks]]
+id = "record"
+type = "remux"
+target = "./record.mp4"
+unused = 1
+
+[sinks.zlm.pusher]
+unused = true
+)");
+
+  REQUIRE(config.sinks.size() == 1);
+  CHECK(config.input.options.url == "rtsp://127.0.0.1/live/camera");
+  CHECK(FindNode<RemuxNodeConfig>(config, "record").options.target ==
+        "./record.mp4");
 }
 
 TEST_CASE("统一配置校验媒体树与消息引用") {
@@ -405,10 +418,6 @@ TEST_CASE("统一配置校验节点参数无需启动媒体资源") {
     options.backend = mw::streamer::decoder::VideoDecoderBackend::kCuda;
     options.device_index = -1;
   }
-  SECTION("Processor尺寸必须成对") {
-    FindNode<TransformProcessorNodeConfig>(config, "transform")
-        .options.output_width = 0;
-  }
   SECTION("Encoder队列") {
     FindNode<EncoderNodeConfig>(config, "encode")
         .options.startup_packet_capacity = 0;
@@ -416,10 +425,6 @@ TEST_CASE("统一配置校验节点参数无需启动媒体资源") {
   SECTION("Encoder帧率分母") {
     FindNode<EncoderNodeConfig>(config, "encode")
         .options.video_encoder.frame_rate.den = 0;
-  }
-  SECTION("Synchronizer帧率") {
-    FindNode<SynchronizerNodeConfig>(config, "sync")
-        .options.video_frame_rate.num = 0;
   }
   SECTION("Synchronizer延迟") {
     FindNode<SynchronizerNodeConfig>(config, "sync")
@@ -597,11 +602,8 @@ TEST_CASE("全速文件输入结构体构建及TOML双向转换") {
         SerializePipelineConfigToToml(loaded));
 }
 
-TEST_CASE("全速文件输入拒绝实时配置及空路径") {
-  for (const auto fields :
-       {"", "path = ''", "path = 1", "path = 'a.mp4'\nurl = 'a.mp4'",
-        "path = 'a.mp4'\n[input.player]",
-        "path = 'a.mp4'\n[input.reconnect_policy]"}) {
+TEST_CASE("全速文件输入拒绝无效路径并忽略实时配置") {
+  for (const auto fields : {"", "path = ''", "path = 1"}) {
     const std::string text =
         "[input]\ntype = 'file'\ndownstream = ['record']\n" +
         std::string(fields) +
@@ -609,6 +611,20 @@ TEST_CASE("全速文件输入拒绝实时配置及空路径") {
     CAPTURE(text);
     CHECK_THROWS(ParsePipelineConfigFromToml(text));
   }
+
+  for (const auto fields :
+       {"path = 'a.mp4'\nurl = 'a.mp4'", "path = 'a.mp4'\n[input.player]",
+        "path = 'a.mp4'\n[input.reconnect_policy]"}) {
+    const std::string text =
+        "[input]\ntype = 'file'\ndownstream = ['record']\n" +
+        std::string(fields) +
+        "\n[[sinks]]\nid = 'record'\ntype = 'remux'\ntarget = 'out.mp4'\n";
+    CAPTURE(text);
+    const auto parsed = ParsePipelineConfigFromToml(text);
+    CHECK(parsed.input.file.path == "a.mp4");
+    CHECK(parsed.input.options.url.empty());
+  }
+
   auto config = ParsePipelineConfigFromToml(kCompleteToml);
   config.input.type = InputType::kFile;
   config.input.file.path = "a.mp4";

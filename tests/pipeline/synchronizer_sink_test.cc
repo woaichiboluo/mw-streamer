@@ -45,14 +45,14 @@ using Clock = std::chrono::steady_clock;
 
 SynchronizerSinkConfig Config() {
   SynchronizerSinkConfig config;
-  config.video_frame_rate = {20, 1};
   config.max_frame_lateness = 60ms;
   config.standby_timeout = 100ms;
   return config;
 }
 
 FrameStreamsReady Streams(std::uint64_t generation = 1, bool audio = true,
-                          bool video = true) {
+                          bool video = true,
+                          AVRational video_frame_rate = {20, 1}) {
   FrameStreamsReady ready{generation, {}, nullptr};
   if (video) {
     StreamInfo stream;
@@ -62,6 +62,7 @@ FrameStreamsReady Streams(std::uint64_t generation = 1, bool audio = true,
     stream.codec_parameters.get()->codec_id = AV_CODEC_ID_H264;
     stream.codec_parameters.get()->width = 64;
     stream.codec_parameters.get()->height = 64;
+    stream.codec_parameters.get()->framerate = video_frame_rate;
     ready.source_streams.push_back(std::move(stream));
   }
   if (audio) {
@@ -589,11 +590,16 @@ TEST_CASE("SynchronizerSink validates configuration and source contracts") {
     CHECK_THROWS_AS(SynchronizerSink("synchronizer", config),
                     std::invalid_argument);
   }
-  SECTION("invalid rate") {
-    auto config = Config();
-    config.video_frame_rate = {0, 1};
-    CHECK_THROWS_AS(SynchronizerSink("synchronizer", config),
-                    std::invalid_argument);
+  SECTION("上游视频帧率无效") {
+    Recorded recorded;
+    SynchronizerSink sink("synchronizer", Config());
+    AddRecorder(sink, recorded);
+    sink.OnStreamsReady(Streams(1, false, true, {0, 1}));
+    const bool failed = WaitState(sink, SynchronizerSinkState::kFailed);
+    const auto error = sink.error();
+    sink.Stop();
+    REQUIRE(failed);
+    CHECK(error == "实时同步视频轨道缺少有效帧率");
   }
   SECTION("negative lateness") {
     auto config = Config();
@@ -883,10 +889,9 @@ TEST_CASE(
 TEST_CASE("SynchronizerSink stop interrupts a distant playback deadline") {
   Recorded recorded;
   auto config = Config();
-  config.video_frame_rate = {1, 1};
   SynchronizerSink sink("synchronizer", config);
   AddRecorder(sink, recorded);
-  sink.OnStreamsReady(Streams(1, false, true));
+  sink.OnStreamsReady(Streams(1, false, true, {1, 1}));
   sink.OnVideoFrame({1, Video(0)});
   const bool played = recorded.WaitVideos(1);
   const auto start = Clock::now();
@@ -904,10 +909,9 @@ TEST_CASE(
   Recorded recorded;
   recorded.video_delay = 60ms;
   auto config = Config();
-  config.video_frame_rate = {25, 1};
   SynchronizerSink sink("synchronizer", config);
   AddRecorder(sink, recorded);
-  sink.OnStreamsReady(Streams(1, false, true));
+  sink.OnStreamsReady(Streams(1, false, true, {25, 1}));
   sink.OnVideoFrame({1, Video(0)});
   const bool played = recorded.WaitVideos(1);
   sink.OnInputEnded({1, StreamEndReason::kEof});

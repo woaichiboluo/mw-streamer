@@ -304,7 +304,6 @@ TEST_CASE("Synchronizer CUDA standby remains decodable through NVENC") {
   const auto* encoding = encoder.get();
   encoder->AddSink(std::move(packets));
   SynchronizerSinkConfig sync_config;
-  sync_config.video_frame_rate = {25, 1};
   sync_config.standby_timeout = 80ms;
   SynchronizerSink sink("sink", sync_config);
   sink.AddSink(std::move(encoder));

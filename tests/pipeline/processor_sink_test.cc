@@ -151,6 +151,7 @@ struct CallbackState {
   std::string initial_config;
   std::string updated_config;
   MwStreamerProcessorSourceInfo source{};
+  MwStreamerVideoOutputSize video_output_size{64, 32};
 };
 
 void Boundary(MwStreamerProcessorBoundaryReason reason, void* context) {
@@ -204,6 +205,9 @@ MwStreamerStreamingProcessorCallbacks TransformCallbacks(CallbackState& state) {
         ++state.starts;
         state.initial_config = request->config->config;
         state.source = *request->source_info;
+        if (request->video_output_size) {
+          *request->video_output_size = state.video_output_size;
+        }
         return state.fail_start ? kMwStreamerProcessorStartFailed
                                 : kMwStreamerProcessorStartSuccess;
       };
@@ -359,7 +363,7 @@ TEST_CASE("TransformProcessorSink无回调时引用原始音视频而不复制�
   auto video = Video();
   auto audio = Audio();
   {
-    TransformProcessorSink sink("processor", {64, 32, ""}, {});
+    TransformProcessorSink sink("processor", {""}, {});
     sink.AddSink(std::make_unique<Recorder>(first));
     sink.AddSink(std::make_unique<Recorder>(second, "second"));
     sink.OnStreamsReady(Streams());
@@ -393,20 +397,69 @@ TEST_CASE("TransformProcessorSink无回调时引用原始音视频而不复制�
   }
 }
 
-TEST_CASE("TransformProcessorSink透传逐帧校验实际尺寸") {
+TEST_CASE("TransformProcessorSink无回调时透传任意视频尺寸") {
   Recorded recorded;
-  TransformProcessorSink sink("processor", {64, 32, ""}, {});
+  TransformProcessorSink sink("processor", {""}, {});
   sink.AddSink(std::make_unique<Recorder>(recorded));
   sink.OnStreamsReady(Streams());
   sink.OnVideoFrame({1, Video()});
-  SECTION("宽度变化") {
-    CHECK_THROWS_AS(sink.OnVideoFrame({1, Video(32, 32)}), std::exception);
-  }
-  SECTION("高度变化") {
-    CHECK_THROWS_AS(sink.OnVideoFrame({1, Video(64, 16)}), std::exception);
-  }
-  REQUIRE(recorded.video.size() == 1);
+  sink.OnVideoFrame({1, Video(32, 16)});
+  REQUIRE(recorded.video.size() == 2);
   CHECK(recorded.video[0].frame->data[0][0] == 0x21);
+  CHECK(recorded.video[1].frame->width == 32);
+  CHECK(recorded.video[1].frame->height == 16);
+}
+
+TEST_CASE("TransformProcessorSink未设置尺寸时使用1920x1080") {
+  Recorded recorded;
+  MwStreamerStreamingProcessorCallbacks callbacks{};
+  callbacks.process_video = [](const MwStreamerStreamingVideoProcessRequest*,
+                               void*) {};
+  TransformProcessorSink sink("processor", {}, callbacks);
+  sink.AddSink(std::make_unique<Recorder>(recorded));
+  sink.OnStreamsReady(Streams());
+  sink.OnVideoFrame({1, Video()});
+  REQUIRE(recorded.video.size() == 1);
+  CHECK(recorded.video.front().frame->width == 1920);
+  CHECK(recorded.video.front().frame->height == 1080);
+}
+
+TEST_CASE("TransformProcessorSink拒绝on_start返回无效输出尺寸") {
+  MwStreamerStreamingProcessorCallbacks callbacks{};
+  callbacks.on_start =
+      [](const MwStreamerStreamingProcessorStartRequest* request, void*) {
+        request->video_output_size->width = 0;
+        return kMwStreamerProcessorStartSuccess;
+      };
+  Recorded recorded;
+  TransformProcessorSink sink("processor", {}, callbacks);
+  sink.AddSink(std::make_unique<Recorder>(recorded));
+  CHECK_THROWS_AS(sink.OnStreamsReady(Streams()), std::invalid_argument);
+}
+
+TEST_CASE("TransformProcessorSink拒绝处理期间改变输出尺寸") {
+  struct State {
+    int calls = 0;
+  } state;
+  MwStreamerStreamingProcessorCallbacks callbacks{};
+  callbacks.user_context = &state;
+  callbacks.on_start =
+      [](const MwStreamerStreamingProcessorStartRequest* request, void*) {
+        *request->video_output_size = {32, 16};
+        return kMwStreamerProcessorStartSuccess;
+      };
+  callbacks.process_video =
+      [](const MwStreamerStreamingVideoProcessRequest* request, void* context) {
+        auto& state = *static_cast<State*>(context);
+        if (++state.calls == 2) request->output->width = 16;
+      };
+  Recorded recorded;
+  TransformProcessorSink sink("processor", {}, callbacks);
+  sink.AddSink(std::make_unique<Recorder>(recorded));
+  sink.OnStreamsReady(Streams());
+  sink.OnVideoFrame({1, Video()});
+  CHECK_THROWS_AS(sink.OnVideoFrame({1, Video()}),
+                  mw::streamer::sink::FatalError);
 }
 
 TEST_CASE("TransformProcessorSink回调使用独立输出并向多个下游保留结果") {
@@ -416,7 +469,8 @@ TEST_CASE("TransformProcessorSink回调使用独立输出并向多个下游保�
   auto video = Video();
   auto audio = Audio();
   {
-    TransformProcessorSink sink("processor", {32, 16, "initial"},
+    state.video_output_size = {32, 16};
+    TransformProcessorSink sink("processor", {"initial"},
                                 TransformCallbacks(state));
     sink.AddSink(std::make_unique<Recorder>(first));
     sink.AddSink(std::make_unique<Recorder>(second, "second"));
@@ -476,8 +530,7 @@ TEST_CASE("ProcessorSink启动失败不会配对停止回调") {
   }
   SECTION("Transform") {
     Recorded recorded;
-    TransformProcessorSink sink("processor", {64, 32, ""},
-                                TransformCallbacks(state));
+    TransformProcessorSink sink("processor", {""}, TransformCallbacks(state));
     sink.AddSink(std::make_unique<Recorder>(recorded));
     CHECK_THROWS_AS(sink.OnStreamsReady(Streams()), std::exception);
     CHECK(recorded.events.empty());
@@ -491,13 +544,13 @@ TEST_CASE("ProcessorSink启动失败不会配对停止回调") {
 
 TEST_CASE("TransformProcessorSink限制下游注册并传播下游异常") {
   SECTION("空下游") {
-    TransformProcessorSink sink("processor", {64, 32, ""}, {});
+    TransformProcessorSink sink("processor", {""}, {});
     CHECK_THROWS_AS(sink.AddSink(nullptr), std::exception);
     CHECK_THROWS_AS(sink.OnStreamsReady(Streams()), std::exception);
   }
   SECTION("已启动后注册") {
     Recorded recorded;
-    TransformProcessorSink sink("processor", {64, 32, ""}, {});
+    TransformProcessorSink sink("processor", {""}, {});
     sink.AddSink(std::make_unique<Recorder>(recorded));
     sink.OnStreamsReady(Streams());
     CHECK_THROWS_AS(sink.AddSink(std::make_unique<Recorder>(recorded)),
@@ -505,7 +558,7 @@ TEST_CASE("TransformProcessorSink限制下游注册并传播下游异常") {
   }
   SECTION("停止后注册") {
     Recorded recorded;
-    TransformProcessorSink sink("processor", {64, 32, ""}, {});
+    TransformProcessorSink sink("processor", {""}, {});
     sink.Stop();
     CHECK_THROWS_AS(sink.AddSink(std::make_unique<Recorder>(recorded)),
                     std::exception);
@@ -513,7 +566,7 @@ TEST_CASE("TransformProcessorSink限制下游注册并传播下游异常") {
   SECTION("下游写入失败") {
     Recorded recorded;
     recorded.throw_video = true;
-    TransformProcessorSink sink("processor", {64, 32, ""}, {});
+    TransformProcessorSink sink("processor", {""}, {});
     sink.AddSink(std::make_unique<Recorder>(recorded));
     sink.OnStreamsReady(Streams());
     CHECK_THROWS_AS(sink.OnVideoFrame({1, Video()}), std::exception);
@@ -578,7 +631,7 @@ TEST_CASE("TransformProcessorSink允许配置与媒体并发且Stop等待两者"
   };
 
   Recorded recorded;
-  TransformProcessorSink sink("processor", {64, 32, ""}, callbacks);
+  TransformProcessorSink sink("processor", {""}, callbacks);
   sink.AddSink(std::make_unique<Recorder>(recorded));
   sink.OnStreamsReady(Streams());
   auto frame = Video();
@@ -671,7 +724,7 @@ TEST_CASE("ProcessorSink缺少回调不产生处理调用统计") {
   SECTION("Transform透传且输出不按下游数量重复累计") {
     Recorded first;
     Recorded second;
-    TransformProcessorSink sink("processor", {64, 32, ""}, {});
+    TransformProcessorSink sink("processor", {""}, {});
     sink.AddSink(std::make_unique<Recorder>(first));
     sink.AddSink(std::make_unique<Recorder>(second, "second"));
     sink.OnStreamsReady(Streams());
@@ -723,7 +776,7 @@ TEST_CASE("ProcessorSink记录回调异常而不把下游异常算成处理失�
       throw std::runtime_error("transform failure");
     };
     Recorded recorded;
-    TransformProcessorSink sink("processor", {64, 32, ""}, callbacks);
+    TransformProcessorSink sink("processor", {""}, callbacks);
     sink.AddSink(std::make_unique<Recorder>(recorded));
     sink.OnStreamsReady(Streams());
     CHECK_THROWS_AS(sink.OnAudioFrame({1, Audio()}), std::runtime_error);
@@ -739,8 +792,7 @@ TEST_CASE("ProcessorSink记录回调异常而不把下游异常算成处理失�
     CallbackState state;
     Recorded recorded;
     recorded.throw_video = true;
-    TransformProcessorSink sink("processor", {64, 32, ""},
-                                TransformCallbacks(state));
+    TransformProcessorSink sink("processor", {""}, TransformCallbacks(state));
     sink.AddSink(std::make_unique<Recorder>(recorded));
     sink.OnStreamsReady(Streams());
     CHECK_THROWS_AS(sink.OnVideoFrame({1, Video()}), std::runtime_error);
@@ -761,8 +813,7 @@ TEST_CASE("TransformProcessorSink慢下游不阻塞采集或计入自身耗时")
   std::promise<void> release;
   recorded.video_entered = &entered;
   recorded.release_video = release.get_future().share();
-  TransformProcessorSink sink("processor", {64, 32, ""},
-                              TransformCallbacks(state));
+  TransformProcessorSink sink("processor", {""}, TransformCallbacks(state));
   sink.AddSink(std::make_unique<Recorder>(recorded));
   sink.OnStreamsReady(Streams());
   auto frame = Video();
@@ -877,8 +928,7 @@ TEST_CASE("两种Processor通过通用消息入口回调并在Stop前等待消�
     callbacks.on_message = on_message;
     callbacks.on_stop = on_stop;
     auto transform = std::make_unique<TransformProcessorSink>(
-        "processor",
-        mw::streamer::processor::StreamingProcessorConfig{64, 32, ""},
+        "processor", mw::streamer::processor::StreamingProcessorConfig{""},
         callbacks);
     transform->AddSink(std::make_unique<Recorder>(recorded));
     sink = std::move(transform);
@@ -920,11 +970,10 @@ TEST_CASE("下游显式绑定Processor后消息直接送达而不经过中间Pro
   };
   Recorded recorded;
   auto root = std::make_unique<TransformProcessorSink>(
-      "processor",
-      mw::streamer::processor::StreamingProcessorConfig{64, 32, ""}, callbacks);
+      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
+      callbacks);
   auto intermediate = std::make_unique<TransformProcessorSink>(
-      "intermediate",
-      mw::streamer::processor::StreamingProcessorConfig{64, 32, ""},
+      "intermediate", mw::streamer::processor::StreamingProcessorConfig{""},
       MwStreamerStreamingProcessorCallbacks{});
   auto sender = std::make_unique<Recorder>(recorded, "sender");
   auto* sender_ptr = sender.get();

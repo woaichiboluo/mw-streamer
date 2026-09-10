@@ -103,11 +103,7 @@ EncoderSinkConfig EncoderConfig() {
   return config;
 }
 
-SynchronizerSinkConfig SynchronizerConfig() {
-  SynchronizerSinkConfig config;
-  config.video_frame_rate = {10, 1};
-  return config;
-}
+SynchronizerSinkConfig SynchronizerConfig() { return {}; }
 
 std::vector<std::filesystem::path> Recordings(
     const std::filesystem::path& directory) {
@@ -180,6 +176,15 @@ MwStreamerStreamingProcessorCallbacks SlowProcessorCallbacks(
     SlowProcessorState& state) {
   MwStreamerStreamingProcessorCallbacks callbacks{};
   callbacks.user_context = &state;
+  callbacks.on_start =
+      [](const MwStreamerStreamingProcessorStartRequest* request, void*) {
+        if (!request->video_output_size) {
+          return kMwStreamerProcessorStartFailed;
+        }
+        request->video_output_size->width = request->source_info->video.width;
+        request->video_output_size->height = request->source_info->video.height;
+        return kMwStreamerProcessorStartSuccess;
+      };
   callbacks.process_video =
       [](const MwStreamerStreamingVideoProcessRequest* request, void* context) {
         auto& state = *static_cast<SlowProcessorState*>(context);
@@ -323,8 +328,7 @@ TEST_CASE("新Pipeline通过Processor同步和Encoder一次编码输出两个独
   Pipeline pipeline(MakeInput());
   auto decoder = MakeDecoder();
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor",
-      mw::streamer::processor::StreamingProcessorConfig{64, 64, ""},
+      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
       MwStreamerStreamingProcessorCallbacks{});
   auto encoder = std::make_unique<EncoderSink>("encoder", EncoderConfig());
   auto* encoding = encoder.get();
@@ -502,8 +506,7 @@ TEST_CASE("慢Processor期间同步独立备播并持续音频且恢复后两路
   Pipeline pipeline(MakeInput());
   auto decoder = MakeDecoder();
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor",
-      mw::streamer::processor::StreamingProcessorConfig{64, 64, ""},
+      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
       SlowProcessorCallbacks(slow_processor));
   auto sync_config = SynchronizerConfig();
   sync_config.standby_timeout = 100ms;
@@ -599,8 +602,7 @@ TEST_CASE("Encoder下游fatal穿过同步层Processor和Decoder自动停止Pipel
   auto decoder = MakeDecoder();
   const auto* decoding = decoder.get();
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor",
-      mw::streamer::processor::StreamingProcessorConfig{64, 64, ""},
+      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
       MwStreamerStreamingProcessorCallbacks{});
   auto encoder = std::make_unique<EncoderSink>("encoder", EncoderConfig());
   const auto* encoding = encoder.get();

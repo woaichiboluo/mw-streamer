@@ -71,20 +71,15 @@ MediaContract ValidateNode(const SinkConfig& config) {
     case SinkType::kAnalysisProcessor:
       static_cast<void>(Options<AnalysisProcessorNodeConfig>(config));
       return {sink::SinkMediaType::kFrame, sink::SinkMediaType::kNone};
-    case SinkType::kTransformProcessor: {
-      const auto& options = Options<TransformProcessorNodeConfig>(config);
-      Require((options.output_width == 0) == (options.output_height == 0),
-              config, "Processor输出宽高必须同时为0或同时大于0");
+    case SinkType::kTransformProcessor:
+      static_cast<void>(Options<TransformProcessorNodeConfig>(config));
       return {sink::SinkMediaType::kFrame, sink::SinkMediaType::kFrame};
-    }
     case SinkType::kSynchronizer: {
       const auto& options = Options<SynchronizerNodeConfig>(config);
       Require(options.frame_queue_capacity > 0 &&
-                  options.video_frame_rate.num > 0 &&
-                  options.video_frame_rate.den > 0 &&
                   options.max_frame_lateness >= 0ms &&
                   options.standby_timeout >= 0ms,
-              config, "同步队列容量、帧率或等待时间无效");
+              config, "同步队列容量或等待时间无效");
       return {sink::SinkMediaType::kFrame, sink::SinkMediaType::kFrame};
     }
     case SinkType::kEncoder: {

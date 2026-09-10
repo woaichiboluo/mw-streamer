@@ -41,13 +41,9 @@ TEST_CASE("Decoder配置支持指定解码器和CUDA视频解码") {
 
 TEST_CASE("Processor配置深拷贝保留业务字符串") {
   mw::streamer::processor::StreamingProcessorConfig original;
-  original.output_width = 1920;
-  original.output_height = 1080;
   original.config = "model = 'a'";
   const auto copy = original;
   original.config.clear();
-  CHECK(copy.output_width == 1920);
-  CHECK(copy.output_height == 1080);
   CHECK(copy.config == "model = 'a'");
   mw::streamer::processor::FileProcessorConfig file;
   file.config = "model = 'file'";

@@ -20,6 +20,8 @@
 #include <utility>
 #include <vector>
 
+#include "mw/log/logging.h"
+
 namespace mw::streamer::config {
 namespace {
 
@@ -38,15 +40,15 @@ std::string FieldPath(std::string_view table_path, std::string_view key) {
       fmt::format("TOML配置项{}必须是{}", path, expected));
 }
 
-void RequireOnlyKeys(const Table& table,
+void WarnUnknownKeys(const Table& table,
                      std::initializer_list<std::string_view> allowed,
                      std::string_view table_path) {
   for (const auto& [key, value] : table) {
     static_cast<void>(value);
     const std::string_view name = key.str();
     if (std::find(allowed.begin(), allowed.end(), name) == allowed.end()) {
-      throw std::invalid_argument(
-          fmt::format("未知TOML配置项: {}", FieldPath(table_path, name)));
+      log::Module<log::LogModule::kStreamer>::Warning(
+          "忽略未知TOML配置项: {}", FieldPath(table_path, name));
     }
   }
 }
@@ -223,11 +225,11 @@ void ReadLogLevel(const Table& table, std::string_view key,
 }
 
 void ReadLogConfig(const Table& table, log::LogConfig* config) {
-  RequireOnlyKeys(table, {"modules", "console", "rotating_file", "async"},
+  WarnUnknownKeys(table, {"modules", "console", "rotating_file", "async"},
                   "log");
   if (const auto* modules = OptionalTable(table, "modules", "log")) {
     constexpr std::string_view kPath = "log.modules";
-    RequireOnlyKeys(*modules, {"zlm", "srt", "ffmpeg", "streamer", "processor"},
+    WarnUnknownKeys(*modules, {"zlm", "srt", "ffmpeg", "streamer", "processor"},
                     kPath);
     ReadLogLevel(*modules, "zlm", kPath, &config->modules.zlm);
     ReadLogLevel(*modules, "srt", kPath, &config->modules.srt);
@@ -237,7 +239,7 @@ void ReadLogConfig(const Table& table, log::LogConfig* config) {
   }
   if (const auto* console = OptionalTable(table, "console", "log")) {
     constexpr std::string_view kPath = "log.console";
-    RequireOnlyKeys(*console, {"enabled", "color", "level"}, kPath);
+    WarnUnknownKeys(*console, {"enabled", "color", "level"}, kPath);
     ReadBool(*console, "enabled", kPath, &config->console.enabled);
     ReadBool(*console, "color", kPath, &config->console.color);
     ReadLogLevel(*console, "level", kPath, &config->console.level);
@@ -245,7 +247,7 @@ void ReadLogConfig(const Table& table, log::LogConfig* config) {
   if (const auto* rotating_file =
           OptionalTable(table, "rotating_file", "log")) {
     constexpr std::string_view kPath = "log.rotating_file";
-    RequireOnlyKeys(*rotating_file,
+    WarnUnknownKeys(*rotating_file,
                     {"enabled", "path", "level", "max_file_size", "max_files"},
                     kPath);
     ReadBool(*rotating_file, "enabled", kPath, &config->rotating_file.enabled);
@@ -258,7 +260,7 @@ void ReadLogConfig(const Table& table, log::LogConfig* config) {
   }
   if (const auto* async = OptionalTable(table, "async", "log")) {
     constexpr std::string_view kPath = "log.async";
-    RequireOnlyKeys(*async, {"enabled", "queue_size", "overflow"}, kPath);
+    WarnUnknownKeys(*async, {"enabled", "queue_size", "overflow"}, kPath);
     ReadBool(*async, "enabled", kPath, &config->async.enabled);
     ReadInteger(*async, "queue_size", kPath, &config->async.queue_size);
     ReadEnum(*async, "overflow", kPath,
@@ -270,7 +272,7 @@ void ReadLogConfig(const Table& table, log::LogConfig* config) {
 
 void ReadInitZlmConfig(const Table& table, zlm::Config* config) {
   constexpr std::string_view kPath = "zlm";
-  RequireOnlyKeys(
+  WarnUnknownKeys(
       table, {"event_poller_threads", "work_threads", "enable_cpu_affinity"},
       kPath);
   ReadInteger(table, "event_poller_threads", kPath,
@@ -281,7 +283,7 @@ void ReadInitZlmConfig(const Table& table, zlm::Config* config) {
 
 void ReadPlayerConfig(const Table& table, zlm::PlayerConfig* config,
                       std::string_view path) {
-  RequireOnlyKeys(
+  WarnUnknownKeys(
       table, {"connect_timeout_ms", "media_timeout_ms", "local_bind_ip"}, path);
   ReadMilliseconds(table, "connect_timeout_ms", path, &config->connect_timeout);
   ReadMilliseconds(table, "media_timeout_ms", path, &config->media_timeout);
@@ -290,10 +292,10 @@ void ReadPlayerConfig(const Table& table, zlm::PlayerConfig* config,
 
 void ReadOutputConfig(const Table& table, zlm::OutputConfig* config,
                       std::string_view path) {
-  RequireOnlyKeys(table, {"pusher", "muxer", "recording"}, path);
+  WarnUnknownKeys(table, {"pusher", "muxer", "recording"}, path);
   if (const auto* pusher = OptionalTable(table, "pusher", path)) {
     const auto child_path = FieldPath(path, "pusher");
-    RequireOnlyKeys(*pusher, {"connect_timeout_ms", "local_bind_ip"},
+    WarnUnknownKeys(*pusher, {"connect_timeout_ms", "local_bind_ip"},
                     child_path);
     ReadMilliseconds(*pusher, "connect_timeout_ms", child_path,
                      &config->pusher.connect_timeout);
@@ -302,13 +304,13 @@ void ReadOutputConfig(const Table& table, zlm::OutputConfig* config,
   }
   if (const auto* muxer = OptionalTable(table, "muxer", path)) {
     const auto child_path = FieldPath(path, "muxer");
-    RequireOnlyKeys(*muxer, {"paced_sender_interval_ms"}, child_path);
+    WarnUnknownKeys(*muxer, {"paced_sender_interval_ms"}, child_path);
     ReadMilliseconds(*muxer, "paced_sender_interval_ms", child_path,
                      &config->muxer.paced_sender_interval);
   }
   if (const auto* recording = OptionalTable(table, "recording", path)) {
     const auto child_path = FieldPath(path, "recording");
-    RequireOnlyKeys(*recording, {"file_buffer_size", "hls_segment_duration_ms"},
+    WarnUnknownKeys(*recording, {"file_buffer_size", "hls_segment_duration_ms"},
                     child_path);
     ReadInteger(*recording, "file_buffer_size", child_path,
                 &config->recording.file_buffer_size);
@@ -319,7 +321,7 @@ void ReadOutputConfig(const Table& table, zlm::OutputConfig* config,
 
 void ReadReconnectPolicyAt(const Table& table, input::ReconnectPolicy* config,
                            std::string_view path) {
-  RequireOnlyKeys(
+  WarnUnknownKeys(
       table, {"max_retries", "min_delay_ms", "max_delay_ms", "delay_step_ms"},
       path);
   ReadInteger(table, "max_retries", path, &config->max_retries);
@@ -331,14 +333,14 @@ void ReadReconnectPolicyAt(const Table& table, input::ReconnectPolicy* config,
 void ReadAudioDecoderConfigAt(const Table& table,
                               decoder::AudioDecoderConfig* config,
                               std::string_view path) {
-  RequireOnlyKeys(table, {"decoder_name"}, path);
+  WarnUnknownKeys(table, {"decoder_name"}, path);
   ReadString(table, "decoder_name", path, &config->decoder_name);
 }
 
 void ReadVideoDecoderConfigAt(const Table& table,
                               decoder::VideoDecoderConfig* config,
                               std::string_view path) {
-  RequireOnlyKeys(table, {"decoder_name", "backend", "device_index"}, path);
+  WarnUnknownKeys(table, {"decoder_name", "backend", "device_index"}, path);
   ReadString(table, "decoder_name", path, &config->decoder_name);
   ReadEnum(table, "backend", path,
            {{"software", decoder::VideoDecoderBackend::kSoftware},
@@ -356,7 +358,7 @@ std::string FormatToml(const Table& table) {
 void ReadAudioEncoderConfigAt(const Table& table,
                               encoder::AudioEncoderConfig* config,
                               std::string_view path) {
-  RequireOnlyKeys(table, {"encoder_name", "properties"}, path);
+  WarnUnknownKeys(table, {"encoder_name", "properties"}, path);
   ReadString(table, "encoder_name", path, &config->encoder_name);
   ReadStringMap(table, "properties", path, &config->properties);
 }
@@ -364,7 +366,7 @@ void ReadAudioEncoderConfigAt(const Table& table,
 void ReadVideoEncoderConfigAt(const Table& table,
                               encoder::VideoEncoderConfig* config,
                               std::string_view path) {
-  RequireOnlyKeys(table, {"codec", "encoder_name", "frame_rate", "properties"},
+  WarnUnknownKeys(table, {"codec", "encoder_name", "frame_rate", "properties"},
                   path);
   ReadEnum(table, "codec", path,
            {{"h264", kMwStreamerCodecH264}, {"h265", kMwStreamerCodecH265}},
@@ -372,7 +374,7 @@ void ReadVideoEncoderConfigAt(const Table& table,
   ReadString(table, "encoder_name", path, &config->encoder_name);
   if (const auto* frame_rate = OptionalTable(table, "frame_rate", path)) {
     const auto frame_rate_path = FieldPath(path, "frame_rate");
-    RequireOnlyKeys(*frame_rate, {"num", "den"}, frame_rate_path);
+    WarnUnknownKeys(*frame_rate, {"num", "den"}, frame_rate_path);
     ReadInteger(*frame_rate, "num", frame_rate_path, &config->frame_rate.num);
     ReadInteger(*frame_rate, "den", frame_rate_path, &config->frame_rate.den);
   }
@@ -419,12 +421,12 @@ pipeline::InputConfig ReadInput(const Table& root) {
            &result.type);
   ReadStringArray(table, "downstream", kPath, &result.downstream);
   if (result.type == pipeline::InputType::kFile) {
-    RequireOnlyKeys(table, {"type", "path", "downstream"}, kPath);
+    WarnUnknownKeys(table, {"type", "path", "downstream"}, kPath);
     RequireField(table, "path", kPath);
     ReadString(table, "path", kPath, &result.file.path);
     return result;
   }
-  RequireOnlyKeys(table,
+  WarnUnknownKeys(table,
                   {"type", "url", "downstream", "player", "reconnect_policy"},
                   kPath);
   RequireField(table, "url", kPath);
@@ -442,7 +444,7 @@ pipeline::InputConfig ReadInput(const Table& root) {
 std::unique_ptr<pipeline::SinkConfig> ReadDecoderNode(const Table& table,
                                                       std::string id,
                                                       std::string_view path) {
-  RequireOnlyKeys(
+  WarnUnknownKeys(
       table,
       {"id", "type", "downstream", "message_receiver", "cache_duration_ms",
        "audio_decode_queue_capacity", "video_decode_queue_capacity",
@@ -475,7 +477,7 @@ std::unique_ptr<pipeline::SinkConfig> ReadProcessorNode(const Table& table,
     business_config = FormatToml(*config);
   }
   if (type == pipeline::SinkType::kAnalysisProcessor) {
-    RequireOnlyKeys(table,
+    WarnUnknownKeys(table,
                     {"id", "type", "downstream", "message_receiver", "config"},
                     path);
     auto node =
@@ -483,25 +485,20 @@ std::unique_ptr<pipeline::SinkConfig> ReadProcessorNode(const Table& table,
     node->options.config = std::move(business_config);
     return node;
   }
-  RequireOnlyKeys(table,
-                  {"id", "type", "downstream", "message_receiver", "config",
-                   "output_width", "output_height"},
-                  path);
+  WarnUnknownKeys(
+      table, {"id", "type", "downstream", "message_receiver", "config"}, path);
   auto node =
       std::make_unique<pipeline::TransformProcessorNodeConfig>(std::move(id));
   node->options.config = std::move(business_config);
-  ReadInteger(table, "output_width", path, &node->options.output_width);
-  ReadInteger(table, "output_height", path, &node->options.output_height);
   return node;
 }
 
 std::unique_ptr<pipeline::SinkConfig> ReadSynchronizerNode(
     const Table& table, std::string id, std::string_view path) {
-  RequireOnlyKeys(
+  WarnUnknownKeys(
       table,
       {"id", "type", "downstream", "message_receiver", "frame_queue_capacity",
-       "video_frame_rate", "max_frame_lateness_ms", "standby_timeout_ms",
-       "standby_image_path"},
+       "max_frame_lateness_ms", "standby_timeout_ms", "standby_image_path"},
       path);
   auto node = std::make_unique<pipeline::SynchronizerNodeConfig>(std::move(id));
   auto& config = node->options;
@@ -511,19 +508,13 @@ std::unique_ptr<pipeline::SinkConfig> ReadSynchronizerNode(
                    &config.max_frame_lateness);
   ReadMilliseconds(table, "standby_timeout_ms", path, &config.standby_timeout);
   ReadString(table, "standby_image_path", path, &config.standby_image_path);
-  if (const auto* rate = OptionalTable(table, "video_frame_rate", path)) {
-    const auto rate_path = FieldPath(path, "video_frame_rate");
-    RequireOnlyKeys(*rate, {"num", "den"}, rate_path);
-    ReadInteger(*rate, "num", rate_path, &config.video_frame_rate.num);
-    ReadInteger(*rate, "den", rate_path, &config.video_frame_rate.den);
-  }
   return node;
 }
 
 std::unique_ptr<pipeline::SinkConfig> ReadEncoderNode(const Table& table,
                                                       std::string id,
                                                       std::string_view path) {
-  RequireOnlyKeys(
+  WarnUnknownKeys(
       table,
       {"id", "type", "downstream", "message_receiver", "frame_queue_capacity",
        "startup_packet_capacity", "audio_encoder", "video_encoder"},
@@ -548,7 +539,7 @@ std::unique_ptr<pipeline::SinkConfig> ReadEncoderNode(const Table& table,
 std::unique_ptr<pipeline::SinkConfig> ReadRemuxNode(const Table& table,
                                                     std::string id,
                                                     std::string_view path) {
-  RequireOnlyKeys(table,
+  WarnUnknownKeys(table,
                   {"id", "type", "downstream", "message_receiver", "target",
                    "packet_queue_capacity", "zlm"},
                   path);
@@ -603,7 +594,7 @@ std::unique_ptr<pipeline::SinkConfig> ReadSinkNode(const Table& table,
 }
 
 pipeline::PipelineConfig ReadPipeline(const Table& root) {
-  RequireOnlyKeys(root, {"input", "sinks"}, "");
+  WarnUnknownKeys(root, {"input", "sinks"}, "");
   pipeline::PipelineConfig result;
   result.input = ReadInput(root);
   RequireField(root, "sinks", "");
@@ -699,7 +690,6 @@ void WriteSynchronizerNode(Table& table,
                            const synchronizer::SynchronizerSinkConfig& config) {
   table.insert("frame_queue_capacity",
                WriteCapacity(config.frame_queue_capacity));
-  table.insert("video_frame_rate", WriteRational(config.video_frame_rate));
   table.insert("max_frame_lateness_ms", config.max_frame_lateness.count());
   table.insert("standby_timeout_ms", config.standby_timeout.count());
   table.insert("standby_image_path", config.standby_image_path);
@@ -770,8 +760,6 @@ Table WriteSinkNode(const pipeline::SinkConfig& node) {
       const auto& config =
           static_cast<const pipeline::TransformProcessorNodeConfig&>(node)
               .options;
-      result.insert("output_width", config.output_width);
-      result.insert("output_height", config.output_height);
       result.insert("config",
                     ParseText(config.config, FieldPath(node.id, "config")));
       break;
@@ -860,7 +848,7 @@ void SavePipelineConfigToToml(const pipeline::PipelineConfig& config,
 
 InitConfig LoadInitConfigFromToml(const std::filesystem::path& path) {
   const auto root = ParseFile(path);
-  RequireOnlyKeys(root, {"log", "zlm"}, "");
+  WarnUnknownKeys(root, {"log", "zlm"}, "");
 
   InitConfig config;
   ReadOptionalConfigTable(root, "log", &config.log, ReadLogConfig);

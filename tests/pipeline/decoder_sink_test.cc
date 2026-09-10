@@ -466,8 +466,7 @@ TEST_CASE("DecoderSink feeds analysis and passthrough processor branches") {
       callbacks));
   decoder.AddSink(std::make_unique<FrameRecorder>("original", original));
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor",
-      mw::streamer::processor::StreamingProcessorConfig{64, 64, {}},
+      "processor", mw::streamer::processor::StreamingProcessorConfig{},
       MwStreamerStreamingProcessorCallbacks{});
   processor->AddSink(std::make_unique<FrameRecorder>("forwarded", forwarded));
   decoder.AddSink(std::move(processor));
@@ -496,28 +495,6 @@ TEST_CASE("DecoderSink feeds analysis and passthrough processor branches") {
           original->audio[i].frame->data[0]);
     CHECK(forwarded->audio[i].frame->pts == original->audio[i].frame->pts);
   }
-}
-
-TEST_CASE("processor passthrough size mismatch fails the decoder chain") {
-  auto recording = std::make_shared<Recording>();
-  DecoderSink decoder("decoder", SoftwareConfig());
-  auto processor = std::make_unique<TransformProcessorSink>(
-      "processor",
-      mw::streamer::processor::StreamingProcessorConfig{128, 128, {}},
-      MwStreamerStreamingProcessorCallbacks{});
-  processor->AddSink(std::make_unique<FrameRecorder>("recording", recording));
-  decoder.AddSink(std::move(processor));
-  Feed(decoder, ReadSample(), 1);
-  const bool failed = WaitForFailure(decoder);
-  decoder.Stop();
-
-  REQUIRE(failed);
-  CHECK(decoder.state() == PacketSinkState::kFailed);
-  CHECK(decoder.error().find("64") != std::string::npos);
-  CHECK(decoder.error().find("128") != std::string::npos);
-  CHECK(recording->video.empty());
-  CHECK(recording->ends.empty());
-  CHECK(recording->stop_calls == 1);
 }
 
 TEST_CASE("DecoderSink reports an in-flight fatal after a local failure") {

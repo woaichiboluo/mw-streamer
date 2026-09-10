@@ -37,14 +37,14 @@ Clock::time_point Epoch() { return Clock::time_point(100s); }
 
 SynchronizerSinkConfig Config() {
   SynchronizerSinkConfig config;
-  config.video_frame_rate = {20, 1};
   config.max_frame_lateness = 40ms;
   config.standby_timeout = 100ms;
   return config;
 }
 
 FrameStreamsReady Streams(bool audio, std::uint64_t generation = 1,
-                          const ffmpeg::HardwareContext* device = nullptr) {
+                          const ffmpeg::HardwareContext* device = nullptr,
+                          AVRational video_frame_rate = {20, 1}) {
   ffmpeg::StreamInfo stream;
   stream.stream_index = 0;
   stream.time_base = audio ? AVRational{1, 48000} : AVRational{1, 1000};
@@ -57,6 +57,7 @@ FrameStreamsReady Streams(bool audio, std::uint64_t generation = 1,
   } else {
     parameters->width = kWidth;
     parameters->height = kHeight;
+    parameters->framerate = video_frame_rate;
   }
   return {generation, {std::move(stream)}, device};
 }
@@ -161,10 +162,9 @@ TEST_CASE(
     "RealtimeFrameScheduler rational video slots do not accumulate rounding "
     "error") {
   auto config = Config();
-  config.video_frame_rate = {30000, 1001};
   config.standby_timeout = 60s;
   RealtimeFrameScheduler scheduler(config);
-  scheduler.Configure(Streams(false));
+  scheduler.Configure(Streams(false, 1, nullptr, {30000, 1001}));
   scheduler.Push({1, Video(0)}, false, Epoch());
   constexpr AVRational kFrameTimeBase{1001, 30000};
   constexpr AVRational kMicroseconds{1, 1000000};
@@ -354,9 +354,8 @@ TEST_CASE(
     "marker frames",
     "[arrival_buffer]") {
   auto config = Config();
-  config.video_frame_rate = {25, 1};
   RealtimeFrameScheduler scheduler(config);
-  auto streams = Streams(false);
+  auto streams = Streams(false, 1, nullptr, {25, 1});
   auto audio = Streams(true).source_streams.front();
   audio.stream_index = 1;
   streams.source_streams.push_back(std::move(audio));
