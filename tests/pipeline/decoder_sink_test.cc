@@ -462,12 +462,10 @@ TEST_CASE("DecoderSink feeds analysis and passthrough processor branches") {
   auto forwarded = std::make_shared<Recording>();
   DecoderSink decoder("decoder", SoftwareConfig());
   decoder.AddSink(std::make_unique<AnalysisProcessorSink>(
-      "analysis-processor-1", mw::streamer::processor::FileProcessorConfig{},
-      callbacks));
+      "analysis-processor-1", callbacks));
   decoder.AddSink(std::make_unique<FrameRecorder>("original", original));
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor", mw::streamer::processor::StreamingProcessorConfig{},
-      MwStreamerStreamingProcessorCallbacks{});
+      "processor", MwStreamerStreamingProcessorCallbacks{});
   processor->AddSink(std::make_unique<FrameRecorder>("forwarded", forwarded));
   decoder.AddSink(std::move(processor));
   Feed(decoder, ReadSample(), 1);

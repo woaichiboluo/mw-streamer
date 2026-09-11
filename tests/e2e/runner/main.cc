@@ -29,7 +29,6 @@ extern "C" {
 
 #include "mw/decoder/decoder_sink.h"
 #include "mw/encoder/encoder_sink.h"
-#include "mw/init/init.h"
 #include "mw/input/file_input.h"
 #include "mw/input/zlm_input.h"
 #include "mw/output/remux_sink.h"
@@ -1048,7 +1047,7 @@ std::unique_ptr<mw::streamer::sink::Sink> MakeProcessor(
     callbacks.on_boundary = OnProcessorBoundary;
     callbacks.on_stop = OnProcessorStop;
     return std::make_unique<mw::streamer::processor::AnalysisProcessorSink>(
-        "processor", mw::streamer::processor::FileProcessorConfig{}, callbacks);
+        "processor", callbacks);
   }
   MwStreamerStreamingProcessorCallbacks callbacks{};
   callbacks.user_context = &observer;
@@ -1059,8 +1058,7 @@ std::unique_ptr<mw::streamer::sink::Sink> MakeProcessor(
   callbacks.on_stop = OnProcessorStop;
   auto processor =
       std::make_unique<mw::streamer::processor::TransformProcessorSink>(
-          "processor", mw::streamer::processor::StreamingProcessorConfig{},
-          callbacks);
+          "processor", callbacks);
   processor->AddSink(MakeSynchronizer(arguments, local_observer, probes));
   return processor;
 }
@@ -1197,8 +1195,7 @@ int RunFile(const Arguments& arguments, EventWriter& events) {
                              mw::streamer::sink::PacketSinkState::kFailed));
   decoder->AddSink(
       std::make_unique<mw::streamer::processor::AnalysisProcessorSink>(
-          "processor", mw::streamer::processor::FileProcessorConfig{},
-          callbacks));
+          "processor", callbacks));
   chain.AddSink(std::move(decoder));
   const auto result = RunPipeline(chain, arguments, probes, events);
   const bool timed_out = !result.eof_drained && !result.failed_seen &&
@@ -1241,13 +1238,6 @@ int RunFile(const Arguments& arguments, EventWriter& events) {
 }
 
 int Run(const Arguments& arguments) {
-  mw::streamer::InitConfig init_config;
-  init_config.log.console.color = false;
-  init_config.log.modules.zlm = mw::streamer::log::LogLevel::kInfo;
-  init_config.log.modules.streamer = mw::streamer::log::LogLevel::kInfo;
-  init_config.log.modules.processor = mw::streamer::log::LogLevel::kInfo;
-  mw::streamer::Init(init_config);
-
   EventWriter events(arguments.events_path);
   int result = 0;
   switch (arguments.scenario) {
@@ -1261,7 +1251,6 @@ int Run(const Arguments& arguments) {
       result = RunFile(arguments, events);
       break;
   }
-  mw::streamer::Shutdown();
   return result;
 }
 
@@ -1275,9 +1264,6 @@ int main(int argc, char* argv[]) {
     return Run(ParseArguments(argc, argv));
   } catch (const std::exception& error) {
     fmt::print(stderr, "mw_streamer_e2e_runner: {}\n", error.what());
-    if (mw::streamer::IsInitialized()) {
-      mw::streamer::Shutdown();
-    }
     return 1;
   }
 }

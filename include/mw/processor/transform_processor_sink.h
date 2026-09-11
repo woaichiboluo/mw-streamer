@@ -4,7 +4,6 @@
 #include <memory>
 #include <string>
 
-#include "mw/processor/config.h"
 #include "mw/processor/processor.h"
 #include "mw/sink/sink.h"
 #include "mw/sink/sink_message.h"
@@ -24,7 +23,6 @@ namespace mw::streamer::processor {
 class TransformProcessorSink final : public sink::Sink {
  public:
   TransformProcessorSink(std::string id,
-                         processor::StreamingProcessorConfig config,
                          MwStreamerStreamingProcessorCallbacks callbacks);
   ~TransformProcessorSink() override;
 
@@ -37,8 +35,8 @@ class TransformProcessorSink final : public sink::Sink {
   void OnTimelineReset(const media::TimelineReset& reset) override;
   void OnInputEnded(const media::StreamEnded& end) override;
 
-  // Requires successful startup. Updates serialize with each other, may overlap
-  // media callbacks, and cannot overlap Stop or stream boundaries.
+  // Before startup, stores the value for on_start. Afterwards, updates
+  // serialize with each other and invoke on_config_update.
   void UpdateConfig(std::string config);
   // Disables message callbacks and waits for in-flight calls before stopping
   // children and invoking C on_stop. Idempotent.

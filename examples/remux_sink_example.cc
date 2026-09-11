@@ -10,7 +10,6 @@
 #include <utility>
 #include <vector>
 
-#include "mw/init/init.h"
 #include "mw/input/zlm_input.h"
 #include "mw/output/remux_sink.h"
 #include "mw/pipeline/pipeline.h"
@@ -90,11 +89,9 @@ int main(int argc, char* argv[]) {
   std::signal(SIGTERM, OnSignal);
   int result = 1;
   try {
-    mw::streamer::Init();
     result = Run(argc, argv);
   } catch (const std::exception& error) {
     fmt::print(stderr, "运行失败：{}\n", error.what());
   }
-  mw::streamer::Shutdown();
   return result;
 }

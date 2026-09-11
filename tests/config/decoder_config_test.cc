@@ -2,7 +2,6 @@
 #include <string>
 
 #include "mw/decoder/config.h"
-#include "mw/processor/config.h"
 
 namespace {
 
@@ -38,16 +37,3 @@ TEST_CASE("Decoder配置支持指定解码器和CUDA视频解码") {
 }
 
 }  // namespace
-
-TEST_CASE("Processor配置深拷贝保留业务字符串") {
-  mw::streamer::processor::StreamingProcessorConfig original;
-  original.config = "model = 'a'";
-  const auto copy = original;
-  original.config.clear();
-  CHECK(copy.config == "model = 'a'");
-  mw::streamer::processor::FileProcessorConfig file;
-  file.config = "model = 'file'";
-  const auto file_copy = file;
-  file.config.clear();
-  CHECK(file_copy.config == "model = 'file'");
-}

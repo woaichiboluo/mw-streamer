@@ -1,3 +1,5 @@
+#include "mw/log/logging.h"
+
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <filesystem>
@@ -5,8 +7,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-
-#include "mw/init/init.h"
 
 extern "C" {
 #include <libavutil/log.h>
@@ -135,14 +135,12 @@ TEST_CASE("async logging drains its shared queue on destruction",
   CHECK(content.find("[streamer] async message 31") != std::string::npos);
 }
 
-TEST_CASE("Logging can be owned manually without init",
-          "[logging][lifecycle]") {
+TEST_CASE("Logging can be owned manually", "[logging][lifecycle]") {
   TemporaryLogFile file;
   const auto config = MakeFileLogConfig(file.path());
 
   {
     mw::streamer::log::Logging logging(config);
-    CHECK_FALSE(mw::streamer::IsInitialized());
     StreamerLog::Info("manually owned logging");
   }
 

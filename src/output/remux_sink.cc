@@ -15,6 +15,7 @@
 
 #include "Poller/EventPoller.h"
 #include "mw/common/blocking_queue.h"
+#include "mw/init/internal/runtime.h"
 #include "mw/log/logging.h"
 #include "mw/output/internal/remux_output.h"
 #include "mw/performance/operation_recorder.h"
@@ -56,6 +57,7 @@ class RemuxSink::Impl final {
     if (config_.packet_queue_capacity == 0) {
       throw std::invalid_argument("RemuxSink包队列容量必须大于零");
     }
+    init::internal::EnsureInitialized();
     poller_ = toolkit::EventPollerPool::Instance().getPoller(false);
     network_snapshot_.target = config_.target;
   }

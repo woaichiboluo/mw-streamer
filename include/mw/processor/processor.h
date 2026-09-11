@@ -221,8 +221,8 @@ typedef struct MwStreamerProcessorSourceInfo {
   MwStreamerAudioSourceInfo audio;
 } MwStreamerProcessorSourceInfo;
 
-// config is a null-terminated opaque user string; the Pipeline copies it
-// during creation and updates it while running.
+// config is a null-terminated opaque user string supplied by the host through
+// Pipeline::SetProcessorConfig.
 typedef struct MwStreamerStreamingProcessorConfig {
   const char* config;
 } MwStreamerStreamingProcessorConfig;
@@ -345,7 +345,7 @@ typedef struct MwStreamerStreamingProcessorCallbacks {
   // concurrently with audio and video processing. The null-terminated string
   // is borrowed for the callback; user code must copy data it needs after
   // returning and synchronize access to its own runtime state.
-  MwStreamerProcessorUpdateConfigCallback update_config;
+  MwStreamerProcessorUpdateConfigCallback on_config_update;
 
   // Called once after a successful on_start, after all process callbacks and
   // their submitted output work have completed. Exceptions are logged and
@@ -373,7 +373,7 @@ typedef struct MwStreamerFileProcessorCallbacks {
 
   // Runtime updates may run concurrently with audio and video processing. The
   // null-terminated string is borrowed for the callback.
-  MwStreamerProcessorUpdateConfigCallback update_config;
+  MwStreamerProcessorUpdateConfigCallback on_config_update;
 
   // Called once after a successful on_start and all processing has completed.
   MwStreamerProcessorStopCallback on_stop;

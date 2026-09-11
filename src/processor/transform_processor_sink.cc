@@ -31,12 +31,8 @@ constexpr std::uint32_t kDefaultVideoOutputHeight = 1080;
 class TransformProcessorSink::Impl final {
  public:
   Impl(TransformProcessorSink& owner,
-       processor::StreamingProcessorConfig config,
        MwStreamerStreamingProcessorCallbacks callbacks)
-      : owner_(owner),
-        config_(std::move(config)),
-        callbacks_(callbacks),
-        outputs_(owner.downstream()) {}
+      : owner_(owner), callbacks_(callbacks), outputs_(owner.downstream()) {}
 
   ~Impl() { Stop(); }
 
@@ -139,11 +135,13 @@ class TransformProcessorSink::Impl final {
     }
   }
 
-  void UpdateConfig(std::string config) {
+  void SetConfig(std::string config) {
     std::shared_lock<std::shared_mutex> lifecycle_lock(lifecycle_mutex_);
     std::lock_guard<std::mutex> update_lock(update_mutex_);
-    Context().UpdateConfig(config);
-    config_.config = std::move(config);
+    processor_config_ = std::move(config);
+    if (context_) {
+      Context().UpdateConfig(processor_config_);
+    }
   }
 
   bool OnMessage(const sink::SinkMessage& message) {
@@ -184,7 +182,7 @@ class TransformProcessorSink::Impl final {
       throw std::logic_error("TransformProcessorSink启动前至少需要一个下游");
     }
     auto context = std::make_unique<internal::ProcessorSinkContext>(streams);
-    const MwStreamerStreamingProcessorConfig config{config_.config.c_str()};
+    const MwStreamerStreamingProcessorConfig config{processor_config_.c_str()};
     MwStreamerVideoOutputSize video_output_size{video_output_width_,
                                                 video_output_height_};
     const MwStreamerStreamingProcessorStartRequest request{
@@ -199,7 +197,7 @@ class TransformProcessorSink::Impl final {
     }
     PrepareAllocators(context->source_info(), video_output_size);
     context->MarkStarted(callbacks_.user_context, callbacks_.on_boundary,
-                         callbacks_.update_config, callbacks_.on_stop);
+                         callbacks_.on_config_update, callbacks_.on_stop);
     context_ = std::move(context);
   }
 
@@ -284,7 +282,7 @@ class TransformProcessorSink::Impl final {
       performance::PerformanceUnit::kFrame,
       performance::PerformanceUnit::kFrame};
   TransformProcessorSink& owner_;
-  processor::StreamingProcessorConfig config_;
+  std::string processor_config_;
   const MwStreamerStreamingProcessorCallbacks callbacks_;
   std::shared_mutex lifecycle_mutex_;
   std::mutex update_mutex_;
@@ -300,11 +298,10 @@ class TransformProcessorSink::Impl final {
 };
 
 TransformProcessorSink::TransformProcessorSink(
-    std::string id, processor::StreamingProcessorConfig config,
-    MwStreamerStreamingProcessorCallbacks callbacks)
+    std::string id, MwStreamerStreamingProcessorCallbacks callbacks)
     : sink::Sink(std::move(id), sink::SinkMediaType::kFrame,
                  sink::SinkMediaType::kFrame),
-      impl_(std::make_unique<Impl>(*this, std::move(config), callbacks)) {}
+      impl_(std::make_unique<Impl>(*this, callbacks)) {}
 
 TransformProcessorSink::~TransformProcessorSink() { Stop(); }
 
@@ -340,7 +337,7 @@ void TransformProcessorSink::OnInputEnded(const media::StreamEnded& end) {
 }
 
 void TransformProcessorSink::UpdateConfig(std::string config) {
-  impl_->UpdateConfig(std::move(config));
+  impl_->SetConfig(std::move(config));
 }
 
 void TransformProcessorSink::OnMessage(const sink::SinkMessage& message) {

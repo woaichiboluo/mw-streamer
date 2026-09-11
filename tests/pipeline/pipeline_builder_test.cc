@@ -159,7 +159,7 @@ TEST_CASE("Pipeline builder owns typed configuration and binds analysis by ID",
         mw::streamer::decoder::VideoDecoderBackend::kSoftware;
     decoder->downstream = {"analysis"};
     auto analysis = std::make_unique<AnalysisProcessorNodeConfig>("analysis");
-    analysis->options.config = "mode = 'integration'";
+
     // Forward references must work independently of declaration order.
     config.sinks.push_back(std::move(analysis));
     config.sinks.push_back(std::move(decoder));
@@ -167,6 +167,7 @@ TEST_CASE("Pipeline builder owns typed configuration and binds analysis by ID",
     bindings.analysis.emplace("analysis", AnalysisCallbacks(state));
     return BuildPipeline(config, bindings);
   }();
+  pipeline->SetProcessorConfig("analysis", "mode = 'integration'");
 
   // Both configuration and binding containers have been destroyed.
   pipeline->Start();

@@ -303,9 +303,8 @@ class MessageGraph {
 TEST_CASE("Pipeline按目标ID绕过中间媒体节点直达Processor") {
   MessageState state;
   MessageGraph graph;
-  auto processor = std::make_unique<TransformProcessorSink>(
-      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
-      Callbacks(state));
+  auto processor =
+      std::make_unique<TransformProcessorSink>("processor", Callbacks(state));
   auto middle = std::make_unique<MessageSink>("middle");
   auto leaf = std::make_unique<MessageSink>("leaf");
   auto* sender = leaf.get();
@@ -472,9 +471,8 @@ TEST_CASE("消息回调内再次发送仍异步执行且不会重入接收者") 
     state.order.push_back("second");
     state.done.set_value();
   };
-  auto processor = std::make_unique<TransformProcessorSink>(
-      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
-      callbacks);
+  auto processor =
+      std::make_unique<TransformProcessorSink>("processor", callbacks);
   auto sender = std::make_unique<MessageSink>("sender");
   state.sender = sender.get();
   processor->AddSink(std::move(sender));
@@ -553,9 +551,8 @@ TEST_CASE("Processor消息回调与媒体并发且媒体发送不等待消息处
   MessageState state;
   MessageGraph graph;
   ReleaseGuard release(state);
-  auto processor = std::make_unique<TransformProcessorSink>(
-      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
-      Callbacks(state));
+  auto processor =
+      std::make_unique<TransformProcessorSink>("processor", Callbacks(state));
   auto* processor_sink = processor.get();
   auto child = std::make_unique<MessageSink>("sender");
   child->send_on_video = true;
@@ -604,9 +601,8 @@ TEST_CASE("Pipeline隔离普通消息异常并继续处理后续消息") {
 TEST_CASE("Pipeline消息Fatal沿接收方媒体树停止整条链路") {
   MessageState state;
   MessageGraph graph;
-  auto processor = std::make_unique<TransformProcessorSink>(
-      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
-      Callbacks(state));
+  auto processor =
+      std::make_unique<TransformProcessorSink>("processor", Callbacks(state));
   auto middle = std::make_unique<MessageSink>("middle");
   processor->AddSink(std::make_unique<MessageSink>("output"));
   middle->AddSink(std::move(processor));
@@ -634,9 +630,8 @@ TEST_CASE("Pipeline停止丢弃积压并等待消息回调后才停止Processor"
   MessageState state;
   MessageGraph graph;
   ReleaseGuard release(state);
-  auto processor = std::make_unique<TransformProcessorSink>(
-      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
-      Callbacks(state));
+  auto processor =
+      std::make_unique<TransformProcessorSink>("processor", Callbacks(state));
   processor->AddSink(std::make_unique<MessageSink>("output"));
   graph.Add(std::move(processor));
   auto& sender = graph.Add("sender");
@@ -684,8 +679,8 @@ TEST_CASE("AnalysisProcessor通过Pipeline公共消息循环接收回调") {
   callbacks.on_stop = [](void* context) {
     static_cast<MessageState*>(context)->Stopped();
   };
-  auto processor = std::make_unique<AnalysisProcessorSink>(
-      "analysis", mw::streamer::processor::FileProcessorConfig{}, callbacks);
+  auto processor =
+      std::make_unique<AnalysisProcessorSink>("analysis", callbacks);
   graph.Add(std::move(processor));
   auto& sender = graph.Add("sender");
   graph.Bind("sender", "analysis");

@@ -10,7 +10,6 @@
 #include "mw/encoder/config.h"
 #include "mw/input/config.h"
 #include "mw/output/config.h"
-#include "mw/processor/config.h"
 #include "mw/synchronizer/config.h"
 
 namespace mw::streamer::pipeline {
@@ -56,7 +55,6 @@ struct AnalysisProcessorNodeConfig final : SinkConfig {
   SinkType type() const noexcept override {
     return SinkType::kAnalysisProcessor;
   }
-  processor::FileProcessorConfig options;
 };
 
 struct TransformProcessorNodeConfig final : SinkConfig {
@@ -64,7 +62,6 @@ struct TransformProcessorNodeConfig final : SinkConfig {
   SinkType type() const noexcept override {
     return SinkType::kTransformProcessor;
   }
-  processor::StreamingProcessorConfig options;
 };
 
 struct SynchronizerNodeConfig final : SinkConfig {

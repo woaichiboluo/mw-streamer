@@ -7,7 +7,7 @@
 
 namespace mw::streamer::zlm {
 
-// Process-wide ZLToolKit configuration consumed by mw::streamer::Init().
+// Process-wide ZLToolKit configuration consumed by Pipeline TOML [zlm].
 struct Config {
   // Zero lets ZLToolKit use std::thread::hardware_concurrency().
   std::size_t event_poller_threads = 0;

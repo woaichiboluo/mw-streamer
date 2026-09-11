@@ -62,33 +62,6 @@ target_link_libraries(mw_logging_tests
 
 catch_discover_tests(mw_logging_tests)
 
-add_executable(mw_init_tests
-    init_test.cc
-)
-
-target_link_libraries(mw_init_tests
-    PRIVATE
-        Catch2::Catch2WithMain
-        FFmpeg::avutil
-        ZLMediaKit::ToolKit
-        mw::streamer_test
-)
-
-catch_discover_tests(mw_init_tests)
-
-add_executable(mw_srt_init_tests
-    srt_init_test.cc
-)
-
-target_link_libraries(mw_srt_init_tests
-    PRIVATE
-        Catch2::Catch2WithMain
-        ZLMediaKit::SRT
-        mw::streamer_test
-)
-
-catch_discover_tests(mw_srt_init_tests)
-
 add_executable(mw_zlm_logger_lifecycle_tests
     zlm_logger_lifecycle_test.cc
 )

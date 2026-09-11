@@ -49,12 +49,8 @@ ctest --test-dir build --output-on-failure
 `BUILD_TESTS` 在项目作为顶层工程时默认开启，作为子工程时默认关闭；
 `BUILD_EXAMPLES` 默认关闭。
 
-SRT reactor 是进程级资源。宿主退出时应先停止创建和重连 SRT 会话，在各会话所属
-`EventPoller` 上完成 `teardown()` 并执行队列屏障，最后调用
-`mw::streamer::Shutdown()`。
-该调用只会关闭已经创建的 SRT reactor，不会在退出阶段反向创建它；关闭过程会等待
-reactor 线程释放 SRT epoll 并在同一线程执行 `srt_cleanup()`。关闭后不可再次创建
-SRT 会话。
+SRT reactor 是进程级资源。宿主退出前应先停止创建和重连 SRT 会话，并在各会话所属
+`EventPoller` 上完成 `teardown()` 和队列屏障。
 
 SRT 每次新建或重连发布会丢弃关键帧之前的残缺历史数据，并从包含 PAT、PMT 和随机访问点的完整 TS 关键帧批次开始发送，避免高码率流从 GOP 中段接入时无法完成接收端初始化。
 
@@ -321,11 +317,9 @@ Pipeline 收到请求后立即进入 `PipelineState::kFailed` 并停止继续分
 `AnalysisProcessorSink` 和 `TransformProcessorSink` 都直接继承 `Sink` 并消费 Frame，按回调
 是否产生输出区分，均可接在文件或实时输入的 DecoderSink 后面。
 
-- `AnalysisProcessorSink` 使用 `FileProcessorConfig` 和
-  `MwStreamerFileProcessorCallbacks`。回调只借用输入帧；没有输出缓冲区和下游。
+- `AnalysisProcessorSink` 使用 `MwStreamerFileProcessorCallbacks`。回调只借用输入帧；没有输出缓冲区和下游。
   未注册某轨道回调时忽略该轨道。
-- `TransformProcessorSink` 使用 `StreamingProcessorConfig` 和
-  `MwStreamerStreamingProcessorCallbacks`，通过 `AddSink()` 独占持有下游，
+- `TransformProcessorSink` 使用 `MwStreamerStreamingProcessorCallbacks`，通过 `AddSink()` 独占持有下游，
   输入前至少注册一个消费者。`on_start` 可设置视频输出尺寸，未设置时为
   1920×1080；随后框架分配可写输出缓冲区。回调返回时必须完成输出，再按注册顺序
   同步交给下游。音频输出与输入保持相同的声道数和
@@ -588,8 +582,6 @@ backend = "software"
 [[sinks]]
 id = "analysis"
 type = "analysis_processor"
-[sinks.config]
-mode = "offline"
 ```
 
 结构体构建时，设置 `spec.input.type = pipeline::InputType::kFile` 和
@@ -601,11 +593,13 @@ mode = "offline"
 - `SerializePipelineConfigToToml(config)`：结构体转 TOML 字符串。
 - `LoadPipelineConfigFromToml(path)`：从文件加载。
 - `SavePipelineConfigToToml(config, path)`：保存到文件，写入前先序列化并校验。
+- `BuildPipelineFromToml(path, bindings)`：读取同一文件中的 `[log]`、`[zlm]` 和媒体拓扑并构建 Pipeline。
 
-双向转换保留节点参数、声明及下游顺序、消息接收者、编码属性和嵌套业务配置的
-语义，不保留注释、空白、引号样式或字段排版。序列化显式写出默认参数。Processor
-的 `options.config` 在 TOML 序列化时必须是有效 TOML 文本（空字符串表示空表），
-写入对应的 `[sinks.config]`；库不解释业务字段，不将无效文本静默转换为字符串。
+双向转换保留节点参数、声明及下游顺序、消息接收者和编码属性的语义，不保留注释、
+空白、引号样式或字段排版。序列化显式写出默认参数。Processor 的业务配置不属于
+streamer TOML，宿主通过 `Pipeline::SetProcessorConfig(id, config)` 提供：启动前的
+最新值传给 `on_start`，启动后的每次设置传给 `on_config_update`；未设置时 `on_start`
+收到空字符串。
 
 字符串解析保留路径原文；文件加载把本地输入、Remux 录像目标和备播图片的相对
 路径解析为相对于 TOML 所在目录的绝对路径，URL 与可选空路径保持不变。加载后
@@ -644,74 +638,19 @@ config::SavePipelineConfigToToml(restored, "pipeline.toml");
 忽略/透传语义，回调的 user_context 由宿主保留到 Pipeline 停止。原有手工
 `Pipeline::AddSink()` 组装方式继续可用。
 
-## 初始化配置
+## 运行时配置
 
-进程初始化使用 `LoadInitConfigFromToml()`，模板见
-[`template/init.toml`](template/init.toml)，包含日志和 ZLToolKit 线程配置。
-链路只使用 [`template/pipeline.toml`](template/pipeline.toml) 的统一格式。
-未填写的可选字段沿用 C++ 默认值；未知字段会被忽略并记录警告，错误类型及整数越界会直接报错。
+[`template/pipeline.toml`](template/pipeline.toml) 是唯一的 streamer TOML：顶部的
+`[log]` 和 `[zlm]` 配置进程运行时，`[input]` 与 `[[sinks]]` 描述媒体拓扑。
+`BuildPipelineFromToml()` 会在创建媒体对象前应用前两者；手工构建 Pipeline 时运行时
+按 C++ 默认值自动初始化，无需主动 Init。未知字段会被忽略并记录警告，错误类型及
+整数越界仍直接报错。
 
 ## 日志
 
 日志模块使用一个活动的 spdlog logger 统一接收 `mw-streamer`、Processor、
 ZLMediaKit、libsrt 和 FFmpeg 日志，并在正文前分别增加 `[streamer]`、
-`[processor]`、`[ZLM]`、`[SRT]` 和 `[FFMPEG]`。各模块级别、控制台、滚动文件及异步队列通过
-`mw::streamer::log::LogConfig`
-配置；异步日志默认关闭，彩色控制台与普通控制台不会同时创建。
-
-```cpp
-#include <mw/init/init.h>
-
-int main() {
-    using Log =
-        mw::streamer::log::Module<mw::streamer::log::LogModule::kStreamer>;
-
-    // init 前使用懒加载的默认同步控制台 logger。
-    Log::Info("program started");
-
-    mw::streamer::InitConfig config;
-    config.log.modules.processor = mw::streamer::log::LogLevel::kInfo;
-    config.log.modules.zlm = mw::streamer::log::LogLevel::kInfo;
-    config.log.modules.srt = mw::streamer::log::LogLevel::kInfo;
-    config.log.modules.ffmpeg = mw::streamer::log::LogLevel::kWarning;
-    config.zlm.event_poller_threads = 4;
-    config.zlm.work_threads = 2;
-    config.zlm.enable_cpu_affinity = true;
-    mw::streamer::Init(config);
-
-    // 创建并使用媒体对象。
-
-    // 先停止所有媒体线程和第三方回调，再关闭全局模块。
-    mw::streamer::Shutdown();
-
-    // shutdown 后再次回到默认 logger。
-    Log::Info("program stopped");
-}
-```
-
-ZLM线程池配置只在首次创建线程池前生效，因此必须先调用
-`mw::streamer::Init()`，再创建任何Player、PacketQueue、Output或Pipeline。
-线程数为0时由ZLToolKit按照硬件并发数决定。
-
-`mw::streamer::Shutdown()` 必须由宿主控制线程调用，不能从 SRT reactor
-或媒体回调线程调用。`mw::streamer::Init()` 使用一次性初始化：第一次成功调用的
-配置生效，后续调用不会替换配置；`mw::streamer::Shutdown()` 后不支持重新初始化。
-初始化构造失败不会消耗这次机会，可以修正配置后再次调用。
-mw-streamer 在 init 到 shutdown 期间独占 ZLM、libsrt 和 FFmpeg 的全局日志接入；
-宿主不要同时替换这些全局回调。shutdown 后 libsrt 恢复 warning 等级、完整原生格式
-和默认输出回调，FFmpeg 恢复默认回调及 init 前的日志等级。
-
-日志模块也允许用户直接持有 `mw::streamer::log::Logging`，其作用域负责接管和
-释放日志桥接。手动持有与 `mw::streamer::Init()` 是两种互斥的所有权方式，
-同一进程同时只能存在一个活动的 `Logging`。手动模式下
-`mw::streamer::IsInitialized()` 仍表示 init 模块未启动，用户应在媒体线程停止后
-自行销毁 `Logging`；`mw::streamer::Shutdown()` 不会销毁这份外部对象。若使用了
-SRT，应在 `Logging` 仍存活时先调用 `mw::streamer::Shutdown()` 关闭 Reactor，
-再销毁它。
-
-默认格式为
-`[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] %v`，其中 `%t` 是线程 ID，
-`%v` 是包含模块前缀的正文。未调用 `mw::streamer::Init()` 时，Streamer 日志
-使用首次写入时创建的默认同步控制台 logger；调用 `mw::streamer::Init()` 后由
-init 模块持有配置后的 `Logging`，并接管 ZLM、SRT 和 FFmpeg 日志。
-`mw::streamer::Shutdown()` 会解除接管、排空配置后的日志后端并恢复默认日志路径。
+`[processor]`、`[ZLM]`、`[SRT]` 和 `[FFMPEG]`。`pipeline.toml` 的 `[log]`
+控制各模块级别、控制台、滚动文件及异步队列；运行时在首次创建 Pipeline 或其他
+媒体对象时初始化并接管这些第三方日志。异步日志默认关闭，彩色控制台与普通控制台
+不会同时创建。线程数为 0 时由 ZLToolKit 按硬件并发数决定。

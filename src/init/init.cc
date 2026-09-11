@@ -1,14 +1,13 @@
-#include "mw/init/init.h"
-
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 
 #include "Poller/EventPoller.h"
 #include "Thread/WorkThreadPool.h"
+#include "mw/init/internal/runtime.h"
 #include "srt/SrtEpollReactor.h"
 
-namespace mw::streamer {
+namespace mw::streamer::init::internal {
 namespace {
 
 void ConfigureZlmThreadPools(const zlm::Config& config) {
@@ -25,7 +24,7 @@ class Initializer final {
     return initializer;
   }
 
-  void Init(const InitConfig& config) {
+  void EnsureInitialized(const RuntimeConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (logging_) {
       return;
@@ -46,17 +45,6 @@ class Initializer final {
     }
   }
 
-  void Shutdown() noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
-    mediakit::SrtEpollReactor::shutdownIfCreated();
-    logging_.reset();
-  }
-
-  bool IsInitialized() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return logging_.has_value();
-  }
-
  private:
   Initializer() = default;
 
@@ -65,19 +53,15 @@ class Initializer final {
            !mediakit::SrtEpollReactor::Instance().available();
   }
 
-  mutable std::mutex mutex_;
+  std::mutex mutex_;
   std::once_flag init_once_;
   std::optional<log::Logging> logging_;
 };
 
 }  // namespace
 
-void Init(const InitConfig& config) { Initializer::Instance().Init(config); }
-
-void Shutdown() noexcept { Initializer::Instance().Shutdown(); }
-
-bool IsInitialized() noexcept {
-  return Initializer::Instance().IsInitialized();
+void EnsureInitialized(const RuntimeConfig& config) {
+  Initializer::Instance().EnsureInitialized(config);
 }
 
-}  // namespace mw::streamer
+}  // namespace mw::streamer::init::internal

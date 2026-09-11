@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "mw/init/internal/runtime.h"
 #include "mw/log/logging.h"
 
 namespace mw::streamer::config {
@@ -472,25 +473,16 @@ std::unique_ptr<pipeline::SinkConfig> ReadProcessorNode(const Table& table,
                                                         std::string id,
                                                         pipeline::SinkType type,
                                                         std::string_view path) {
-  std::string business_config;
-  if (const auto* config = OptionalTable(table, "config", path)) {
-    business_config = FormatToml(*config);
-  }
   if (type == pipeline::SinkType::kAnalysisProcessor) {
-    WarnUnknownKeys(table,
-                    {"id", "type", "downstream", "message_receiver", "config"},
+    WarnUnknownKeys(table, {"id", "type", "downstream", "message_receiver"},
                     path);
-    auto node =
-        std::make_unique<pipeline::AnalysisProcessorNodeConfig>(std::move(id));
-    node->options.config = std::move(business_config);
-    return node;
+    return std::make_unique<pipeline::AnalysisProcessorNodeConfig>(
+        std::move(id));
   }
-  WarnUnknownKeys(
-      table, {"id", "type", "downstream", "message_receiver", "config"}, path);
-  auto node =
-      std::make_unique<pipeline::TransformProcessorNodeConfig>(std::move(id));
-  node->options.config = std::move(business_config);
-  return node;
+  WarnUnknownKeys(table, {"id", "type", "downstream", "message_receiver"},
+                  path);
+  return std::make_unique<pipeline::TransformProcessorNodeConfig>(
+      std::move(id));
 }
 
 std::unique_ptr<pipeline::SinkConfig> ReadSynchronizerNode(
@@ -594,7 +586,7 @@ std::unique_ptr<pipeline::SinkConfig> ReadSinkNode(const Table& table,
 }
 
 pipeline::PipelineConfig ReadPipeline(const Table& root) {
-  WarnUnknownKeys(root, {"input", "sinks"}, "");
+  WarnUnknownKeys(root, {"log", "zlm", "input", "sinks"}, "");
   pipeline::PipelineConfig result;
   result.input = ReadInput(root);
   RequireField(root, "sinks", "");
@@ -746,24 +738,12 @@ Table WriteSinkNode(const pipeline::SinkConfig& node) {
           result,
           static_cast<const pipeline::DecoderNodeConfig&>(node).options);
       break;
-    case pipeline::SinkType::kAnalysisProcessor: {
+    case pipeline::SinkType::kAnalysisProcessor:
       result.insert("type", "analysis_processor");
-      const auto& config =
-          static_cast<const pipeline::AnalysisProcessorNodeConfig&>(node)
-              .options;
-      result.insert("config",
-                    ParseText(config.config, FieldPath(node.id, "config")));
       break;
-    }
-    case pipeline::SinkType::kTransformProcessor: {
+    case pipeline::SinkType::kTransformProcessor:
       result.insert("type", "transform_processor");
-      const auto& config =
-          static_cast<const pipeline::TransformProcessorNodeConfig&>(node)
-              .options;
-      result.insert("config",
-                    ParseText(config.config, FieldPath(node.id, "config")));
       break;
-    }
     case pipeline::SinkType::kSynchronizer:
       result.insert("type", "synchronizer");
       WriteSynchronizerNode(
@@ -846,14 +826,31 @@ void SavePipelineConfigToToml(const pipeline::PipelineConfig& config,
   }
 }
 
-InitConfig LoadInitConfigFromToml(const std::filesystem::path& path) {
+std::unique_ptr<pipeline::Pipeline> BuildPipelineFromToml(
+    const std::filesystem::path& path,
+    const pipeline::ProcessorBindings& bindings) {
   const auto root = ParseFile(path);
-  WarnUnknownKeys(root, {"log", "zlm"}, "");
-
-  InitConfig config;
-  ReadOptionalConfigTable(root, "log", &config.log, ReadLogConfig);
-  ReadOptionalConfigTable(root, "zlm", &config.zlm, ReadInitZlmConfig);
-  return config;
+  init::internal::RuntimeConfig init_config;
+  ReadOptionalConfigTable(root, "log", &init_config.log, ReadLogConfig);
+  ReadOptionalConfigTable(root, "zlm", &init_config.zlm, ReadInitZlmConfig);
+  init::internal::EnsureInitialized(init_config);
+  auto config = ReadPipeline(root);
+  const auto directory = std::filesystem::absolute(path).parent_path();
+  if (config.input.type == pipeline::InputType::kFile) {
+    ResolveLocalPath(&config.input.file.path, directory);
+  } else {
+    ResolveLocalPath(&config.input.options.url, directory);
+  }
+  for (const auto& sink : config.sinks) {
+    if (auto* remux = dynamic_cast<pipeline::RemuxNodeConfig*>(sink.get())) {
+      ResolveLocalPath(&remux->options.target, directory);
+    } else if (auto* synchronizer =
+                   dynamic_cast<pipeline::SynchronizerNodeConfig*>(
+                       sink.get())) {
+      ResolveLocalPath(&synchronizer->options.standby_image_path, directory);
+    }
+  }
+  return pipeline::BuildPipeline(config, bindings);
 }
 
 }  // namespace mw::streamer::config

@@ -24,6 +24,7 @@ extern "C" {
 #include "Poller/EventPoller.h"
 #include "mw/converter/zlm_codec_parameters_converter.h"
 #include "mw/converter/zlm_packet_converter.h"
+#include "mw/init/internal/runtime.h"
 #include "mw/input/internal/zlm_timestamp_reviser.h"
 #include "mw/sink/packet_sink.h"
 #include "mw/zlm/internal/config_validator.h"
@@ -208,9 +209,11 @@ class PlayerProxy::Impl final
  public:
   Impl(std::shared_ptr<toolkit::EventPoller> poller,
        ReconnectPolicy reconnect_policy)
-      : poller_(poller ? std::move(poller)
-                       : toolkit::EventPollerPool::Instance().getPoller()),
-        reconnect_policy_(reconnect_policy) {
+      : poller_(std::move(poller)), reconnect_policy_(reconnect_policy) {
+    if (!poller_) {
+      init::internal::EnsureInitialized();
+      poller_ = toolkit::EventPollerPool::Instance().getPoller();
+    }
     ValidatePolicy(reconnect_policy_);
   }
 

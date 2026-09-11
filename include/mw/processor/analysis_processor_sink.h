@@ -4,7 +4,6 @@
 #include <memory>
 #include <string>
 
-#include "mw/processor/config.h"
 #include "mw/processor/processor.h"
 #include "mw/sink/sink.h"
 
@@ -18,7 +17,7 @@ namespace mw::streamer::processor {
 // methods.
 class AnalysisProcessorSink final : public sink::Sink {
  public:
-  AnalysisProcessorSink(std::string id, processor::FileProcessorConfig config,
+  AnalysisProcessorSink(std::string id,
                         MwStreamerFileProcessorCallbacks callbacks);
   ~AnalysisProcessorSink() override;
 
@@ -31,8 +30,8 @@ class AnalysisProcessorSink final : public sink::Sink {
   void OnTimelineReset(const media::TimelineReset& reset) override;
   void OnInputEnded(const media::StreamEnded& end) override;
 
-  // Requires successful startup. Updates serialize with each other, may overlap
-  // media callbacks, and cannot overlap Stop or stream boundaries.
+  // Before startup, stores the value for on_start. Afterwards, updates
+  // serialize with each other and invoke on_config_update.
   void UpdateConfig(std::string config);
   // Waits for callbacks; pairs on_stop only with successful startup.
   // Idempotent.

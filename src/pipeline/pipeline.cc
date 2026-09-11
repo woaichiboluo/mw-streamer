@@ -15,7 +15,10 @@
 
 #include "Poller/EventPoller.h"
 #include "mw/common/thread.h"
+#include "mw/init/internal/runtime.h"
 #include "mw/log/logging.h"
+#include "mw/processor/analysis_processor_sink.h"
+#include "mw/processor/transform_processor_sink.h"
 
 namespace mw::streamer::pipeline {
 namespace {
@@ -92,6 +95,33 @@ class Pipeline::Impl final : public input::Input::Observer {
                                      std::move(receiver_id));
   }
 
+  void SetProcessorConfig(std::string processor_id, std::string config) {
+    if (processor_id.empty()) {
+      throw std::invalid_argument("Processor ID不能为空");
+    }
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    if (stopped_) {
+      throw std::logic_error("Pipeline停止后不能更新Processor配置");
+    }
+    sink::Sink* target = FindSink(processor_id);
+    if (!target) {
+      throw std::invalid_argument(
+          fmt::format("Processor不存在: {}", processor_id));
+    }
+    if (auto* analysis =
+            dynamic_cast<processor::AnalysisProcessorSink*>(target)) {
+      analysis->UpdateConfig(std::move(config));
+      return;
+    }
+    if (auto* transform =
+            dynamic_cast<processor::TransformProcessorSink*>(target)) {
+      transform->UpdateConfig(std::move(config));
+      return;
+    }
+    throw std::invalid_argument(
+        fmt::format("Sink不是Processor: {}", processor_id));
+  }
+
   void Start() {
     std::lock_guard<std::mutex> lock(control_mutex_);
     if (started_ || stopped_) {
@@ -163,6 +193,25 @@ class Pipeline::Impl final : public input::Input::Observer {
   }
 
  private:
+  sink::Sink* FindSink(const std::string& id) const {
+    if (!sinks_by_id_.empty()) {
+      const auto found = sinks_by_id_.find(id);
+      return found == sinks_by_id_.end() ? nullptr : found->second;
+    }
+    for (const auto& sink : sinks_) {
+      if (auto* found = FindSink(*sink, id)) return found;
+    }
+    return nullptr;
+  }
+
+  static sink::Sink* FindSink(sink::Sink& sink, const std::string& id) {
+    if (sink.id() == id) return &sink;
+    for (const auto& child : sink.downstream()) {
+      if (auto* found = FindSink(*child, id)) return found;
+    }
+    return nullptr;
+  }
+
   void IndexSink(sink::Sink& sink) {
     if (!sinks_by_id_.emplace(sink.id(), &sink).second) {
       throw std::invalid_argument(fmt::format("Sink ID重复: {}", sink.id()));
@@ -349,7 +398,10 @@ class Pipeline::Impl final : public input::Input::Observer {
 };
 
 Pipeline::Pipeline(std::unique_ptr<input::Input> input)
-    : impl_(std::make_unique<Impl>(std::move(input))) {}
+    : impl_([&input] {
+        init::internal::EnsureInitialized();
+        return std::make_unique<Impl>(std::move(input));
+      }()) {}
 
 Pipeline::~Pipeline() = default;
 
@@ -360,6 +412,11 @@ void Pipeline::AddSink(std::unique_ptr<sink::Sink> sink) {
 void Pipeline::SetMessageReceiver(std::string sender_id,
                                   std::string receiver_id) {
   impl_->SetMessageReceiver(std::move(sender_id), std::move(receiver_id));
+}
+
+void Pipeline::SetProcessorConfig(std::string processor_id,
+                                  std::string config) {
+  impl_->SetProcessorConfig(std::move(processor_id), std::move(config));
 }
 
 void Pipeline::Start() { impl_->Start(); }

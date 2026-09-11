@@ -73,24 +73,11 @@ device_index = 2
 id = "analysis"
 type = "analysis_processor"
 message_receiver = "transform"
-[sinks.config]
-text = "引号\"反斜杠\\换行\n"
-count = 42
-enabled = true
-values = [1, 2, 3]
-date = 2026-09-07
-[sinks.config.runtime]
-ratio = 1.25
-labels = ["left", "right"]
 
 [[sinks]]
 id = "transform"
 type = "transform_processor"
 downstream = ["sync"]
-[sinks.config]
-mode = "passthrough"
-[sinks.config.business]
-threshold = 0.75
 
 [[sinks]]
 id = "sync"
@@ -222,18 +209,9 @@ TEST_CASE("统一配置完整参数双向转换并保持节点与连接顺序") 
       FindNode<AnalysisProcessorNodeConfig>(config, "analysis");
   CHECK(analysis.type() == SinkType::kAnalysisProcessor);
   CHECK(analysis.message_receiver == "transform");
-  CHECK(analysis.options.config ==
-        FindNode<AnalysisProcessorNodeConfig>(original, "analysis")
-            .options.config);
-  CHECK(analysis.options.config.find("2026-09-07") != std::string::npos);
-  CHECK(analysis.options.config.find("[runtime]") != std::string::npos);
-  CHECK(analysis.options.config.find("true") != std::string::npos);
   const auto& transform =
       FindNode<TransformProcessorNodeConfig>(config, "transform");
   CHECK(transform.type() == SinkType::kTransformProcessor);
-  CHECK(transform.options.config ==
-        FindNode<TransformProcessorNodeConfig>(original, "transform")
-            .options.config);
 
   const auto& sync = FindNode<SynchronizerNodeConfig>(config, "sync").options;
   CHECK(sync.frame_queue_capacity == 41);
@@ -286,13 +264,9 @@ type = "analysis_processor"
         mw::streamer::decoder::VideoDecoderBackend::kCuda);
   CHECK(config.input.options.player.connect_timeout == 10000ms);
   CHECK(config.input.options.reconnect_policy.max_retries == -1);
-  CHECK(FindNode<AnalysisProcessorNodeConfig>(config, "analysis")
-            .options.config.empty());
   const auto serialized = SerializePipelineConfigToToml(config);
   auto again = ParsePipelineConfigFromToml(serialized);
   for (const auto& node : again.sinks) CHECK(node->message_receiver.empty());
-  CHECK(FindNode<AnalysisProcessorNodeConfig>(again, "analysis")
-            .options.config.empty());
 }
 
 TEST_CASE("统一配置严格拒绝错误TOML结构") {
@@ -318,13 +292,6 @@ TEST_CASE("统一配置严格拒绝错误TOML结构") {
     const auto pos = valid.find("b = \"192k\"");
     REQUIRE(pos != std::string::npos);
     valid.replace(pos, std::string("b = \"192k\"").size(), "b = 192");
-  }
-  SECTION("Processor业务配置必须为表") {
-    const auto pos = valid.find("[sinks.config]\nmode = \"passthrough\"");
-    REQUIRE(pos != std::string::npos);
-    valid.replace(pos,
-                  std::string("[sinks.config]\nmode = \"passthrough\"").size(),
-                  "config = \"opaque\"");
   }
   SECTION("无符号参数拒绝负数") {
     const auto pos = valid.find("frame_queue_capacity = 21");
@@ -445,19 +412,6 @@ TEST_CASE("统一配置校验节点参数无需启动媒体资源") {
     config.input.options.reconnect_policy.max_delay = 1s;
   }
   CHECK_THROWS_AS(ValidatePipelineConfig(config), std::invalid_argument);
-}
-
-TEST_CASE("序列化拒绝程序配置中的非法业务TOML并保护文件") {
-  TemporaryDirectory directory;
-  const auto file = directory.path() / "pipeline.toml";
-  const std::string original = "保留原文件内容";
-  Write(file, original);
-  auto config = ParsePipelineConfigFromToml(kCompleteToml);
-  FindNode<TransformProcessorNodeConfig>(config, "transform").options.config =
-      "[broken";
-  CHECK_THROWS(SerializePipelineConfigToToml(config));
-  CHECK_THROWS(SavePipelineConfigToToml(config, file));
-  CHECK(Read(file) == original);
 }
 
 TEST_CASE("程序配置无需TOML即可构建且生命周期不借用配置") {

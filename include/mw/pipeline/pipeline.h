@@ -44,6 +44,13 @@ class Pipeline final {
   // No automatic binding. Message routing is independent of media connections.
   void SetMessageReceiver(std::string sender_id, std::string receiver_id);
 
+  // Stores opaque business configuration for a Processor Sink. Before that
+  // Processor starts, its on_start callback receives the latest value; after
+  // it starts, on_config_update receives each new value. Every Processor
+  // defaults to an empty configuration string. Unknown or non-Processor IDs
+  // throw invalid_argument; calls after Stop throw logic_error.
+  void SetProcessorConfig(std::string processor_id, std::string config);
+
   // Requires at least one sink and allows one start attempt per instance.
   // Source validation errors propagate to the caller after stopping input.
   // Runtime input errors are available through input_status().

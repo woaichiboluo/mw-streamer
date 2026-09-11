@@ -69,10 +69,8 @@ MediaContract ValidateNode(const SinkConfig& config) {
       return {sink::SinkMediaType::kPacket, sink::SinkMediaType::kFrame};
     }
     case SinkType::kAnalysisProcessor:
-      static_cast<void>(Options<AnalysisProcessorNodeConfig>(config));
       return {sink::SinkMediaType::kFrame, sink::SinkMediaType::kNone};
     case SinkType::kTransformProcessor:
-      static_cast<void>(Options<TransformProcessorNodeConfig>(config));
       return {sink::SinkMediaType::kFrame, sink::SinkMediaType::kFrame};
     case SinkType::kSynchronizer: {
       const auto& options = Options<SynchronizerNodeConfig>(config);
@@ -147,12 +145,10 @@ std::unique_ptr<sink::Sink> CreateSink(const SinkConfig& config,
           config.id, Options<DecoderNodeConfig>(config));
     case SinkType::kAnalysisProcessor:
       return std::make_unique<processor::AnalysisProcessorSink>(
-          config.id, Options<AnalysisProcessorNodeConfig>(config),
-          FindCallbacks(bindings.analysis, config.id));
+          config.id, FindCallbacks(bindings.analysis, config.id));
     case SinkType::kTransformProcessor:
       return std::make_unique<processor::TransformProcessorSink>(
-          config.id, Options<TransformProcessorNodeConfig>(config),
-          FindCallbacks(bindings.transform, config.id));
+          config.id, FindCallbacks(bindings.transform, config.id));
     case SinkType::kSynchronizer:
       return std::make_unique<synchronizer::SynchronizerSink>(
           config.id, Options<SynchronizerNodeConfig>(config));

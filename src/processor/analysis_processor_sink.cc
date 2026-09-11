@@ -16,9 +16,8 @@ namespace mw::streamer::processor {
 
 class AnalysisProcessorSink::Impl final {
  public:
-  Impl(AnalysisProcessorSink& owner, processor::FileProcessorConfig config,
-       MwStreamerFileProcessorCallbacks callbacks)
-      : owner_(owner), config_(std::move(config)), callbacks_(callbacks) {}
+  Impl(AnalysisProcessorSink& owner, MwStreamerFileProcessorCallbacks callbacks)
+      : owner_(owner), callbacks_(callbacks) {}
 
   ~Impl() { Stop(); }
 
@@ -89,11 +88,13 @@ class AnalysisProcessorSink::Impl final {
     Context().End(end);
   }
 
-  void UpdateConfig(std::string config) {
+  void SetConfig(std::string config) {
     std::shared_lock<std::shared_mutex> lifecycle_lock(lifecycle_mutex_);
     std::lock_guard<std::mutex> update_lock(update_mutex_);
-    Context().UpdateConfig(config);
-    config_.config = std::move(config);
+    processor_config_ = std::move(config);
+    if (context_) {
+      Context().UpdateConfig(processor_config_);
+    }
   }
 
   bool OnMessage(const sink::SinkMessage& message) {
@@ -126,7 +127,7 @@ class AnalysisProcessorSink::Impl final {
  private:
   void Start(const media::FrameStreamsReady& streams) {
     auto context = std::make_unique<internal::ProcessorSinkContext>(streams);
-    const MwStreamerFileProcessorConfig config{config_.config.c_str()};
+    const MwStreamerFileProcessorConfig config{processor_config_.c_str()};
     const MwStreamerFileProcessorStartRequest request{
         &context->source_info(), &config, &context->execution()};
     const auto result =
@@ -137,7 +138,7 @@ class AnalysisProcessorSink::Impl final {
       throw std::runtime_error("AnalysisProcessorSink拒绝启动");
     }
     context->MarkStarted(callbacks_.user_context, callbacks_.on_boundary,
-                         callbacks_.update_config, callbacks_.on_stop);
+                         callbacks_.on_config_update, callbacks_.on_stop);
     context_ = std::move(context);
   }
 
@@ -168,7 +169,7 @@ class AnalysisProcessorSink::Impl final {
       performance::PerformanceUnit::kFrame,
       performance::PerformanceUnit::kNone};
   AnalysisProcessorSink& owner_;
-  processor::FileProcessorConfig config_;
+  std::string processor_config_;
   const MwStreamerFileProcessorCallbacks callbacks_;
   std::shared_mutex lifecycle_mutex_;
   std::mutex update_mutex_;
@@ -178,10 +179,9 @@ class AnalysisProcessorSink::Impl final {
 };
 
 AnalysisProcessorSink::AnalysisProcessorSink(
-    std::string id, processor::FileProcessorConfig config,
-    MwStreamerFileProcessorCallbacks callbacks)
+    std::string id, MwStreamerFileProcessorCallbacks callbacks)
     : sink::Sink(std::move(id), sink::SinkMediaType::kFrame),
-      impl_(std::make_unique<Impl>(*this, std::move(config), callbacks)) {}
+      impl_(std::make_unique<Impl>(*this, callbacks)) {}
 
 AnalysisProcessorSink::~AnalysisProcessorSink() { Stop(); }
 
@@ -216,7 +216,7 @@ void AnalysisProcessorSink::OnInputEnded(const media::StreamEnded& end) {
 }
 
 void AnalysisProcessorSink::UpdateConfig(std::string config) {
-  impl_->UpdateConfig(std::move(config));
+  impl_->SetConfig(std::move(config));
 }
 
 void AnalysisProcessorSink::OnMessage(const sink::SinkMessage& message) {

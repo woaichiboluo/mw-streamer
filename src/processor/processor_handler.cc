@@ -54,12 +54,12 @@ class ProcessorHandler::Impl final {
 
   void MarkStarted(void* user_context,
                    MwStreamerProcessorBoundaryCallback on_boundary,
-                   MwStreamerProcessorUpdateConfigCallback update_config,
+                   MwStreamerProcessorUpdateConfigCallback on_config_update,
                    MwStreamerProcessorStopCallback on_stop) {
     RequireReady("完成Processor启动");
     user_context_ = user_context;
     on_boundary_ = on_boundary;
-    update_config_ = update_config;
+    on_config_update_ = on_config_update;
     on_stop_ = on_stop;
     state_ = HandlerState::kStarted;
   }
@@ -74,8 +74,8 @@ class ProcessorHandler::Impl final {
 
   void UpdateConfig(std::string config) {
     RequireStarted("更新Processor配置");
-    if (update_config_) {
-      update_config_(config.c_str(), user_context_);
+    if (on_config_update_) {
+      on_config_update_(config.c_str(), user_context_);
     }
     Log::Debug("Processor运行配置更新完成：bytes={}", config.size());
   }
@@ -129,7 +129,7 @@ class ProcessorHandler::Impl final {
   HandlerState state_ = HandlerState::kReady;
   void* user_context_ = nullptr;
   MwStreamerProcessorBoundaryCallback on_boundary_ = nullptr;
-  MwStreamerProcessorUpdateConfigCallback update_config_ = nullptr;
+  MwStreamerProcessorUpdateConfigCallback on_config_update_ = nullptr;
   MwStreamerProcessorStopCallback on_stop_ = nullptr;
 };
 
@@ -157,9 +157,9 @@ void ProcessorHandler::RequireStarted(const char* operation) const {
 
 void ProcessorHandler::MarkStarted(
     void* user_context, MwStreamerProcessorBoundaryCallback on_boundary,
-    MwStreamerProcessorUpdateConfigCallback update_config,
+    MwStreamerProcessorUpdateConfigCallback on_config_update,
     MwStreamerProcessorStopCallback on_stop) {
-  impl_->MarkStarted(user_context, on_boundary, update_config, on_stop);
+  impl_->MarkStarted(user_context, on_boundary, on_config_update, on_stop);
 }
 
 void ProcessorHandler::ValidateVideoInput(

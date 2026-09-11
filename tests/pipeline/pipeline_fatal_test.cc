@@ -393,9 +393,8 @@ TEST_CASE("真实Processor链路fatal自动停止Pipeline及健康旁路") {
         [](const MwStreamerStreamingVideoProcessRequest* request, void*) {
           request->output->width = 128;
         };
-    auto transform = std::make_unique<TransformProcessorSink>(
-        "processor", mw::streamer::processor::StreamingProcessorConfig{""},
-        callbacks);
+    auto transform =
+        std::make_unique<TransformProcessorSink>("processor", callbacks);
     transform->AddSink(std::move(output));
     decoder->AddSink(std::move(transform));
   }
@@ -404,9 +403,8 @@ TEST_CASE("真实Processor链路fatal自动停止Pipeline及健康旁路") {
     callbacks.process_video = [](const MwStreamerVideoFrameView*, void*) {
       throw FatalError("processor callback fatal");
     };
-    decoder->AddSink(std::make_unique<AnalysisProcessorSink>(
-        "processor", mw::streamer::processor::FileProcessorConfig{},
-        callbacks));
+    decoder->AddSink(
+        std::make_unique<AnalysisProcessorSink>("processor", callbacks));
     decoder->AddSink(std::move(output));
   }
   pipeline.AddSink(std::move(decoder));
@@ -454,17 +452,15 @@ TEST_CASE("Processor异步消息fatal穿过Sink链路自动停止Pipeline") {
   callbacks.on_message = [](const MwStreamerMessage*, void*) {
     throw FatalError("message callback fatal");
   };
-  auto processor = std::make_unique<TransformProcessorSink>(
-      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
-      callbacks);
+  auto processor =
+      std::make_unique<TransformProcessorSink>("processor", callbacks);
   auto message_source = std::make_unique<MessageSource>(output_stop);
   pipeline.SetMessageReceiver("message_source", "processor");
   processor->AddSink(std::move(message_source));
   SECTION("直接接入Decoder") { decoder->AddSink(std::move(processor)); }
   SECTION("经过另一层Transform转交fatal") {
     auto parent = std::make_unique<TransformProcessorSink>(
-        "parent", mw::streamer::processor::StreamingProcessorConfig{""},
-        MwStreamerStreamingProcessorCallbacks{});
+        "parent", MwStreamerStreamingProcessorCallbacks{});
     parent->AddSink(std::move(processor));
     decoder->AddSink(std::move(parent));
   }

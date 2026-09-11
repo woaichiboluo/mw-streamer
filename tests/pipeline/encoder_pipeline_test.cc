@@ -328,8 +328,7 @@ TEST_CASE("新Pipeline通过Processor同步和Encoder一次编码输出两个独
   Pipeline pipeline(MakeInput());
   auto decoder = MakeDecoder();
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
-      MwStreamerStreamingProcessorCallbacks{});
+      "processor", MwStreamerStreamingProcessorCallbacks{});
   auto encoder = std::make_unique<EncoderSink>("encoder", EncoderConfig());
   auto* encoding = encoder.get();
   std::vector<RemuxSink*> outputs;
@@ -506,8 +505,7 @@ TEST_CASE("慢Processor期间同步独立备播并持续音频且恢复后两路
   Pipeline pipeline(MakeInput());
   auto decoder = MakeDecoder();
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
-      SlowProcessorCallbacks(slow_processor));
+      "processor", SlowProcessorCallbacks(slow_processor));
   auto sync_config = SynchronizerConfig();
   sync_config.standby_timeout = 100ms;
   auto synchronizer =
@@ -602,8 +600,7 @@ TEST_CASE("Encoder下游fatal穿过同步层Processor和Decoder自动停止Pipel
   auto decoder = MakeDecoder();
   const auto* decoding = decoder.get();
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor", mw::streamer::processor::StreamingProcessorConfig{""},
-      MwStreamerStreamingProcessorCallbacks{});
+      "processor", MwStreamerStreamingProcessorCallbacks{});
   auto encoder = std::make_unique<EncoderSink>("encoder", EncoderConfig());
   const auto* encoding = encoder.get();
   auto target = std::make_unique<FatalTarget>();

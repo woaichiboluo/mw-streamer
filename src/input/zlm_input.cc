@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "Poller/EventPoller.h"
+#include "mw/init/internal/runtime.h"
 #include "mw/input/player_proxy.h"
 #include "mw/media/stream_event.h"
 #include "mw/performance/operation_recorder.h"
@@ -83,6 +84,7 @@ class ZlmInput::Impl final {
       throw std::invalid_argument("输入URL不能为空");
     }
     zlm::internal::ValidatePlayerConfig(config_.player);
+    init::internal::EnsureInitialized();
     player_ = std::make_unique<input::PlayerProxy>(
         toolkit::EventPollerPool::Instance().extractPoller(),
         config_.reconnect_policy);

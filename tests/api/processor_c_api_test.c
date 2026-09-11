@@ -117,7 +117,7 @@ int main(void) {
       .process_video = ProcessVideo,
       .process_audio = ProcessAudio,
       .on_boundary = OnBoundary,
-      .update_config = UpdateConfig,
+      .on_config_update = UpdateConfig,
       .on_stop = OnStop,
   };
   const MwStreamerStreamingProcessorConfig config = {
@@ -253,7 +253,7 @@ int main(void) {
   callbacks.process_audio(&audio_request, callbacks.user_context);
 
   callbacks.on_boundary(kMwStreamerProcessorEndOfInput, callbacks.user_context);
-  callbacks.update_config("updated", callbacks.user_context);
+  callbacks.on_config_update("updated", callbacks.user_context);
   callbacks.on_stop(callbacks.user_context);
 
   if (processor.start_calls != 1 || processor.video_calls != 1 ||
@@ -273,7 +273,7 @@ int main(void) {
       .process_video = ProcessFileVideo,
       .process_audio = ProcessFileAudio,
       .on_boundary = OnBoundary,
-      .update_config = UpdateConfig,
+      .on_config_update = UpdateConfig,
       .on_stop = OnStop,
   };
   const MwStreamerFileProcessorConfig file_config = {
@@ -293,7 +293,7 @@ int main(void) {
   file_callbacks.process_audio(&audio_input, file_callbacks.user_context);
   file_callbacks.on_boundary(kMwStreamerProcessorEndOfInput,
                              file_callbacks.user_context);
-  file_callbacks.update_config("updated", file_callbacks.user_context);
+  file_callbacks.on_config_update("updated", file_callbacks.user_context);
   file_callbacks.on_stop(file_callbacks.user_context);
   if (file_processor.start_calls != 1 || file_processor.video_calls != 1 ||
       file_processor.audio_calls != 1 || file_processor.boundary_calls != 1 ||
