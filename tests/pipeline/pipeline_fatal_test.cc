@@ -388,9 +388,9 @@ TEST_CASE("真实Processor链路fatal自动停止Pipeline及健康旁路") {
   bool output_size_failure = false;
   SECTION("Transform回调改变输出尺寸") {
     output_size_failure = true;
-    MwStreamerStreamingProcessorCallbacks callbacks{};
+    MwStreamerTransformProcessorCallbacks callbacks{};
     callbacks.process_video =
-        [](const MwStreamerStreamingVideoProcessRequest* request, void*) {
+        [](const MwStreamerTransformVideoProcessRequest* request, void*) {
           request->output->width = 128;
         };
     auto transform =
@@ -399,7 +399,7 @@ TEST_CASE("真实Processor链路fatal自动停止Pipeline及健康旁路") {
     decoder->AddSink(std::move(transform));
   }
   SECTION("Analysis业务回调明确抛出FatalError") {
-    MwStreamerFileProcessorCallbacks callbacks{};
+    MwStreamerAnalysisProcessorCallbacks callbacks{};
     callbacks.process_video = [](const MwStreamerVideoFrameView*, void*) {
       throw FatalError("processor callback fatal");
     };
@@ -448,7 +448,7 @@ TEST_CASE("Processor异步消息fatal穿过Sink链路自动停止Pipeline") {
       mw::streamer::decoder::VideoDecoderBackend::kSoftware;
   auto decoder = std::make_unique<DecoderSink>("decoder", decoder_config);
   const auto* decoder_sink = decoder.get();
-  MwStreamerStreamingProcessorCallbacks callbacks{};
+  MwStreamerTransformProcessorCallbacks callbacks{};
   callbacks.on_message = [](const MwStreamerMessage*, void*) {
     throw FatalError("message callback fatal");
   };
@@ -460,7 +460,7 @@ TEST_CASE("Processor异步消息fatal穿过Sink链路自动停止Pipeline") {
   SECTION("直接接入Decoder") { decoder->AddSink(std::move(processor)); }
   SECTION("经过另一层Transform转交fatal") {
     auto parent = std::make_unique<TransformProcessorSink>(
-        "parent", MwStreamerStreamingProcessorCallbacks{});
+        "parent", MwStreamerTransformProcessorCallbacks{});
     parent->AddSink(std::move(processor));
     decoder->AddSink(std::move(parent));
   }

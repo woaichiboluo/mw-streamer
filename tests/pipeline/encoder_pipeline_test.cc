@@ -172,12 +172,12 @@ struct SlowProcessorState {
   bool standby_observed = false;
 };
 
-MwStreamerStreamingProcessorCallbacks SlowProcessorCallbacks(
+MwStreamerTransformProcessorCallbacks SlowProcessorCallbacks(
     SlowProcessorState& state) {
-  MwStreamerStreamingProcessorCallbacks callbacks{};
+  MwStreamerTransformProcessorCallbacks callbacks{};
   callbacks.user_context = &state;
   callbacks.on_start =
-      [](const MwStreamerStreamingProcessorStartRequest* request, void*) {
+      [](const MwStreamerTransformProcessorStartRequest* request, void*) {
         if (!request->video_output_size) {
           return kMwStreamerProcessorStartFailed;
         }
@@ -186,7 +186,7 @@ MwStreamerStreamingProcessorCallbacks SlowProcessorCallbacks(
         return kMwStreamerProcessorStartSuccess;
       };
   callbacks.process_video =
-      [](const MwStreamerStreamingVideoProcessRequest* request, void* context) {
+      [](const MwStreamerTransformVideoProcessRequest* request, void* context) {
         auto& state = *static_cast<SlowProcessorState*>(context);
         if (++state.video_calls == 4) {
           std::unique_lock<std::mutex> lock(state.mutex);
@@ -328,7 +328,7 @@ TEST_CASE("新Pipeline通过Processor同步和Encoder一次编码输出两个独
   Pipeline pipeline(MakeInput());
   auto decoder = MakeDecoder();
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor", MwStreamerStreamingProcessorCallbacks{});
+      "processor", MwStreamerTransformProcessorCallbacks{});
   auto encoder = std::make_unique<EncoderSink>("encoder", EncoderConfig());
   auto* encoding = encoder.get();
   std::vector<RemuxSink*> outputs;
@@ -600,7 +600,7 @@ TEST_CASE("Encoder下游fatal穿过同步层Processor和Decoder自动停止Pipel
   auto decoder = MakeDecoder();
   const auto* decoding = decoder.get();
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor", MwStreamerStreamingProcessorCallbacks{});
+      "processor", MwStreamerTransformProcessorCallbacks{});
   auto encoder = std::make_unique<EncoderSink>("encoder", EncoderConfig());
   const auto* encoding = encoder.get();
   auto target = std::make_unique<FatalTarget>();

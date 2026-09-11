@@ -440,7 +440,7 @@ TEST_CASE("DecoderSink feeds analysis and passthrough processor branches") {
     int ends = 0;
     int stops = 0;
   } calls;
-  MwStreamerFileProcessorCallbacks callbacks{};
+  MwStreamerAnalysisProcessorCallbacks callbacks{};
   callbacks.user_context = &calls;
   callbacks.process_audio = [](const MwStreamerAudioFrameView*, void* context) {
     ++static_cast<Calls*>(context)->audio;
@@ -465,7 +465,7 @@ TEST_CASE("DecoderSink feeds analysis and passthrough processor branches") {
       "analysis-processor-1", callbacks));
   decoder.AddSink(std::make_unique<FrameRecorder>("original", original));
   auto processor = std::make_unique<TransformProcessorSink>(
-      "processor", MwStreamerStreamingProcessorCallbacks{});
+      "processor", MwStreamerTransformProcessorCallbacks{});
   processor->AddSink(std::make_unique<FrameRecorder>("forwarded", forwarded));
   decoder.AddSink(std::move(processor));
   Feed(decoder, ReadSample(), 1);

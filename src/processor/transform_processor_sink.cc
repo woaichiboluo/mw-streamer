@@ -31,7 +31,7 @@ constexpr std::uint32_t kDefaultVideoOutputHeight = 1080;
 class TransformProcessorSink::Impl final {
  public:
   Impl(TransformProcessorSink& owner,
-       MwStreamerStreamingProcessorCallbacks callbacks)
+       MwStreamerTransformProcessorCallbacks callbacks)
       : owner_(owner), callbacks_(callbacks), outputs_(owner.downstream()) {}
 
   ~Impl() { Stop(); }
@@ -182,10 +182,10 @@ class TransformProcessorSink::Impl final {
       throw std::logic_error("TransformProcessorSink启动前至少需要一个下游");
     }
     auto context = std::make_unique<internal::ProcessorSinkContext>(streams);
-    const MwStreamerStreamingProcessorConfig config{processor_config_.c_str()};
+    const MwStreamerTransformProcessorConfig config{processor_config_.c_str()};
     MwStreamerVideoOutputSize video_output_size{video_output_width_,
                                                 video_output_height_};
-    const MwStreamerStreamingProcessorStartRequest request{
+    const MwStreamerTransformProcessorStartRequest request{
         &context->source_info(), &config, &context->execution(),
         context->source_info().has_video ? &video_output_size : nullptr};
     const auto result =
@@ -225,7 +225,7 @@ class TransformProcessorSink::Impl final {
     auto result = audio_allocator_->Allocate(frame);
     processor::internal::AudioBufferAdapter output(result);
     auto output_view = output.view();
-    const MwStreamerStreamingAudioProcessRequest request{&input.view(),
+    const MwStreamerTransformAudioProcessRequest request{&input.view(),
                                                          &output_view};
     callbacks_.process_audio(&request, callbacks_.user_context);
     result.CopyPropertiesFrom(frame);
@@ -240,7 +240,7 @@ class TransformProcessorSink::Impl final {
     auto result = video_allocator_->Allocate(frame);
     processor::internal::VideoBufferAdapter output(result);
     auto output_view = output.view();
-    const MwStreamerStreamingVideoProcessRequest request{&input.view(),
+    const MwStreamerTransformVideoProcessRequest request{&input.view(),
                                                          &output_view};
     callbacks_.process_video(&request, callbacks_.user_context);
     if (output_view.width != video_output_width_ ||
@@ -283,7 +283,7 @@ class TransformProcessorSink::Impl final {
       performance::PerformanceUnit::kFrame};
   TransformProcessorSink& owner_;
   std::string processor_config_;
-  const MwStreamerStreamingProcessorCallbacks callbacks_;
+  const MwStreamerTransformProcessorCallbacks callbacks_;
   std::shared_mutex lifecycle_mutex_;
   std::mutex update_mutex_;
   std::mutex stop_mutex_;
@@ -298,7 +298,7 @@ class TransformProcessorSink::Impl final {
 };
 
 TransformProcessorSink::TransformProcessorSink(
-    std::string id, MwStreamerStreamingProcessorCallbacks callbacks)
+    std::string id, MwStreamerTransformProcessorCallbacks callbacks)
     : sink::Sink(std::move(id), sink::SinkMediaType::kFrame,
                  sink::SinkMediaType::kFrame),
       impl_(std::make_unique<Impl>(*this, callbacks)) {}

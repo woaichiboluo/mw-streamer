@@ -9,16 +9,16 @@
 
 namespace mw::streamer::processor {
 
-// Synchronously consumes frames through the File Processor C callbacks; absent
-// media callbacks ignore that track. Audio/video may execute concurrently.
-// Source metadata and the hardware device must stay stable across generations.
-// Callbacks borrow their arguments and user_context remains borrowed until
-// Stop. No callback may reenter this sink's control, delivery, or destruction
-// methods.
+// Synchronously consumes frames through the Analysis Processor C callbacks;
+// absent media callbacks ignore that track. Audio/video may execute
+// concurrently. Source metadata and the hardware device must stay stable across
+// generations. Callbacks borrow their arguments and user_context remains
+// borrowed until Stop. No callback may reenter this sink's control, delivery,
+// or destruction methods.
 class AnalysisProcessorSink final : public sink::Sink {
  public:
   AnalysisProcessorSink(std::string id,
-                        MwStreamerFileProcessorCallbacks callbacks);
+                        MwStreamerAnalysisProcessorCallbacks callbacks);
   ~AnalysisProcessorSink() override;
 
   AnalysisProcessorSink(const AnalysisProcessorSink&) = delete;

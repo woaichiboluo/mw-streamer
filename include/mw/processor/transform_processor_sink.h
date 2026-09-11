@@ -10,7 +10,7 @@
 
 namespace mw::streamer::processor {
 
-// Synchronously transforms frames through Streaming Processor C callbacks and
+// Synchronously transforms frames through Transform Processor C callbacks and
 // fans out in registration order. Missing callbacks pass the original Frame;
 // on_start selects a fixed video output size, defaulting to 1920x1080. A
 // process callback that mutates its supplied output dimensions causes a
@@ -23,7 +23,7 @@ namespace mw::streamer::processor {
 class TransformProcessorSink final : public sink::Sink {
  public:
   TransformProcessorSink(std::string id,
-                         MwStreamerStreamingProcessorCallbacks callbacks);
+                         MwStreamerTransformProcessorCallbacks callbacks);
   ~TransformProcessorSink() override;
 
   TransformProcessorSink(const TransformProcessorSink&) = delete;

@@ -58,21 +58,25 @@ FFprobe 和 MediaMTX，媒体配置只需要填写一个目录。
 ## 构建运行器
 
 ```bash
-cmake -S . -B build -DBUILD_TESTS=ON \
-  -DFFMPEG_LINKAGE=SHARED \
-  -DSRT_LINKAGE=SHARED
+cmake -S . -B build -DBUILD_TESTS=ON
 cmake --build build --target mw_streamer_e2e_runner -j
 ```
 
-如果机器同时安装了多套 FFmpeg，应在配置 CMake 时通过
-`FFmpeg_ROOT` 明确选择与项目一致的版本：
+FFmpeg 和 SRT 自动接受平台能够找到的共享库或静态库。FFmpeg 必须为
+5.0 或更高版本，并安装
+`pkg-config` 或兼容的 `pkgconf`，并为所用组件提供 `.pc` 文件。依赖位于非标准前缀
+或机器同时安装了多套依赖时，统一通过 `FFMPEG_ROOT`、`SRT_ROOT` 和
+`OPENSSL_ROOT` 指定各自的安装根目录：
 
 ```bash
 cmake -S . -B build -DBUILD_TESTS=ON \
-  -DFFMPEG_LINKAGE=SHARED \
-  -DSRT_LINKAGE=SHARED \
-  -DFFmpeg_ROOT=/absolute/path/to/ffmpeg
+  -DFFMPEG_ROOT=/absolute/path/to/ffmpeg \
+  -DSRT_ROOT=/absolute/path/to/srt \
+  -DOPENSSL_ROOT=/absolute/path/to/openssl
 ```
+
+也可以使用 CMake 通用的 `CMAKE_PREFIX_PATH` 提供查找前缀。FFmpeg 各组件的 `.pc`
+文件仍须位于对应安装根目录的标准 pkg-config 目录中，或可由 `PKG_CONFIG_PATH` 找到。
 
 ## 运行测试
 

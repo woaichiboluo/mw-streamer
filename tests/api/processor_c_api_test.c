@@ -14,7 +14,7 @@ typedef struct TestProcessor {
 } TestProcessor;
 
 static MwStreamerProcessorStartResult OnStart(
-    const MwStreamerStreamingProcessorStartRequest* request,
+    const MwStreamerTransformProcessorStartRequest* request,
     void* user_context) {
   TestProcessor* processor = user_context;
   if (!request->source_info->has_video || !request->source_info->has_audio ||
@@ -34,7 +34,7 @@ static MwStreamerProcessorStartResult OnStart(
   return kMwStreamerProcessorStartSuccess;
 }
 
-static void ProcessVideo(const MwStreamerStreamingVideoProcessRequest* request,
+static void ProcessVideo(const MwStreamerTransformVideoProcessRequest* request,
                          void* user_context) {
   TestProcessor* processor = user_context;
   if (request->input->buffer.width == 3840 && request->output->width == 1280 &&
@@ -47,7 +47,7 @@ static void ProcessVideo(const MwStreamerStreamingVideoProcessRequest* request,
   }
 }
 
-static void ProcessAudio(const MwStreamerStreamingAudioProcessRequest* request,
+static void ProcessAudio(const MwStreamerTransformAudioProcessRequest* request,
                          void* user_context) {
   TestProcessor* processor = user_context;
   const size_t sample_count =
@@ -84,7 +84,8 @@ static void OnStop(void* user_context) {
 }
 
 static MwStreamerProcessorStartResult OnFileStart(
-    const MwStreamerFileProcessorStartRequest* request, void* user_context) {
+    const MwStreamerAnalysisProcessorStartRequest* request,
+    void* user_context) {
   TestProcessor* processor = user_context;
   if (!request->source_info->has_video || !request->source_info->has_audio ||
       strcmp(request->config->config, "file") != 0 ||
@@ -111,7 +112,7 @@ static void ProcessFileAudio(const MwStreamerAudioFrameView* input,
 
 int main(void) {
   TestProcessor processor = {0};
-  MwStreamerStreamingProcessorCallbacks callbacks = {
+  MwStreamerTransformProcessorCallbacks callbacks = {
       .user_context = &processor,
       .on_start = OnStart,
       .process_video = ProcessVideo,
@@ -120,7 +121,7 @@ int main(void) {
       .on_config_update = UpdateConfig,
       .on_stop = OnStop,
   };
-  const MwStreamerStreamingProcessorConfig config = {
+  const MwStreamerTransformProcessorConfig config = {
       .config = "initial",
   };
   const MwStreamerProcessorSourceInfo source_info = {
@@ -192,7 +193,7 @@ int main(void) {
       .type = kMwStreamerExecutionCuda,
   };
   MwStreamerVideoOutputSize video_output_size = {.width = 1920, .height = 1080};
-  const MwStreamerStreamingProcessorStartRequest start_request = {
+  const MwStreamerTransformProcessorStartRequest start_request = {
       .source_info = &source_info,
       .config = &config,
       .execution = &execution,
@@ -206,7 +207,7 @@ int main(void) {
     return 1;
   }
 
-  const MwStreamerStreamingVideoProcessRequest video_request = {
+  const MwStreamerTransformVideoProcessRequest video_request = {
       .input = &video_input,
       .output =
           &(MwStreamerVideoBufferView){
@@ -241,7 +242,7 @@ int main(void) {
               .time_base = {.num = 1, .den = 48000},
           },
   };
-  const MwStreamerStreamingAudioProcessRequest audio_request = {
+  const MwStreamerTransformAudioProcessRequest audio_request = {
       .input = &audio_input,
       .output =
           &(MwStreamerAudioBufferView){
@@ -266,9 +267,9 @@ int main(void) {
     return 1;
   }
 
-  TestProcessor file_processor = {0};
-  const MwStreamerFileProcessorCallbacks file_callbacks = {
-      .user_context = &file_processor,
+  TestProcessor analysis_processor = {0};
+  const MwStreamerAnalysisProcessorCallbacks analysis_callbacks = {
+      .user_context = &analysis_processor,
       .on_start = OnFileStart,
       .process_video = ProcessFileVideo,
       .process_audio = ProcessFileAudio,
@@ -276,28 +277,34 @@ int main(void) {
       .on_config_update = UpdateConfig,
       .on_stop = OnStop,
   };
-  const MwStreamerFileProcessorConfig file_config = {
+  const MwStreamerAnalysisProcessorConfig analysis_config = {
       .config = "file",
   };
-  const MwStreamerFileProcessorStartRequest file_start_request = {
+  const MwStreamerAnalysisProcessorStartRequest analysis_start_request = {
       .source_info = &source_info,
-      .config = &file_config,
+      .config = &analysis_config,
       .execution = &execution,
   };
-  if (file_callbacks.on_start(&file_start_request,
-                              file_callbacks.user_context) !=
+  if (analysis_callbacks.on_start(&analysis_start_request,
+                                  analysis_callbacks.user_context) !=
       kMwStreamerProcessorStartSuccess) {
     return 1;
   }
-  file_callbacks.process_video(&video_input, file_callbacks.user_context);
-  file_callbacks.process_audio(&audio_input, file_callbacks.user_context);
-  file_callbacks.on_boundary(kMwStreamerProcessorEndOfInput,
-                             file_callbacks.user_context);
-  file_callbacks.on_config_update("updated", file_callbacks.user_context);
-  file_callbacks.on_stop(file_callbacks.user_context);
-  if (file_processor.start_calls != 1 || file_processor.video_calls != 1 ||
-      file_processor.audio_calls != 1 || file_processor.boundary_calls != 1 ||
-      file_processor.update_calls != 1 || file_processor.stop_calls != 1) {
+  analysis_callbacks.process_video(&video_input,
+                                   analysis_callbacks.user_context);
+  analysis_callbacks.process_audio(&audio_input,
+                                   analysis_callbacks.user_context);
+  analysis_callbacks.on_boundary(kMwStreamerProcessorEndOfInput,
+                                 analysis_callbacks.user_context);
+  analysis_callbacks.on_config_update("updated",
+                                      analysis_callbacks.user_context);
+  analysis_callbacks.on_stop(analysis_callbacks.user_context);
+  if (analysis_processor.start_calls != 1 ||
+      analysis_processor.video_calls != 1 ||
+      analysis_processor.audio_calls != 1 ||
+      analysis_processor.boundary_calls != 1 ||
+      analysis_processor.update_calls != 1 ||
+      analysis_processor.stop_calls != 1) {
     return 1;
   }
   return 0;

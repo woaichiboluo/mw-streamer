@@ -13,20 +13,12 @@ file(WRITE "${_package_root}/include/srt/version.h"
     "#define SRT_VERSION_STRING \"1.5.6\"\n"
 )
 
-set(_linkage)
 set(_system_arguments)
-set(_expected_target_type)
-if(CASE STREQUAL "linkage_required")
-    file(MAKE_DIRECTORY "${_package_root}/lib")
-    file(WRITE "${_package_root}/lib/libsrt.so" "")
-elseif(CASE STREQUAL "linux_shared")
-    set(_linkage SHARED)
-    set(_expected_target_type SHARED_LIBRARY)
+set(_expected_target_type UNKNOWN_LIBRARY)
+if(CASE STREQUAL "linux_shared")
     file(MAKE_DIRECTORY "${_package_root}/lib")
     file(WRITE "${_package_root}/lib/libsrt.so" "")
 elseif(CASE STREQUAL "linux_static")
-    set(_linkage STATIC)
-    set(_expected_target_type STATIC_LIBRARY)
     file(MAKE_DIRECTORY "${_package_root}/lib/pkgconfig")
     file(WRITE "${_package_root}/lib/libsrt.a" "")
     file(WRITE "${_package_root}/lib/pkgconfig/srt.pc"
@@ -40,9 +32,11 @@ elseif(CASE STREQUAL "linux_static")
         "Libs.private: -lssl -lcrypto -pthread\n"
         "Cflags: -I\${includedir}\n"
     )
+elseif(CASE STREQUAL "linux_shared_and_static")
+    file(MAKE_DIRECTORY "${_package_root}/lib")
+    file(WRITE "${_package_root}/lib/libsrt.so" "")
+    file(WRITE "${_package_root}/lib/libsrt.a" "")
 elseif(CASE STREQUAL "windows_shared")
-    set(_linkage SHARED)
-    set(_expected_target_type SHARED_LIBRARY)
     list(APPEND _system_arguments
         -DCMAKE_SYSTEM_NAME=Windows
         -DCMAKE_SYSTEM_PROCESSOR=x86_64
@@ -54,8 +48,6 @@ elseif(CASE STREQUAL "windows_shared")
     file(WRITE "${_package_root}/lib/Release-x64/srt.lib" "")
     file(WRITE "${_package_root}/bin/Release-x64/srt.dll" "")
 elseif(CASE STREQUAL "windows_static")
-    set(_linkage STATIC)
-    set(_expected_target_type STATIC_LIBRARY)
     list(APPEND _system_arguments
         -DCMAKE_SYSTEM_NAME=Windows
         -DCMAKE_SYSTEM_PROCESSOR=x86_64
@@ -74,8 +66,6 @@ elseif(CASE STREQUAL "windows_static")
         "</Link></ItemDefinitionGroup></Project>"
     )
 elseif(CASE STREQUAL "windows_static_pkg_config")
-    set(_linkage STATIC)
-    set(_expected_target_type STATIC_LIBRARY)
     list(APPEND _system_arguments
         -DCMAKE_SYSTEM_NAME=Windows
         -DCMAKE_SYSTEM_PROCESSOR=x86_64
@@ -109,12 +99,9 @@ set(_command
     "-DEXPECTED_TARGET_TYPE=${_expected_target_type}"
     "-DFIND_SRT_MODULE_DIR=${FIND_SRT_MODULE_DIR}"
     "-DSRT_ROOT=${_package_root}"
+    "-DCMAKE_IGNORE_PREFIX_PATH=/usr/local"
     ${_system_arguments}
 )
-if(_linkage)
-    list(APPEND _command "-DSRT_LINKAGE=${_linkage}")
-endif()
-
 execute_process(
     COMMAND ${_command}
     RESULT_VARIABLE _result
@@ -122,16 +109,7 @@ execute_process(
     ERROR_VARIABLE _stderr
 )
 
-if(CASE STREQUAL "linkage_required")
-    if(_result EQUAL 0 OR
-       NOT "${_stdout}${_stderr}" MATCHES
-           "SRT_LINKAGE must be explicitly set to STATIC or SHARED")
-        message(FATAL_ERROR
-            "Missing SRT_LINKAGE was not rejected as expected:\n"
-            "${_stdout}${_stderr}"
-        )
-    endif()
-elseif(NOT _result EQUAL 0)
+if(NOT _result EQUAL 0)
     message(FATAL_ERROR
         "FindSRT ${CASE} fixture failed:\n${_stdout}${_stderr}"
     )

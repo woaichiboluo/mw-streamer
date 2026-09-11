@@ -183,10 +183,10 @@ void ReceiveMessage(const MwStreamerMessage* message, void* context) {
            : std::nullopt});
 }
 
-MwStreamerStreamingProcessorCallbacks Callbacks(MessageState& state) {
-  MwStreamerStreamingProcessorCallbacks callbacks{};
+MwStreamerTransformProcessorCallbacks Callbacks(MessageState& state) {
+  MwStreamerTransformProcessorCallbacks callbacks{};
   callbacks.user_context = &state;
-  callbacks.on_start = [](const MwStreamerStreamingProcessorStartRequest*,
+  callbacks.on_start = [](const MwStreamerTransformProcessorStartRequest*,
                           void*) { return kMwStreamerProcessorStartSuccess; };
   callbacks.on_message = ReceiveMessage;
   callbacks.on_stop = [](void* context) {
@@ -458,7 +458,7 @@ TEST_CASE("消息回调内再次发送仍异步执行且不会重入接收者") 
   } state;
   auto done = state.done.get_future();
   MessageGraph graph;
-  MwStreamerStreamingProcessorCallbacks callbacks{};
+  MwStreamerTransformProcessorCallbacks callbacks{};
   callbacks.user_context = &state;
   callbacks.on_message = [](const MwStreamerMessage* message, void* context) {
     auto& state = *static_cast<State*>(context);
@@ -670,11 +670,10 @@ TEST_CASE("Pipeline停止丢弃积压并等待消息回调后才停止Processor"
 TEST_CASE("AnalysisProcessor通过Pipeline公共消息循环接收回调") {
   MessageState state;
   MessageGraph graph;
-  MwStreamerFileProcessorCallbacks callbacks{};
+  MwStreamerAnalysisProcessorCallbacks callbacks{};
   callbacks.user_context = &state;
-  callbacks.on_start = [](const MwStreamerFileProcessorStartRequest*, void*) {
-    return kMwStreamerProcessorStartSuccess;
-  };
+  callbacks.on_start = [](const MwStreamerAnalysisProcessorStartRequest*,
+                          void*) { return kMwStreamerProcessorStartSuccess; };
   callbacks.on_message = ReceiveMessage;
   callbacks.on_stop = [](void* context) {
     static_cast<MessageState*>(context)->Stopped();

@@ -15,8 +15,8 @@ namespace mw::streamer::pipeline {
 // Unspecified callbacks retain each Processor's existing passthrough/ignore
 // semantics. Callback contexts are borrowed until the built Pipeline stops.
 struct ProcessorBindings {
-  std::map<std::string, MwStreamerFileProcessorCallbacks> analysis;
-  std::map<std::string, MwStreamerStreamingProcessorCallbacks> transform;
+  std::map<std::string, MwStreamerAnalysisProcessorCallbacks> analysis;
+  std::map<std::string, MwStreamerTransformProcessorCallbacks> transform;
 };
 
 // Validates and constructs an exclusively owned tree, with message routes

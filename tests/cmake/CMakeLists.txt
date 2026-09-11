@@ -3,9 +3,9 @@ set(_MW_FIND_SRT_TEST_SCRIPT
 )
 
 foreach(_case IN ITEMS
-        linkage_required
         linux_shared
         linux_static
+        linux_shared_and_static
         windows_shared
         windows_static
         windows_static_pkg_config
@@ -29,8 +29,10 @@ set(_MW_FIND_FFMPEG_TEST_SCRIPT
 )
 
 foreach(_case IN ITEMS
-        linkage_required
         pkg_config_required
+        old_avcodec
+        linux_auto
+        root_selection
         linux_shared
         linux_static
         windows_shared

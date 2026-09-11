@@ -1,7 +1,7 @@
-add_executable(mw_remux_sink_example
-    remux_sink_example.cc
+add_executable(mw_pipeline_remux_example
+    pipeline_remux_example.cc
 )
 
-target_link_libraries(mw_remux_sink_example
+target_link_libraries(mw_pipeline_remux_example
     PRIVATE mw::streamer
 )

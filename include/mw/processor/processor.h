@@ -223,78 +223,79 @@ typedef struct MwStreamerProcessorSourceInfo {
 
 // config is a null-terminated opaque user string supplied by the host through
 // Pipeline::SetProcessorConfig.
-typedef struct MwStreamerStreamingProcessorConfig {
+typedef struct MwStreamerTransformProcessorConfig {
   const char* config;
-} MwStreamerStreamingProcessorConfig;
+} MwStreamerTransformProcessorConfig;
 
 typedef struct MwStreamerVideoOutputSize {
   uint32_t width;
   uint32_t height;
 } MwStreamerVideoOutputSize;
 
-typedef struct MwStreamerFileProcessorConfig {
+typedef struct MwStreamerAnalysisProcessorConfig {
   const char* config;
-} MwStreamerFileProcessorConfig;
+} MwStreamerAnalysisProcessorConfig;
 
-typedef struct MwStreamerStreamingVideoProcessRequest {
+typedef struct MwStreamerTransformVideoProcessRequest {
   const MwStreamerVideoFrameView* input;
   // The framework attaches input->timestamp to the completed output frame.
   MwStreamerVideoBufferView* output;
-} MwStreamerStreamingVideoProcessRequest;
+} MwStreamerTransformVideoProcessRequest;
 
-typedef struct MwStreamerStreamingAudioProcessRequest {
+typedef struct MwStreamerTransformAudioProcessRequest {
   const MwStreamerAudioFrameView* input;
   // The framework attaches input->timestamp to the completed output frame.
   MwStreamerAudioBufferView* output;
-} MwStreamerStreamingAudioProcessRequest;
+} MwStreamerTransformAudioProcessRequest;
 
-typedef struct MwStreamerStreamingProcessorStartRequest {
+typedef struct MwStreamerTransformProcessorStartRequest {
   const MwStreamerProcessorSourceInfo* source_info;
-  const MwStreamerStreamingProcessorConfig* config;
+  const MwStreamerTransformProcessorConfig* config;
   const MwStreamerExecutionContext* execution;
   // Non-null only when source_info->has_video is true. The framework
   // initializes it to 1920x1080 before on_start. The callback may overwrite
   // it before returning success; the resulting dimensions remain fixed for
   // the Processor lifetime.
   MwStreamerVideoOutputSize* video_output_size;
-} MwStreamerStreamingProcessorStartRequest;
+} MwStreamerTransformProcessorStartRequest;
 
-typedef struct MwStreamerFileProcessorStartRequest {
+typedef struct MwStreamerAnalysisProcessorStartRequest {
   const MwStreamerProcessorSourceInfo* source_info;
-  const MwStreamerFileProcessorConfig* config;
+  const MwStreamerAnalysisProcessorConfig* config;
   const MwStreamerExecutionContext* execution;
-} MwStreamerFileProcessorStartRequest;
+} MwStreamerAnalysisProcessorStartRequest;
 
 // A failed callback must release any partially initialized user resources
 // before returning. on_stop is paired only with a successful on_start.
 typedef MwStreamerProcessorStartResult (
-    *MwStreamerStreamingProcessorStartCallback)(
-    const MwStreamerStreamingProcessorStartRequest* request,
+    *MwStreamerTransformProcessorStartCallback)(
+    const MwStreamerTransformProcessorStartRequest* request,
     void* user_context);
 
-typedef MwStreamerProcessorStartResult (*MwStreamerFileProcessorStartCallback)(
-    const MwStreamerFileProcessorStartRequest* request, void* user_context);
+typedef MwStreamerProcessorStartResult (
+    *MwStreamerAnalysisProcessorStartCallback)(
+    const MwStreamerAnalysisProcessorStartRequest* request, void* user_context);
 
-// Every Streaming callback must completely produce one output for one input.
+// Every Transform callback must completely produce one output for one input.
 // All writes to output must be complete when the callback returns. A Processor
 // using an asynchronous backend must establish input readiness before reading
 // GPU memory and finish its output writes before returning. The core does not
 // wait for GPU work before invoking callbacks; the provided adapters handle
 // synchronization at their copy boundaries.
-typedef void (*MwStreamerStreamingProcessVideoCallback)(
-    const MwStreamerStreamingVideoProcessRequest* request, void* user_context);
+typedef void (*MwStreamerTransformProcessVideoCallback)(
+    const MwStreamerTransformVideoProcessRequest* request, void* user_context);
 
-// Audio presented to Streaming Processor is always 48 kHz float32 interleaved.
+// Audio presented to Transform Processor is always 48 kHz float32 interleaved.
 // The output has the same channel count and samples_per_channel as the input.
-typedef void (*MwStreamerStreamingProcessAudioCallback)(
-    const MwStreamerStreamingAudioProcessRequest* request, void* user_context);
+typedef void (*MwStreamerTransformProcessAudioCallback)(
+    const MwStreamerTransformAudioProcessRequest* request, void* user_context);
 
-// File callbacks consume decoded input without allocating or producing an
+// Analysis callbacks consume decoded input without allocating or producing an
 // output media frame. GPU input access has the same synchronization contract
-// as Streaming video callbacks.
-typedef void (*MwStreamerFileProcessVideoCallback)(
+// as Transform video callbacks.
+typedef void (*MwStreamerAnalysisProcessVideoCallback)(
     const MwStreamerVideoFrameView* input, void* user_context);
-typedef void (*MwStreamerFileProcessAudioCallback)(
+typedef void (*MwStreamerAnalysisProcessAudioCallback)(
     const MwStreamerAudioFrameView* input, void* user_context);
 
 // Optional input boundary notification. Timeline reset is called after all
@@ -324,7 +325,7 @@ typedef struct MwStreamerMessage {
 typedef void (*MwStreamerProcessorMessageCallback)(
     const MwStreamerMessage* message, void* user_context);
 
-typedef struct MwStreamerStreamingProcessorCallbacks {
+typedef struct MwStreamerTransformProcessorCallbacks {
   // Borrowed user data returned unchanged to every callback. The framework
   // never reads or releases it.
   void* user_context;
@@ -333,9 +334,9 @@ typedef struct MwStreamerStreamingProcessorCallbacks {
   // and a writable default video output size before the first process callback.
   // User code that needs the backend stream must copy it into user_context
   // here. All request views are borrowed for the callback.
-  MwStreamerStreamingProcessorStartCallback on_start;
-  MwStreamerStreamingProcessVideoCallback process_video;
-  MwStreamerStreamingProcessAudioCallback process_audio;
+  MwStreamerTransformProcessorStartCallback on_start;
+  MwStreamerTransformProcessVideoCallback process_video;
+  MwStreamerTransformProcessAudioCallback process_audio;
 
   // Optional. A boundary is emitted once for the whole Processor, not once per
   // audio or video stream.
@@ -356,16 +357,16 @@ typedef struct MwStreamerStreamingProcessorCallbacks {
   // may run concurrently with audio and video processing. The message and all
   // referenced data are borrowed for the callback.
   MwStreamerProcessorMessageCallback on_message;
-} MwStreamerStreamingProcessorCallbacks;
+} MwStreamerTransformProcessorCallbacks;
 
-typedef struct MwStreamerFileProcessorCallbacks {
+typedef struct MwStreamerAnalysisProcessorCallbacks {
   // Borrowed user data returned unchanged to every callback. The framework
   // never reads or releases it.
   void* user_context;
 
-  MwStreamerFileProcessorStartCallback on_start;
-  MwStreamerFileProcessVideoCallback process_video;
-  MwStreamerFileProcessAudioCallback process_audio;
+  MwStreamerAnalysisProcessorStartCallback on_start;
+  MwStreamerAnalysisProcessVideoCallback process_video;
+  MwStreamerAnalysisProcessAudioCallback process_audio;
 
   // Optional. A boundary is emitted once for the whole Processor, not once per
   // audio or video stream.
@@ -379,9 +380,9 @@ typedef struct MwStreamerFileProcessorCallbacks {
   MwStreamerProcessorStopCallback on_stop;
 
   // Optional. AnalysisProcessorSink delivers messages asynchronously, with the
-  // same lifetime and concurrency contract as the Streaming on_message hook.
+  // same lifetime and concurrency contract as the Transform on_message hook.
   MwStreamerProcessorMessageCallback on_message;
-} MwStreamerFileProcessorCallbacks;
+} MwStreamerAnalysisProcessorCallbacks;
 
 #ifdef __cplusplus
 }

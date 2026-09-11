@@ -142,14 +142,14 @@ void NormalizeColorInfo(MwStreamerVideoColorInfo* color) {
 }
 
 MwStreamerVideoFrameView MakeInputPrototype(
-    const MwStreamerStreamingVideoProcessRequest& request) {
+    const MwStreamerTransformVideoProcessRequest& request) {
   auto prototype = *request.input;
   NormalizeColorInfo(&prototype.color);
   return prototype;
 }
 
 MwStreamerVideoFrameView MakeOutputPrototype(
-    const MwStreamerStreamingVideoProcessRequest& request,
+    const MwStreamerTransformVideoProcessRequest& request,
     const MwStreamerVideoColorInfo& color) {
   MwStreamerVideoFrameView prototype{};
   prototype.buffer = *request.output;
@@ -218,7 +218,7 @@ bool HasOsd(const cv::Mat& image) {
 }
 
 MwStreamerProcessorStartResult OnProcessorStart(
-    const MwStreamerStreamingProcessorStartRequest* request,
+    const MwStreamerTransformProcessorStartRequest* request,
     void* user_context) {
   const auto* state = static_cast<const ProcessorState*>(user_context);
   if (!request || !request->source_info || !request->execution || !state ||
@@ -236,7 +236,7 @@ MwStreamerProcessorStartResult OnProcessorStart(
   return kMwStreamerProcessorStartSuccess;
 }
 
-void ProcessVideo(const MwStreamerStreamingVideoProcessRequest* request,
+void ProcessVideo(const MwStreamerTransformVideoProcessRequest* request,
                   void* user_context) {
   auto* state = static_cast<ProcessorState*>(user_context);
   if (!request || !request->input || !request->output || !state ||
@@ -347,7 +347,7 @@ TEST_CASE("OpenCV Adapter通过Pipeline叠加OSD并写回软硬件输出") {
       TestDirectory directory;
       ProcessorState state;
       state.test_case = &test_case;
-      MwStreamerStreamingProcessorCallbacks callbacks{};
+      MwStreamerTransformProcessorCallbacks callbacks{};
       callbacks.user_context = &state;
       callbacks.on_start = OnProcessorStart;
       callbacks.process_video = ProcessVideo;

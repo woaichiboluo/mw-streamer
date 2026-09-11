@@ -465,7 +465,7 @@ class DecodedObservationSink final : public mw::streamer::sink::Sink {
   EventWriter& events_;
 };
 
-struct FileProcessorObserver {
+struct AnalysisProcessorObserver {
   std::atomic_bool has_audio{false};
   std::atomic_bool has_video{false};
   EventWriter* events = nullptr;
@@ -476,9 +476,10 @@ struct FileProcessorObserver {
   std::atomic_uint64_t stop_count{0};
 };
 
-MwStreamerProcessorStartResult OnFileProcessorStart(
-    const MwStreamerFileProcessorStartRequest* request, void* user_context) {
-  auto* observer = static_cast<FileProcessorObserver*>(user_context);
+MwStreamerProcessorStartResult OnAnalysisProcessorStart(
+    const MwStreamerAnalysisProcessorStartRequest* request,
+    void* user_context) {
+  auto* observer = static_cast<AnalysisProcessorObserver*>(user_context);
   if (!observer || !observer->events || !request || !request->source_info ||
       !request->config || !request->execution) {
     return kMwStreamerProcessorStartFailed;
@@ -499,33 +500,33 @@ MwStreamerProcessorStartResult OnFileProcessorStart(
 
 void ProcessFileVideo(const MwStreamerVideoFrameView* input,
                       void* user_context) {
-  auto* observer = static_cast<FileProcessorObserver*>(user_context);
+  auto* observer = static_cast<AnalysisProcessorObserver*>(user_context);
   if (!observer || !input || input->buffer.width == 0 ||
       input->buffer.height == 0 ||
       input->buffer.memory_type != kMwStreamerMemoryHost) {
-    throw std::invalid_argument("E2E File Processor视频帧无效");
+    throw std::invalid_argument("E2E Analysis Processor视频帧无效");
   }
   observer->video_frames.fetch_add(1, std::memory_order_relaxed);
 }
 
 void ProcessFileAudio(const MwStreamerAudioFrameView* input,
                       void* user_context) {
-  auto* observer = static_cast<FileProcessorObserver*>(user_context);
+  auto* observer = static_cast<AnalysisProcessorObserver*>(user_context);
   if (!observer || !input || !input->data || input->sample_rate != 48000 ||
       input->channel_count == 0 || input->samples_per_channel == 0) {
-    throw std::invalid_argument("E2E File Processor音频帧无效");
+    throw std::invalid_argument("E2E Analysis Processor音频帧无效");
   }
   observer->audio_frames.fetch_add(1, std::memory_order_relaxed);
   observer->audio_samples.fetch_add(input->samples_per_channel,
                                     std::memory_order_relaxed);
 }
 
-void OnFileProcessorBoundary(MwStreamerProcessorBoundaryReason reason,
-                             void* user_context) {
-  auto* observer = static_cast<FileProcessorObserver*>(user_context);
+void OnAnalysisProcessorBoundary(MwStreamerProcessorBoundaryReason reason,
+                                 void* user_context) {
+  auto* observer = static_cast<AnalysisProcessorObserver*>(user_context);
   if (!observer || !observer->events ||
       reason != kMwStreamerProcessorEndOfInput) {
-    throw std::invalid_argument("E2E File Processor收到未知边界");
+    throw std::invalid_argument("E2E Analysis Processor收到未知边界");
   }
   const auto count =
       observer->end_of_input_count.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -534,8 +535,8 @@ void OnFileProcessorBoundary(MwStreamerProcessorBoundaryReason reason,
       {{"reason", "end_of_input"}, {"count", std::to_string(count)}});
 }
 
-void OnFileProcessorStop(void* user_context) {
-  auto* observer = static_cast<FileProcessorObserver*>(user_context);
+void OnAnalysisProcessorStop(void* user_context) {
+  auto* observer = static_cast<AnalysisProcessorObserver*>(user_context);
   if (!observer || !observer->events) {
     return;
   }
@@ -546,7 +547,7 @@ void OnFileProcessorStop(void* user_context) {
 }
 
 MwStreamerProcessorStartResult OnProcessorStart(
-    const MwStreamerStreamingProcessorStartRequest* request,
+    const MwStreamerTransformProcessorStartRequest* request,
     void* user_context) {
   auto* observer = static_cast<ProcessorObserver*>(user_context);
   if (!observer || !observer->events || !request || !request->source_info ||
@@ -668,7 +669,7 @@ void CopyCudaVideo(const MwStreamerVideoBufferView& input,
   }
 }
 
-void ProcessVideo(const MwStreamerStreamingVideoProcessRequest* request,
+void ProcessVideo(const MwStreamerTransformVideoProcessRequest* request,
                   void* user_context) {
   auto* observer = static_cast<ProcessorObserver*>(user_context);
   if (!observer || !request || !request->input || !request->output) {
@@ -972,12 +973,13 @@ std::unique_ptr<mw::streamer::output::RemuxSink> MakeRemux(
 }
 
 MwStreamerProcessorStartResult OnAnalysisStart(
-    const MwStreamerFileProcessorStartRequest* request, void* user_context) {
+    const MwStreamerAnalysisProcessorStartRequest* request,
+    void* user_context) {
   if (!request) return kMwStreamerProcessorStartFailed;
-  MwStreamerStreamingProcessorConfig config{};
+  MwStreamerTransformProcessorConfig config{};
   config.config = request->config->config;
   MwStreamerVideoOutputSize video_output_size{};
-  const MwStreamerStreamingProcessorStartRequest adapted{
+  const MwStreamerTransformProcessorStartRequest adapted{
       request->source_info, &config, request->execution, &video_output_size};
   return OnProcessorStart(&adapted, user_context);
 }
@@ -1041,7 +1043,7 @@ std::unique_ptr<mw::streamer::sink::Sink> MakeProcessor(
     const Arguments& arguments, ProcessorObserver& observer,
     LocalSinkObserver& local_observer, std::vector<SinkProbe>& probes) {
   if (arguments.outputs.empty() && !arguments.local_sink) {
-    MwStreamerFileProcessorCallbacks callbacks{};
+    MwStreamerAnalysisProcessorCallbacks callbacks{};
     callbacks.user_context = &observer;
     callbacks.on_start = OnAnalysisStart;
     callbacks.on_boundary = OnProcessorBoundary;
@@ -1049,7 +1051,7 @@ std::unique_ptr<mw::streamer::sink::Sink> MakeProcessor(
     return std::make_unique<mw::streamer::processor::AnalysisProcessorSink>(
         "processor", callbacks);
   }
-  MwStreamerStreamingProcessorCallbacks callbacks{};
+  MwStreamerTransformProcessorCallbacks callbacks{};
   callbacks.user_context = &observer;
   callbacks.on_start = OnProcessorStart;
   callbacks.process_video =
@@ -1172,15 +1174,15 @@ std::uint64_t OutputCount(const performance::PipelineSnapshot& snapshot,
 }
 
 int RunFile(const Arguments& arguments, EventWriter& events) {
-  FileProcessorObserver observer;
+  AnalysisProcessorObserver observer;
   observer.events = &events;
-  MwStreamerFileProcessorCallbacks callbacks{};
+  MwStreamerAnalysisProcessorCallbacks callbacks{};
   callbacks.user_context = &observer;
-  callbacks.on_start = OnFileProcessorStart;
+  callbacks.on_start = OnAnalysisProcessorStart;
   callbacks.process_video = ProcessFileVideo;
   callbacks.process_audio = ProcessFileAudio;
-  callbacks.on_boundary = OnFileProcessorBoundary;
-  callbacks.on_stop = OnFileProcessorStop;
+  callbacks.on_boundary = OnAnalysisProcessorBoundary;
+  callbacks.on_stop = OnAnalysisProcessorStop;
   mw::streamer::input::FileInputConfig input{arguments.input};
   pipeline::Pipeline chain(
       std::make_unique<mw::streamer::input::FileInput>(input));

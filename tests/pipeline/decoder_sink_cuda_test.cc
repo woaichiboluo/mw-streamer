@@ -121,7 +121,7 @@ TEST_CASE("DecoderSink CUDA frames outlive the decoder context") {
   }
   SECTION("processor without a callback preserves CUDA storage") {
     auto processor = std::make_unique<TransformProcessorSink>(
-        "processor", MwStreamerStreamingProcessorCallbacks{});
+        "processor", MwStreamerTransformProcessorCallbacks{});
     processor->AddSink(std::make_unique<CudaRecorder>("recording", recording));
     sink->AddSink(std::move(processor));
   }

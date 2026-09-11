@@ -15,22 +15,27 @@
 ## 构建
 
 ```bash
-cmake -S . -B build-static -DCMAKE_BUILD_TYPE=Release \
-  -DFFMPEG_LINKAGE=SHARED \
-  -DSRT_LINKAGE=SHARED
+cmake -S . -B build-static -DCMAKE_BUILD_TYPE=Release
 cmake --build build-static --parallel
 ```
 
 项目交付供 C++ 宿主使用的静态库，公开接口位于 `include/mw/`，按模块组织。
 Processor 的 callback、context 和 frame view 保留纯 C 兼容结构体与函数指针；
 Pipeline 的 C 句柄封装暂不提供。FFmpeg、SRT 和 OpenSSL 由用户预先安装。FFmpeg 和 SRT
-分别通过 `FFMPEG_LINKAGE`、`SRT_LINKAGE` 明确选择 `SHARED` 或 `STATIC`，不能根据
-Windows 的 `.lib` 后缀推断；必要时可用 `FFmpeg_ROOT`、`SRT_ROOT` 指定安装目录。
-构建还需要 CUDA Toolkit 头文件，可用 `CUDAToolkit_ROOT` 指定安装目录；库在使用
-CUDA 帧时动态加载 NVIDIA 驱动，不链接 CUDA Runtime。
-FFmpeg 要求安装 `pkg-config` 或兼容的 `pkgconf`，并为所用组件提供 `.pc` 文件；
+自动接受平台能够找到的共享库或静态库，无需单独指定链接类型。
+OpenSSL 使用 CMake 标准的 `FindOpenSSL` 查找。
+核心库不需要 CUDA Toolkit 头文件；CUDA 解码和编码通过 FFmpeg 的硬件上下文工作。
+E2E runner 为验证 CUDA Processor 帧复制，才直接使用 CUDA Driver API；找不到
+CUDA Toolkit 时 CMake 会跳过该 runner。可选 OpenCV adapter 同样需要 CUDA Toolkit，
+可用 `CUDAToolkit_ROOT` 指定安装目录。
+FFmpeg 要求 5.0 或更高版本，并要求安装 `pkg-config` 或兼容的
+`pkgconf`，为所用组件提供 `.pc` 文件；
 静态 FFmpeg 的私有依赖由各组件的 `.pc` 传递。静态 SRT 的私有链接依赖由
 `SRT::SRT` 根据匹配的 `srt.pc` 或 Windows 官方包中的 `libsrt.props` 传递。
+依赖安装在非标准前缀时，统一通过 `FFMPEG_ROOT`、`SRT_ROOT` 和 `OPENSSL_ROOT`
+指定各自的安装根目录；也可以使用 CMake 通用的 `CMAKE_PREFIX_PATH`。FFmpeg 各组件的
+`.pc` 文件仍须位于对应安装根目录的标准 pkg-config 目录中，或可由
+`PKG_CONFIG_PATH` 找到。
 ZLMediaKit 固定源码位于
 `third_party/ZLMediaKit`，其上游版本和裁剪边界记录在该目录的文档及 Git 历史中。
 
@@ -38,8 +43,6 @@ ZLMediaKit 固定源码位于
 
 ```bash
 cmake -S . -B build \
-  -DFFMPEG_LINKAGE=SHARED \
-  -DSRT_LINKAGE=SHARED \
   -DBUILD_TESTS=ON \
   -DBUILD_EXAMPLES=ON
 cmake --build build --parallel
@@ -317,9 +320,9 @@ Pipeline 收到请求后立即进入 `PipelineState::kFailed` 并停止继续分
 `AnalysisProcessorSink` 和 `TransformProcessorSink` 都直接继承 `Sink` 并消费 Frame，按回调
 是否产生输出区分，均可接在文件或实时输入的 DecoderSink 后面。
 
-- `AnalysisProcessorSink` 使用 `MwStreamerFileProcessorCallbacks`。回调只借用输入帧；没有输出缓冲区和下游。
+- `AnalysisProcessorSink` 使用 `MwStreamerAnalysisProcessorCallbacks`。回调只借用输入帧；没有输出缓冲区和下游。
   未注册某轨道回调时忽略该轨道。
-- `TransformProcessorSink` 使用 `MwStreamerStreamingProcessorCallbacks`，通过 `AddSink()` 独占持有下游，
+- `TransformProcessorSink` 使用 `MwStreamerTransformProcessorCallbacks`，通过 `AddSink()` 独占持有下游，
   输入前至少注册一个消费者。`on_start` 可设置视频输出尺寸，未设置时为
   1920×1080；随后框架分配可写输出缓冲区。回调返回时必须完成输出，再按注册顺序
   同步交给下游。音频输出与输入保持相同的声道数和

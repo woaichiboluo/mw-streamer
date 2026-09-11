@@ -75,18 +75,19 @@ struct AnalysisState {
   std::string initial_config;
 };
 
-MwStreamerFileProcessorCallbacks AnalysisCallbacks(AnalysisState& state) {
-  MwStreamerFileProcessorCallbacks callbacks{};
+MwStreamerAnalysisProcessorCallbacks AnalysisCallbacks(AnalysisState& state) {
+  MwStreamerAnalysisProcessorCallbacks callbacks{};
   callbacks.user_context = &state;
-  callbacks.on_start = [](const MwStreamerFileProcessorStartRequest* request,
-                          void* context) {
-    auto& state = *static_cast<AnalysisState*>(context);
-    ++state.starts;
-    state.has_audio = request->source_info->has_audio;
-    state.has_video = request->source_info->has_video;
-    state.initial_config = request->config->config;
-    return kMwStreamerProcessorStartSuccess;
-  };
+  callbacks.on_start =
+      [](const MwStreamerAnalysisProcessorStartRequest* request,
+         void* context) {
+        auto& state = *static_cast<AnalysisState*>(context);
+        ++state.starts;
+        state.has_audio = request->source_info->has_audio;
+        state.has_video = request->source_info->has_video;
+        state.initial_config = request->config->config;
+        return kMwStreamerProcessorStartSuccess;
+      };
   callbacks.process_audio = [](const MwStreamerAudioFrameView* frame,
                                void* context) {
     auto& state = *static_cast<AnalysisState*>(context);

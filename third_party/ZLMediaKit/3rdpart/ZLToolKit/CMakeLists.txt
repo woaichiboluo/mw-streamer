@@ -90,7 +90,7 @@ add_library(${PROJECT_NAME}_deps INTERFACE)
 target_link_libraries(${PROJECT_NAME}_deps INTERFACE ${TK_LINK_LIBRARIES})
 
 #编译库
-add_library(${PROJECT_NAME} ${SRC_LIST})
+add_library(${PROJECT_NAME} STATIC ${SRC_LIST})
 #引用头文件路径
 target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${TK_INC_PATHS})
 target_link_libraries(${PROJECT_NAME} PUBLIC ${PROJECT_NAME}_deps)

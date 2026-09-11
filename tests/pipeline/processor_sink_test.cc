@@ -171,18 +171,19 @@ void StopCallback(void* context) {
   ++static_cast<CallbackState*>(context)->stops;
 }
 
-MwStreamerFileProcessorCallbacks AnalysisCallbacks(CallbackState& state) {
-  MwStreamerFileProcessorCallbacks callbacks{};
+MwStreamerAnalysisProcessorCallbacks AnalysisCallbacks(CallbackState& state) {
+  MwStreamerAnalysisProcessorCallbacks callbacks{};
   callbacks.user_context = &state;
-  callbacks.on_start = [](const MwStreamerFileProcessorStartRequest* request,
-                          void* context) {
-    auto& state = *static_cast<CallbackState*>(context);
-    ++state.starts;
-    state.initial_config = request->config->config;
-    state.source = *request->source_info;
-    return state.fail_start ? kMwStreamerProcessorStartFailed
-                            : kMwStreamerProcessorStartSuccess;
-  };
+  callbacks.on_start =
+      [](const MwStreamerAnalysisProcessorStartRequest* request,
+         void* context) {
+        auto& state = *static_cast<CallbackState*>(context);
+        ++state.starts;
+        state.initial_config = request->config->config;
+        state.source = *request->source_info;
+        return state.fail_start ? kMwStreamerProcessorStartFailed
+                                : kMwStreamerProcessorStartSuccess;
+      };
   callbacks.process_video = [](const MwStreamerVideoFrameView*, void* context) {
     ++static_cast<CallbackState*>(context)->videos;
   };
@@ -195,11 +196,11 @@ MwStreamerFileProcessorCallbacks AnalysisCallbacks(CallbackState& state) {
   return callbacks;
 }
 
-MwStreamerStreamingProcessorCallbacks TransformCallbacks(CallbackState& state) {
-  MwStreamerStreamingProcessorCallbacks callbacks{};
+MwStreamerTransformProcessorCallbacks TransformCallbacks(CallbackState& state) {
+  MwStreamerTransformProcessorCallbacks callbacks{};
   callbacks.user_context = &state;
   callbacks.on_start =
-      [](const MwStreamerStreamingProcessorStartRequest* request,
+      [](const MwStreamerTransformProcessorStartRequest* request,
          void* context) {
         auto& state = *static_cast<CallbackState*>(context);
         ++state.starts;
@@ -212,7 +213,7 @@ MwStreamerStreamingProcessorCallbacks TransformCallbacks(CallbackState& state) {
                                 : kMwStreamerProcessorStartSuccess;
       };
   callbacks.process_video =
-      [](const MwStreamerStreamingVideoProcessRequest* request, void* context) {
+      [](const MwStreamerTransformVideoProcessRequest* request, void* context) {
         auto& state = *static_cast<CallbackState*>(context);
         ++state.videos;
         state.independent_video &=
@@ -229,7 +230,7 @@ MwStreamerStreamingProcessorCallbacks TransformCallbacks(CallbackState& state) {
         }
       };
   callbacks.process_audio =
-      [](const MwStreamerStreamingAudioProcessRequest* request, void* context) {
+      [](const MwStreamerTransformAudioProcessRequest* request, void* context) {
         auto& state = *static_cast<CallbackState*>(context);
         ++state.audios;
         state.independent_audio &=
@@ -412,8 +413,8 @@ TEST_CASE("TransformProcessorSink无回调时透传任意视频尺寸") {
 
 TEST_CASE("TransformProcessorSink未设置尺寸时使用1920x1080") {
   Recorded recorded;
-  MwStreamerStreamingProcessorCallbacks callbacks{};
-  callbacks.process_video = [](const MwStreamerStreamingVideoProcessRequest*,
+  MwStreamerTransformProcessorCallbacks callbacks{};
+  callbacks.process_video = [](const MwStreamerTransformVideoProcessRequest*,
                                void*) {};
   TransformProcessorSink sink("processor", callbacks);
   sink.AddSink(std::make_unique<Recorder>(recorded));
@@ -425,9 +426,9 @@ TEST_CASE("TransformProcessorSink未设置尺寸时使用1920x1080") {
 }
 
 TEST_CASE("TransformProcessorSink拒绝on_start返回无效输出尺寸") {
-  MwStreamerStreamingProcessorCallbacks callbacks{};
+  MwStreamerTransformProcessorCallbacks callbacks{};
   callbacks.on_start =
-      [](const MwStreamerStreamingProcessorStartRequest* request, void*) {
+      [](const MwStreamerTransformProcessorStartRequest* request, void*) {
         request->video_output_size->width = 0;
         return kMwStreamerProcessorStartSuccess;
       };
@@ -441,15 +442,15 @@ TEST_CASE("TransformProcessorSink拒绝处理期间改变输出尺寸") {
   struct State {
     int calls = 0;
   } state;
-  MwStreamerStreamingProcessorCallbacks callbacks{};
+  MwStreamerTransformProcessorCallbacks callbacks{};
   callbacks.user_context = &state;
   callbacks.on_start =
-      [](const MwStreamerStreamingProcessorStartRequest* request, void*) {
+      [](const MwStreamerTransformProcessorStartRequest* request, void*) {
         *request->video_output_size = {32, 16};
         return kMwStreamerProcessorStartSuccess;
       };
   callbacks.process_video =
-      [](const MwStreamerStreamingVideoProcessRequest* request, void* context) {
+      [](const MwStreamerTransformVideoProcessRequest* request, void* context) {
         auto& state = *static_cast<State*>(context);
         if (++state.calls == 2) request->output->width = 16;
       };
@@ -595,12 +596,12 @@ TEST_CASE("TransformProcessorSink允许配置与媒体并发且Stop等待两者"
   auto video_entered = state.video_entered.get_future();
   auto update_entered = state.update_entered.get_future();
 
-  MwStreamerStreamingProcessorCallbacks callbacks{};
+  MwStreamerTransformProcessorCallbacks callbacks{};
   callbacks.user_context = &state;
-  callbacks.on_start = [](const MwStreamerStreamingProcessorStartRequest*,
+  callbacks.on_start = [](const MwStreamerTransformProcessorStartRequest*,
                           void*) { return kMwStreamerProcessorStartSuccess; };
   callbacks.process_video =
-      [](const MwStreamerStreamingVideoProcessRequest* request, void* context) {
+      [](const MwStreamerTransformVideoProcessRequest* request, void* context) {
         auto& state = *static_cast<BlockingState*>(context);
         state.video_active.store(true);
         state.video_entered.set_value();
@@ -754,7 +755,7 @@ TEST_CASE("ProcessorSink缺少回调不产生处理调用统计") {
 
 TEST_CASE("ProcessorSink记录回调异常而不把下游异常算成处理失败") {
   SECTION("Analysis回调异常") {
-    MwStreamerFileProcessorCallbacks callbacks{};
+    MwStreamerAnalysisProcessorCallbacks callbacks{};
     callbacks.process_video = [](const MwStreamerVideoFrameView*, void*) {
       throw std::runtime_error("analysis failure");
     };
@@ -770,8 +771,8 @@ TEST_CASE("ProcessorSink记录回调异常而不把下游异常算成处理失�
     CHECK(video.in_flight == 0);
   }
   SECTION("Transform回调异常") {
-    MwStreamerStreamingProcessorCallbacks callbacks{};
-    callbacks.process_audio = [](const MwStreamerStreamingAudioProcessRequest*,
+    MwStreamerTransformProcessorCallbacks callbacks{};
+    callbacks.process_audio = [](const MwStreamerTransformAudioProcessRequest*,
                                  void*) {
       throw std::runtime_error("transform failure");
     };
@@ -853,7 +854,7 @@ TEST_CASE("AnalysisProcessorSink执行回调期间快照保留正在处理的调
   auto entered = state.entered.get_future();
   std::promise<void> release;
   state.release = release.get_future().share();
-  MwStreamerFileProcessorCallbacks callbacks{};
+  MwStreamerAnalysisProcessorCallbacks callbacks{};
   callbacks.user_context = &state;
   callbacks.process_video = [](const MwStreamerVideoFrameView*, void* context) {
     auto& state = *static_cast<State*>(context);
@@ -915,14 +916,14 @@ TEST_CASE("两种Processor通过通用消息入口回调并在Stop前等待消�
   Recorded recorded;
   std::unique_ptr<Sink> sink;
   SECTION("Analysis") {
-    MwStreamerFileProcessorCallbacks callbacks{};
+    MwStreamerAnalysisProcessorCallbacks callbacks{};
     callbacks.user_context = &state;
     callbacks.on_message = on_message;
     callbacks.on_stop = on_stop;
     sink = std::make_unique<AnalysisProcessorSink>("processor", callbacks);
   }
   SECTION("Transform") {
-    MwStreamerStreamingProcessorCallbacks callbacks{};
+    MwStreamerTransformProcessorCallbacks callbacks{};
     callbacks.user_context = &state;
     callbacks.on_message = on_message;
     callbacks.on_stop = on_stop;
@@ -961,7 +962,7 @@ TEST_CASE("下游显式绑定Processor后消息直接送达而不经过中间Pro
   using namespace std::chrono_literals;
   std::promise<std::string> received;
   auto result = received.get_future();
-  MwStreamerStreamingProcessorCallbacks callbacks{};
+  MwStreamerTransformProcessorCallbacks callbacks{};
   callbacks.user_context = &received;
   callbacks.on_message = [](const MwStreamerMessage* message, void* context) {
     static_cast<std::promise<std::string>*>(context)->set_value(message->type);
@@ -969,7 +970,7 @@ TEST_CASE("下游显式绑定Processor后消息直接送达而不经过中间Pro
   Recorded recorded;
   auto root = std::make_unique<TransformProcessorSink>("processor", callbacks);
   auto intermediate = std::make_unique<TransformProcessorSink>(
-      "intermediate", MwStreamerStreamingProcessorCallbacks{});
+      "intermediate", MwStreamerTransformProcessorCallbacks{});
   auto sender = std::make_unique<Recorder>(recorded, "sender");
   auto* sender_ptr = sender.get();
   intermediate->AddSink(std::move(sender));
