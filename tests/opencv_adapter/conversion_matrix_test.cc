@@ -126,7 +126,7 @@ class ColoredYuvFrame final {
          format,
          kWidth,
          kHeight,
-         {.linear = {planes_.data(), plane_count}}},
+         {{planes_.data(), plane_count}}},
         {color_range, color_space, kMwStreamerColorPrimariesBt709,
          kMwStreamerColorTransferBt709, kMwStreamerChromaLocationLeft},
         {1234, 1, {1, 25}},

@@ -1,0 +1,354 @@
+#include "mw/streamer/processor/transform_processor_sink.h"
+
+#include <fmt/format.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <exception>
+#include <mutex>
+#include <optional>
+#include <shared_mutex>
+#include <stdexcept>
+#include <utility>
+#include <vector>
+
+#include "mw/streamer/processor/internal/processor_sink_context.h"
+#include "mw/streamer/performance/operation_recorder.h"
+#include "mw/streamer/processor/internal/audio_frame_allocator.h"
+#include "mw/streamer/processor/internal/frame_adapter.h"
+#include "mw/streamer/processor/internal/video_frame_allocator.h"
+#include "mw/streamer/sink/fatal_error.h"
+
+namespace mw::streamer {
+namespace {
+
+constexpr std::uint32_t kDefaultVideoOutputWidth = 1920;
+constexpr std::uint32_t kDefaultVideoOutputHeight = 1080;
+
+}  // namespace
+
+class TransformProcessorSink::Impl final {
+ public:
+  Impl(TransformProcessorSink& owner,
+       MwStreamerTransformProcessorCallbacks callbacks)
+      : owner_(owner), callbacks_(callbacks), outputs_(owner.downstream()) {}
+
+  ~Impl() { Stop(); }
+
+  NodeSnapshot GetPerformance() const {
+    NodeSnapshot snapshot;
+    snapshot.name = "TransformProcessorSink";
+    snapshot.operations = {audio_performance_.GetSnapshot(),
+                           video_performance_.GetSnapshot()};
+    return snapshot;
+  }
+
+  void OnStreamsReady(const FrameStreamsReady& streams) {
+    std::exception_ptr failure;
+    {
+      std::unique_lock<std::shared_mutex> lock(lifecycle_mutex_);
+      try {
+        if (stopping_.load() || stopped_) {
+          throw std::logic_error("TransformProcessorSink已停止");
+        }
+        if (!context_) {
+          Start(streams);
+        }
+        if (stopping_.load()) {
+          return;
+        }
+        if (context_->Open(streams)) {
+          owner_.StartMessages();
+          for (auto& output : outputs_) {
+            output->OnStreamsReady(streams);
+          }
+        }
+      } catch (...) {
+        // A message sent by a partially initialized child must not slip through
+        // when this exclusive boundary releases the waiting message callback.
+        stopping_.store(true, std::memory_order_release);
+        failure = std::current_exception();
+      }
+    }
+    if (failure) {
+      // Message callbacks may be waiting for lifecycle_mutex_. Wait only
+      // after releasing the boundary lock, including partial startup failures.
+      owner_.Stop();
+      std::rethrow_exception(failure);
+    }
+  }
+
+  void OnAudioFrame(const FrameReady& frame) {
+    std::shared_lock<std::shared_mutex> lock(lifecycle_mutex_);
+    Context().ValidateFrame(frame, false);
+    audio_performance_.AddInput(std::max(frame.frame->nb_samples, 0));
+    if (!callbacks_.process_audio) {
+      audio_performance_.AddOutput(std::max(frame.frame->nb_samples, 0));
+      for (auto& output : outputs_) {
+        output->OnAudioFrame(frame);
+      }
+      return;
+    }
+    const FrameReady result{frame.generation, ProcessAudio(frame.frame)};
+    audio_performance_.AddOutput(std::max(result.frame->nb_samples, 0));
+    for (auto& output : outputs_) {
+      output->OnAudioFrame(result);
+    }
+  }
+
+  void OnVideoFrame(const FrameReady& frame) {
+    std::shared_lock<std::shared_mutex> lock(lifecycle_mutex_);
+    auto& context = Context();
+    context.ValidateFrame(frame, true);
+    video_performance_.AddInput(1);
+    if (!callbacks_.process_video) {
+      video_performance_.AddOutput(1);
+      for (auto& output : outputs_) {
+        output->OnVideoFrame(frame);
+      }
+      return;
+    }
+    const FrameReady result{frame.generation,
+                                   ProcessVideo(frame.frame, context)};
+    video_performance_.AddOutput(1);
+    for (auto& output : outputs_) {
+      output->OnVideoFrame(result);
+    }
+  }
+
+  void OnTimelineReset(const TimelineReset& reset) {
+    std::unique_lock<std::shared_mutex> lock(lifecycle_mutex_);
+    if (Context().Reset(reset)) {
+      for (auto& output : outputs_) {
+        output->OnTimelineReset(reset);
+      }
+    }
+  }
+
+  void OnInputEnded(const StreamEnded& end) {
+    std::unique_lock<std::shared_mutex> lock(lifecycle_mutex_);
+    if (Context().End(end)) {
+      for (auto& output : outputs_) {
+        output->OnInputEnded(end);
+      }
+    }
+  }
+
+  void SetConfig(std::string config) {
+    std::shared_lock<std::shared_mutex> lifecycle_lock(lifecycle_mutex_);
+    std::lock_guard<std::mutex> update_lock(update_mutex_);
+    processor_config_ = std::move(config);
+    if (context_) {
+      Context().UpdateConfig(processor_config_);
+    }
+  }
+
+  bool OnMessage(const SinkMessage& message) {
+    std::shared_lock<std::shared_mutex> lock(lifecycle_mutex_);
+    if (stopping_.load() || !context_) {
+      return true;
+    }
+    if (!callbacks_.on_message) {
+      return false;
+    }
+    const std::string sink_id(message.sink_id);
+    const std::string type(message.type);
+    const MwStreamerMessage view{
+        sink_id.c_str(),
+        type.c_str(),
+        message.payload,
+        message.payload_size,
+        static_cast<std::uint8_t>(message.timestamp.has_value()),
+        message.timestamp.value_or(MwStreamerMediaTimestamp{})};
+    callbacks_.on_message(&view, callbacks_.user_context);
+    return true;
+  }
+
+  void Stop() noexcept {
+    std::lock_guard<std::mutex> stop_lock(stop_mutex_);
+    stopping_.store(true, std::memory_order_release);
+    std::unique_lock<std::shared_mutex> lock(lifecycle_mutex_);
+    if (stopped_) {
+      return;
+    }
+    owner_.StopDownstream();
+    FinishStop();
+  }
+
+ private:
+  void Start(const FrameStreamsReady& streams) {
+    if (outputs_.empty()) {
+      throw std::logic_error("TransformProcessorSink启动前至少需要一个下游");
+    }
+    auto context = std::make_unique<internal::ProcessorSinkContext>(streams);
+    const MwStreamerTransformProcessorConfig config{processor_config_.c_str()};
+    MwStreamerVideoOutputSize video_output_size{video_output_width_,
+                                                video_output_height_};
+    const MwStreamerTransformProcessorStartRequest request{
+        &context->source_info(), &config, &context->execution(),
+        context->source_info().has_video ? &video_output_size : nullptr};
+    const auto result =
+        callbacks_.on_start
+            ? callbacks_.on_start(&request, callbacks_.user_context)
+            : kMwStreamerProcessorStartSuccess;
+    if (result != kMwStreamerProcessorStartSuccess) {
+      throw std::runtime_error("TransformProcessorSink拒绝启动");
+    }
+    PrepareAllocators(context->source_info(), video_output_size);
+    context->MarkStarted(callbacks_.user_context, callbacks_.on_boundary,
+                         callbacks_.on_config_update, callbacks_.on_stop);
+    context_ = std::move(context);
+  }
+
+  void PrepareAllocators(const MwStreamerProcessorSourceInfo& source,
+                         MwStreamerVideoOutputSize video_output_size) {
+    if (source.has_video) {
+      if (video_output_size.width == 0 || video_output_size.height == 0) {
+        throw std::invalid_argument(
+            "TransformProcessorSink视频输出宽高必须有效");
+      }
+      video_output_width_ = video_output_size.width;
+      video_output_height_ = video_output_size.height;
+      if (callbacks_.process_video) {
+        video_allocator_.emplace(video_output_width_, video_output_height_);
+      }
+    }
+    if (source.has_audio && callbacks_.process_audio) {
+      audio_allocator_.emplace();
+    }
+  }
+
+  Frame ProcessAudio(const Frame& frame) {
+    OperationRecorder::Call call(audio_performance_);
+    const internal::AudioFrameAdapter input(frame);
+    auto result = audio_allocator_->Allocate(frame);
+    internal::AudioBufferAdapter output(result);
+    auto output_view = output.view();
+    const MwStreamerTransformAudioProcessRequest request{&input.view(),
+                                                         &output_view};
+    callbacks_.process_audio(&request, callbacks_.user_context);
+    result.CopyPropertiesFrom(frame);
+    return result;
+  }
+
+  Frame ProcessVideo(const Frame& frame,
+                             internal::ProcessorSinkContext& context) {
+    OperationRecorder::Call call(video_performance_);
+    const internal::VideoFrameAdapter input(frame);
+    context.ValidateVideoInput(*frame.get(), input.view());
+    auto result = video_allocator_->Allocate(frame);
+    internal::VideoBufferAdapter output(result);
+    auto output_view = output.view();
+    const MwStreamerTransformVideoProcessRequest request{&input.view(),
+                                                         &output_view};
+    callbacks_.process_video(&request, callbacks_.user_context);
+    if (output_view.width != video_output_width_ ||
+        output_view.height != video_output_height_) {
+      throw FatalError(
+          fmt::format("TransformProcessorSink视频输出尺寸在启动后变化：实际{}x{"
+                      "}，期望{}x{}",
+                      output_view.width, output_view.height,
+                      video_output_width_, video_output_height_));
+    }
+    result.CopyPropertiesFrom(frame);
+    result.ClearCrop();
+    return result;
+  }
+
+  internal::ProcessorSinkContext& Context() const {
+    if (stopping_.load() || stopped_ || !context_) {
+      throw std::logic_error("TransformProcessorSink尚未启动或已停止");
+    }
+    return *context_;
+  }
+
+  void FinishStop() noexcept {
+    stopped_ = true;
+    if (context_) {
+      context_->Stop();
+    }
+    audio_allocator_.reset();
+    video_allocator_.reset();
+    context_.reset();
+  }
+
+  OperationRecorder audio_performance_{
+      PerformanceType::kAudioProcessor,
+      PerformanceUnit::kSample,
+      PerformanceUnit::kSample};
+  OperationRecorder video_performance_{
+      PerformanceType::kVideoProcessor,
+      PerformanceUnit::kFrame,
+      PerformanceUnit::kFrame};
+  TransformProcessorSink& owner_;
+  std::string processor_config_;
+  const MwStreamerTransformProcessorCallbacks callbacks_;
+  std::shared_mutex lifecycle_mutex_;
+  std::mutex update_mutex_;
+  std::mutex stop_mutex_;
+  std::unique_ptr<internal::ProcessorSinkContext> context_;
+  std::optional<internal::AudioFrameAllocator> audio_allocator_;
+  std::optional<internal::VideoFrameAllocator> video_allocator_;
+  std::uint32_t video_output_width_ = kDefaultVideoOutputWidth;
+  std::uint32_t video_output_height_ = kDefaultVideoOutputHeight;
+  const std::vector<std::unique_ptr<Sink>>& outputs_;
+  std::atomic<bool> stopping_{false};
+  bool stopped_ = false;
+};
+
+TransformProcessorSink::TransformProcessorSink(
+    std::string id, MwStreamerTransformProcessorCallbacks callbacks)
+    : Sink(std::move(id), SinkMediaType::kFrame,
+                 SinkMediaType::kFrame),
+      impl_(std::make_unique<Impl>(*this, callbacks)) {}
+
+TransformProcessorSink::~TransformProcessorSink() { Stop(); }
+
+NodeSnapshot TransformProcessorSink::GetOwnPerformance() const {
+  return impl_->GetPerformance();
+}
+
+void TransformProcessorSink::OnStreamsReady(
+    const FrameStreamsReady& streams) {
+  CloseRegistration();
+  impl_->OnStreamsReady(streams);
+}
+
+void TransformProcessorSink::OnAudioFrame(const FrameReady& frame) {
+  CloseRegistration();
+  impl_->OnAudioFrame(frame);
+}
+
+void TransformProcessorSink::OnVideoFrame(const FrameReady& frame) {
+  CloseRegistration();
+  impl_->OnVideoFrame(frame);
+}
+
+void TransformProcessorSink::OnTimelineReset(
+    const TimelineReset& reset) {
+  CloseRegistration();
+  impl_->OnTimelineReset(reset);
+}
+
+void TransformProcessorSink::OnInputEnded(const StreamEnded& end) {
+  CloseRegistration();
+  impl_->OnInputEnded(end);
+}
+
+void TransformProcessorSink::UpdateConfig(std::string config) {
+  impl_->SetConfig(std::move(config));
+}
+
+void TransformProcessorSink::OnMessage(const SinkMessage& message) {
+  if (!impl_->OnMessage(message)) {
+    Sink::OnMessage(message);
+  }
+}
+
+void TransformProcessorSink::Stop() noexcept {
+  StopMessages();
+  impl_->Stop();
+}
+
+}  // namespace mw::streamer

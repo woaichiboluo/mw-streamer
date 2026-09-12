@@ -11,12 +11,12 @@
 #include <thread>
 #include <utility>
 
-#include "mw/decoder/decoder_sink.h"
-#include "mw/input/zlm_input.h"
-#include "mw/pipeline/pipeline.h"
-#include "mw/processor/analysis_processor_sink.h"
-#include "mw/processor/transform_processor_sink.h"
-#include "mw/sink/fatal_error.h"
+#include "mw/streamer/decoder/decoder_sink.h"
+#include "mw/streamer/input/zlm_input.h"
+#include "mw/streamer/pipeline/pipeline.h"
+#include "mw/streamer/processor/analysis_processor_sink.h"
+#include "mw/streamer/processor/transform_processor_sink.h"
+#include "mw/streamer/sink/fatal_error.h"
 
 namespace {
 

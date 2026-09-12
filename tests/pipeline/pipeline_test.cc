@@ -1,4 +1,4 @@
-#include "mw/pipeline/pipeline.h"
+#include "mw/streamer/pipeline/pipeline.h"
 
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
@@ -12,8 +12,8 @@
 #include <utility>
 #include <vector>
 
-#include "mw/common/blocking_queue.h"
-#include "mw/input/zlm_input.h"
+#include "mw/streamer/common/blocking_queue.h"
+#include "mw/streamer/input/zlm_input.h"
 
 namespace {
 

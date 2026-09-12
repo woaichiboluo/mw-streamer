@@ -52,15 +52,25 @@ add_executable(mw_logging_tests
     logging_test.cc
 )
 
+target_include_directories(mw_logging_tests
+    PRIVATE "${PROJECT_SOURCE_DIR}/src/streamer"
+)
+
 target_link_libraries(mw_logging_tests
     PRIVATE
         Catch2::Catch2WithMain
         FFmpeg::avutil
         ZLMediaKit::ToolKit
+        mw::log_test
         mw::streamer_test
 )
 
 catch_discover_tests(mw_logging_tests DISCOVERY_MODE PRE_TEST)
+
+add_executable(mw_log_c_api_tests log_c_api_test.c)
+target_link_libraries(mw_log_c_api_tests PRIVATE mw::log_test)
+set_target_properties(mw_log_c_api_tests PROPERTIES LINKER_LANGUAGE CXX)
+add_test(NAME mw_log_c_api_tests COMMAND mw_log_c_api_tests)
 
 add_executable(mw_zlm_logger_lifecycle_tests
     zlm_logger_lifecycle_test.cc

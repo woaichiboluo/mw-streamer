@@ -18,10 +18,10 @@ extern "C" {
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "mw/decoder/video_decoder.h"
-#include "mw/encoder/encoder_sink.h"
-#include "mw/ffmpeg/error.h"
-#include "mw/synchronizer/synchronizer_sink.h"
+#include "mw/streamer/decoder/video_decoder.h"
+#include "mw/streamer/encoder/encoder_sink.h"
+#include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/synchronizer/synchronizer_sink.h"
 
 namespace {
 

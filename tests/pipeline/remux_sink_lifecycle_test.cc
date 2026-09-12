@@ -7,9 +7,9 @@
 #include <vector>
 
 #include "Poller/EventPoller.h"
-#include "mw/ffmpeg/packet.h"
-#include "mw/ffmpeg/stream_info.h"
-#include "mw/output/remux_sink.h"
+#include "mw/streamer/ffmpeg/packet.h"
+#include "mw/streamer/ffmpeg/stream_info.h"
+#include "mw/streamer/output/remux_sink.h"
 
 #ifdef CHECK
 #undef CHECK

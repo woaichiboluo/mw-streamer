@@ -10,11 +10,11 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 }
 
-#include "mw/converter/av_packet_to_zlm_frame_converter.h"
-#include "mw/converter/internal/codec_bridge.h"
-#include "mw/converter/internal/zlm_time_base.h"
-#include "mw/ffmpeg/codec_parameters.h"
-#include "mw/ffmpeg/packet.h"
+#include "mw/streamer/converter/av_packet_to_zlm_frame_converter.h"
+#include "mw/streamer/converter/internal/codec_bridge.h"
+#include "mw/streamer/converter/internal/zlm_time_base.h"
+#include "mw/streamer/ffmpeg/codec_parameters.h"
+#include "mw/streamer/ffmpeg/packet.h"
 
 namespace {
 

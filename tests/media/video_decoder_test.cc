@@ -14,10 +14,10 @@ extern "C" {
 
 #include "Extension/Track.h"
 #include "Record/MP4Demuxer.h"
-#include "mw/converter/zlm_codec_parameters_converter.h"
-#include "mw/converter/zlm_packet_converter.h"
-#include "mw/decoder/video_decoder.h"
-#include "mw/processor/internal/frame_adapter.h"
+#include "mw/streamer/converter/zlm_codec_parameters_converter.h"
+#include "mw/streamer/converter/zlm_packet_converter.h"
+#include "mw/streamer/decoder/video_decoder.h"
+#include "mw/streamer/processor/internal/frame_adapter.h"
 
 namespace {
 

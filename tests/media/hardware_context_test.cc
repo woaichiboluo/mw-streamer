@@ -7,8 +7,8 @@ extern "C" {
 #include <libavutil/hwcontext.h>
 }
 
-#include "mw/ffmpeg/frame.h"
-#include "mw/ffmpeg/hardware_context.h"
+#include "mw/streamer/ffmpeg/frame.h"
+#include "mw/streamer/ffmpeg/hardware_context.h"
 
 namespace {
 

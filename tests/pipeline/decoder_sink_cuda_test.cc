@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-#include "mw/decoder/decoder_sink.h"
+#include "mw/streamer/decoder/decoder_sink.h"
 
 extern "C" {
 #include <libavutil/hwcontext.h>
@@ -18,8 +18,8 @@ extern "C" {
 #endif
 #include <catch2/catch_test_macros.hpp>
 
-#include "mw/ffmpeg/input_format_context.h"
-#include "mw/processor/transform_processor_sink.h"
+#include "mw/streamer/ffmpeg/input_format_context.h"
+#include "mw/streamer/processor/transform_processor_sink.h"
 
 namespace {
 

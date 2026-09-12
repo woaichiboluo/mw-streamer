@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <string_view>
 
-#include "mw/processor/internal/enum_converter.h"
+#include "mw/streamer/processor/internal/enum_converter.h"
 
 namespace {
 

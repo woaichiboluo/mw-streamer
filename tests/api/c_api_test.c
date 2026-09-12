@@ -1,4 +1,4 @@
-#include "mw/c_api.h"
+#include "mw/streamer.h"
 
 #include <math.h>
 #include <stddef.h>

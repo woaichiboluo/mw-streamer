@@ -1,4 +1,4 @@
-#include "mw/output/recording_target.h"
+#include "mw/streamer/output/recording_target.h"
 
 #include <chrono>
 #include <filesystem>
@@ -11,7 +11,7 @@
 #include "Common/config.h"
 #include "Record/MP4Demuxer.h"
 #include "Util/onceToken.h"
-#include "mw/zlm/internal/config_validator.h"
+#include "mw/streamer/zlm/internal/config_validator.h"
 
 #ifdef CHECK
 #undef CHECK

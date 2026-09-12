@@ -1,4 +1,4 @@
-#include "mw/encoder/encoder_sink.h"
+#include "mw/streamer/encoder/encoder_sink.h"
 
 #include <atomic>
 #include <chrono>
@@ -23,9 +23,9 @@ extern "C" {
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "mw/decoder/audio_decoder.h"
-#include "mw/decoder/video_decoder.h"
-#include "mw/ffmpeg/error.h"
+#include "mw/streamer/decoder/audio_decoder.h"
+#include "mw/streamer/decoder/video_decoder.h"
+#include "mw/streamer/ffmpeg/error.h"
 
 namespace {
 

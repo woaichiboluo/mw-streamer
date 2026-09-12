@@ -10,10 +10,10 @@ extern "C" {
 #include <libavutil/pixfmt.h>
 }
 
-#include "mw/decoder/video_decoder.h"
-#include "mw/encoder/video_encoder.h"
-#include "mw/ffmpeg/error.h"
-#include "mw/ffmpeg/hardware_context.h"
+#include "mw/streamer/decoder/video_decoder.h"
+#include "mw/streamer/encoder/video_encoder.h"
+#include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/ffmpeg/hardware_context.h"
 
 namespace {
 

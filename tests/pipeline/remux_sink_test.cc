@@ -1,4 +1,4 @@
-#include "mw/output/remux_sink.h"
+#include "mw/streamer/output/remux_sink.h"
 
 #include <algorithm>
 #include <chrono>
@@ -19,11 +19,11 @@
 #include "Record/MP4.h"
 #include "Record/MP4Demuxer.h"
 #include "ext-codec/H264.h"
-#include "mw/converter/zlm_codec_parameters_converter.h"
-#include "mw/converter/zlm_packet_converter.h"
-#include "mw/ffmpeg/input_format_context.h"
-#include "mw/input/zlm_input.h"
-#include "mw/pipeline/pipeline.h"
+#include "mw/streamer/converter/zlm_codec_parameters_converter.h"
+#include "mw/streamer/converter/zlm_packet_converter.h"
+#include "mw/streamer/ffmpeg/input_format_context.h"
+#include "mw/streamer/input/zlm_input.h"
+#include "mw/streamer/pipeline/pipeline.h"
 
 #ifdef CHECK
 #undef CHECK

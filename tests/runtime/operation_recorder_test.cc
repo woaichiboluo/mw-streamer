@@ -1,4 +1,4 @@
-#include "mw/performance/operation_recorder.h"
+#include "mw/streamer/performance/operation_recorder.h"
 
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>

@@ -1,4 +1,4 @@
-#include "mw/sink/sink.h"
+#include "mw/streamer/sink/sink.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <memory>
@@ -6,7 +6,7 @@
 #include <string>
 #include <utility>
 
-#include "mw/performance/pipeline_snapshot.h"
+#include "mw/streamer/performance/pipeline_snapshot.h"
 
 namespace {
 

@@ -17,8 +17,8 @@ extern "C" {
 }
 
 #include "Poller/EventPoller.h"
-#include "mw/input/player_proxy.h"
-#include "mw/sink/packet_sink.h"
+#include "mw/streamer/input/player_proxy.h"
+#include "mw/streamer/sink/packet_sink.h"
 
 namespace {
 

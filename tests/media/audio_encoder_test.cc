@@ -10,9 +10,9 @@ extern "C" {
 #include <libavutil/samplefmt.h>
 }
 
-#include "mw/decoder/audio_decoder.h"
-#include "mw/encoder/audio_encoder.h"
-#include "mw/ffmpeg/error.h"
+#include "mw/streamer/decoder/audio_decoder.h"
+#include "mw/streamer/encoder/audio_encoder.h"
+#include "mw/streamer/ffmpeg/error.h"
 
 namespace {
 

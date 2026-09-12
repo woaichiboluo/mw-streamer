@@ -8,9 +8,9 @@
 #include <thread>
 #include <utility>
 
-#include "mw/input/zlm_input.h"
-#include "mw/output/remux_sink.h"
-#include "mw/pipeline/pipeline.h"
+#include "mw/streamer/input/zlm_input.h"
+#include "mw/streamer/output/remux_sink.h"
+#include "mw/streamer/pipeline/pipeline.h"
 
 namespace {
 

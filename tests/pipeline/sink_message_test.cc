@@ -22,11 +22,11 @@ extern "C" {
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "mw/pipeline/pipeline.h"
-#include "mw/processor/analysis_processor_sink.h"
-#include "mw/processor/transform_processor_sink.h"
-#include "mw/sink/fatal_error.h"
-#include "mw/sink/sink.h"
+#include "mw/streamer/pipeline/pipeline.h"
+#include "mw/streamer/processor/analysis_processor_sink.h"
+#include "mw/streamer/processor/transform_processor_sink.h"
+#include "mw/streamer/sink/fatal_error.h"
+#include "mw/streamer/sink/sink.h"
 
 namespace {
 

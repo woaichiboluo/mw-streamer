@@ -1,4 +1,4 @@
-#include "mw/pipeline/pipeline_builder.h"
+#include "mw/streamer/pipeline/pipeline_builder.h"
 
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
@@ -11,8 +11,8 @@
 #include <utility>
 #include <vector>
 
-#include "mw/config/toml.h"
-#include "mw/ffmpeg/input_format_context.h"
+#include "mw/streamer/config/toml.h"
+#include "mw/streamer/ffmpeg/input_format_context.h"
 
 namespace {
 

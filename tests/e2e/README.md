@@ -2,8 +2,8 @@
 
 本目录通过新的 `Pipeline` 使用真实的 FFmpeg、MediaMTX 和媒体文件验证以下
 能力。运行器只在组装时依赖 `pipeline`；Input、Sink 和具体处理节点使用各自模块的
-公开接口：`mw/input/`、`mw/sink/`、`mw/decoder/`、`mw/processor/`、
-`mw/synchronizer/`、`mw/encoder/` 和 `mw/output/`。模块名也是
+公开接口：`mw/streamer/input/`、`mw/streamer/sink/`、`mw/streamer/decoder/`、`mw/streamer/processor/`、
+`mw/streamer/synchronizer/`、`mw/streamer/encoder/` 和 `mw/streamer/output/`。模块名也是
 `mw::streamer` 下的命名空间。共用投递参数位于 `media`，输入状态位于 `input`，
 消息和 Fatal 位于 `sink`；节点参数来自各自的 `config.h`。测试观察节点继承
 `Sink`，通过 `PacketReady`、`FrameReady` 等参数接收数据。

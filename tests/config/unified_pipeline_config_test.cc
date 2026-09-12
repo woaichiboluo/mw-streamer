@@ -9,8 +9,8 @@
 #include <string_view>
 #include <vector>
 
-#include "mw/config/toml.h"
-#include "mw/pipeline/pipeline_builder.h"
+#include "mw/streamer/config/toml.h"
+#include "mw/streamer/pipeline/pipeline_builder.h"
 
 namespace {
 

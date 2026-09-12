@@ -1,4 +1,4 @@
-#include "mw/synchronizer/internal/realtime_frame_scheduler.h"
+#include "mw/streamer/synchronizer/internal/realtime_frame_scheduler.h"
 
 #include <chrono>
 #include <cstddef>
@@ -19,8 +19,8 @@ extern "C" {
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "mw/ffmpeg/error.h"
-#include "mw/ffmpeg/hardware_context.h"
+#include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/ffmpeg/hardware_context.h"
 
 namespace {
 

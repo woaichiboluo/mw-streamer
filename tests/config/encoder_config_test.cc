@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <type_traits>
 
-#include "mw/encoder/config.h"
+#include "mw/streamer/encoder/config.h"
 
 namespace {
 

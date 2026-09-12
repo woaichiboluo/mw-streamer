@@ -1,4 +1,4 @@
-#include "mw/input/file_input.h"
+#include "mw/streamer/input/file_input.h"
 
 #include <chrono>
 #include <cstring>
@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include "mw/ffmpeg/input_format_context.h"
+#include "mw/streamer/ffmpeg/input_format_context.h"
 
 #ifdef CHECK
 #undef CHECK

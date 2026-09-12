@@ -1,4 +1,4 @@
-#include "mw/processor/internal/source_info_adapter.h"
+#include "mw/streamer/processor/internal/source_info_adapter.h"
 
 #include <array>
 #include <optional>
@@ -10,7 +10,7 @@ extern "C" {
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "mw/media/internal/codec_bridge.h"
+#include "mw/streamer/media/internal/codec_bridge.h"
 
 namespace {
 

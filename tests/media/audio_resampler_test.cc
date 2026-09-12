@@ -11,10 +11,10 @@ extern "C" {
 #include <libavutil/samplefmt.h>
 }
 
-#include "mw/ffmpeg/codec_parameters.h"
-#include "mw/ffmpeg/frame.h"
-#include "mw/ffmpeg/stream_info.h"
-#include "mw/resampler/audio_resampler.h"
+#include "mw/streamer/ffmpeg/codec_parameters.h"
+#include "mw/streamer/ffmpeg/frame.h"
+#include "mw/streamer/ffmpeg/stream_info.h"
+#include "mw/streamer/resampler/audio_resampler.h"
 
 namespace {
 

@@ -1,4 +1,4 @@
-#include "mw/performance/pipeline_snapshot.h"
+#include "mw/streamer/performance/pipeline_snapshot.h"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>

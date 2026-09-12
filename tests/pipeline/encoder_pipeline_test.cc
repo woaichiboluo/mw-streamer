@@ -14,15 +14,15 @@
 #include <utility>
 #include <vector>
 
-#include "mw/decoder/decoder_sink.h"
-#include "mw/encoder/encoder_sink.h"
-#include "mw/ffmpeg/codec_context.h"
-#include "mw/ffmpeg/input_format_context.h"
-#include "mw/input/zlm_input.h"
-#include "mw/output/remux_sink.h"
-#include "mw/pipeline/pipeline.h"
-#include "mw/processor/transform_processor_sink.h"
-#include "mw/synchronizer/synchronizer_sink.h"
+#include "mw/streamer/decoder/decoder_sink.h"
+#include "mw/streamer/encoder/encoder_sink.h"
+#include "mw/streamer/ffmpeg/codec_context.h"
+#include "mw/streamer/ffmpeg/input_format_context.h"
+#include "mw/streamer/input/zlm_input.h"
+#include "mw/streamer/output/remux_sink.h"
+#include "mw/streamer/pipeline/pipeline.h"
+#include "mw/streamer/processor/transform_processor_sink.h"
+#include "mw/streamer/synchronizer/synchronizer_sink.h"
 
 namespace {
 

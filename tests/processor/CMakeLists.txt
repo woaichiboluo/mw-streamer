@@ -24,7 +24,7 @@ add_test(NAME mw_source_info_adapter_tests COMMAND mw_source_info_adapter_tests)
 
 add_executable(mw_processor_enum_converter_tests
     processor_enum_converter_test.cc
-    "${PROJECT_SOURCE_DIR}/src/processor/internal/enum_converter.cc"
+    "${PROJECT_SOURCE_DIR}/src/streamer/processor/internal/enum_converter.cc"
 )
 
 target_include_directories(mw_processor_enum_converter_tests

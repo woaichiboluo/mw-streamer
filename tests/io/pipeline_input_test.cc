@@ -12,9 +12,9 @@
 #include <vector>
 
 #include "Poller/EventPoller.h"
-#include "mw/common/blocking_queue.h"
-#include "mw/input/zlm_input.h"
-#include "mw/sink/sink.h"
+#include "mw/streamer/common/blocking_queue.h"
+#include "mw/streamer/input/zlm_input.h"
+#include "mw/streamer/sink/sink.h"
 
 #ifdef CHECK
 #undef CHECK

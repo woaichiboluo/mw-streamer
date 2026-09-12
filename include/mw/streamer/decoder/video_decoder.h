@@ -1,0 +1,60 @@
+#ifndef MW_STREAMER_DECODER_VIDEO_DECODER_H_
+#define MW_STREAMER_DECODER_VIDEO_DECODER_H_
+
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <memory>
+
+#include "mw/streamer/decoder/config.h"
+#include "mw/streamer/ffmpeg/frame.h"
+#include "mw/streamer/ffmpeg/hardware_context.h"
+#include "mw/streamer/ffmpeg/packet.h"
+#include "mw/streamer/ffmpeg/stream_info.h"
+
+namespace mw::streamer {
+
+struct VideoDecodeResult {
+  std::uint64_t frames = 0;
+  std::chrono::nanoseconds service_time{0};
+};
+
+class VideoDecoder final {
+ public:
+  using OnFrame = std::function<void(const Frame& frame)>;
+
+  explicit VideoDecoder(StreamInfo stream_info,
+                        VideoDecoderConfig config = {});
+  ~VideoDecoder();
+
+  VideoDecoder(const VideoDecoder&) = delete;
+  VideoDecoder& operator=(const VideoDecoder&) = delete;
+
+  // Decoding and callbacks are synchronous on the calling thread. One packet
+  // may produce zero or more frames. The frame is borrowed for OnFrame; copy or
+  // call Ref to retain it. GPU consumers using another context/stream must
+  // establish input readiness before reading; decoding does not wait on GPU
+  // work on the host.
+  void SetOnFrame(OnFrame callback);
+  VideoDecodeResult Decode(const Packet& packet);
+
+  // Drain emits all delayed frames and ends the current decoder timeline.
+  // Decode cannot be called again until Flush starts a new timeline.
+  VideoDecodeResult Drain();
+  void Flush();
+
+  const StreamInfo& stream_info() const noexcept;
+  const VideoDecoderConfig& config() const noexcept;
+
+  // Returns the CUDA context owned by this decoder. Software decoders return
+  // nullptr. The pointer is borrowed for the VideoDecoder lifetime.
+  const HardwareContext* hardware_context() const noexcept;
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace mw::streamer
+
+#endif  // MW_STREAMER_DECODER_VIDEO_DECODER_H_

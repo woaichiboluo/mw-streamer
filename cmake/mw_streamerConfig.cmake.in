@@ -1,0 +1,187 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+set(_mw_package_is_shared @MW_STREAMER_PACKAGE_IS_SHARED@)
+set(_mw_package_has_opencv_adapter @MW_STREAMER_PACKAGE_HAS_OPENCV_ADAPTER@)
+set(_mw_saved_module_path "${CMAKE_MODULE_PATH}")
+list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/modules")
+
+function(_mw_find_library output name directory)
+    unset(${output} CACHE)
+    unset(${output})
+    find_library(${output}
+        NAMES "${name}"
+        PATHS "${PACKAGE_PREFIX_DIR}/${directory}"
+        NO_DEFAULT_PATH
+    )
+    if(NOT ${output})
+        message(FATAL_ERROR
+            "mw_streamer package is missing the ${name} library"
+        )
+    endif()
+    set(${output} "${${output}}" PARENT_SCOPE)
+endfunction()
+
+function(_mw_import_static target name)
+    if(TARGET "${target}")
+        return()
+    endif()
+    _mw_find_library(_mw_location "${name}" "@CMAKE_INSTALL_LIBDIR@/mw_streamer")
+    if(NOT _mw_location)
+        return()
+    endif()
+    add_library("${target}" STATIC IMPORTED)
+    set_target_properties("${target}" PROPERTIES
+        IMPORTED_LOCATION "${_mw_location}"
+    )
+endfunction()
+
+function(_mw_import_public target name static_definition)
+    if(TARGET "${target}")
+        return()
+    endif()
+
+    if(_mw_package_is_shared)
+        if(WIN32)
+            _mw_find_library(_mw_implib "${name}" "@CMAKE_INSTALL_LIBDIR@")
+            unset(_mw_location CACHE)
+            unset(_mw_location)
+            find_file(_mw_location
+                NAMES "${name}.dll"
+                PATHS "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@"
+                NO_DEFAULT_PATH
+            )
+            if(NOT _mw_location)
+                message(FATAL_ERROR
+                    "mw_streamer package is missing ${name}.dll"
+                )
+            endif()
+            add_library("${target}" SHARED IMPORTED)
+            set_target_properties("${target}" PROPERTIES
+                IMPORTED_IMPLIB "${_mw_implib}"
+                IMPORTED_LOCATION "${_mw_location}"
+            )
+        else()
+            _mw_find_library(_mw_location "${name}" "@CMAKE_INSTALL_LIBDIR@")
+            if(NOT _mw_location)
+                return()
+            endif()
+            add_library("${target}" SHARED IMPORTED)
+            set_target_properties("${target}" PROPERTIES
+                IMPORTED_LOCATION "${_mw_location}"
+            )
+        endif()
+    else()
+        _mw_find_library(_mw_location "${name}" "@CMAKE_INSTALL_LIBDIR@")
+        if(NOT _mw_location)
+            return()
+        endif()
+        add_library("${target}" STATIC IMPORTED)
+        set_target_properties("${target}" PROPERTIES
+            IMPORTED_LOCATION "${_mw_location}"
+            INTERFACE_COMPILE_DEFINITIONS "${static_definition}"
+        )
+    endif()
+
+    set_target_properties("${target}" PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@"
+        INTERFACE_COMPILE_FEATURES cxx_std_17
+    )
+endfunction()
+
+_mw_import_static(mw::_fmt fmt)
+if(TARGET mw::_fmt)
+    set_target_properties(mw::_fmt PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@"
+        INTERFACE_COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>"
+    )
+endif()
+
+_mw_import_public(mw::log mw_log MW_LOG_STATIC_LIBRARY)
+if(TARGET mw::log)
+    set_property(TARGET mw::log APPEND PROPERTY
+        INTERFACE_LINK_LIBRARIES mw::_fmt
+    )
+endif()
+
+_mw_import_public(mw::streamer mw_streamer MW_STREAMER_STATIC_LIBRARY)
+
+if(NOT _mw_package_is_shared)
+    find_dependency(Threads)
+    find_dependency(OpenSSL COMPONENTS SSL Crypto)
+    find_dependency(SRT)
+    find_dependency(FFmpeg COMPONENTS
+        AVCODEC AVFORMAT AVUTIL SWRESAMPLE SWSCALE
+    )
+
+    _mw_import_static(mw::_spdlog spdlog)
+    _mw_import_static(mw::_hdr_histogram hdr_histogram)
+    _mw_import_static(mw::_zltoolkit ZLToolKit)
+    _mw_import_static(mw::_zlmediakit zlmediakit)
+    _mw_import_static(mw::_ext_codec ext-codec)
+    _mw_import_static(mw::_zlmediakit_srt_adapter zlmediakit_srt_adapter)
+    _mw_import_static(mw::_flv flv)
+    _mw_import_static(mw::_mov mov)
+    _mw_import_static(mw::_mpeg mpeg)
+
+    if(TARGET mw::_spdlog)
+        set_property(TARGET mw::_spdlog APPEND PROPERTY
+            INTERFACE_LINK_LIBRARIES mw::_fmt
+        )
+    endif()
+    if(TARGET mw::log)
+        set_property(TARGET mw::log APPEND PROPERTY
+            INTERFACE_LINK_LIBRARIES mw::_spdlog
+        )
+    endif()
+    if(TARGET mw::streamer)
+        set_property(TARGET mw::streamer APPEND PROPERTY
+            INTERFACE_LINK_LIBRARIES
+                "mw::log;mw::_zlmediakit;mw::_ext_codec;mw::_zlmediakit_srt_adapter;mw::_flv;mw::_mov;mw::_mpeg;mw::_zltoolkit;mw::_hdr_histogram;SRT::SRT;FFmpeg::avcodec;FFmpeg::avformat;FFmpeg::avutil;FFmpeg::swresample;FFmpeg::swscale;OpenSSL::SSL;OpenSSL::Crypto;Threads::Threads"
+        )
+        if(WIN32)
+            set_property(TARGET mw::streamer APPEND PROPERTY
+                INTERFACE_LINK_LIBRARIES ws2_32 iphlpapi shlwapi crypt32
+            )
+        elseif(UNIX)
+            set_property(TARGET mw::streamer APPEND PROPERTY
+                INTERFACE_LINK_LIBRARIES "${CMAKE_DL_LIBS}" m
+            )
+        endif()
+    endif()
+endif()
+
+if(_mw_package_has_opencv_adapter)
+    find_dependency(OpenCV COMPONENTS core cudaarithm)
+    _mw_import_public(
+        mw::opencv_adapter
+        mw_opencv_adapter
+        MW_OPENCV_ADAPTER_STATIC_LIBRARY
+    )
+    if(TARGET mw::opencv_adapter)
+        set_property(TARGET mw::opencv_adapter APPEND PROPERTY
+            INTERFACE_INCLUDE_DIRECTORIES "${OpenCV_INCLUDE_DIRS}"
+        )
+        set_property(TARGET mw::opencv_adapter APPEND PROPERTY
+            INTERFACE_LINK_LIBRARIES "${OpenCV_LIBS}"
+        )
+    endif()
+
+    if(NOT _mw_package_is_shared)
+        find_dependency(CUDAToolkit)
+        if(TARGET mw::opencv_adapter)
+            set_property(TARGET mw::opencv_adapter APPEND PROPERTY
+                INTERFACE_LINK_LIBRARIES
+                    "mw::log;CUDA::cuda_driver;CUDA::cudart;CUDA::nppc;CUDA::nppial;CUDA::nppicc;CUDA::nppidei;CUDA::nppig;CUDA::nppitc;FFmpeg::swscale;FFmpeg::avutil"
+            )
+        endif()
+    endif()
+endif()
+
+set(CMAKE_MODULE_PATH "${_mw_saved_module_path}")
+unset(_mw_saved_module_path)
+unset(_mw_package_is_shared)
+unset(_mw_package_has_opencv_adapter)
+
+check_required_components(mw_streamer)

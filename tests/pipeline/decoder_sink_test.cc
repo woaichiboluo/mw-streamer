@@ -1,4 +1,4 @@
-#include "mw/decoder/decoder_sink.h"
+#include "mw/streamer/decoder/decoder_sink.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -24,11 +24,11 @@ extern "C" {
 #endif
 #include <catch2/catch_test_macros.hpp>
 
-#include "mw/ffmpeg/input_format_context.h"
-#include "mw/input/zlm_input.h"
-#include "mw/pipeline/pipeline.h"
-#include "mw/processor/analysis_processor_sink.h"
-#include "mw/processor/transform_processor_sink.h"
+#include "mw/streamer/ffmpeg/input_format_context.h"
+#include "mw/streamer/input/zlm_input.h"
+#include "mw/streamer/pipeline/pipeline.h"
+#include "mw/streamer/processor/analysis_processor_sink.h"
+#include "mw/streamer/processor/transform_processor_sink.h"
 
 namespace {
 

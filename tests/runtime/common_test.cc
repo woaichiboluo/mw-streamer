@@ -8,9 +8,9 @@
 #include <vector>
 
 #include "Util/util.h"
-#include "mw/common/barrier.h"
-#include "mw/common/blocking_queue.h"
-#include "mw/common/thread.h"
+#include "mw/streamer/common/barrier.h"
+#include "mw/streamer/common/blocking_queue.h"
+#include "mw/streamer/common/thread.h"
 
 #ifdef CHECK
 #undef CHECK

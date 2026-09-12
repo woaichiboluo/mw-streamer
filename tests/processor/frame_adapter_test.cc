@@ -12,10 +12,10 @@ extern "C" {
 #include <libavutil/samplefmt.h>
 }
 
-#include "mw/ffmpeg/frame.h"
-#include "mw/ffmpeg/frame_view.h"
-#include "mw/ffmpeg/hardware_context.h"
-#include "mw/processor/internal/frame_adapter.h"
+#include "mw/streamer/ffmpeg/frame.h"
+#include "mw/streamer/ffmpeg/frame_view.h"
+#include "mw/streamer/ffmpeg/hardware_context.h"
+#include "mw/streamer/processor/internal/frame_adapter.h"
 
 namespace {
 

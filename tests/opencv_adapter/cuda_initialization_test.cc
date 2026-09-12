@@ -4,7 +4,7 @@
 #include <future>
 #include <vector>
 
-#include "mw/opencv_adapter/cuda_frame.h"
+#include "mw/opencv_adapter.h"
 
 namespace {
 
@@ -21,22 +21,23 @@ TEST_CASE("CudaFrame支持多线程并发首次初始化CUDA Driver") {
       {reinterpret_cast<std::uintptr_t>(uv.data()), kWidth, kWidth,
        kHeight / 2},
   }};
-  const MwStreamerVideoFrameView source = {
-      {kMwStreamerMemoryHost,
-       kMwStreamerVideoStorageLinear,
-       kMwStreamerVideoPixelFormatNv12,
-       kWidth,
-       kHeight,
-       {.linear = {planes.data(), static_cast<std::uint32_t>(planes.size())}}},
-      {kMwStreamerColorRangeLimited, kMwStreamerColorSpaceBt709,
-       kMwStreamerColorPrimariesBt709, kMwStreamerColorTransferBt709,
-       kMwStreamerChromaLocationLeft},
-      {1, 1, {1, 25}},
-  };
+  MwStreamerVideoFrameView source{};
+  source.buffer.memory_type = kMwStreamerMemoryHost;
+  source.buffer.storage_type = kMwStreamerVideoStorageLinear;
+  source.buffer.pixel_format = kMwStreamerVideoPixelFormatNv12;
+  source.buffer.width = kWidth;
+  source.buffer.height = kHeight;
+  source.buffer.storage.linear = {
+      planes.data(), static_cast<std::uint32_t>(planes.size())};
+  source.color = {kMwStreamerColorRangeLimited, kMwStreamerColorSpaceBt709,
+                  kMwStreamerColorPrimariesBt709,
+                  kMwStreamerColorTransferBt709,
+                  kMwStreamerChromaLocationLeft};
+  source.timestamp = {1, 1, {1, 25}};
 
   std::array<std::future<bool>, kWorkerCount> workers;
   for (auto& worker : workers) {
-    worker = std::async(std::launch::async, [&source] {
+    worker = std::async(std::launch::async, [&source, kWidth, kHeight] {
       const auto cuda = CudaFrame::CopyFrom(source);
       const auto host = cuda.ToHost();
       const auto& linear = host.view().buffer.storage.linear;

@@ -1,0 +1,391 @@
+#ifndef MW_STREAMER_PROCESSOR_PROCESSOR_H_
+#define MW_STREAMER_PROCESSOR_PROCESSOR_H_
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "mw/streamer/media/types.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum MwStreamerMemoryType {
+  kMwStreamerMemoryHost = 0,
+  kMwStreamerMemoryCuda,
+} MwStreamerMemoryType;
+
+typedef enum MwStreamerVideoStorageType {
+  kMwStreamerVideoStorageLinear = 0,
+  kMwStreamerVideoStorageNativeSurface,
+} MwStreamerVideoStorageType;
+
+typedef enum MwStreamerVideoPixelFormat {
+  kMwStreamerVideoPixelFormatUnknown = 0,
+  kMwStreamerVideoPixelFormatNv12,
+  kMwStreamerVideoPixelFormatP010,
+  kMwStreamerVideoPixelFormatYuv420p,
+  kMwStreamerVideoPixelFormatYuv422p,
+  kMwStreamerVideoPixelFormatYuv444p,
+  kMwStreamerVideoPixelFormatYuv420p10le,
+  kMwStreamerVideoPixelFormatYuv422p10le,
+  kMwStreamerVideoPixelFormatYuv444p10le,
+  kMwStreamerVideoPixelFormatP016,
+  kMwStreamerVideoPixelFormatYuv444p16le,
+} MwStreamerVideoPixelFormat;
+
+typedef enum MwStreamerColorRange {
+  kMwStreamerColorRangeUnknown = 0,
+  kMwStreamerColorRangeLimited,
+  kMwStreamerColorRangeFull,
+} MwStreamerColorRange;
+
+typedef enum MwStreamerColorSpace {
+  kMwStreamerColorSpaceUnknown = 0,
+  kMwStreamerColorSpaceRgb,
+  kMwStreamerColorSpaceBt709,
+  kMwStreamerColorSpaceFcc,
+  kMwStreamerColorSpaceBt470bg,
+  kMwStreamerColorSpaceSmpte170m,
+  kMwStreamerColorSpaceSmpte240m,
+  kMwStreamerColorSpaceYcgco,
+  kMwStreamerColorSpaceBt2020Ncl,
+  kMwStreamerColorSpaceBt2020Cl,
+  kMwStreamerColorSpaceSmpte2085,
+  kMwStreamerColorSpaceChromaDerivedNcl,
+  kMwStreamerColorSpaceChromaDerivedCl,
+  kMwStreamerColorSpaceIctcp,
+  kMwStreamerColorSpaceIptC2,
+  kMwStreamerColorSpaceYcgcoRe,
+  kMwStreamerColorSpaceYcgcoRo,
+} MwStreamerColorSpace;
+
+typedef enum MwStreamerColorPrimaries {
+  kMwStreamerColorPrimariesUnknown = 0,
+  kMwStreamerColorPrimariesBt709,
+  kMwStreamerColorPrimariesBt470m,
+  kMwStreamerColorPrimariesBt470bg,
+  kMwStreamerColorPrimariesSmpte170m,
+  kMwStreamerColorPrimariesSmpte240m,
+  kMwStreamerColorPrimariesFilm,
+  kMwStreamerColorPrimariesBt2020,
+  kMwStreamerColorPrimariesSmpte428,
+  kMwStreamerColorPrimariesSmpte431,
+  kMwStreamerColorPrimariesSmpte432,
+  kMwStreamerColorPrimariesEbu3213,
+} MwStreamerColorPrimaries;
+
+typedef enum MwStreamerColorTransfer {
+  kMwStreamerColorTransferUnknown = 0,
+  kMwStreamerColorTransferBt709,
+  kMwStreamerColorTransferGamma22,
+  kMwStreamerColorTransferGamma28,
+  kMwStreamerColorTransferSmpte170m,
+  kMwStreamerColorTransferSmpte240m,
+  kMwStreamerColorTransferLinear,
+  kMwStreamerColorTransferLog,
+  kMwStreamerColorTransferLogSqrt,
+  kMwStreamerColorTransferIec61966_2_4,
+  kMwStreamerColorTransferBt1361Ecg,
+  kMwStreamerColorTransferIec61966_2_1,
+  kMwStreamerColorTransferBt2020_10,
+  kMwStreamerColorTransferBt2020_12,
+  kMwStreamerColorTransferSmpte2084,
+  kMwStreamerColorTransferSmpte428,
+  kMwStreamerColorTransferAribStdB67,
+} MwStreamerColorTransfer;
+
+typedef enum MwStreamerChromaLocation {
+  kMwStreamerChromaLocationUnknown = 0,
+  kMwStreamerChromaLocationLeft,
+  kMwStreamerChromaLocationCenter,
+  kMwStreamerChromaLocationTopLeft,
+  kMwStreamerChromaLocationTop,
+  kMwStreamerChromaLocationBottomLeft,
+  kMwStreamerChromaLocationBottom,
+} MwStreamerChromaLocation;
+
+typedef enum MwStreamerExecutionType {
+  kMwStreamerExecutionCpu = 0,
+  kMwStreamerExecutionCuda,
+} MwStreamerExecutionType;
+
+typedef enum MwStreamerProcessorStartResult {
+  kMwStreamerProcessorStartSuccess = 0,
+  kMwStreamerProcessorStartFailed,
+} MwStreamerProcessorStartResult;
+
+typedef enum MwStreamerProcessorBoundaryReason {
+  kMwStreamerProcessorTimelineReset = 0,
+  kMwStreamerProcessorEndOfInput,
+} MwStreamerProcessorBoundaryReason;
+
+typedef struct MwStreamerExecutionContext {
+  MwStreamerExecutionType type;
+} MwStreamerExecutionContext;
+
+typedef struct MwStreamerVideoPlaneView {
+  uintptr_t address;
+  // Byte distance between adjacent rows. It may be negative for host frames.
+  int32_t stride_bytes;
+  // Valid payload bytes in one row, excluding stride padding.
+  uint32_t row_bytes;
+  // Number of valid rows in this plane.
+  uint32_t row_count;
+} MwStreamerVideoPlaneView;
+
+// Host and CUDA frames currently use addressable linear planes.
+typedef struct MwStreamerLinearVideoStorageView {
+  const MwStreamerVideoPlaneView* planes;
+  uint32_t plane_count;
+} MwStreamerLinearVideoStorageView;
+
+// Native surfaces are backend-specific and borrowed for one process callback.
+// descriptor is null when handle and subresource_index fully describe the
+// surface.
+typedef struct MwStreamerNativeVideoStorageView {
+  uintptr_t handle;
+  uint32_t subresource_index;
+  const void* descriptor;
+} MwStreamerNativeVideoStorageView;
+
+typedef union MwStreamerVideoStorageView {
+  MwStreamerLinearVideoStorageView linear;
+  MwStreamerNativeVideoStorageView native_surface;
+} MwStreamerVideoStorageView;
+
+// The storage descriptor and its payload are borrowed for one process
+// callback. Linear input addresses are read-only by contract; linear output
+// addresses refer to writable framework-owned storage. storage_type selects
+// the active member of storage.
+typedef struct MwStreamerVideoBufferView {
+  MwStreamerMemoryType memory_type;
+  MwStreamerVideoStorageType storage_type;
+  MwStreamerVideoPixelFormat pixel_format;
+  uint32_t width;
+  uint32_t height;
+  MwStreamerVideoStorageView storage;
+} MwStreamerVideoBufferView;
+
+typedef struct MwStreamerVideoColorInfo {
+  MwStreamerColorRange range;
+  MwStreamerColorSpace space;
+  MwStreamerColorPrimaries primaries;
+  MwStreamerColorTransfer transfer;
+  MwStreamerChromaLocation chroma_location;
+} MwStreamerVideoColorInfo;
+
+// Color metadata and decoded storage properties describe this concrete frame,
+// independently of the source-reported track information.
+typedef struct MwStreamerVideoFrameView {
+  MwStreamerVideoBufferView buffer;
+  MwStreamerVideoColorInfo color;
+  MwStreamerMediaTimestamp timestamp;
+} MwStreamerVideoFrameView;
+
+typedef struct MwStreamerAudioFrameView {
+  const float* data;
+  uint32_t sample_rate;
+  uint32_t channel_count;
+  uint32_t samples_per_channel;
+  MwStreamerMediaTimestamp timestamp;
+} MwStreamerAudioFrameView;
+
+typedef struct MwStreamerAudioBufferView {
+  float* data;
+  uint32_t channel_count;
+  uint32_t samples_per_channel;
+} MwStreamerAudioBufferView;
+
+typedef struct MwStreamerVideoSourceInfo {
+  MwStreamerCodec codec;
+  // Source-reported dimensions; concrete decoded dimensions belong to each
+  // MwStreamerVideoFrameView.
+  uint32_t width;
+  uint32_t height;
+  MwStreamerRational frame_rate;
+  MwStreamerRational time_base;
+} MwStreamerVideoSourceInfo;
+
+typedef struct MwStreamerAudioSourceInfo {
+  MwStreamerCodec codec;
+  uint32_t sample_rate;
+  uint32_t channel_count;
+  MwStreamerRational time_base;
+} MwStreamerAudioSourceInfo;
+
+typedef struct MwStreamerProcessorSourceInfo {
+  uint8_t has_video;
+  uint8_t has_audio;
+  MwStreamerVideoSourceInfo video;
+  MwStreamerAudioSourceInfo audio;
+} MwStreamerProcessorSourceInfo;
+
+// config is a null-terminated opaque user string supplied by the host through
+// Pipeline::SetProcessorConfig.
+typedef struct MwStreamerTransformProcessorConfig {
+  const char* config;
+} MwStreamerTransformProcessorConfig;
+
+typedef struct MwStreamerVideoOutputSize {
+  uint32_t width;
+  uint32_t height;
+} MwStreamerVideoOutputSize;
+
+typedef struct MwStreamerAnalysisProcessorConfig {
+  const char* config;
+} MwStreamerAnalysisProcessorConfig;
+
+typedef struct MwStreamerTransformVideoProcessRequest {
+  const MwStreamerVideoFrameView* input;
+  // The framework attaches input->timestamp to the completed output frame.
+  MwStreamerVideoBufferView* output;
+} MwStreamerTransformVideoProcessRequest;
+
+typedef struct MwStreamerTransformAudioProcessRequest {
+  const MwStreamerAudioFrameView* input;
+  // The framework attaches input->timestamp to the completed output frame.
+  MwStreamerAudioBufferView* output;
+} MwStreamerTransformAudioProcessRequest;
+
+typedef struct MwStreamerTransformProcessorStartRequest {
+  const MwStreamerProcessorSourceInfo* source_info;
+  const MwStreamerTransformProcessorConfig* config;
+  const MwStreamerExecutionContext* execution;
+  // Non-null only when source_info->has_video is true. The framework
+  // initializes it to 1920x1080 before on_start. The callback may overwrite
+  // it before returning success; the resulting dimensions remain fixed for
+  // the Processor lifetime.
+  MwStreamerVideoOutputSize* video_output_size;
+} MwStreamerTransformProcessorStartRequest;
+
+typedef struct MwStreamerAnalysisProcessorStartRequest {
+  const MwStreamerProcessorSourceInfo* source_info;
+  const MwStreamerAnalysisProcessorConfig* config;
+  const MwStreamerExecutionContext* execution;
+} MwStreamerAnalysisProcessorStartRequest;
+
+// A failed callback must release any partially initialized user resources
+// before returning. on_stop is paired only with a successful on_start.
+typedef MwStreamerProcessorStartResult (
+    *MwStreamerTransformProcessorStartCallback)(
+    const MwStreamerTransformProcessorStartRequest* request,
+    void* user_context);
+
+typedef MwStreamerProcessorStartResult (
+    *MwStreamerAnalysisProcessorStartCallback)(
+    const MwStreamerAnalysisProcessorStartRequest* request, void* user_context);
+
+// Every Transform callback must completely produce one output for one input.
+// All writes to output must be complete when the callback returns. A Processor
+// using an asynchronous backend must establish input readiness before reading
+// GPU memory and finish its output writes before returning. The core does not
+// wait for GPU work before invoking callbacks; the provided adapters handle
+// synchronization at their copy boundaries.
+typedef void (*MwStreamerTransformProcessVideoCallback)(
+    const MwStreamerTransformVideoProcessRequest* request, void* user_context);
+
+// Audio presented to Transform Processor is always 48 kHz float32 interleaved.
+// The output has the same channel count and samples_per_channel as the input.
+typedef void (*MwStreamerTransformProcessAudioCallback)(
+    const MwStreamerTransformAudioProcessRequest* request, void* user_context);
+
+// Analysis callbacks consume decoded input without allocating or producing an
+// output media frame. GPU input access has the same synchronization contract
+// as Transform video callbacks.
+typedef void (*MwStreamerAnalysisProcessVideoCallback)(
+    const MwStreamerVideoFrameView* input, void* user_context);
+typedef void (*MwStreamerAnalysisProcessAudioCallback)(
+    const MwStreamerAudioFrameView* input, void* user_context);
+
+// Optional input boundary notification. Timeline reset is called after all
+// work from the old timeline and before the first callback of the new
+// timeline; discard temporal state and incomplete batches. End of input is
+// called after the last process callback; complete any partial final batch.
+typedef void (*MwStreamerProcessorBoundaryCallback)(
+    MwStreamerProcessorBoundaryReason reason, void* user_context);
+
+typedef void (*MwStreamerProcessorUpdateConfigCallback)(const char* config,
+                                                        void* user_context);
+
+typedef void (*MwStreamerProcessorStopCallback)(void* user_context);
+
+// A message produced by a Sink. All fields are borrowed for the callback.
+// timestamp describes observed media; it is informational and does not impose
+// ordering with media frame callbacks.
+typedef struct MwStreamerMessage {
+  const char* sink_id;
+  const char* type;
+  const void* payload;
+  size_t payload_size;
+  uint8_t has_timestamp;
+  MwStreamerMediaTimestamp timestamp;
+} MwStreamerMessage;
+
+typedef void (*MwStreamerProcessorMessageCallback)(
+    const MwStreamerMessage* message, void* user_context);
+
+typedef struct MwStreamerTransformProcessorCallbacks {
+  // Borrowed user data returned unchanged to every callback. The framework
+  // never reads or releases it.
+  void* user_context;
+
+  // on_start receives source information, execution context, initial config,
+  // and a writable default video output size before the first process callback.
+  // User code that needs the backend stream must copy it into user_context
+  // here. All request views are borrowed for the callback.
+  MwStreamerTransformProcessorStartCallback on_start;
+  MwStreamerTransformProcessVideoCallback process_video;
+  MwStreamerTransformProcessAudioCallback process_audio;
+
+  // Optional. A boundary is emitted once for the whole Processor, not once per
+  // audio or video stream.
+  MwStreamerProcessorBoundaryCallback on_boundary;
+
+  // Runtime updates originate from the Pipeline control thread and may run
+  // concurrently with audio and video processing. The null-terminated string
+  // is borrowed for the callback; user code must copy data it needs after
+  // returning and synchronize access to its own runtime state.
+  MwStreamerProcessorUpdateConfigCallback on_config_update;
+
+  // Called once after a successful on_start, after all process callbacks and
+  // their submitted output work have completed. Exceptions are logged and
+  // suppressed by the framework.
+  MwStreamerProcessorStopCallback on_stop;
+
+  // Optional. Messages are delivered asynchronously in submission order and
+  // may run concurrently with audio and video processing. The message and all
+  // referenced data are borrowed for the callback.
+  MwStreamerProcessorMessageCallback on_message;
+} MwStreamerTransformProcessorCallbacks;
+
+typedef struct MwStreamerAnalysisProcessorCallbacks {
+  // Borrowed user data returned unchanged to every callback. The framework
+  // never reads or releases it.
+  void* user_context;
+
+  MwStreamerAnalysisProcessorStartCallback on_start;
+  MwStreamerAnalysisProcessVideoCallback process_video;
+  MwStreamerAnalysisProcessAudioCallback process_audio;
+
+  // Optional. A boundary is emitted once for the whole Processor, not once per
+  // audio or video stream.
+  MwStreamerProcessorBoundaryCallback on_boundary;
+
+  // Runtime updates may run concurrently with audio and video processing. The
+  // null-terminated string is borrowed for the callback.
+  MwStreamerProcessorUpdateConfigCallback on_config_update;
+
+  // Called once after a successful on_start and all processing has completed.
+  MwStreamerProcessorStopCallback on_stop;
+
+  // Optional. AnalysisProcessorSink delivers messages asynchronously, with the
+  // same lifetime and concurrency contract as the Transform on_message hook.
+  MwStreamerProcessorMessageCallback on_message;
+} MwStreamerAnalysisProcessorCallbacks;
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif  // MW_STREAMER_PROCESSOR_PROCESSOR_H_

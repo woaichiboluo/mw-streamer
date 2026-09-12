@@ -16,11 +16,11 @@ extern "C" {
 
 #include "Extension/Factory.h"
 #include "Record/MP4Demuxer.h"
-#include "mw/converter/zlm_codec_parameters_converter.h"
-#include "mw/converter/zlm_packet_converter.h"
-#include "mw/ffmpeg/codec_context.h"
-#include "mw/ffmpeg/frame.h"
-#include "mw/ffmpeg/packet.h"
+#include "mw/streamer/converter/zlm_codec_parameters_converter.h"
+#include "mw/streamer/converter/zlm_packet_converter.h"
+#include "mw/streamer/ffmpeg/codec_context.h"
+#include "mw/streamer/ffmpeg/frame.h"
+#include "mw/streamer/ffmpeg/packet.h"
 
 namespace {
 

@@ -8,9 +8,9 @@
 #include <string>
 #include <thread>
 
-#include "mw/decoder/decoder_sink.h"
-#include "mw/input/file_input.h"
-#include "mw/pipeline/pipeline.h"
+#include "mw/streamer/decoder/decoder_sink.h"
+#include "mw/streamer/input/file_input.h"
+#include "mw/streamer/pipeline/pipeline.h"
 
 namespace {
 

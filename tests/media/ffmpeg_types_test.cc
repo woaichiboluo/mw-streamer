@@ -15,14 +15,14 @@ extern "C" {
 #include <libavutil/samplefmt.h>
 }
 
-#include "mw/ffmpeg/codec_context.h"
-#include "mw/ffmpeg/codec_parameters.h"
-#include "mw/ffmpeg/error.h"
-#include "mw/ffmpeg/frame.h"
-#include "mw/ffmpeg/input_format_context.h"
-#include "mw/ffmpeg/packet.h"
-#include "mw/ffmpeg/pixel_format.h"
-#include "mw/ffmpeg/stream_info.h"
+#include "mw/streamer/ffmpeg/codec_context.h"
+#include "mw/streamer/ffmpeg/codec_parameters.h"
+#include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/ffmpeg/frame.h"
+#include "mw/streamer/ffmpeg/input_format_context.h"
+#include "mw/streamer/ffmpeg/packet.h"
+#include "mw/streamer/ffmpeg/pixel_format.h"
+#include "mw/streamer/ffmpeg/stream_info.h"
 
 namespace {
 

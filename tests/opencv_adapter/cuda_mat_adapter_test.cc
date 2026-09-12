@@ -12,12 +12,12 @@
 #include <opencv2/core/mat.hpp>
 #include <vector>
 
-#include "mw/ffmpeg/error.h"
-#include "mw/ffmpeg/frame.h"
-#include "mw/ffmpeg/hardware_context.h"
+#include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/ffmpeg/frame.h"
+#include "mw/streamer/ffmpeg/hardware_context.h"
 #include "mw/opencv_adapter/cuda_frame.h"
 #include "mw/opencv_adapter/host_mat_adapter.h"
-#include "mw/processor/internal/frame_adapter.h"
+#include "mw/streamer/processor/internal/frame_adapter.h"
 
 extern "C" {
 #include <libavutil/hwcontext.h>
@@ -85,7 +85,7 @@ class TestFrame final {
          format,
          kWidth,
          kHeight,
-         {.linear = {planes_.data(), plane_count}}},
+         {{planes_.data(), plane_count}}},
         MakeColorInfo(),
         {1234, 1, {1, 25}},
     };

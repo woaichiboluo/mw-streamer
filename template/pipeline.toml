@@ -1,5 +1,8 @@
 # 单输入：原始流录像，同时处理后推流与录像。
 # 相对路径以本 TOML 所在目录为基准；所有 Sink ID 必须唯一。
+[log]
+level = "info"
+
 [log.modules]
 zlm = "off"
 srt = "off"
@@ -8,16 +11,14 @@ streamer = "info"
 processor = "info"
 
 [log.console]
-enabled = true
 color = true
 level = "trace"
 
 [log.rotating_file]
-enabled = false
 path = "mw-streamer.log"
 max_file_size = 10485760
 max_files = 3
-level = "info"
+level = "off"
 
 [log.async]
 enabled = false

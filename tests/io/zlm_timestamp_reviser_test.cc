@@ -1,4 +1,4 @@
-#include "mw/input/internal/zlm_timestamp_reviser.h"
+#include "mw/streamer/input/internal/zlm_timestamp_reviser.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>

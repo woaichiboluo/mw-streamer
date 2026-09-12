@@ -1,0 +1,60 @@
+#ifndef MW_STREAMER_PROCESSOR_INTERNAL_VIDEO_FRAME_ALLOCATOR_H_
+#define MW_STREAMER_PROCESSOR_INTERNAL_VIDEO_FRAME_ALLOCATOR_H_
+
+#include <cstdint>
+#include <optional>
+
+extern "C" {
+#include <libavutil/buffer.h>
+#include <libavutil/pixfmt.h>
+}
+
+#include "mw/streamer/ffmpeg/frame.h"
+
+namespace mw::streamer {
+class HardwareContext;
+}
+
+namespace mw::streamer::internal {
+
+class VideoFrameAllocator final {
+ public:
+  VideoFrameAllocator(std::uint32_t output_width, std::uint32_t output_height);
+  ~VideoFrameAllocator();
+
+  VideoFrameAllocator(const VideoFrameAllocator&) = delete;
+  VideoFrameAllocator& operator=(const VideoFrameAllocator&) = delete;
+  VideoFrameAllocator(VideoFrameAllocator&&) = delete;
+  VideoFrameAllocator& operator=(VideoFrameAllocator&&) = delete;
+
+  // The first allocation captures the input storage and lazily creates a CUDA
+  // output frames context when required. Later inputs must preserve the same
+  // format, dimensions, and hardware device.
+  Frame Allocate(const Frame& input);
+
+  // Validates every input before returning a cached black frame. The cache is
+  // rebuilt when the input color range changes.
+  Frame GetBlackFrame(const Frame& input,
+                              const HardwareContext* hardware_context);
+
+ private:
+  Frame AllocateBlackFrame(const Frame& input);
+  void PrepareOrValidate(const AVFrame& input);
+  void Prepare(const AVFrame& input);
+  void ValidatePreparedInput(const AVFrame& input) const;
+
+  std::uint32_t output_width_;
+  std::uint32_t output_height_;
+  AVPixelFormat input_format_ = AV_PIX_FMT_NONE;
+  AVPixelFormat storage_format_ = AV_PIX_FMT_NONE;
+  int input_width_ = 0;
+  int input_height_ = 0;
+  AVBufferRef* input_device_context_ = nullptr;
+  AVBufferRef* output_frames_context_ = nullptr;
+  std::optional<Frame> black_frame_;
+  bool prepared_ = false;
+};
+
+}  // namespace mw::streamer::internal
+
+#endif  // MW_STREAMER_PROCESSOR_INTERNAL_VIDEO_FRAME_ALLOCATOR_H_

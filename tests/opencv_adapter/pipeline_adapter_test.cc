@@ -19,15 +19,15 @@ extern "C" {
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "mw/decoder/video_decoder.h"
-#include "mw/ffmpeg/codec_parameters.h"
-#include "mw/ffmpeg/input_format_context.h"
-#include "mw/ffmpeg/packet.h"
-#include "mw/ffmpeg/stream_info.h"
+#include "mw/streamer/decoder/video_decoder.h"
+#include "mw/streamer/ffmpeg/codec_parameters.h"
+#include "mw/streamer/ffmpeg/input_format_context.h"
+#include "mw/streamer/ffmpeg/packet.h"
+#include "mw/streamer/ffmpeg/stream_info.h"
 #include "mw/opencv_adapter/cuda_mat_adapter.h"
 #include "mw/opencv_adapter/host_mat_adapter.h"
-#include "mw/pipeline/pipeline_builder.h"
-#include "mw/processor/internal/frame_adapter.h"
+#include "mw/streamer/pipeline/pipeline_builder.h"
+#include "mw/streamer/processor/internal/frame_adapter.h"
 
 namespace {
 
@@ -36,9 +36,18 @@ using mw::streamer::VideoDecoder;
 using mw::streamer::VideoDecoderBackend;
 using mw::streamer::VideoDecoderConfig;
 using mw::streamer::CodecParameters;
+using mw::streamer::BuildPipeline;
+using mw::streamer::DecoderNodeConfig;
+using mw::streamer::EncoderNodeConfig;
 using mw::streamer::InputFormatContext;
 using mw::streamer::Packet;
+using mw::streamer::PipelineConfig;
+using mw::streamer::PipelineState;
+using mw::streamer::ProcessorBindings;
+using mw::streamer::RemuxNodeConfig;
 using mw::streamer::StreamInfo;
+using mw::streamer::SynchronizerNodeConfig;
+using mw::streamer::TransformProcessorNodeConfig;
 using mw::opencv_adapter::CudaMatAdapter;
 using mw::opencv_adapter::HostMatAdapter;
 using mw::streamer::PerformanceType;

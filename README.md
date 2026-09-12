@@ -19,6 +19,25 @@ cmake -S . -B build-static -DCMAKE_BUILD_TYPE=Release
 cmake --build build-static --parallel
 ```
 
+安装后可通过 CMake Config Package 引用。静态安装会自动传递所需的静态宏和链接库，
+动态安装会提供对应 DLL 的导入目标：
+
+```cmake
+find_package(mw_streamer 0.1 CONFIG REQUIRED)
+
+target_link_libraries(app PRIVATE
+    mw::log
+    mw::streamer
+)
+
+# 构建并安装了可选 OpenCV adapter 时可用。
+target_link_libraries(app PRIVATE mw::opencv_adapter)
+```
+
+安装前缀不在 CMake 默认搜索路径时，将该前缀加入 `CMAKE_PREFIX_PATH`，或设置
+`mw_streamer_DIR` 指向 `lib/cmake/mw_streamer`。静态包仍要求系统能够找到 FFmpeg、
+SRT、OpenSSL、OpenCV 和 CUDA；项目自带的 fmt 及其他私有静态实现依赖会随包安装。
+
 项目交付供 C++ 宿主使用的静态库，公开接口位于 `include/mw/`，按模块组织。
 Processor 的 callback、context 和 frame view 保留纯 C 兼容结构体与函数指针；
 Pipeline 的 C 句柄封装暂不提供。FFmpeg、SRT 和 OpenSSL 由用户预先安装。FFmpeg 和 SRT
@@ -63,18 +82,18 @@ SRT 每次新建或重连发布会丢弃关键帧之前的残缺历史数据，�
 
 | 模块及命名空间 | 公开头文件位置 | 职责 |
 |---|---|---|
-| `pipeline` | `mw/pipeline/` | Pipeline、Builder 和图配置；组装节点、路由消息并协调生命周期 |
-| `input` | `mw/input/` | Input、FileInput、ZlmInput、输入状态及 PlayerProxy；获取源数据 |
-| `sink` | `mw/sink/` | 统一 Sink、SinkMessage、FatalError 和节点媒体类型、消费状态 |
-| `media` | `mw/media/` | Packet、Frame 的投递参数、轨道就绪与时间线事件；纯 C 媒体类型 |
-| `cache` | `mw/cache/` | PacketQueue 的压缩包缓存和调度 |
-| `decoder` | `mw/decoder/` | DecoderSink、音视频解码器；输出 Frame |
-| `processor` | `mw/processor/` | AnalysisProcessorSink、TransformProcessorSink 及业务回调适配 |
-| `synchronizer` | `mw/synchronizer/` | SynchronizerSink；内部实时调度、同步和备播 |
-| `encoder` | `mw/encoder/` | EncoderSink、音视频编码器；输出 Packet |
-| `output` | `mw/output/` | RemuxSink、单目标转封装、推流和录像 |
+| `pipeline` | `mw/streamer/pipeline/` | Pipeline、Builder 和图配置；组装节点、路由消息并协调生命周期 |
+| `input` | `mw/streamer/input/` | Input、FileInput、ZlmInput、输入状态及 PlayerProxy；获取源数据 |
+| `sink` | `mw/streamer/sink/` | 统一 Sink、SinkMessage、FatalError 和节点媒体类型、消费状态 |
+| `media` | `mw/streamer/media/` | Packet、Frame 的投递参数、轨道就绪与时间线事件；纯 C 媒体类型 |
+| `cache` | `mw/streamer/cache/` | PacketQueue 的压缩包缓存和调度 |
+| `decoder` | `mw/streamer/decoder/` | DecoderSink、音视频解码器；输出 Frame |
+| `processor` | `mw/streamer/processor/` | AnalysisProcessorSink、TransformProcessorSink 及业务回调适配 |
+| `synchronizer` | `mw/streamer/synchronizer/` | SynchronizerSink；内部实时调度、同步和备播 |
+| `encoder` | `mw/streamer/encoder/` | EncoderSink、音视频编码器；输出 Packet |
+| `output` | `mw/streamer/output/` | RemuxSink、单目标转封装、推流和录像 |
 
-各节点的参数结构放在所属模块的 `config.h`；`mw/pipeline/pipeline_config.h` 只描述
+各节点的参数结构放在所属模块的 `config.h`；`mw/streamer/pipeline/pipeline_config.h` 只描述
 Input、节点 ID、媒体连接和消息路由，并复用这些参数。`ffmpeg`、`common`、
 `performance` 分别提供媒体资源封装、线程容器工具和性能统计。
 
@@ -133,9 +152,9 @@ PacketQueue 依赖 Sink 作为消费者。组件不依赖 Pipeline 的实现，F
 #include <memory>
 #include <utility>
 
-#include "mw/input/zlm_input.h"
-#include "mw/pipeline/pipeline.h"
-#include "mw/sink/sink.h"
+#include "mw/streamer/input/zlm_input.h"
+#include "mw/streamer/pipeline/pipeline.h"
+#include "mw/streamer/sink/sink.h"
 
 using namespace mw::streamer;
 
@@ -172,7 +191,7 @@ Pipeline 在 Start 时创建一个仅等待 fatal 停机请求的控制线程，
 Sink 实现，各自管理状态、封装和关闭。
 
 ```cpp
-#include "mw/output/remux_sink.h"
+#include "mw/streamer/output/remux_sink.h"
 
 using namespace mw::streamer;
 
@@ -211,7 +230,7 @@ PTS/DTS 间隔，不进行逐轨归零或大间隔平滑。EOF 写完启动缓�
 仅使该 Sink 进入 `kFailed`，通过 `error()` 查询原因。其他目标继续工作，显式
 `FatalError` 仍使用统一的 Pipeline 停机通道。单目标网络状态可通过
 `GetNetworkOutputSnapshot()` 查询，返回定义在
-`mw/performance/pipeline_snapshot.h` 中的 `NetworkOutputSnapshot`。
+`mw/streamer/performance/pipeline_snapshot.h` 中的 `NetworkOutputSnapshot`。
 
 可运行示例：`mw_remux_sink_example input_url target [target...]`，每个 target
 创建一个独立 RemuxSink；有限输入 EOF 后等待输出完成，Ctrl+C 有序停止。
@@ -284,7 +303,7 @@ flow.AddSink(std::move(decoder));
 flow.Start();
 ```
 
-使用时另包含 `mw/decoder/decoder_sink.h`。
+使用时另包含 `mw/streamer/decoder/decoder_sink.h`。
 
 消费 Frame 的 Sink 回调抛出的异常会使 DecoderSink 进入 `kFailed`，原因可通过 `error()`
 查询。显式 Stop 丢弃待处理数据、取消边界等待，等待解码线程退出后再停止下游。
@@ -294,7 +313,7 @@ Input 的 EOF 状态仅表示源读完。
 ### Fatal 错误与整链路停止
 
 同步 Frame 处理节点的处理或边界回调可以抛出 `FatalError`，
-定义位于 `mw/sink/fatal_error.h`。
+定义位于 `mw/streamer/sink/fatal_error.h`。
 DecoderSink 捕获后先记录自身失败，再通过 Sink 的 fatal 通道请求 Pipeline
 停机，同时丢弃本地排队数据并取消解码边界等待。独立的异步 Sink 可以调用
 受保护的 `ReportFatalError()` 上报；Pipeline 注册 Sink 时绑定 `SetOnFatalError()`。
@@ -435,9 +454,9 @@ Packet；EOF 在编码器排空、全部延迟包交付之后通知下游。Stop
 地址、录像器或 Poller。
 
 ```cpp
-#include "mw/encoder/encoder_sink.h"
-#include "mw/output/remux_sink.h"
-#include "mw/synchronizer/synchronizer_sink.h"
+#include "mw/streamer/encoder/encoder_sink.h"
+#include "mw/streamer/output/remux_sink.h"
+#include "mw/streamer/synchronizer/synchronizer_sink.h"
 
 using namespace mw::streamer;
 
@@ -528,7 +547,7 @@ Pipeline 与 e2e 均使用统一的 Input、Sink 链路；配置支持双向转�
 
 ## 现有 PlayerProxy 输入接口
 
-`mw/sink/packet_sink.h` 定义压缩音视频消费者 `mw::streamer::PacketSink`。
+`mw/streamer/sink/packet_sink.h` 定义压缩音视频消费者 `mw::streamer::PacketSink`。
 单源输入 `PlayerProxy` 可在首次 `Start()` 前通过 `AddPacketSink()` 接收
 `std::unique_ptr<PacketSink>`，取得 Sink 的独占所有权。多个 Sink 按注册顺序在
 输入所属 poller 上同步调用；Sink 自己决定是否排队、使用工作线程及如何处理积压和
@@ -548,7 +567,7 @@ PlayerProxy，通用 Input 当前只公开 Start、Stop 与状态查询。
 ## Pipeline 配置与 TOML 双向转换
 
 链路使用 `PipelineConfig`，不按实时、文件或转封装划分配置类型。
-`mw/pipeline/pipeline_config.h` 定义一个 Input 和平铺的节点列表；每个节点保留
+`mw/streamer/pipeline/pipeline_config.h` 定义一个 Input 和平铺的节点列表；每个节点保留
 `id`、`downstream`、可选的 `message_receiver`，并通过具体 NodeConfig 的
 `options` 成员复用已有参数结构。配置对象独占持有节点描述，只能移动，不包含
 运行中的 Sink、线程或业务回调。
@@ -585,7 +604,7 @@ type = "analysis_processor"
 结构体构建时，设置 `spec.input.type = InputType::kFile` 和
 `spec.input.file.path = "./input.mp4"`，其余节点构建方式相同。
 
-`mw/config/toml.h` 提供四个统一入口：
+`mw/streamer/config/toml.h` 提供四个统一入口：
 
 - `ParsePipelineConfigFromToml(text)`：TOML 字符串转结构体。
 - `SerializePipelineConfigToToml(config)`：结构体转 TOML 字符串。
@@ -610,7 +629,7 @@ streamer TOML，宿主通过 `Pipeline::SetProcessorConfig(id, config)` 提供�
 每个 Sink 只有一个媒体上游，消息连接独立；实际轨道、尺寸兼容与编解码器可用性
 仍由运行组件检查。
 
-`mw/pipeline/pipeline_builder.h` 的 `BuildPipeline()` 同时服务 TOML 与 C++ 调用方：
+`mw/streamer/pipeline/pipeline_builder.h` 的 `BuildPipeline()` 同时服务 TOML 与 C++ 调用方：
 
 ```cpp
 
@@ -646,9 +665,13 @@ SavePipelineConfigToToml(restored, "pipeline.toml");
 
 ## 日志
 
-日志模块使用一个活动的 spdlog logger 统一接收 `mw-streamer`、Processor、
-ZLMediaKit、libsrt 和 FFmpeg 日志，并在正文前分别增加 `[streamer]`、
-`[processor]`、`[ZLM]`、`[SRT]` 和 `[FFMPEG]`。`pipeline.toml` 的 `[log]`
-控制各模块级别、控制台、滚动文件及异步队列；运行时在首次创建 Pipeline 或其他
-媒体对象时初始化并接管这些第三方日志。异步日志默认关闭，彩色控制台与普通控制台
-不会同时创建。线程数为 0 时由 ZLToolKit 按硬件并发数决定。
+独立目标 `mw::log` 通过聚合头文件 `mw/log.h` 提供支持 fmt 的 C++ 日志宏，
+以及接收纯文本的 C ABI。`MW_LOG_INFO(module, ...)` 等宏记录命名
+模块，`MW_LOG_INFO_DEFAULT(...)` 等宏使用 `default` 模块；日志末尾包含调用处的
+文件名和行号。
+
+所有模块共享同一组输出端。Console 和滚动文件的级别为 `off` 时不创建对应 Sink，
+二者可以单独或同时输出；`[log].level` 是未单独配置模块的默认级别，
+`[log.modules]` 可以用任意字符串模块名覆盖。streamer 只负责接管 ZLMediaKit、
+libsrt 和 FFmpeg 日志并转发给 `mw::log`。异步日志默认关闭，线程数为 0 时由
+ZLToolKit 按硬件并发数决定。

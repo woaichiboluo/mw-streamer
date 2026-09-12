@@ -17,12 +17,12 @@ extern "C" {
 #include <libavutil/hwcontext_cuda.h>
 }
 
-#include "mw/ffmpeg/error.h"
-#include "mw/ffmpeg/frame.h"
-#include "mw/ffmpeg/hardware_context.h"
+#include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/ffmpeg/frame.h"
+#include "mw/streamer/ffmpeg/hardware_context.h"
 #include "mw/opencv_adapter/cuda_frame.h"
 #include "mw/opencv_adapter/host_frame.h"
-#include "mw/processor/internal/frame_adapter.h"
+#include "mw/streamer/processor/internal/frame_adapter.h"
 
 namespace {
 
@@ -79,7 +79,7 @@ TEST_CASE("HostFrame深拷贝带padding和负stride的Host帧") {
        kMwStreamerVideoPixelFormatNv12,
        kWidth,
        kHeight,
-       {.linear = {planes.data(), static_cast<std::uint32_t>(planes.size())}}},
+       {{planes.data(), static_cast<std::uint32_t>(planes.size())}}},
       MakeColorInfo(),
       MakeTimestamp(),
   };
@@ -278,8 +278,8 @@ TEST_CASE("HostFrame CopyTo校验目标格式和全部平面布局") {
        kMwStreamerVideoPixelFormatNv12,
        kWidth,
        kHeight,
-       {.linear = {source_planes.data(),
-                   static_cast<std::uint32_t>(source_planes.size())}}},
+       {{source_planes.data(),
+         static_cast<std::uint32_t>(source_planes.size())}}},
       MakeColorInfo(),
       MakeTimestamp(),
   };

@@ -82,7 +82,7 @@ TEST_CASE("HostMatAdapter在NV12和BGR8之间同步转换") {
        kMwStreamerVideoPixelFormatNv12,
        kWidth,
        kHeight,
-       {.linear = {planes.data(), static_cast<std::uint32_t>(planes.size())}}},
+       {{planes.data(), static_cast<std::uint32_t>(planes.size())}}},
       MakeColorInfo(),
       MakeTimestamp(),
   };
@@ -149,7 +149,7 @@ TEST_CASE("HostMatAdapter在P010和BGR16之间同步转换") {
        kMwStreamerVideoPixelFormatP010,
        kWidth,
        kHeight,
-       {.linear = {planes.data(), static_cast<std::uint32_t>(planes.size())}}},
+       {{planes.data(), static_cast<std::uint32_t>(planes.size())}}},
       MakeColorInfo(),
       MakeTimestamp(),
   };
@@ -206,8 +206,7 @@ TEST_CASE("HostMatAdapter转换P016和YUV444P16") {
          kMwStreamerVideoPixelFormatP016,
          kWidth,
          kHeight,
-         {.linear = {planes.data(),
-                     static_cast<std::uint32_t>(planes.size())}}},
+         {{planes.data(), static_cast<std::uint32_t>(planes.size())}}},
         MakeColorInfo(),
         MakeTimestamp(),
     };
@@ -236,8 +235,7 @@ TEST_CASE("HostMatAdapter转换P016和YUV444P16") {
          kMwStreamerVideoPixelFormatYuv444p16le,
          kWidth,
          kHeight,
-         {.linear = {planes.data(),
-                     static_cast<std::uint32_t>(planes.size())}}},
+         {{planes.data(), static_cast<std::uint32_t>(planes.size())}}},
         MakeColorInfo(),
         MakeTimestamp(),
     };
@@ -266,7 +264,7 @@ TEST_CASE("HostMatAdapter转换YUV444P") {
        kMwStreamerVideoPixelFormatYuv444p,
        kWidth,
        kHeight,
-       {.linear = {planes.data(), static_cast<std::uint32_t>(planes.size())}}},
+       {{planes.data(), static_cast<std::uint32_t>(planes.size())}}},
       MakeColorInfo(),
       MakeTimestamp(),
   };
@@ -293,7 +291,7 @@ TEST_CASE("HostMatAdapter接受CUDA View和prototype") {
        kMwStreamerVideoPixelFormatNv12,
        kWidth,
        kHeight,
-       {.linear = {planes.data(), static_cast<std::uint32_t>(planes.size())}}},
+       {{planes.data(), static_cast<std::uint32_t>(planes.size())}}},
       MakeColorInfo(),
       MakeTimestamp(),
   };
@@ -332,7 +330,7 @@ TEST_CASE("HostMatAdapter拒绝HDR和不匹配的Mat") {
        kMwStreamerVideoPixelFormatNv12,
        kWidth,
        kHeight,
-       {.linear = {planes.data(), static_cast<std::uint32_t>(planes.size())}}},
+       {{planes.data(), static_cast<std::uint32_t>(planes.size())}}},
       MakeColorInfo(),
       MakeTimestamp(),
   };

@@ -1,4 +1,4 @@
-#include "mw/synchronizer/synchronizer_sink.h"
+#include "mw/streamer/synchronizer/synchronizer_sink.h"
 
 #include <atomic>
 #include <chrono>

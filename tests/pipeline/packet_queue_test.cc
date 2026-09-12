@@ -1,4 +1,4 @@
-#include "mw/cache/packet_queue.h"
+#include "mw/streamer/cache/packet_queue.h"
 
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>

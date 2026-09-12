@@ -1,7 +1,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "mw/processor/processor.h"
+#include "mw/streamer/processor/processor.h"
 
 typedef struct TestProcessor {
   uint32_t start_calls;
