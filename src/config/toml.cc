@@ -23,7 +23,7 @@
 #include "mw/init/internal/runtime.h"
 #include "mw/log/logging.h"
 
-namespace mw::streamer::config {
+namespace mw::streamer {
 namespace {
 
 using Table = toml::table;
@@ -48,7 +48,7 @@ void WarnUnknownKeys(const Table& table,
     static_cast<void>(value);
     const std::string_view name = key.str();
     if (std::find(allowed.begin(), allowed.end(), name) == allowed.end()) {
-      log::Module<log::LogModule::kStreamer>::Warning(
+      Module<LogModule::kStreamer>::Warning(
           "忽略未知TOML配置项: {}", FieldPath(table_path, name));
     }
   }
@@ -213,19 +213,19 @@ Table ParseFile(const std::filesystem::path& path) {
 }
 
 void ReadLogLevel(const Table& table, std::string_view key,
-                  std::string_view table_path, log::LogLevel* output) {
+                  std::string_view table_path, LogLevel* output) {
   ReadEnum(table, key, table_path,
-           {{"off", log::LogLevel::kOff},
-            {"trace", log::LogLevel::kTrace},
-            {"debug", log::LogLevel::kDebug},
-            {"info", log::LogLevel::kInfo},
-            {"warning", log::LogLevel::kWarning},
-            {"error", log::LogLevel::kError},
-            {"critical", log::LogLevel::kCritical}},
+           {{"off", LogLevel::kOff},
+            {"trace", LogLevel::kTrace},
+            {"debug", LogLevel::kDebug},
+            {"info", LogLevel::kInfo},
+            {"warning", LogLevel::kWarning},
+            {"error", LogLevel::kError},
+            {"critical", LogLevel::kCritical}},
            output);
 }
 
-void ReadLogConfig(const Table& table, log::LogConfig* config) {
+void ReadLogConfig(const Table& table, LogConfig* config) {
   WarnUnknownKeys(table, {"modules", "console", "rotating_file", "async"},
                   "log");
   if (const auto* modules = OptionalTable(table, "modules", "log")) {
@@ -265,13 +265,13 @@ void ReadLogConfig(const Table& table, log::LogConfig* config) {
     ReadBool(*async, "enabled", kPath, &config->async.enabled);
     ReadInteger(*async, "queue_size", kPath, &config->async.queue_size);
     ReadEnum(*async, "overflow", kPath,
-             {{"block", log::OverflowPolicy::kBlock},
-              {"overrun_oldest", log::OverflowPolicy::kOverrunOldest}},
+             {{"block", OverflowPolicy::kBlock},
+              {"overrun_oldest", OverflowPolicy::kOverrunOldest}},
              &config->async.overflow);
   }
 }
 
-void ReadInitZlmConfig(const Table& table, zlm::Config* config) {
+void ReadInitZlmConfig(const Table& table, ZlmConfig* config) {
   constexpr std::string_view kPath = "zlm";
   WarnUnknownKeys(
       table, {"event_poller_threads", "work_threads", "enable_cpu_affinity"},
@@ -282,7 +282,7 @@ void ReadInitZlmConfig(const Table& table, zlm::Config* config) {
   ReadBool(table, "enable_cpu_affinity", kPath, &config->enable_cpu_affinity);
 }
 
-void ReadPlayerConfig(const Table& table, zlm::PlayerConfig* config,
+void ReadPlayerConfig(const Table& table, PlayerConfig* config,
                       std::string_view path) {
   WarnUnknownKeys(
       table, {"connect_timeout_ms", "media_timeout_ms", "local_bind_ip"}, path);
@@ -291,7 +291,7 @@ void ReadPlayerConfig(const Table& table, zlm::PlayerConfig* config,
   ReadString(table, "local_bind_ip", path, &config->local_bind_ip);
 }
 
-void ReadOutputConfig(const Table& table, zlm::OutputConfig* config,
+void ReadOutputConfig(const Table& table, OutputConfig* config,
                       std::string_view path) {
   WarnUnknownKeys(table, {"pusher", "muxer", "recording"}, path);
   if (const auto* pusher = OptionalTable(table, "pusher", path)) {
@@ -320,7 +320,7 @@ void ReadOutputConfig(const Table& table, zlm::OutputConfig* config,
   }
 }
 
-void ReadReconnectPolicyAt(const Table& table, input::ReconnectPolicy* config,
+void ReadReconnectPolicyAt(const Table& table, ReconnectPolicy* config,
                            std::string_view path) {
   WarnUnknownKeys(
       table, {"max_retries", "min_delay_ms", "max_delay_ms", "delay_step_ms"},
@@ -332,20 +332,20 @@ void ReadReconnectPolicyAt(const Table& table, input::ReconnectPolicy* config,
 }
 
 void ReadAudioDecoderConfigAt(const Table& table,
-                              decoder::AudioDecoderConfig* config,
+                              AudioDecoderConfig* config,
                               std::string_view path) {
   WarnUnknownKeys(table, {"decoder_name"}, path);
   ReadString(table, "decoder_name", path, &config->decoder_name);
 }
 
 void ReadVideoDecoderConfigAt(const Table& table,
-                              decoder::VideoDecoderConfig* config,
+                              VideoDecoderConfig* config,
                               std::string_view path) {
   WarnUnknownKeys(table, {"decoder_name", "backend", "device_index"}, path);
   ReadString(table, "decoder_name", path, &config->decoder_name);
   ReadEnum(table, "backend", path,
-           {{"software", decoder::VideoDecoderBackend::kSoftware},
-            {"cuda", decoder::VideoDecoderBackend::kCuda}},
+           {{"software", VideoDecoderBackend::kSoftware},
+            {"cuda", VideoDecoderBackend::kCuda}},
            &config->backend);
   ReadInteger(table, "device_index", path, &config->device_index);
 }
@@ -357,7 +357,7 @@ std::string FormatToml(const Table& table) {
 }
 
 void ReadAudioEncoderConfigAt(const Table& table,
-                              encoder::AudioEncoderConfig* config,
+                              AudioEncoderConfig* config,
                               std::string_view path) {
   WarnUnknownKeys(table, {"encoder_name", "properties"}, path);
   ReadString(table, "encoder_name", path, &config->encoder_name);
@@ -365,7 +365,7 @@ void ReadAudioEncoderConfigAt(const Table& table,
 }
 
 void ReadVideoEncoderConfigAt(const Table& table,
-                              encoder::VideoEncoderConfig* config,
+                              VideoEncoderConfig* config,
                               std::string_view path) {
   WarnUnknownKeys(table, {"codec", "encoder_name", "frame_rate", "properties"},
                   path);
@@ -409,19 +409,19 @@ Table ParseText(std::string_view text, std::string_view path = "") {
   }
 }
 
-pipeline::InputConfig ReadInput(const Table& root) {
+InputConfig ReadInput(const Table& root) {
   RequireField(root, "input", "");
   const auto& table = *OptionalTable(root, "input", "");
   constexpr std::string_view kPath = "input";
   RequireField(table, "type", kPath);
   RequireField(table, "downstream", kPath);
-  pipeline::InputConfig result;
+  InputConfig result;
   ReadEnum(table, "type", kPath,
-           {{"zlm", pipeline::InputType::kZlm},
-            {"file", pipeline::InputType::kFile}},
+           {{"zlm", InputType::kZlm},
+            {"file", InputType::kFile}},
            &result.type);
   ReadStringArray(table, "downstream", kPath, &result.downstream);
-  if (result.type == pipeline::InputType::kFile) {
+  if (result.type == InputType::kFile) {
     WarnUnknownKeys(table, {"type", "path", "downstream"}, kPath);
     RequireField(table, "path", kPath);
     ReadString(table, "path", kPath, &result.file.path);
@@ -442,7 +442,7 @@ pipeline::InputConfig ReadInput(const Table& root) {
   return result;
 }
 
-std::unique_ptr<pipeline::SinkConfig> ReadDecoderNode(const Table& table,
+std::unique_ptr<SinkConfig> ReadDecoderNode(const Table& table,
                                                       std::string id,
                                                       std::string_view path) {
   WarnUnknownKeys(
@@ -451,7 +451,7 @@ std::unique_ptr<pipeline::SinkConfig> ReadDecoderNode(const Table& table,
        "audio_decode_queue_capacity", "video_decode_queue_capacity",
        "audio_decoder", "video_decoder"},
       path);
-  auto node = std::make_unique<pipeline::DecoderNodeConfig>(std::move(id));
+  auto node = std::make_unique<DecoderNodeConfig>(std::move(id));
   auto& config = node->options;
   ReadMilliseconds(table, "cache_duration_ms", path, &config.cache_duration);
   ReadInteger(table, "audio_decode_queue_capacity", path,
@@ -469,30 +469,30 @@ std::unique_ptr<pipeline::SinkConfig> ReadDecoderNode(const Table& table,
   return node;
 }
 
-std::unique_ptr<pipeline::SinkConfig> ReadProcessorNode(const Table& table,
+std::unique_ptr<SinkConfig> ReadProcessorNode(const Table& table,
                                                         std::string id,
-                                                        pipeline::SinkType type,
+                                                        SinkType type,
                                                         std::string_view path) {
-  if (type == pipeline::SinkType::kAnalysisProcessor) {
+  if (type == SinkType::kAnalysisProcessor) {
     WarnUnknownKeys(table, {"id", "type", "downstream", "message_receiver"},
                     path);
-    return std::make_unique<pipeline::AnalysisProcessorNodeConfig>(
+    return std::make_unique<AnalysisProcessorNodeConfig>(
         std::move(id));
   }
   WarnUnknownKeys(table, {"id", "type", "downstream", "message_receiver"},
                   path);
-  return std::make_unique<pipeline::TransformProcessorNodeConfig>(
+  return std::make_unique<TransformProcessorNodeConfig>(
       std::move(id));
 }
 
-std::unique_ptr<pipeline::SinkConfig> ReadSynchronizerNode(
+std::unique_ptr<SinkConfig> ReadSynchronizerNode(
     const Table& table, std::string id, std::string_view path) {
   WarnUnknownKeys(
       table,
       {"id", "type", "downstream", "message_receiver", "frame_queue_capacity",
        "max_frame_lateness_ms", "standby_timeout_ms", "standby_image_path"},
       path);
-  auto node = std::make_unique<pipeline::SynchronizerNodeConfig>(std::move(id));
+  auto node = std::make_unique<SynchronizerNodeConfig>(std::move(id));
   auto& config = node->options;
   ReadInteger(table, "frame_queue_capacity", path,
               &config.frame_queue_capacity);
@@ -503,7 +503,7 @@ std::unique_ptr<pipeline::SinkConfig> ReadSynchronizerNode(
   return node;
 }
 
-std::unique_ptr<pipeline::SinkConfig> ReadEncoderNode(const Table& table,
+std::unique_ptr<SinkConfig> ReadEncoderNode(const Table& table,
                                                       std::string id,
                                                       std::string_view path) {
   WarnUnknownKeys(
@@ -511,7 +511,7 @@ std::unique_ptr<pipeline::SinkConfig> ReadEncoderNode(const Table& table,
       {"id", "type", "downstream", "message_receiver", "frame_queue_capacity",
        "startup_packet_capacity", "audio_encoder", "video_encoder"},
       path);
-  auto node = std::make_unique<pipeline::EncoderNodeConfig>(std::move(id));
+  auto node = std::make_unique<EncoderNodeConfig>(std::move(id));
   auto& config = node->options;
   ReadInteger(table, "frame_queue_capacity", path,
               &config.frame_queue_capacity);
@@ -528,7 +528,7 @@ std::unique_ptr<pipeline::SinkConfig> ReadEncoderNode(const Table& table,
   return node;
 }
 
-std::unique_ptr<pipeline::SinkConfig> ReadRemuxNode(const Table& table,
+std::unique_ptr<SinkConfig> ReadRemuxNode(const Table& table,
                                                     std::string id,
                                                     std::string_view path) {
   WarnUnknownKeys(table,
@@ -536,7 +536,7 @@ std::unique_ptr<pipeline::SinkConfig> ReadRemuxNode(const Table& table,
                    "packet_queue_capacity", "zlm"},
                   path);
   RequireField(table, "target", path);
-  auto node = std::make_unique<pipeline::RemuxNodeConfig>(std::move(id));
+  auto node = std::make_unique<RemuxNodeConfig>(std::move(id));
   ReadString(table, "target", path, &node->options.target);
   ReadInteger(table, "packet_queue_capacity", path,
               &node->options.packet_queue_capacity);
@@ -546,37 +546,37 @@ std::unique_ptr<pipeline::SinkConfig> ReadRemuxNode(const Table& table,
   return node;
 }
 
-std::unique_ptr<pipeline::SinkConfig> ReadSinkNode(const Table& table,
+std::unique_ptr<SinkConfig> ReadSinkNode(const Table& table,
                                                    std::string_view path) {
   RequireField(table, "id", path);
   RequireField(table, "type", path);
   std::string id;
   ReadString(table, "id", path, &id);
-  pipeline::SinkType type;
+  SinkType type;
   ReadEnum(table, "type", path,
-           {{"decoder", pipeline::SinkType::kDecoder},
-            {"analysis_processor", pipeline::SinkType::kAnalysisProcessor},
-            {"transform_processor", pipeline::SinkType::kTransformProcessor},
-            {"synchronizer", pipeline::SinkType::kSynchronizer},
-            {"encoder", pipeline::SinkType::kEncoder},
-            {"remux", pipeline::SinkType::kRemux}},
+           {{"decoder", SinkType::kDecoder},
+            {"analysis_processor", SinkType::kAnalysisProcessor},
+            {"transform_processor", SinkType::kTransformProcessor},
+            {"synchronizer", SinkType::kSynchronizer},
+            {"encoder", SinkType::kEncoder},
+            {"remux", SinkType::kRemux}},
            &type);
-  std::unique_ptr<pipeline::SinkConfig> result;
+  std::unique_ptr<SinkConfig> result;
   switch (type) {
-    case pipeline::SinkType::kDecoder:
+    case SinkType::kDecoder:
       result = ReadDecoderNode(table, std::move(id), path);
       break;
-    case pipeline::SinkType::kAnalysisProcessor:
-    case pipeline::SinkType::kTransformProcessor:
+    case SinkType::kAnalysisProcessor:
+    case SinkType::kTransformProcessor:
       result = ReadProcessorNode(table, std::move(id), type, path);
       break;
-    case pipeline::SinkType::kSynchronizer:
+    case SinkType::kSynchronizer:
       result = ReadSynchronizerNode(table, std::move(id), path);
       break;
-    case pipeline::SinkType::kEncoder:
+    case SinkType::kEncoder:
       result = ReadEncoderNode(table, std::move(id), path);
       break;
-    case pipeline::SinkType::kRemux:
+    case SinkType::kRemux:
       result = ReadRemuxNode(table, std::move(id), path);
       break;
   }
@@ -585,9 +585,9 @@ std::unique_ptr<pipeline::SinkConfig> ReadSinkNode(const Table& table,
   return result;
 }
 
-pipeline::PipelineConfig ReadPipeline(const Table& root) {
+PipelineConfig ReadPipeline(const Table& root) {
   WarnUnknownKeys(root, {"log", "zlm", "input", "sinks"}, "");
-  pipeline::PipelineConfig result;
+  PipelineConfig result;
   result.input = ReadInput(root);
   RequireField(root, "sinks", "");
   const auto* sinks = root.get("sinks")->as_array();
@@ -602,7 +602,7 @@ pipeline::PipelineConfig ReadPipeline(const Table& root) {
     }
     result.sinks.push_back(ReadSinkNode(*table, path));
   }
-  pipeline::ValidatePipelineConfig(result);
+  ValidatePipelineConfig(result);
   return result;
 }
 
@@ -638,8 +638,8 @@ Table WriteRational(const Rational& value) {
   return result;
 }
 
-Table WriteInput(const pipeline::InputConfig& input) {
-  if (input.type == pipeline::InputType::kFile) {
+Table WriteInput(const InputConfig& input) {
+  if (input.type == InputType::kFile) {
     return Table{{"type", "file"},
                  {"path", input.file.path},
                  {"downstream", WriteStringArray(input.downstream)}};
@@ -661,7 +661,7 @@ Table WriteInput(const pipeline::InputConfig& input) {
              {"delay_step_ms", reconnect.delay_step.count()}}}};
 }
 
-void WriteDecoderNode(Table& table, const decoder::DecoderSinkConfig& config) {
+void WriteDecoderNode(Table& table, const DecoderSinkConfig& config) {
   table.insert("cache_duration_ms", config.cache_duration.count());
   table.insert("audio_decode_queue_capacity",
                WriteCapacity(config.audio_decode_queue_capacity));
@@ -672,14 +672,14 @@ void WriteDecoderNode(Table& table, const decoder::DecoderSinkConfig& config) {
   table.insert("video_decoder",
                Table{{"decoder_name", config.video_decoder.decoder_name},
                      {"backend", config.video_decoder.backend ==
-                                         decoder::VideoDecoderBackend::kCuda
+                                         VideoDecoderBackend::kCuda
                                      ? "cuda"
                                      : "software"},
                      {"device_index", config.video_decoder.device_index}});
 }
 
 void WriteSynchronizerNode(Table& table,
-                           const synchronizer::SynchronizerSinkConfig& config) {
+                           const SynchronizerSinkConfig& config) {
   table.insert("frame_queue_capacity",
                WriteCapacity(config.frame_queue_capacity));
   table.insert("max_frame_lateness_ms", config.max_frame_lateness.count());
@@ -687,7 +687,7 @@ void WriteSynchronizerNode(Table& table,
   table.insert("standby_image_path", config.standby_image_path);
 }
 
-void WriteEncoderNode(Table& table, const encoder::EncoderSinkConfig& config) {
+void WriteEncoderNode(Table& table, const EncoderSinkConfig& config) {
   table.insert("frame_queue_capacity",
                WriteCapacity(config.frame_queue_capacity));
   table.insert("startup_packet_capacity",
@@ -706,7 +706,7 @@ void WriteEncoderNode(Table& table, const encoder::EncoderSinkConfig& config) {
             {"properties", WriteProperties(config.video_encoder.properties)}});
 }
 
-void WriteRemuxNode(Table& table, const output::RemuxSinkConfig& config) {
+void WriteRemuxNode(Table& table, const RemuxSinkConfig& config) {
   table.insert("target", config.target);
   table.insert("packet_queue_capacity",
                WriteCapacity(config.packet_queue_capacity));
@@ -725,41 +725,41 @@ void WriteRemuxNode(Table& table, const output::RemuxSinkConfig& config) {
                     output.recording.hls_segment_duration.count()}}}});
 }
 
-Table WriteSinkNode(const pipeline::SinkConfig& node) {
+Table WriteSinkNode(const SinkConfig& node) {
   Table result{{"id", node.id},
                {"downstream", WriteStringArray(node.downstream)}};
   if (!node.message_receiver.empty()) {
     result.insert("message_receiver", node.message_receiver);
   }
   switch (node.type()) {
-    case pipeline::SinkType::kDecoder:
+    case SinkType::kDecoder:
       result.insert("type", "decoder");
       WriteDecoderNode(
           result,
-          static_cast<const pipeline::DecoderNodeConfig&>(node).options);
+          static_cast<const DecoderNodeConfig&>(node).options);
       break;
-    case pipeline::SinkType::kAnalysisProcessor:
+    case SinkType::kAnalysisProcessor:
       result.insert("type", "analysis_processor");
       break;
-    case pipeline::SinkType::kTransformProcessor:
+    case SinkType::kTransformProcessor:
       result.insert("type", "transform_processor");
       break;
-    case pipeline::SinkType::kSynchronizer:
+    case SinkType::kSynchronizer:
       result.insert("type", "synchronizer");
       WriteSynchronizerNode(
           result,
-          static_cast<const pipeline::SynchronizerNodeConfig&>(node).options);
+          static_cast<const SynchronizerNodeConfig&>(node).options);
       break;
-    case pipeline::SinkType::kEncoder:
+    case SinkType::kEncoder:
       result.insert("type", "encoder");
       WriteEncoderNode(
           result,
-          static_cast<const pipeline::EncoderNodeConfig&>(node).options);
+          static_cast<const EncoderNodeConfig&>(node).options);
       break;
-    case pipeline::SinkType::kRemux:
+    case SinkType::kRemux:
       result.insert("type", "remux");
       WriteRemuxNode(
-          result, static_cast<const pipeline::RemuxNodeConfig&>(node).options);
+          result, static_cast<const RemuxNodeConfig&>(node).options);
       break;
   }
   return result;
@@ -775,13 +775,13 @@ void ResolveLocalPath(std::string* value,
 
 }  // namespace
 
-pipeline::PipelineConfig ParsePipelineConfigFromToml(std::string_view text) {
+PipelineConfig ParsePipelineConfigFromToml(std::string_view text) {
   return ReadPipeline(ParseText(text));
 }
 
 std::string SerializePipelineConfigToToml(
-    const pipeline::PipelineConfig& config) {
-  pipeline::ValidatePipelineConfig(config);
+    const PipelineConfig& config) {
+  ValidatePipelineConfig(config);
   toml::array sinks;
   for (const auto& sink : config.sinks) {
     sinks.push_back(WriteSinkNode(*sink));
@@ -790,19 +790,19 @@ std::string SerializePipelineConfigToToml(
       Table{{"input", WriteInput(config.input)}, {"sinks", std::move(sinks)}});
 }
 
-pipeline::PipelineConfig LoadPipelineConfigFromToml(
+PipelineConfig LoadPipelineConfigFromToml(
     const std::filesystem::path& path) {
   auto config = ReadPipeline(ParseFile(path));
   const auto directory = std::filesystem::absolute(path).parent_path();
-  if (config.input.type == pipeline::InputType::kFile) {
+  if (config.input.type == InputType::kFile) {
     ResolveLocalPath(&config.input.file.path, directory);
   } else {
     ResolveLocalPath(&config.input.options.url, directory);
   }
   for (const auto& sink : config.sinks) {
-    if (auto* remux = dynamic_cast<pipeline::RemuxNodeConfig*>(sink.get())) {
+    if (auto* remux = dynamic_cast<RemuxNodeConfig*>(sink.get())) {
       ResolveLocalPath(&remux->options.target, directory);
-    } else if (auto* sync = dynamic_cast<pipeline::SynchronizerNodeConfig*>(
+    } else if (auto* sync = dynamic_cast<SynchronizerNodeConfig*>(
                    sink.get())) {
       ResolveLocalPath(&sync->options.standby_image_path, directory);
     }
@@ -810,7 +810,7 @@ pipeline::PipelineConfig LoadPipelineConfigFromToml(
   return config;
 }
 
-void SavePipelineConfigToToml(const pipeline::PipelineConfig& config,
+void SavePipelineConfigToToml(const PipelineConfig& config,
                               const std::filesystem::path& path) {
   const auto text = SerializePipelineConfigToToml(config);
   std::ofstream output(path, std::ios::binary | std::ios::trunc);
@@ -826,31 +826,31 @@ void SavePipelineConfigToToml(const pipeline::PipelineConfig& config,
   }
 }
 
-std::unique_ptr<pipeline::Pipeline> BuildPipelineFromToml(
+std::unique_ptr<Pipeline> BuildPipelineFromToml(
     const std::filesystem::path& path,
-    const pipeline::ProcessorBindings& bindings) {
+    const ProcessorBindings& bindings) {
   const auto root = ParseFile(path);
-  init::internal::RuntimeConfig init_config;
+  internal::RuntimeConfig init_config;
   ReadOptionalConfigTable(root, "log", &init_config.log, ReadLogConfig);
   ReadOptionalConfigTable(root, "zlm", &init_config.zlm, ReadInitZlmConfig);
-  init::internal::EnsureInitialized(init_config);
+  internal::EnsureInitialized(init_config);
   auto config = ReadPipeline(root);
   const auto directory = std::filesystem::absolute(path).parent_path();
-  if (config.input.type == pipeline::InputType::kFile) {
+  if (config.input.type == InputType::kFile) {
     ResolveLocalPath(&config.input.file.path, directory);
   } else {
     ResolveLocalPath(&config.input.options.url, directory);
   }
   for (const auto& sink : config.sinks) {
-    if (auto* remux = dynamic_cast<pipeline::RemuxNodeConfig*>(sink.get())) {
+    if (auto* remux = dynamic_cast<RemuxNodeConfig*>(sink.get())) {
       ResolveLocalPath(&remux->options.target, directory);
     } else if (auto* synchronizer =
-                   dynamic_cast<pipeline::SynchronizerNodeConfig*>(
+                   dynamic_cast<SynchronizerNodeConfig*>(
                        sink.get())) {
       ResolveLocalPath(&synchronizer->options.standby_image_path, directory);
     }
   }
-  return pipeline::BuildPipeline(config, bindings);
+  return BuildPipeline(config, bindings);
 }
 
-}  // namespace mw::streamer::config
+}  // namespace mw::streamer

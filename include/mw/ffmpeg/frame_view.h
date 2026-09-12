@@ -6,7 +6,7 @@
 #include "mw/ffmpeg/frame.h"
 #include "mw/processor/processor.h"
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 // Exposes a borrowed C view of a video Frame without copying its buffers. The
 // source Frame must remain alive and unchanged, and this adapter must remain
@@ -40,6 +40,6 @@ class AudioFrameViewAdapter final {
   MwStreamerAudioFrameView view_{};
 };
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_FFMPEG_FRAME_VIEW_H_

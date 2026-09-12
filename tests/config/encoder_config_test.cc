@@ -5,9 +5,9 @@
 
 namespace {
 
-using mw::streamer::encoder::AudioEncoderConfig;
-using mw::streamer::encoder::EncoderProperties;
-using mw::streamer::encoder::VideoEncoderConfig;
+using mw::streamer::AudioEncoderConfig;
+using mw::streamer::EncoderProperties;
+using mw::streamer::VideoEncoderConfig;
 
 static_assert(
     std::is_same_v<EncoderProperties, std::map<std::string, std::string>>);

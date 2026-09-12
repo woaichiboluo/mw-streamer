@@ -5,7 +5,7 @@
 #include <limits>
 #include <stdexcept>
 
-namespace mw::streamer::zlm::internal {
+namespace mw::streamer::internal {
 namespace {
 
 void ValidateTimeout(std::chrono::milliseconds timeout,
@@ -50,4 +50,4 @@ void ValidateOutputConfig(const OutputConfig& config) {
   ValidateRecordingConfig(config.recording);
 }
 
-}  // namespace mw::streamer::zlm::internal
+}  // namespace mw::streamer::internal

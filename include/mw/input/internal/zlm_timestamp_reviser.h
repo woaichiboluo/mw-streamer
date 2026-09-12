@@ -9,7 +9,7 @@ class Frame;
 class Stamp;
 }  // namespace mediakit
 
-namespace mw::streamer::input::internal {
+namespace mw::streamer::internal {
 
 // ZLM's RTSP player reconstructs each RTP track against its own RTCP/NTP
 // clock. Its MultiMediaSourceMuxer normally smooths the resulting jumps with
@@ -22,6 +22,6 @@ bool ShouldReviseZlmTimestamps(std::string_view url) noexcept;
 std::shared_ptr<mediakit::Frame> ReviseZlmFrameTimestamp(
     std::shared_ptr<mediakit::Frame> frame, mediakit::Stamp* stamp);
 
-}  // namespace mw::streamer::input::internal
+}  // namespace mw::streamer::internal
 
 #endif  // MW_STREAMER_INCLUDE_MW_INPUT_INTERNAL_ZLM_TIMESTAMP_REVISER_H_

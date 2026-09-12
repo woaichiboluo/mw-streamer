@@ -17,9 +17,9 @@ extern "C" {
 namespace {
 
 using StreamerLog =
-    mw::streamer::log::Module<mw::streamer::log::LogModule::kStreamer>;
+    mw::streamer::Module<mw::streamer::LogModule::kStreamer>;
 using ProcessorLog =
-    mw::streamer::log::Module<mw::streamer::log::LogModule::kProcessor>;
+    mw::streamer::Module<mw::streamer::LogModule::kProcessor>;
 
 class TemporaryLogFile {
  public:
@@ -48,13 +48,13 @@ class TemporaryLogFile {
   std::filesystem::path path_;
 };
 
-mw::streamer::log::LogConfig MakeFileLogConfig(
+mw::streamer::LogConfig MakeFileLogConfig(
     const std::filesystem::path& path) {
-  mw::streamer::log::LogConfig config;
+  mw::streamer::LogConfig config;
   config.console.enabled = false;
   config.rotating_file.enabled = true;
   config.rotating_file.path = path.string();
-  config.rotating_file.level = mw::streamer::log::LogLevel::kTrace;
+  config.rotating_file.level = mw::streamer::LogLevel::kTrace;
   config.rotating_file.max_file_size = 1024 * 1024;
   config.rotating_file.max_files = 1;
   return config;
@@ -65,10 +65,10 @@ mw::streamer::log::LogConfig MakeFileLogConfig(
 TEST_CASE("module level filters before the shared logger", "[logging]") {
   TemporaryLogFile file;
   auto config = MakeFileLogConfig(file.path());
-  config.modules.streamer = mw::streamer::log::LogLevel::kWarning;
+  config.modules.streamer = mw::streamer::LogLevel::kWarning;
 
   {
-    mw::streamer::log::Logging logging(config);
+    mw::streamer::Logging logging(config);
     StreamerLog::Info("hidden info message");
     StreamerLog::Warning("visible warning {}", 42);
   }
@@ -81,11 +81,11 @@ TEST_CASE("module level filters before the shared logger", "[logging]") {
 TEST_CASE("Processor logs use an independent module level", "[logging]") {
   TemporaryLogFile file;
   auto config = MakeFileLogConfig(file.path());
-  config.modules.streamer = mw::streamer::log::LogLevel::kOff;
-  config.modules.processor = mw::streamer::log::LogLevel::kWarning;
+  config.modules.streamer = mw::streamer::LogLevel::kOff;
+  config.modules.processor = mw::streamer::LogLevel::kWarning;
 
   {
-    mw::streamer::log::Logging logging(config);
+    mw::streamer::Logging logging(config);
     StreamerLog::Warning("hidden streamer warning");
     ProcessorLog::Info("hidden processor info");
     ProcessorLog::Warning("visible processor warning");
@@ -101,11 +101,11 @@ TEST_CASE("Processor logs use an independent module level", "[logging]") {
 TEST_CASE("ZLM and FFmpeg logs use module prefixes", "[logging][bridge]") {
   TemporaryLogFile file;
   auto config = MakeFileLogConfig(file.path());
-  config.modules.zlm = mw::streamer::log::LogLevel::kInfo;
-  config.modules.ffmpeg = mw::streamer::log::LogLevel::kInfo;
+  config.modules.zlm = mw::streamer::LogLevel::kInfo;
+  config.modules.ffmpeg = mw::streamer::LogLevel::kInfo;
 
   {
-    mw::streamer::log::Logging logging(config);
+    mw::streamer::Logging logging(config);
     InfoL << "zlm bridge message";
     av_log(nullptr, AV_LOG_INFO, "ffmpeg bridge message\n");
   }
@@ -121,10 +121,10 @@ TEST_CASE("async logging drains its shared queue on destruction",
   auto config = MakeFileLogConfig(file.path());
   config.async.enabled = true;
   config.async.queue_size = 128;
-  config.async.overflow = mw::streamer::log::OverflowPolicy::kBlock;
+  config.async.overflow = mw::streamer::OverflowPolicy::kBlock;
 
   {
-    mw::streamer::log::Logging logging(config);
+    mw::streamer::Logging logging(config);
     for (int index = 0; index < 32; ++index) {
       StreamerLog::Info("async message {}", index);
     }
@@ -140,13 +140,13 @@ TEST_CASE("Logging can be owned manually", "[logging][lifecycle]") {
   const auto config = MakeFileLogConfig(file.path());
 
   {
-    mw::streamer::log::Logging logging(config);
+    mw::streamer::Logging logging(config);
     StreamerLog::Info("manually owned logging");
   }
 
   const auto content = file.Read();
   CHECK(content.find("[streamer] manually owned logging") != std::string::npos);
-  CHECK(mw::streamer::log::detail::ShouldLog(
-      mw::streamer::log::LogModule::kStreamer,
-      mw::streamer::log::LogLevel::kInfo));
+  CHECK(mw::streamer::internal::ShouldLog(
+      mw::streamer::LogModule::kStreamer,
+      mw::streamer::LogLevel::kInfo));
 }

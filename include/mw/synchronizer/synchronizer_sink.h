@@ -9,7 +9,7 @@
 #include "mw/sink/sink.h"
 #include "mw/synchronizer/config.h"
 
-namespace mw::streamer::synchronizer {
+namespace mw::streamer {
 
 enum class SynchronizerSinkState {
   kIdle,
@@ -43,7 +43,7 @@ enum class SynchronizerSinkState {
 // error()/state(); FatalError and explicit child fatal reports additionally
 // request Pipeline shutdown. Explicit message receivers must outlive senders.
 // Lifecycle methods must not be called from callbacks or the owned thread.
-class SynchronizerSink final : public sink::Sink {
+class SynchronizerSink final : public Sink {
  public:
   explicit SynchronizerSink(std::string id, SynchronizerSinkConfig config = {});
   ~SynchronizerSink() override;
@@ -51,11 +51,11 @@ class SynchronizerSink final : public sink::Sink {
   SynchronizerSink(const SynchronizerSink&) = delete;
   SynchronizerSink& operator=(const SynchronizerSink&) = delete;
 
-  void OnStreamsReady(const media::FrameStreamsReady& streams) override;
-  void OnAudioFrame(const media::FrameReady& frame) override;
-  void OnVideoFrame(const media::FrameReady& frame) override;
-  void OnTimelineReset(const media::TimelineReset& reset) override;
-  void OnInputEnded(const media::StreamEnded& end) override;
+  void OnStreamsReady(const FrameStreamsReady& streams) override;
+  void OnAudioFrame(const FrameReady& frame) override;
+  void OnVideoFrame(const FrameReady& frame) override;
+  void OnTimelineReset(const TimelineReset& reset) override;
+  void OnInputEnded(const StreamEnded& end) override;
   void Stop() noexcept override;
 
   SynchronizerSinkState state() const noexcept;
@@ -67,13 +67,13 @@ class SynchronizerSink final : public sink::Sink {
  private:
   // kSynchronizer counts audio and video frame objects together. Its calls
   // cover scheduler Push/TakeReady, excluding pacing waits and all consumers.
-  performance::NodeSnapshot GetOwnPerformance() const override;
+  NodeSnapshot GetOwnPerformance() const override;
   void HandleFatalError(const std::string& error) noexcept override;
 
   class Impl;
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::synchronizer
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_SYNCHRONIZER_SYNCHRONIZER_SINK_H_

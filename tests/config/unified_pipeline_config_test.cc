@@ -15,11 +15,11 @@
 namespace {
 
 using namespace std::chrono_literals;
-using namespace mw::streamer::pipeline;
-using mw::streamer::config::LoadPipelineConfigFromToml;
-using mw::streamer::config::ParsePipelineConfigFromToml;
-using mw::streamer::config::SavePipelineConfigToToml;
-using mw::streamer::config::SerializePipelineConfigToToml;
+using namespace mw::streamer;
+using mw::streamer::LoadPipelineConfigFromToml;
+using mw::streamer::ParsePipelineConfigFromToml;
+using mw::streamer::SavePipelineConfigToToml;
+using mw::streamer::SerializePipelineConfigToToml;
 
 constexpr std::string_view kCompleteToml = R"toml(
 [input]
@@ -125,7 +125,7 @@ Node& FindNode(PipelineConfig& config, const std::string& id) {
   throw std::logic_error("测试节点不存在");
 }
 
-PipelineConfig RecordingConfig() {
+PipelineConfig MakeRecordingPipelineConfig() {
   PipelineConfig config;
   config.input.options.url = "rtsp://127.0.0.1/live/camera";
   config.input.downstream = {"record"};
@@ -202,7 +202,7 @@ TEST_CASE("统一配置完整参数双向转换并保持节点与连接顺序") 
   CHECK(decoder.options.audio_decoder.decoder_name == "aac");
   CHECK(decoder.options.video_decoder.decoder_name == "h264");
   CHECK(decoder.options.video_decoder.backend ==
-        mw::streamer::decoder::VideoDecoderBackend::kSoftware);
+        mw::streamer::VideoDecoderBackend::kSoftware);
   CHECK(decoder.options.video_decoder.device_index == 2);
 
   const auto& analysis =
@@ -261,7 +261,7 @@ type = "analysis_processor"
   CHECK(decoder.options.audio_decode_queue_capacity == 256);
   CHECK(decoder.options.video_decode_queue_capacity == 128);
   CHECK(decoder.options.video_decoder.backend ==
-        mw::streamer::decoder::VideoDecoderBackend::kCuda);
+        mw::streamer::VideoDecoderBackend::kCuda);
   CHECK(config.input.options.player.connect_timeout == 10000ms);
   CHECK(config.input.options.reconnect_policy.max_retries == -1);
   const auto serialized = SerializePipelineConfigToToml(config);
@@ -382,7 +382,7 @@ TEST_CASE("统一配置校验节点参数无需启动媒体资源") {
   SECTION("视频设备") {
     auto& options =
         FindNode<DecoderNodeConfig>(config, "decode").options.video_decoder;
-    options.backend = mw::streamer::decoder::VideoDecoderBackend::kCuda;
+    options.backend = mw::streamer::VideoDecoderBackend::kCuda;
     options.device_index = -1;
   }
   SECTION("Encoder队列") {
@@ -417,7 +417,7 @@ TEST_CASE("统一配置校验节点参数无需启动媒体资源") {
 TEST_CASE("程序配置无需TOML即可构建且生命周期不借用配置") {
   std::unique_ptr<Pipeline> pipeline;
   {
-    auto config = RecordingConfig();
+    auto config = MakeRecordingPipelineConfig();
     config.sinks[0]->message_receiver = "record";
     pipeline = BuildPipeline(config);
   }
@@ -472,10 +472,10 @@ TEST_CASE("文件加载解析本地路径而字符串解析保留路径") {
   auto loaded = LoadPipelineConfigFromToml(file);
   CHECK(loaded.input.options.url == (directory.path() / "input.mp4").string());
   CHECK(FindNode<RemuxNodeConfig>(loaded, "raw").options.target ==
-        (directory.path() / "recordings/original.mp4").string());
+        (directory.path() / "recordings/original.mp4").lexically_normal().string());
   CHECK(FindNode<SynchronizerNodeConfig>(loaded, "sync")
             .options.standby_image_path ==
-        (directory.path() / "images/standby.png").string());
+        (directory.path() / "images/standby.png").lexically_normal().string());
   CHECK(FindNode<RemuxNodeConfig>(loaded, "publish").options.target ==
         "rtmp://127.0.0.1/live/processed");
   loaded.input.options.url = "rtsp://127.0.0.1/live/camera";
@@ -490,7 +490,7 @@ TEST_CASE("文件加载解析本地路径而字符串解析保留路径") {
 TEST_CASE("保存加载报告IO错误且无效配置不会覆盖原文件") {
   TemporaryDirectory directory;
   const auto file = directory.path() / "pipeline.toml";
-  auto config = RecordingConfig();
+  auto config = MakeRecordingPipelineConfig();
   config.input.options.url = (directory.path() / "input.mp4").string();
   FindNode<RemuxNodeConfig>(config, "record").options.target =
       (directory.path() / "record.mp4").string();

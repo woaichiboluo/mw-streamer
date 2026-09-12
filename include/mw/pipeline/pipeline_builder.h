@@ -9,7 +9,7 @@
 #include "mw/pipeline/pipeline_config.h"
 #include "mw/processor/processor.h"
 
-namespace mw::streamer::pipeline {
+namespace mw::streamer {
 
 // Optional bindings by Sink ID, supplied by the host and never serialized.
 // Unspecified callbacks retain each Processor's existing passthrough/ignore
@@ -25,6 +25,6 @@ struct ProcessorBindings {
 std::unique_ptr<Pipeline> BuildPipeline(const PipelineConfig& config,
                                         const ProcessorBindings& bindings = {});
 
-}  // namespace mw::streamer::pipeline
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_PIPELINE_PIPELINE_BUILDER_H_

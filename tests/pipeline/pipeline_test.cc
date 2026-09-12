@@ -18,22 +18,22 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::input::Input;
-using mw::streamer::input::InputState;
-using mw::streamer::input::InputStateChanged;
-using mw::streamer::input::ZlmInput;
-using mw::streamer::input::ZlmInputConfig;
-using mw::streamer::media::PacketReady;
-using mw::streamer::media::StreamEnded;
-using mw::streamer::media::StreamEndReason;
-using mw::streamer::media::StreamsReady;
-using mw::streamer::media::TimelineReset;
-using mw::streamer::media::TimelineResetReason;
-using mw::streamer::sink::PacketSinkState;
-using mw::streamer::sink::Sink;
-using mw::streamer::sink::SinkMediaType;
-using namespace mw::streamer::pipeline;
-using mw::streamer::common::BlockingQueue;
+using mw::streamer::Input;
+using mw::streamer::InputState;
+using mw::streamer::InputStateChanged;
+using mw::streamer::ZlmInput;
+using mw::streamer::ZlmInputConfig;
+using mw::streamer::PacketReady;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
+using mw::streamer::StreamsReady;
+using mw::streamer::TimelineReset;
+using mw::streamer::TimelineResetReason;
+using mw::streamer::PacketSinkState;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
+using namespace mw::streamer;
+using mw::streamer::BlockingQueue;
 
 class FakeInput final : public Input {
  public:
@@ -383,7 +383,7 @@ TEST_CASE("pipeline stop waits for a sink callback and leaves sinks alive") {
   CHECK(performance_result == std::future_status::ready);
   const auto snapshot = performance.get();
   const auto input_stats =
-      snapshot.Find(mw::streamer::performance::PerformanceType::kInput);
+      snapshot.Find(mw::streamer::PerformanceType::kInput);
   REQUIRE(input_stats.size() == 1);
   CHECK(input_stats[0].operation->output_count > 0);
   CHECK(snapshot.sinks.size() == 1);

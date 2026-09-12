@@ -8,7 +8,7 @@ extern "C" {
 
 #include "mw/ffmpeg/codec_parameters.h"
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 struct StreamInfo {
   int stream_index = -1;
@@ -20,6 +20,6 @@ struct StreamInfo {
   void Validate() const;
 };
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_FFMPEG_STREAM_INFO_H_

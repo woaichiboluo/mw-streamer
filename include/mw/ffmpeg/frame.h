@@ -5,7 +5,7 @@ extern "C" {
 #include <libavutil/frame.h>
 }
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 class Frame final {
  public:
@@ -35,6 +35,6 @@ class Frame final {
   AVFrame* frame_ = nullptr;
 };
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_FFMPEG_FRAME_H_

@@ -16,14 +16,14 @@ extern "C" {
 #include "mw/ffmpeg/error.h"
 #include "mw/log/logging.h"
 
-namespace mw::streamer::resampler {
+namespace mw::streamer {
 namespace {
 
-using Log = log::Module<log::LogModule::kStreamer>;
+using Log = Module<LogModule::kStreamer>;
 
 constexpr AVRational kOutputTimeBase{1, AudioResampler::kOutputSampleRate};
 
-void ValidateStreamInfo(const ffmpeg::StreamInfo& stream_info) {
+void ValidateStreamInfo(const StreamInfo& stream_info) {
   stream_info.Validate();
   const auto* parameters = stream_info.codec_parameters.get();
   if (parameters->codec_type != AVMEDIA_TYPE_AUDIO) {
@@ -39,7 +39,7 @@ void ValidateStreamInfo(const ffmpeg::StreamInfo& stream_info) {
 
 class AudioResampler::Impl final {
  public:
-  explicit Impl(ffmpeg::StreamInfo stream_info)
+  explicit Impl(StreamInfo stream_info)
       : stream_info_(std::move(stream_info)) {
     ValidateStreamInfo(stream_info_);
   }
@@ -48,7 +48,7 @@ class AudioResampler::Impl final {
 
   void SetOnFrame(OnFrame callback) { on_frame_ = std::move(callback); }
 
-  void Resample(const ffmpeg::Frame& frame) {
+  void Resample(const Frame& frame) {
     if (drained_) {
       throw std::logic_error(
           "AudioResampler已Drain，必须Flush后才能继续重采样");
@@ -61,13 +61,13 @@ class AudioResampler::Impl final {
     const auto output_pts = OutputPts(*input);
     const int output_capacity =
         swr_get_out_samples(context_, input->nb_samples);
-    ffmpeg::ThrowIfError(output_capacity, "计算音频重采样输出容量");
+    ThrowIfError(output_capacity, "计算音频重采样输出容量");
     auto output = AllocateOutputFrame(std::max(output_capacity, 1));
     const int output_samples =
         swr_convert(context_, output->extended_data, output->nb_samples,
                     const_cast<const std::uint8_t**>(input->extended_data),
                     input->nb_samples);
-    ffmpeg::ThrowIfError(output_samples, "重采样音频帧");
+    ThrowIfError(output_samples, "重采样音频帧");
     Emit(std::move(output), output_samples, output_pts);
   }
 
@@ -78,7 +78,7 @@ class AudioResampler::Impl final {
 
     while (context_) {
       const int output_capacity = swr_get_out_samples(context_, 0);
-      ffmpeg::ThrowIfError(output_capacity, "计算音频重采样尾部容量");
+      ThrowIfError(output_capacity, "计算音频重采样尾部容量");
       if (output_capacity == 0) {
         break;
       }
@@ -86,7 +86,7 @@ class AudioResampler::Impl final {
       auto output = AllocateOutputFrame(output_capacity);
       const int output_samples = swr_convert(context_, output->extended_data,
                                              output->nb_samples, nullptr, 0);
-      ffmpeg::ThrowIfError(output_samples, "排空音频重采样器");
+      ThrowIfError(output_samples, "排空音频重采样器");
       if (output_samples == 0) {
         break;
       }
@@ -101,7 +101,7 @@ class AudioResampler::Impl final {
   void Flush() {
     if (context_) {
       swr_close(context_);
-      ffmpeg::ThrowIfError(swr_init(context_), "重置音频重采样器");
+      ThrowIfError(swr_init(context_), "重置音频重采样器");
     }
     next_output_pts_.reset();
     drained_ = false;
@@ -109,7 +109,7 @@ class AudioResampler::Impl final {
                stream_info_.stream_index);
   }
 
-  const ffmpeg::StreamInfo& stream_info() const noexcept {
+  const StreamInfo& stream_info() const noexcept {
     return stream_info_;
   }
 
@@ -139,14 +139,14 @@ class AudioResampler::Impl final {
     SwrContext* pending_context = nullptr;
     const auto* parameters = stream_info_.codec_parameters.get();
     try {
-      ffmpeg::ThrowIfError(
+      ThrowIfError(
           swr_alloc_set_opts2(&pending_context, &parameters->ch_layout,
                               AV_SAMPLE_FMT_FLT, kOutputSampleRate,
                               &input.ch_layout,
                               static_cast<AVSampleFormat>(input.format),
                               input.sample_rate, 0, nullptr),
           "配置音频重采样器");
-      ffmpeg::ThrowIfError(swr_init(pending_context), "初始化音频重采样器");
+      ThrowIfError(swr_init(pending_context), "初始化音频重采样器");
     } catch (...) {
       swr_free(&pending_context);
       throw;
@@ -165,17 +165,17 @@ class AudioResampler::Impl final {
         kOutputSampleRate, input.ch_layout.nb_channels);
   }
 
-  ffmpeg::Frame AllocateOutputFrame(int sample_capacity) const {
-    ffmpeg::Frame output;
+  Frame AllocateOutputFrame(int sample_capacity) const {
+    Frame output;
     output->format = AV_SAMPLE_FMT_FLT;
     output->sample_rate = kOutputSampleRate;
     output->time_base = kOutputTimeBase;
     output->nb_samples = sample_capacity;
-    ffmpeg::ThrowIfError(
+    ThrowIfError(
         av_channel_layout_copy(&output->ch_layout,
                                &stream_info_.codec_parameters.get()->ch_layout),
         "复制重采样输出声道布局");
-    ffmpeg::ThrowIfError(av_frame_get_buffer(output.get(), 0),
+    ThrowIfError(av_frame_get_buffer(output.get(), 0),
                          "分配重采样音频帧");
     return output;
   }
@@ -191,7 +191,7 @@ class AudioResampler::Impl final {
     return input_pts - delay;
   }
 
-  void Emit(ffmpeg::Frame output, int output_samples, std::int64_t output_pts) {
+  void Emit(Frame output, int output_samples, std::int64_t output_pts) {
     if (output_samples == 0) {
       if (output_pts != AV_NOPTS_VALUE) {
         next_output_pts_ = output_pts;
@@ -212,7 +212,7 @@ class AudioResampler::Impl final {
     }
   }
 
-  ffmpeg::StreamInfo stream_info_;
+  StreamInfo stream_info_;
   SwrContext* context_ = nullptr;
   AVSampleFormat input_sample_format_ = AV_SAMPLE_FMT_NONE;
   std::optional<std::int64_t> next_output_pts_;
@@ -220,7 +220,7 @@ class AudioResampler::Impl final {
   bool drained_ = false;
 };
 
-AudioResampler::AudioResampler(ffmpeg::StreamInfo stream_info)
+AudioResampler::AudioResampler(StreamInfo stream_info)
     : impl_(std::make_unique<Impl>(std::move(stream_info))) {}
 
 AudioResampler::~AudioResampler() = default;
@@ -229,7 +229,7 @@ void AudioResampler::SetOnFrame(OnFrame callback) {
   impl_->SetOnFrame(std::move(callback));
 }
 
-void AudioResampler::Resample(const ffmpeg::Frame& frame) {
+void AudioResampler::Resample(const Frame& frame) {
   impl_->Resample(frame);
 }
 
@@ -237,8 +237,8 @@ void AudioResampler::Drain() { impl_->Drain(); }
 
 void AudioResampler::Flush() { impl_->Flush(); }
 
-const ffmpeg::StreamInfo& AudioResampler::stream_info() const noexcept {
+const StreamInfo& AudioResampler::stream_info() const noexcept {
   return impl_->stream_info();
 }
 
-}  // namespace mw::streamer::resampler
+}  // namespace mw::streamer

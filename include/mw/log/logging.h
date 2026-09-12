@@ -10,7 +10,7 @@
 #include <string_view>
 #include <utility>
 
-namespace mw::streamer::log {
+namespace mw::streamer {
 
 enum class LogLevel : std::uint8_t {
   kOff,
@@ -71,7 +71,7 @@ struct LogConfig {
   AsyncConfig async;
 };
 
-namespace detail {
+namespace internal {
 
 class LoggingImpl;
 
@@ -87,7 +87,7 @@ void Write(LogModule module, LogLevel level, fmt::format_string<Args...> format,
   Write(module, level, fmt::format(format, std::forward<Args>(args)...));
 }
 
-}  // namespace detail
+}  // namespace internal
 
 class Logging {
  public:
@@ -100,47 +100,47 @@ class Logging {
   Logging& operator=(Logging&&) = delete;
 
  private:
-  std::unique_ptr<detail::LoggingImpl> impl_;
+  std::unique_ptr<internal::LoggingImpl> impl_;
 };
 
 template <LogModule module>
 struct Module {
   template <typename... Args>
   static void Trace(fmt::format_string<Args...> format, Args&&... args) {
-    detail::Write(module, LogLevel::kTrace, format,
+    internal::Write(module, LogLevel::kTrace, format,
                   std::forward<Args>(args)...);
   }
 
   template <typename... Args>
   static void Debug(fmt::format_string<Args...> format, Args&&... args) {
-    detail::Write(module, LogLevel::kDebug, format,
+    internal::Write(module, LogLevel::kDebug, format,
                   std::forward<Args>(args)...);
   }
 
   template <typename... Args>
   static void Info(fmt::format_string<Args...> format, Args&&... args) {
-    detail::Write(module, LogLevel::kInfo, format, std::forward<Args>(args)...);
+    internal::Write(module, LogLevel::kInfo, format, std::forward<Args>(args)...);
   }
 
   template <typename... Args>
   static void Warning(fmt::format_string<Args...> format, Args&&... args) {
-    detail::Write(module, LogLevel::kWarning, format,
+    internal::Write(module, LogLevel::kWarning, format,
                   std::forward<Args>(args)...);
   }
 
   template <typename... Args>
   static void Error(fmt::format_string<Args...> format, Args&&... args) {
-    detail::Write(module, LogLevel::kError, format,
+    internal::Write(module, LogLevel::kError, format,
                   std::forward<Args>(args)...);
   }
 
   template <typename... Args>
   static void Critical(fmt::format_string<Args...> format, Args&&... args) {
-    detail::Write(module, LogLevel::kCritical, format,
+    internal::Write(module, LogLevel::kCritical, format,
                   std::forward<Args>(args)...);
   }
 };
 
-}  // namespace mw::streamer::log
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_LOG_LOGGING_H_

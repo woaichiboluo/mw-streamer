@@ -5,9 +5,9 @@
 
 namespace {
 
-using mw::streamer::decoder::AudioDecoderConfig;
-using mw::streamer::decoder::VideoDecoderBackend;
-using mw::streamer::decoder::VideoDecoderConfig;
+using mw::streamer::AudioDecoderConfig;
+using mw::streamer::VideoDecoderBackend;
+using mw::streamer::VideoDecoderConfig;
 
 TEST_CASE("Decoder配置默认使用FFmpeg自动选择和CUDA设备零") {
   const AudioDecoderConfig audio;

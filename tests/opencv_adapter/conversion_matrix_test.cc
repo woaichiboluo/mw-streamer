@@ -18,10 +18,10 @@
 
 namespace {
 
-using mw::streamer::opencv_adapter::CudaFrame;
-using mw::streamer::opencv_adapter::CudaMatAdapter;
-using mw::streamer::opencv_adapter::HostFrame;
-using mw::streamer::opencv_adapter::HostMatAdapter;
+using mw::opencv_adapter::CudaFrame;
+using mw::opencv_adapter::CudaMatAdapter;
+using mw::opencv_adapter::HostFrame;
+using mw::opencv_adapter::HostMatAdapter;
 
 constexpr std::uint32_t kWidth = 64;
 constexpr std::uint32_t kHeight = 16;

@@ -7,7 +7,7 @@
 #include "mw/processor/processor.h"
 #include "mw/sink/sink.h"
 
-namespace mw::streamer::processor {
+namespace mw::streamer {
 
 // Synchronously consumes frames through the Analysis Processor C callbacks;
 // absent media callbacks ignore that track. Audio/video may execute
@@ -15,7 +15,7 @@ namespace mw::streamer::processor {
 // generations. Callbacks borrow their arguments and user_context remains
 // borrowed until Stop. No callback may reenter this sink's control, delivery,
 // or destruction methods.
-class AnalysisProcessorSink final : public sink::Sink {
+class AnalysisProcessorSink final : public Sink {
  public:
   AnalysisProcessorSink(std::string id,
                         MwStreamerAnalysisProcessorCallbacks callbacks);
@@ -24,11 +24,11 @@ class AnalysisProcessorSink final : public sink::Sink {
   AnalysisProcessorSink(const AnalysisProcessorSink&) = delete;
   AnalysisProcessorSink& operator=(const AnalysisProcessorSink&) = delete;
 
-  void OnStreamsReady(const media::FrameStreamsReady& streams) override;
-  void OnAudioFrame(const media::FrameReady& frame) override;
-  void OnVideoFrame(const media::FrameReady& frame) override;
-  void OnTimelineReset(const media::TimelineReset& reset) override;
-  void OnInputEnded(const media::StreamEnded& end) override;
+  void OnStreamsReady(const FrameStreamsReady& streams) override;
+  void OnAudioFrame(const FrameReady& frame) override;
+  void OnVideoFrame(const FrameReady& frame) override;
+  void OnTimelineReset(const TimelineReset& reset) override;
+  void OnInputEnded(const StreamEnded& end) override;
 
   // Before startup, stores the value for on_start. Afterwards, updates
   // serialize with each other and invoke on_config_update.
@@ -38,14 +38,14 @@ class AnalysisProcessorSink final : public sink::Sink {
   void Stop() noexcept override;
 
  protected:
-  performance::NodeSnapshot GetOwnPerformance() const override;
-  void OnMessage(const sink::SinkMessage& message) override;
+  NodeSnapshot GetOwnPerformance() const override;
+  void OnMessage(const SinkMessage& message) override;
 
  private:
   class Impl;
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::processor
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_PROCESSOR_ANALYSIS_PROCESSOR_SINK_H_

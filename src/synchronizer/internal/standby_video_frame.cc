@@ -24,57 +24,57 @@ extern "C" {
 #include "mw/ffmpeg/packet.h"
 #include "mw/ffmpeg/pixel_format.h"
 
-namespace mw::streamer::synchronizer::internal {
+namespace mw::streamer::internal {
 namespace {
 
 using ScaleContext = std::unique_ptr<SwsContext, void (*)(SwsContext*)>;
 
-ffmpeg::Frame DecodeImage(const std::string& path) {
-  ffmpeg::InputFormatContext input(path);
+Frame DecodeImage(const std::string& path) {
+  InputFormatContext input(path);
   input.FindStreamInfo();
   const int stream_index =
       av_find_best_stream(input.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-  ffmpeg::ThrowIfError(stream_index, "查找备播图片视频流");
+  ThrowIfError(stream_index, "查找备播图片视频流");
 
   const auto* parameters = input->streams[stream_index]->codecpar;
   const auto* codec = avcodec_find_decoder(parameters->codec_id);
   if (!codec) {
     throw std::invalid_argument("找不到备播图片解码器");
   }
-  ffmpeg::CodecContext decoder(codec);
-  ffmpeg::ThrowIfError(avcodec_parameters_to_context(decoder.get(), parameters),
+  CodecContext decoder(codec);
+  ThrowIfError(avcodec_parameters_to_context(decoder.get(), parameters),
                        "复制备播图片解码参数");
-  ffmpeg::ThrowIfError(avcodec_open2(decoder.get(), codec, nullptr),
+  ThrowIfError(avcodec_open2(decoder.get(), codec, nullptr),
                        "打开备播图片解码器");
 
-  ffmpeg::Packet packet;
+  Packet packet;
   for (;;) {
     packet.Unref();
     const bool has_packet = input.ReadPacket(packet);
     if (!has_packet) {
-      ffmpeg::ThrowIfError(avcodec_send_packet(decoder.get(), nullptr),
+      ThrowIfError(avcodec_send_packet(decoder.get(), nullptr),
                            "提交备播图片结束标记");
     } else if (packet->stream_index != stream_index) {
       continue;
     } else {
-      ffmpeg::ThrowIfError(avcodec_send_packet(decoder.get(), packet.get()),
+      ThrowIfError(avcodec_send_packet(decoder.get(), packet.get()),
                            "提交备播图片数据");
     }
 
-    ffmpeg::Frame decoded;
+    Frame decoded;
     const int receive_result =
         avcodec_receive_frame(decoder.get(), decoded.get());
     if (receive_result == 0) {
       if (decoded->width <= 0 || decoded->height <= 0 ||
           decoded->format == AV_PIX_FMT_NONE ||
-          ffmpeg::IsHardwarePixelFormat(
+          IsHardwarePixelFormat(
               static_cast<AVPixelFormat>(decoded->format))) {
         throw std::invalid_argument("备播图片解码结果无效");
       }
       return decoded;
     }
     if (receive_result != AVERROR(EAGAIN) && receive_result != AVERROR_EOF) {
-      ffmpeg::ThrowIfError(receive_result, "接收备播图片解码帧");
+      ThrowIfError(receive_result, "接收备播图片解码帧");
     }
     if (!has_packet) {
       break;
@@ -95,12 +95,12 @@ ScaleContext MakeScaleContext(int source_width, int source_height,
   return {context, sws_freeContext};
 }
 
-ffmpeg::Frame AllocateRgbaCanvas(int width, int height) {
-  ffmpeg::Frame frame;
+Frame AllocateRgbaCanvas(int width, int height) {
+  Frame frame;
   frame->format = AV_PIX_FMT_RGBA;
   frame->width = width;
   frame->height = height;
-  ffmpeg::ThrowIfError(av_frame_get_buffer(frame.get(), 32),
+  ThrowIfError(av_frame_get_buffer(frame.get(), 32),
                        "分配备播RGBA画布");
   for (int row = 0; row < height; ++row) {
     auto* line = frame->data[0] + row * frame->linesize[0];
@@ -235,13 +235,13 @@ void DrawDecodedImage(AVFrame* canvas, const AVFrame& decoded) {
   }
 }
 
-ffmpeg::Frame ConvertCanvas(const ffmpeg::Frame& canvas,
+Frame ConvertCanvas(const Frame& canvas,
                             AVPixelFormat target_format) {
-  ffmpeg::Frame output;
+  Frame output;
   output->format = target_format;
   output->width = canvas->width;
   output->height = canvas->height;
-  ffmpeg::ThrowIfError(av_frame_get_buffer(output.get(), 32),
+  ThrowIfError(av_frame_get_buffer(output.get(), 32),
                        "分配备播软件视频帧");
   auto scaler = MakeScaleContext(canvas->width, canvas->height, AV_PIX_FMT_RGBA,
                                  output->width, output->height, target_format);
@@ -259,8 +259,8 @@ StandbyVideoFrame::StandbyVideoFrame(std::string image_path)
     : image_path_(std::move(image_path)) {}
 
 void StandbyVideoFrame::Prepare(
-    const ffmpeg::Frame& prototype,
-    const ffmpeg::HardwareContext* hardware_context) {
+    const Frame& prototype,
+    const HardwareContext* hardware_context) {
   if (prepared_) {
     return;
   }
@@ -278,21 +278,21 @@ void StandbyVideoFrame::Prepare(
   }
 
   const auto format = static_cast<AVPixelFormat>(prototype->format);
-  if (!ffmpeg::IsHardwarePixelFormat(format)) {
+  if (!IsHardwarePixelFormat(format)) {
     frame_ = ConvertCanvas(canvas, format);
   } else {
     const auto* frames_context =
-        ffmpeg::HardwareContext::GetFramesContext(*prototype.get());
+        HardwareContext::GetFramesContext(*prototype.get());
     if (format != AV_PIX_FMT_CUDA || !frames_context || !hardware_context ||
         !hardware_context->IsCompatible(*prototype.get())) {
       throw std::invalid_argument("备播暂不支持该硬件视频帧");
     }
     auto software = ConvertCanvas(canvas, frames_context->sw_format);
-    ffmpeg::Frame hardware;
-    ffmpeg::ThrowIfError(
+    Frame hardware;
+    ThrowIfError(
         av_hwframe_get_buffer(prototype->hw_frames_ctx, hardware.get(), 0),
         "分配CUDA备播视频帧");
-    ffmpeg::ThrowIfError(
+    ThrowIfError(
         av_hwframe_transfer_data(hardware.get(), software.get(), 0),
         "上传CUDA备播视频帧");
     frame_ = std::move(hardware);
@@ -307,11 +307,11 @@ void StandbyVideoFrame::Prepare(
 
 bool StandbyVideoFrame::prepared() const noexcept { return prepared_; }
 
-ffmpeg::Frame StandbyVideoFrame::Ref() const {
+Frame StandbyVideoFrame::Ref() const {
   if (!prepared_) {
     throw std::logic_error("备播视频帧尚未准备");
   }
   return frame_.Ref();
 }
 
-}  // namespace mw::streamer::synchronizer::internal
+}  // namespace mw::streamer::internal

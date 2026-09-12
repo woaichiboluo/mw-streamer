@@ -12,7 +12,7 @@
 #include "mw/performance/operation_recorder.h"
 #include "mw/processor/internal/frame_adapter.h"
 
-namespace mw::streamer::processor {
+namespace mw::streamer {
 
 class AnalysisProcessorSink::Impl final {
  public:
@@ -22,15 +22,15 @@ class AnalysisProcessorSink::Impl final {
 
   ~Impl() { Stop(); }
 
-  performance::NodeSnapshot GetPerformance() const {
-    performance::NodeSnapshot snapshot;
+  NodeSnapshot GetPerformance() const {
+    NodeSnapshot snapshot;
     snapshot.name = "AnalysisProcessorSink";
     snapshot.operations = {audio_performance_.GetSnapshot(),
                            video_performance_.GetSnapshot()};
     return snapshot;
   }
 
-  void OnStreamsReady(const media::FrameStreamsReady& streams) {
+  void OnStreamsReady(const FrameStreamsReady& streams) {
     std::exception_ptr failure;
     {
       std::unique_lock<std::shared_mutex> lock(lifecycle_mutex_);
@@ -55,36 +55,36 @@ class AnalysisProcessorSink::Impl final {
     }
   }
 
-  void OnAudioFrame(const media::FrameReady& frame) {
+  void OnAudioFrame(const FrameReady& frame) {
     std::shared_lock<std::shared_mutex> lock(lifecycle_mutex_);
     Context().ValidateFrame(frame, false);
     audio_performance_.AddInput(std::max(frame.frame->nb_samples, 0));
     if (callbacks_.process_audio) {
-      performance::OperationRecorder::Call call(audio_performance_);
-      const processor::internal::AudioFrameAdapter input(frame.frame);
+      OperationRecorder::Call call(audio_performance_);
+      const internal::AudioFrameAdapter input(frame.frame);
       callbacks_.process_audio(&input.view(), callbacks_.user_context);
     }
   }
 
-  void OnVideoFrame(const media::FrameReady& frame) {
+  void OnVideoFrame(const FrameReady& frame) {
     std::shared_lock<std::shared_mutex> lock(lifecycle_mutex_);
     auto& context = Context();
     context.ValidateFrame(frame, true);
     video_performance_.AddInput(1);
     if (callbacks_.process_video) {
-      performance::OperationRecorder::Call call(video_performance_);
-      const processor::internal::VideoFrameAdapter input(frame.frame);
+      OperationRecorder::Call call(video_performance_);
+      const internal::VideoFrameAdapter input(frame.frame);
       context.ValidateVideoInput(*frame.frame.get(), input.view());
       callbacks_.process_video(&input.view(), callbacks_.user_context);
     }
   }
 
-  void OnTimelineReset(const media::TimelineReset& reset) {
+  void OnTimelineReset(const TimelineReset& reset) {
     std::unique_lock<std::shared_mutex> lock(lifecycle_mutex_);
     Context().Reset(reset);
   }
 
-  void OnInputEnded(const media::StreamEnded& end) {
+  void OnInputEnded(const StreamEnded& end) {
     std::unique_lock<std::shared_mutex> lock(lifecycle_mutex_);
     Context().End(end);
   }
@@ -98,7 +98,7 @@ class AnalysisProcessorSink::Impl final {
     }
   }
 
-  bool OnMessage(const sink::SinkMessage& message) {
+  bool OnMessage(const SinkMessage& message) {
     std::shared_lock<std::shared_mutex> lock(lifecycle_mutex_);
     if (stopping_.load() || !context_) {
       return true;
@@ -126,7 +126,7 @@ class AnalysisProcessorSink::Impl final {
   }
 
  private:
-  void Start(const media::FrameStreamsReady& streams) {
+  void Start(const FrameStreamsReady& streams) {
     auto context = std::make_unique<internal::ProcessorSinkContext>(streams);
     const MwStreamerAnalysisProcessorConfig config{processor_config_.c_str()};
     const MwStreamerAnalysisProcessorStartRequest request{
@@ -161,14 +161,14 @@ class AnalysisProcessorSink::Impl final {
     }
   }
 
-  performance::OperationRecorder audio_performance_{
-      performance::PerformanceType::kAudioProcessor,
-      performance::PerformanceUnit::kSample,
-      performance::PerformanceUnit::kNone};
-  performance::OperationRecorder video_performance_{
-      performance::PerformanceType::kVideoProcessor,
-      performance::PerformanceUnit::kFrame,
-      performance::PerformanceUnit::kNone};
+  OperationRecorder audio_performance_{
+      PerformanceType::kAudioProcessor,
+      PerformanceUnit::kSample,
+      PerformanceUnit::kNone};
+  OperationRecorder video_performance_{
+      PerformanceType::kVideoProcessor,
+      PerformanceUnit::kFrame,
+      PerformanceUnit::kNone};
   AnalysisProcessorSink& owner_;
   std::string processor_config_;
   const MwStreamerAnalysisProcessorCallbacks callbacks_;
@@ -181,37 +181,37 @@ class AnalysisProcessorSink::Impl final {
 
 AnalysisProcessorSink::AnalysisProcessorSink(
     std::string id, MwStreamerAnalysisProcessorCallbacks callbacks)
-    : sink::Sink(std::move(id), sink::SinkMediaType::kFrame),
+    : Sink(std::move(id), SinkMediaType::kFrame),
       impl_(std::make_unique<Impl>(*this, callbacks)) {}
 
 AnalysisProcessorSink::~AnalysisProcessorSink() { Stop(); }
 
-performance::NodeSnapshot AnalysisProcessorSink::GetOwnPerformance() const {
+NodeSnapshot AnalysisProcessorSink::GetOwnPerformance() const {
   return impl_->GetPerformance();
 }
 
 void AnalysisProcessorSink::OnStreamsReady(
-    const media::FrameStreamsReady& streams) {
+    const FrameStreamsReady& streams) {
   CloseRegistration();
   impl_->OnStreamsReady(streams);
 }
 
-void AnalysisProcessorSink::OnAudioFrame(const media::FrameReady& frame) {
+void AnalysisProcessorSink::OnAudioFrame(const FrameReady& frame) {
   CloseRegistration();
   impl_->OnAudioFrame(frame);
 }
 
-void AnalysisProcessorSink::OnVideoFrame(const media::FrameReady& frame) {
+void AnalysisProcessorSink::OnVideoFrame(const FrameReady& frame) {
   CloseRegistration();
   impl_->OnVideoFrame(frame);
 }
 
-void AnalysisProcessorSink::OnTimelineReset(const media::TimelineReset& reset) {
+void AnalysisProcessorSink::OnTimelineReset(const TimelineReset& reset) {
   CloseRegistration();
   impl_->OnTimelineReset(reset);
 }
 
-void AnalysisProcessorSink::OnInputEnded(const media::StreamEnded& end) {
+void AnalysisProcessorSink::OnInputEnded(const StreamEnded& end) {
   CloseRegistration();
   impl_->OnInputEnded(end);
 }
@@ -220,9 +220,9 @@ void AnalysisProcessorSink::UpdateConfig(std::string config) {
   impl_->SetConfig(std::move(config));
 }
 
-void AnalysisProcessorSink::OnMessage(const sink::SinkMessage& message) {
+void AnalysisProcessorSink::OnMessage(const SinkMessage& message) {
   if (!impl_->OnMessage(message)) {
-    sink::Sink::OnMessage(message);
+    Sink::OnMessage(message);
   }
 }
 
@@ -231,4 +231,4 @@ void AnalysisProcessorSink::Stop() noexcept {
   impl_->Stop();
 }
 
-}  // namespace mw::streamer::processor
+}  // namespace mw::streamer

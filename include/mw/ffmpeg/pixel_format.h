@@ -5,10 +5,10 @@ extern "C" {
 #include <libavutil/pixfmt.h>
 }
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 bool IsHardwarePixelFormat(AVPixelFormat format) noexcept;
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_FFMPEG_PIXEL_FORMAT_H_

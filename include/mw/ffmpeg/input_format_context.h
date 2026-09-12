@@ -7,7 +7,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 }
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 class Packet;
 
@@ -39,6 +39,6 @@ class InputFormatContext final {
   AVFormatContext* context_ = nullptr;
 };
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_FFMPEG_INPUT_FORMAT_CONTEXT_H_

@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace mw::streamer::common {
+namespace mw::streamer {
 
 class Barrier final {
  public:
@@ -75,6 +75,6 @@ class Barrier final {
   std::condition_variable condition_;
 };
 
-}  // namespace mw::streamer::common
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_COMMON_BARRIER_H_

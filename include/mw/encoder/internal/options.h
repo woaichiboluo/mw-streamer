@@ -7,11 +7,11 @@ extern "C" {
 #include <libavutil/dict.h>
 }
 
-namespace mw::streamer::encoder::internal {
+namespace mw::streamer::internal {
 
 void WarnUnusedOptions(const AVDictionary* options,
                        std::string_view encoder_kind, const char* encoder_name);
 
-}  // namespace mw::streamer::encoder::internal
+}  // namespace mw::streamer::internal
 
 #endif  // MW_STREAMER_INCLUDE_MW_ENCODER_INTERNAL_OPTIONS_H_

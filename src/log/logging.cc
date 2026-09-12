@@ -27,7 +27,7 @@ extern "C" {
 #include "Util/NoticeCenter.h"
 #include "Util/logger.h"
 
-namespace mw::streamer::log {
+namespace mw::streamer {
 namespace {
 
 constexpr std::size_t kModuleCount =
@@ -216,7 +216,7 @@ std::uint64_t NextLoggingGeneration() noexcept {
 
 }  // namespace
 
-namespace detail {
+namespace internal {
 
 class LoggingImpl {
  public:
@@ -335,12 +335,12 @@ class LoggingImpl {
         [](const toolkit::Logger&, const toolkit::LogContextPtr& context) {
           try {
             const auto level = FromZlmLevel(context->_level);
-            if (!detail::ShouldLog(LogModule::kZlm, level)) {
+            if (!internal::ShouldLog(LogModule::kZlm, level)) {
               return;
             }
-            detail::Write(LogModule::kZlm, level, context->str());
+            internal::Write(LogModule::kZlm, level, context->str());
             if (context->_repeat > 1) {
-              detail::Write(LogModule::kZlm, level,
+              internal::Write(LogModule::kZlm, level,
                             fmt::format("last message repeated {} times",
                                         context->_repeat));
             }
@@ -427,7 +427,7 @@ class LoggingImpl {
     try {
       (void)opaque;
       const auto mapped_level = FromSrtLevel(level);
-      if (!detail::ShouldLog(LogModule::kSrt, mapped_level)) {
+      if (!internal::ShouldLog(LogModule::kSrt, mapped_level)) {
         return;
       }
 
@@ -436,7 +436,7 @@ class LoggingImpl {
       if (text.size() >= 2 && text.substr(0, 2) == ": ") {
         text.remove_prefix(2);
       }
-      detail::Write(LogModule::kSrt, mapped_level,
+      internal::Write(LogModule::kSrt, mapped_level,
                     fmt::format("[{}] {} ({}:{})", area ? area : "SRT", text,
                                 file ? file : "unknown", line));
     } catch (...) {
@@ -576,11 +576,11 @@ void Write(LogModule module, LogLevel level, std::string_view message) {
   (logging ? *logging : DefaultLogging()).Write(module, level, message);
 }
 
-}  // namespace detail
+}  // namespace internal
 
 Logging::Logging(const LogConfig& config)
-    : impl_(std::make_unique<detail::LoggingImpl>(config, true)) {}
+    : impl_(std::make_unique<internal::LoggingImpl>(config, true)) {}
 
 Logging::~Logging() = default;
 
-}  // namespace mw::streamer::log
+}  // namespace mw::streamer

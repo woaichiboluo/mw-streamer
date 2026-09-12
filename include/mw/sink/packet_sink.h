@@ -7,7 +7,7 @@
 #include "mw/ffmpeg/packet.h"
 #include "mw/ffmpeg/stream_info.h"
 
-namespace mw::streamer::sink {
+namespace mw::streamer {
 
 // Consumes compressed audio/video, whether received from an input or produced
 // by an encoder. Calls are synchronous and serialized by the producer.
@@ -23,14 +23,14 @@ class PacketSink {
   // EndInput. Streams are borrowed for this call and must be copied to retain.
   virtual void SetStreams(
       std::uint64_t generation,
-      const std::vector<ffmpeg::StreamInfo>& streams) noexcept = 0;
+      const std::vector<StreamInfo>& streams) noexcept = 0;
 
   // Borrows a read-only packet for this call. Copy or Ref it before returning
   // to retain it for asynchronous work. Referenced buffers remain read-only
   // because other Sinks may share them. Returning does not imply processing
   // completed; blocking here blocks the producer and subsequent Sinks.
   virtual void Write(std::uint64_t generation,
-                     const ffmpeg::Packet& packet) noexcept = 0;
+                     const Packet& packet) noexcept = 0;
 
   // No more packets will arrive for this generation. This can follow EOF,
   // interruption, or explicit input stop; a later SetStreams may start another
@@ -39,6 +39,6 @@ class PacketSink {
   virtual void EndInput(std::uint64_t generation) noexcept = 0;
 };
 
-}  // namespace mw::streamer::sink
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_SINK_PACKET_SINK_H_

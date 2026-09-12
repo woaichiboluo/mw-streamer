@@ -29,10 +29,10 @@
 #include "mw/performance/operation_recorder.h"
 #include "mw/zlm/internal/config_validator.h"
 
-namespace mw::streamer::output::internal {
+namespace mw::streamer::internal {
 namespace {
 
-using Log = log::Module<log::LogModule::kStreamer>;
+using Log = Module<LogModule::kStreamer>;
 
 enum class TargetKind { kRtmp, kRtsp, kSrt, kFmp4, kHls };
 
@@ -78,9 +78,9 @@ bool StartsWithAnnexB(const std::uint8_t* data, std::size_t size) {
          (data[2] == 1 || (size >= 4 && data[2] == 0 && data[3] == 1));
 }
 
-mediakit::Track::Ptr CreateTrack(const ffmpeg::StreamInfo& stream) {
+mediakit::Track::Ptr CreateTrack(const StreamInfo& stream) {
   const auto& parameters = *stream.codec_parameters.get();
-  const auto codec = converter::internal::ToZlmCodecId(parameters.codec_id);
+  const auto codec = internal::ToZlmCodecId(parameters.codec_id);
   if (codec == mediakit::CodecInvalid) {
     throw std::invalid_argument("输出流包含不支持的codec");
   }
@@ -115,7 +115,7 @@ mediakit::Track::Ptr CreateTrack(const ffmpeg::StreamInfo& stream) {
 
 mediakit::ProtocolOption MakeProtocolOption(TargetKind kind,
                                             std::size_t stream_count,
-                                            const zlm::MuxerConfig& config) {
+                                            const MuxerConfig& config) {
   mediakit::ProtocolOption option;
   option.modify_stamp = mediakit::ProtocolOption::kModifyStampOff;
   option.preserve_startup_packets = true;
@@ -166,15 +166,15 @@ std::chrono::system_clock::time_point NextRecordingStartTime() {
 
 void ValidateRemuxOutputConfig(const RemuxOutputConfig& config) {
   static_cast<void>(ParseTarget(config.target));
-  zlm::internal::ValidateOutputConfig(config.zlm);
+  internal::ValidateOutputConfig(config.zlm);
 }
 
 class RemuxOutput::Impl final {
  public:
-  Impl(RemuxOutputConfig config, std::vector<ffmpeg::StreamInfo> streams,
+  Impl(RemuxOutputConfig config, std::vector<StreamInfo> streams,
        std::shared_ptr<toolkit::EventPoller> poller,
        std::function<void(const std::string&)> on_failed,
-       performance::OperationRecorder* performance)
+       OperationRecorder* performance)
       : config_(std::move(config)),
         streams_(std::move(streams)),
         poller_(std::move(poller)),
@@ -196,7 +196,7 @@ class RemuxOutput::Impl final {
     }
   }
 
-  void Write(const ffmpeg::Packet& packet) {
+  void Write(const Packet& packet) {
     if (state_ != State::kOpen) {
       throw std::logic_error("Remux输出尚未打开或已停止");
     }
@@ -240,8 +240,8 @@ class RemuxOutput::Impl final {
     tracks_.clear();
   }
 
-  performance::NetworkOutputSnapshot GetNetworkOutputSnapshot() const {
-    performance::NetworkOutputSnapshot result;
+  NetworkOutputSnapshot GetNetworkOutputSnapshot() const {
+    NetworkOutputSnapshot result;
     result.target = config_.target;
     if (pusher_) {
       result.connected = pusher_->getStatus() == 0;
@@ -306,7 +306,7 @@ class RemuxOutput::Impl final {
   };
 
   void OpenOutput() {
-    zlm::internal::ValidateOutputConfig(config_.zlm);
+    internal::ValidateOutputConfig(config_.zlm);
     if (streams_.empty())
       throw std::invalid_argument("Remux输出至少需要一路轨道");
     for (const auto& stream : streams_) {
@@ -344,7 +344,7 @@ class RemuxOutput::Impl final {
                        [](const auto& track) { return track->ready(); });
   }
 
-  void CacheStartup(const ffmpeg::Packet& packet) {
+  void CacheStartup(const Packet& packet) {
     if (startup_packets_.size() >= config_.startup_packet_capacity) {
       throw std::runtime_error("Remux等待轨道信息的启动包缓存已满");
     }
@@ -384,8 +384,8 @@ class RemuxOutput::Impl final {
     startup_packets_.clear();
   }
 
-  void WritePacket(const ffmpeg::Packet& packet) {
-    std::optional<performance::OperationRecorder::Call> call;
+  void WritePacket(const Packet& packet) {
+    std::optional<OperationRecorder::Call> call;
     if (performance_) call.emplace(*performance_);
     auto frames = converters_.at(packet->stream_index)
                       .Convert(packet, timestamp_origin_ms_);
@@ -487,11 +487,11 @@ class RemuxOutput::Impl final {
   }
 
   RemuxOutputConfig config_;
-  std::vector<ffmpeg::StreamInfo> streams_;
+  std::vector<StreamInfo> streams_;
   toolkit::EventPoller::Ptr poller_;
   std::function<void(const std::string&)> on_failed_;
   const TargetKind kind_;
-  performance::OperationRecorder* const performance_;
+  OperationRecorder* const performance_;
   State state_ = State::kCreated;
   mediakit::MediaTuple tuple_;
   std::shared_ptr<ListenerBridge> bridge_;
@@ -499,31 +499,31 @@ class RemuxOutput::Impl final {
   mediakit::PusherProxy::Ptr pusher_;
   std::unique_ptr<Fmp4FileTarget> fmp4_;
   std::unique_ptr<HlsFmp4FileTarget> hls_;
-  std::unordered_map<int, converter::AvPacketToZlmFrameConverter> converters_;
+  std::unordered_map<int, AvPacketToZlmFrameConverter> converters_;
   std::vector<mediakit::Track::Ptr> tracks_;
   std::unordered_set<int> seen_tracks_;
-  std::vector<ffmpeg::Packet> startup_packets_;
+  std::vector<Packet> startup_packets_;
   std::int64_t timestamp_origin_ms_ = 0;
   bool startup_complete_ = false;
 };
 
 RemuxOutput::RemuxOutput(RemuxOutputConfig config,
-                         std::vector<ffmpeg::StreamInfo> streams,
+                         std::vector<StreamInfo> streams,
                          std::shared_ptr<toolkit::EventPoller> poller,
                          std::function<void(const std::string&)> on_failed,
-                         performance::OperationRecorder* performance)
+                         OperationRecorder* performance)
     : impl_(std::make_unique<Impl>(std::move(config), std::move(streams),
                                    std::move(poller), std::move(on_failed),
                                    performance)) {}
 
 RemuxOutput::~RemuxOutput() { Close(); }
 void RemuxOutput::Open() { impl_->Open(); }
-void RemuxOutput::Write(const ffmpeg::Packet& packet) { impl_->Write(packet); }
+void RemuxOutput::Write(const Packet& packet) { impl_->Write(packet); }
 void RemuxOutput::Finish() { impl_->Finish(); }
 void RemuxOutput::Close() noexcept { impl_->Close(); }
-performance::NetworkOutputSnapshot RemuxOutput::GetNetworkOutputSnapshot()
+NetworkOutputSnapshot RemuxOutput::GetNetworkOutputSnapshot()
     const {
   return impl_->GetNetworkOutputSnapshot();
 }
 
-}  // namespace mw::streamer::output::internal
+}  // namespace mw::streamer::internal

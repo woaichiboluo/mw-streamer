@@ -7,7 +7,7 @@
 #include "Common/Stamp.h"
 #include "Extension/Frame.h"
 
-namespace mw::streamer::input::internal {
+namespace mw::streamer::internal {
 
 bool ShouldReviseZlmTimestamps(std::string_view url) noexcept {
   const auto separator = url.find("://");
@@ -37,4 +37,4 @@ std::shared_ptr<mediakit::Frame> ReviseZlmFrameTimestamp(
       std::move(frame), *stamp, mediakit::ProtocolOption::kModifyStampRelative);
 }
 
-}  // namespace mw::streamer::input::internal
+}  // namespace mw::streamer::internal

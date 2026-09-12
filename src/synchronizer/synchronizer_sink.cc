@@ -14,7 +14,7 @@
 #include "mw/performance/operation_recorder.h"
 #include "mw/synchronizer/internal/realtime_frame_scheduler.h"
 
-namespace mw::streamer::synchronizer {
+namespace mw::streamer {
 
 class SynchronizerSink::Impl final {
  public:
@@ -32,7 +32,7 @@ class SynchronizerSink::Impl final {
 
   ~Impl() { Stop(); }
 
-  void OnStreamsReady(const media::FrameStreamsReady& streams) {
+  void OnStreamsReady(const FrameStreamsReady& streams) {
     Submit([&]() {
       if (streams.generation == 0 || streams.source_streams.empty()) {
         throw std::invalid_argument("SynchronizerSink代次和轨道不能为空");
@@ -55,7 +55,7 @@ class SynchronizerSink::Impl final {
     });
   }
 
-  void OnFrame(const media::FrameReady& frame, bool audio) {
+  void OnFrame(const FrameReady& frame, bool audio) {
     Submit([&]() {
       if (!CurrentGeneration(frame.generation)) return;
       if (!(audio ? has_audio_ : has_video_) || !frame.frame.get() ||
@@ -78,7 +78,7 @@ class SynchronizerSink::Impl final {
     });
   }
 
-  void OnTimelineReset(const media::TimelineReset& reset) {
+  void OnTimelineReset(const TimelineReset& reset) {
     Submit([&]() {
       if (final_input_end_) {
         throw std::logic_error("SynchronizerSink最终结束后不能重置输入");
@@ -97,13 +97,13 @@ class SynchronizerSink::Impl final {
     });
   }
 
-  void OnInputEnded(const media::StreamEnded& end) {
+  void OnInputEnded(const StreamEnded& end) {
     Submit([&]() {
       if (end.generation < input_generation_ || input_ended_) return;
       if (!CurrentGeneration(end.generation)) return;
       input_ended_ = true;
-      final_input_end_ = end.reason != media::StreamEndReason::kInterrupted;
-      if (end.reason != media::StreamEndReason::kEof) queue_.EraseIf(IsFrame);
+      final_input_end_ = end.reason != StreamEndReason::kInterrupted;
+      if (end.reason != StreamEndReason::kEof) queue_.EraseIf(IsFrame);
       Work work;
       work.kind = Kind::kEnd;
       work.end = end;
@@ -140,8 +140,8 @@ class SynchronizerSink::Impl final {
     return queue_.size() + cached_frames_.load();
   }
 
-  performance::NodeSnapshot GetOwnPerformance() const {
-    performance::NodeSnapshot result;
+  NodeSnapshot GetOwnPerformance() const {
+    NodeSnapshot result;
     result.name = "SynchronizerSink";
     result.operations.push_back(performance_.GetSnapshot());
     return result;
@@ -156,9 +156,9 @@ class SynchronizerSink::Impl final {
   enum class Kind { kReady, kAudio, kVideo, kReset, kEnd };
   struct Work {
     Kind kind = Kind::kReady;
-    std::optional<media::FrameStreamsReady> streams;
-    std::optional<media::FrameReady> frame;
-    std::optional<media::StreamEnded> end;
+    std::optional<FrameStreamsReady> streams;
+    std::optional<FrameReady> frame;
+    std::optional<StreamEnded> end;
   };
 
   static bool IsFrame(const Work& work) {
@@ -177,7 +177,7 @@ class SynchronizerSink::Impl final {
       }
       action();
       if (!worker_) {
-        worker_ = std::make_unique<common::Thread>("mw-synchronize",
+        worker_ = std::make_unique<Thread>("mw-synchronize",
                                                    [this]() { Run(); });
       }
     } catch (const std::exception& error) {
@@ -190,7 +190,7 @@ class SynchronizerSink::Impl final {
     }
   }
 
-  void ValidateTracks(const media::FrameStreamsReady& streams) {
+  void ValidateTracks(const FrameStreamsReady& streams) {
     std::optional<int> audio;
     std::optional<int> video;
     for (const auto& stream : streams.source_streams) {
@@ -236,7 +236,7 @@ class SynchronizerSink::Impl final {
         DrainReadyFrames();
         cached_frames_.store(scheduler_->queue_depth());
         if (finishing_ && scheduler_->finished()) {
-          NotifyEnd(media::StreamEndReason::kEof);
+          NotifyEnd(StreamEndReason::kEof);
           SetState(SynchronizerSinkState::kEnded);
           queue_.Close();
         } else {
@@ -246,7 +246,7 @@ class SynchronizerSink::Impl final {
                                      : SynchronizerSinkState::kRunning));
         }
       }
-    } catch (const sink::FatalError& error) {
+    } catch (const FatalError& error) {
       Fail(error.what(), true);
     } catch (const std::exception& error) {
       Fail(error.what());
@@ -255,8 +255,8 @@ class SynchronizerSink::Impl final {
     }
     if (failed_.load() && !output_ended_) {
       try {
-        NotifyEnd(media::StreamEndReason::kFailed);
-      } catch (const sink::FatalError& error) {
+        NotifyEnd(StreamEndReason::kFailed);
+      } catch (const FatalError& error) {
         Fail(error.what(), true);
       } catch (...) {
         // The first diagnostic is retained; Stop still releases every child.
@@ -283,7 +283,7 @@ class SynchronizerSink::Impl final {
       case Kind::kAudio:
       case Kind::kVideo: {
         performance_.AddInput(1);
-        performance::OperationRecorder::Call call(performance_);
+        OperationRecorder::Call call(performance_);
         scheduler_->Push(*work.frame, work.kind == Kind::kAudio,
                          Scheduler::Clock::now());
         return;
@@ -301,7 +301,7 @@ class SynchronizerSink::Impl final {
     constexpr int kOutputBatchSize = 8;
     poll_again_ = false;
     for (int count = 0; count < kOutputBatchSize && CanRun(); ++count) {
-      performance::OperationRecorder::Call call(performance_);
+      OperationRecorder::Call call(performance_);
       auto frame = scheduler_->TakeReady(Scheduler::Clock::now());
       call.Finish();
       if (!frame) return;
@@ -313,15 +313,15 @@ class SynchronizerSink::Impl final {
     poll_again_ = true;
   }
 
-  void End(media::StreamEndReason reason) {
-    if (reason == media::StreamEndReason::kInterrupted) {
+  void End(StreamEndReason reason) {
+    if (reason == StreamEndReason::kInterrupted) {
       scheduler_->Reset();
-    } else if (reason == media::StreamEndReason::kEof) {
+    } else if (reason == StreamEndReason::kEof) {
       scheduler_->Finish();
       finishing_ = true;
     } else {
       NotifyEnd(reason);
-      if (reason == media::StreamEndReason::kFailed) {
+      if (reason == StreamEndReason::kFailed) {
         Fail("SynchronizerSink上游输入失败");
       } else {
         SetState(SynchronizerSinkState::kStopped);
@@ -331,7 +331,7 @@ class SynchronizerSink::Impl final {
   }
 
   void Forward(const Scheduler::OutputFrame& frame) {
-    const media::FrameReady ready{output_generation_, frame.frame};
+    const FrameReady ready{output_generation_, frame.frame};
     for (auto& output : outputs_) {
       if (!CanRun()) return;
       if (frame.audio) {
@@ -342,14 +342,14 @@ class SynchronizerSink::Impl final {
     }
   }
 
-  void NotifyEnd(media::StreamEndReason reason) {
+  void NotifyEnd(StreamEndReason reason) {
     if (!output_ready_ || output_ended_) return;
     output_ended_ = true;
     std::exception_ptr first_error;
     for (std::size_t index = 0; index < ready_outputs_; ++index) {
       try {
         outputs_[index]->OnInputEnded({output_generation_, reason});
-      } catch (const sink::FatalError& error) {
+      } catch (const FatalError& error) {
         owner_.ReportFatalError(error.what());
         if (!first_error) first_error = std::current_exception();
       } catch (...) {
@@ -370,7 +370,7 @@ class SynchronizerSink::Impl final {
       if (!failed_.exchange(true)) {
         error_ = error;
         state_.store(SynchronizerSinkState::kFailed);
-        log::Module<log::LogModule::kStreamer>::Error(
+        Module<LogModule::kStreamer>::Error(
             "SynchronizerSink失败: {}", error);
       }
     }
@@ -381,14 +381,14 @@ class SynchronizerSink::Impl final {
 
   SynchronizerSink& owner_;
   const SynchronizerSinkConfig config_;
-  performance::OperationRecorder performance_{
-      performance::PerformanceType::kSynchronizer,
-      performance::PerformanceUnit::kFrame,
-      performance::PerformanceUnit::kFrame};
-  const std::vector<std::unique_ptr<sink::Sink>>& outputs_;
-  common::BlockingQueue<Work> queue_;
+  OperationRecorder performance_{
+      PerformanceType::kSynchronizer,
+      PerformanceUnit::kFrame,
+      PerformanceUnit::kFrame};
+  const std::vector<std::unique_ptr<Sink>>& outputs_;
+  BlockingQueue<Work> queue_;
   std::unique_ptr<Scheduler> scheduler_;
-  std::unique_ptr<common::Thread> worker_;
+  std::unique_ptr<Thread> worker_;
   std::mutex input_mutex_;
   std::mutex stop_mutex_;
   mutable std::mutex status_mutex_;
@@ -417,27 +417,27 @@ class SynchronizerSink::Impl final {
 
 SynchronizerSink::SynchronizerSink(std::string id,
                                    SynchronizerSinkConfig config)
-    : sink::Sink(std::move(id), sink::SinkMediaType::kFrame,
-                 sink::SinkMediaType::kFrame),
+    : Sink(std::move(id), SinkMediaType::kFrame,
+                 SinkMediaType::kFrame),
       impl_(std::make_unique<Impl>(*this, std::move(config))) {}
 SynchronizerSink::~SynchronizerSink() { Stop(); }
-void SynchronizerSink::OnStreamsReady(const media::FrameStreamsReady& streams) {
+void SynchronizerSink::OnStreamsReady(const FrameStreamsReady& streams) {
   CloseRegistration();
   impl_->OnStreamsReady(streams);
 }
-void SynchronizerSink::OnAudioFrame(const media::FrameReady& frame) {
+void SynchronizerSink::OnAudioFrame(const FrameReady& frame) {
   CloseRegistration();
   impl_->OnFrame(frame, true);
 }
-void SynchronizerSink::OnVideoFrame(const media::FrameReady& frame) {
+void SynchronizerSink::OnVideoFrame(const FrameReady& frame) {
   CloseRegistration();
   impl_->OnFrame(frame, false);
 }
-void SynchronizerSink::OnTimelineReset(const media::TimelineReset& reset) {
+void SynchronizerSink::OnTimelineReset(const TimelineReset& reset) {
   CloseRegistration();
   impl_->OnTimelineReset(reset);
 }
-void SynchronizerSink::OnInputEnded(const media::StreamEnded& end) {
+void SynchronizerSink::OnInputEnded(const StreamEnded& end) {
   CloseRegistration();
   impl_->OnInputEnded(end);
 }
@@ -452,7 +452,7 @@ std::string SynchronizerSink::error() const { return impl_->error(); }
 std::size_t SynchronizerSink::queue_depth() const {
   return impl_->queue_depth();
 }
-performance::NodeSnapshot SynchronizerSink::GetOwnPerformance() const {
+NodeSnapshot SynchronizerSink::GetOwnPerformance() const {
   return impl_->GetOwnPerformance();
 }
 
@@ -460,4 +460,4 @@ void SynchronizerSink::HandleFatalError(const std::string& error) noexcept {
   impl_->HandleFatalError(error);
 }
 
-}  // namespace mw::streamer::synchronizer
+}  // namespace mw::streamer

@@ -26,12 +26,12 @@ extern "C" {
 
 namespace {
 
-using mw::streamer::ffmpeg::Frame;
-using mw::streamer::ffmpeg::HardwareContext;
-using mw::streamer::ffmpeg::ThrowIfError;
-using mw::streamer::opencv_adapter::CudaFrame;
-using mw::streamer::opencv_adapter::HostFrame;
-using mw::streamer::processor::internal::VideoFrameAdapter;
+using mw::streamer::Frame;
+using mw::streamer::HardwareContext;
+using mw::streamer::ThrowIfError;
+using mw::opencv_adapter::CudaFrame;
+using mw::opencv_adapter::HostFrame;
+using mw::streamer::internal::VideoFrameAdapter;
 
 static_assert(!std::is_copy_constructible_v<HostFrame>);
 static_assert(!std::is_copy_assignable_v<HostFrame>);

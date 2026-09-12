@@ -3,7 +3,7 @@
 #include <array>
 #include <utility>
 
-namespace mw::streamer::processor::internal {
+namespace mw::streamer::internal {
 namespace {
 
 template <typename Enum, std::size_t Size>
@@ -62,4 +62,4 @@ std::optional<MwStreamerExecutionType> ExecutionTypeFromName(
   return FindValue(name, kExecutionTypes);
 }
 
-}  // namespace mw::streamer::processor::internal
+}  // namespace mw::streamer::internal

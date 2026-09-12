@@ -21,14 +21,14 @@
 #include "mw/performance/operation_recorder.h"
 #include "mw/sink/fatal_error.h"
 
-namespace mw::streamer::output {
+namespace mw::streamer {
 namespace {
 
-using Log = log::Module<log::LogModule::kStreamer>;
+using Log = Module<LogModule::kStreamer>;
 constexpr std::size_t kDrainBatchSize = 64;
 
-bool SameStream(const ffmpeg::StreamInfo& left,
-                const ffmpeg::StreamInfo& right) {
+bool SameStream(const StreamInfo& left,
+                const StreamInfo& right) {
   const auto& a = *left.codec_parameters.get();
   const auto& b = *right.codec_parameters.get();
   if (left.stream_index != right.stream_index ||
@@ -53,30 +53,30 @@ class RemuxSink::Impl final {
  public:
   Impl(RemuxSink& owner, RemuxSinkConfig config)
       : owner_(owner), config_(std::move(config)) {
-    output::internal::ValidateRemuxOutputConfig({config_.target, config_.zlm});
+    internal::ValidateRemuxOutputConfig({config_.target, config_.zlm});
     if (config_.packet_queue_capacity == 0) {
       throw std::invalid_argument("RemuxSink包队列容量必须大于零");
     }
-    init::internal::EnsureInitialized();
+    internal::EnsureInitialized();
     poller_ = toolkit::EventPollerPool::Instance().getPoller(false);
     network_snapshot_.target = config_.target;
   }
 
   ~Impl() { Stop(); }
 
-  void OnStreamsReady(const media::StreamsReady& streams) noexcept {
+  void OnStreamsReady(const StreamsReady& streams) noexcept {
     Submit(streams, &Impl::OpenStreams);
   }
 
-  void OnPacket(const media::PacketReady& packet) noexcept {
+  void OnPacket(const PacketReady& packet) noexcept {
     Submit(packet, &Impl::WritePacket, true);
   }
 
-  void OnTimelineReset(const media::TimelineReset& reset) noexcept {
+  void OnTimelineReset(const TimelineReset& reset) noexcept {
     Submit(reset, &Impl::ResetTimeline);
   }
 
-  void OnInputEnded(const media::StreamEnded& end) noexcept {
+  void OnInputEnded(const StreamEnded& end) noexcept {
     Submit(end, &Impl::EndInput);
   }
 
@@ -96,17 +96,17 @@ class RemuxSink::Impl final {
       queue_.Close();
     }
     poller_->sync([this]() {
-      SetState(sink::PacketSinkState::kDraining);
+      SetState(PacketSinkState::kDraining);
       while (auto work = queue_.TryPop()) {
         Execute(*work);
       }
       CloseOutput();
-      SetState(sink::PacketSinkState::kStopped);
+      SetState(PacketSinkState::kStopped);
     });
     stopped_ = true;
   }
 
-  sink::PacketSinkState state() const noexcept { return state_.load(); }
+  PacketSinkState state() const noexcept { return state_.load(); }
 
   std::string error() const {
     std::lock_guard<std::mutex> lock(status_mutex_);
@@ -115,15 +115,15 @@ class RemuxSink::Impl final {
 
   std::size_t queue_depth() const { return queue_.size(); }
 
-  performance::NodeSnapshot GetOwnPerformance() const {
-    performance::NodeSnapshot snapshot;
+  NodeSnapshot GetOwnPerformance() const {
+    NodeSnapshot snapshot;
     snapshot.name = fmt::format("RemuxSink ({})", config_.target);
     snapshot.operations.push_back(performance_.GetSnapshot());
     return snapshot;
   }
 
-  performance::NetworkOutputSnapshot GetNetworkOutputSnapshot() const {
-    performance::NetworkOutputSnapshot result;
+  NetworkOutputSnapshot GetNetworkOutputSnapshot() const {
+    NetworkOutputSnapshot result;
     poller_->sync([this, &result]() {
       result =
           output_ ? output_->GetNetworkOutputSnapshot() : network_snapshot_;
@@ -182,7 +182,7 @@ class RemuxSink::Impl final {
     {
       std::lock_guard<std::mutex> lock(submit_mutex_);
       drain_scheduled_ = false;
-      failed = state() == sink::PacketSinkState::kFailed;
+      failed = state() == PacketSinkState::kFailed;
       if (!failed && queue_.size() != 0) {
         try {
           ScheduleDrain();
@@ -193,7 +193,7 @@ class RemuxSink::Impl final {
       }
     }
     if (failed) {
-      if (state() != sink::PacketSinkState::kFailed) {
+      if (state() != PacketSinkState::kFailed) {
         Fail("调度RemuxSink失败");
       }
       CloseOutput();
@@ -206,7 +206,7 @@ class RemuxSink::Impl final {
     }
     try {
       work.run();
-    } catch (const sink::FatalError& error) {
+    } catch (const FatalError& error) {
       Fail(error.what());
       owner_.ReportFatalError(error.what());
     } catch (const std::exception& error) {
@@ -216,7 +216,7 @@ class RemuxSink::Impl final {
     }
   }
 
-  void OpenStreams(const media::StreamsReady& streams) {
+  void OpenStreams(const StreamsReady& streams) {
     if (streams.generation == 0 || streams.streams.empty()) {
       throw std::invalid_argument("RemuxSink输入代次和轨道不能为空");
     }
@@ -253,11 +253,11 @@ class RemuxSink::Impl final {
     if (!output_) {
       OpenOutput();
     }
-    SetState(sink::PacketSinkState::kRunning);
+    SetState(PacketSinkState::kRunning);
     owner_.StartMessages();
   }
 
-  void WritePacket(const media::PacketReady& packet) {
+  void WritePacket(const PacketReady& packet) {
     if (pending_generation_ || input_ended_ ||
         packet.generation != generation_) {
       throw std::logic_error("RemuxSink收到非当前就绪代次的数据包");
@@ -276,7 +276,7 @@ class RemuxSink::Impl final {
           "RemuxSink DTS回退，重建输出：target={}, stream={}, {} -> {}",
           config_.target, raw->stream_index, *track->second, raw->dts);
       CloseOutput();
-      if (state() == sink::PacketSinkState::kFailed) return;
+      if (state() == PacketSinkState::kFailed) return;
       for (auto& entry : last_dts_) {
         entry.second.reset();
       }
@@ -287,8 +287,8 @@ class RemuxSink::Impl final {
   }
 
   void OpenOutput() {
-    auto output = std::make_unique<output::internal::RemuxOutput>(
-        output::internal::RemuxOutputConfig{config_.target, config_.zlm,
+    auto output = std::make_unique<internal::RemuxOutput>(
+        internal::RemuxOutputConfig{config_.target, config_.zlm,
                                             config_.packet_queue_capacity},
         streams_, poller_, [this](const std::string& error) { Fail(error); },
         &performance_);
@@ -299,7 +299,7 @@ class RemuxSink::Impl final {
   void CloseOutput() noexcept {
     if (output_) {
       network_snapshot_ = output_->GetNetworkOutputSnapshot();
-      if (state() != sink::PacketSinkState::kFailed) {
+      if (state() != PacketSinkState::kFailed) {
         try {
           output_->Finish();
         } catch (const std::exception& error) {
@@ -314,28 +314,28 @@ class RemuxSink::Impl final {
     }
   }
 
-  void EndInput(const media::StreamEnded& end) {
+  void EndInput(const StreamEnded& end) {
     if (pending_generation_ || input_ended_ || end.generation != generation_) {
       return;
     }
     input_ended_ = true;
-    if (end.reason == media::StreamEndReason::kInterrupted) {
+    if (end.reason == StreamEndReason::kInterrupted) {
       return;
     }
-    if (end.reason == media::StreamEndReason::kFailed) {
+    if (end.reason == StreamEndReason::kFailed) {
       Fail("RemuxSink输入失败");
       return;
     }
-    SetState(sink::PacketSinkState::kDraining);
+    SetState(PacketSinkState::kDraining);
     CloseOutput();
-    SetState(end.reason == media::StreamEndReason::kEof
-                 ? sink::PacketSinkState::kEnded
-                 : sink::PacketSinkState::kStopped);
+    SetState(end.reason == StreamEndReason::kEof
+                 ? PacketSinkState::kEnded
+                 : PacketSinkState::kStopped);
     queue_.Close();
     queue_.Clear();
   }
 
-  void ResetTimeline(const media::TimelineReset& reset) {
+  void ResetTimeline(const TimelineReset& reset) {
     if (reset.generation > generation_ &&
         (!pending_generation_ || reset.generation > *pending_generation_)) {
       pending_generation_ = reset.generation;
@@ -345,14 +345,14 @@ class RemuxSink::Impl final {
 
   bool Terminal() const {
     const auto current = state();
-    return current == sink::PacketSinkState::kFailed ||
-           current == sink::PacketSinkState::kEnded ||
-           current == sink::PacketSinkState::kStopped;
+    return current == PacketSinkState::kFailed ||
+           current == PacketSinkState::kEnded ||
+           current == PacketSinkState::kStopped;
   }
 
-  void SetState(sink::PacketSinkState next) {
+  void SetState(PacketSinkState next) {
     std::lock_guard<std::mutex> lock(status_mutex_);
-    if (state() != sink::PacketSinkState::kFailed) {
+    if (state() != PacketSinkState::kFailed) {
       state_.store(next);
     }
   }
@@ -360,11 +360,11 @@ class RemuxSink::Impl final {
   void Fail(const std::string& error) noexcept {
     {
       std::lock_guard<std::mutex> lock(status_mutex_);
-      if (state() == sink::PacketSinkState::kFailed) {
+      if (state() == PacketSinkState::kFailed) {
         return;
       }
       error_ = error;
-      state_.store(sink::PacketSinkState::kFailed);
+      state_.store(PacketSinkState::kFailed);
     }
     queue_.Close();
     queue_.Clear();
@@ -382,23 +382,23 @@ class RemuxSink::Impl final {
   RemuxSink& owner_;
   const RemuxSinkConfig config_;
   toolkit::EventPoller::Ptr poller_;
-  common::BlockingQueue<Work> queue_;
+  BlockingQueue<Work> queue_;
   std::mutex submit_mutex_;
   bool drain_scheduled_ = false;
   bool stop_requested_ = false;
   std::mutex stop_mutex_;
   bool stopped_ = false;
   mutable std::mutex status_mutex_;
-  std::atomic<sink::PacketSinkState> state_{sink::PacketSinkState::kIdle};
+  std::atomic<PacketSinkState> state_{PacketSinkState::kIdle};
   std::string error_;
-  performance::OperationRecorder performance_{
-      performance::PerformanceType::kRemux,
-      performance::PerformanceUnit::kPacket,
-      performance::PerformanceUnit::kPacket};
+  OperationRecorder performance_{
+      PerformanceType::kRemux,
+      PerformanceUnit::kPacket,
+      PerformanceUnit::kPacket};
   // Remaining state is accessed only on poller_.
-  std::unique_ptr<output::internal::RemuxOutput> output_;
-  performance::NetworkOutputSnapshot network_snapshot_;
-  std::vector<ffmpeg::StreamInfo> streams_;
+  std::unique_ptr<internal::RemuxOutput> output_;
+  NetworkOutputSnapshot network_snapshot_;
+  std::vector<StreamInfo> streams_;
   std::unordered_map<int, std::optional<std::int64_t>> last_dts_;
   std::uint64_t generation_ = 0;
   std::optional<std::uint64_t> pending_generation_;
@@ -406,27 +406,27 @@ class RemuxSink::Impl final {
 };
 
 RemuxSink::RemuxSink(std::string id, RemuxSinkConfig config)
-    : sink::Sink(std::move(id), sink::SinkMediaType::kPacket),
+    : Sink(std::move(id), SinkMediaType::kPacket),
       impl_(std::make_unique<Impl>(*this, std::move(config))) {}
 
 RemuxSink::~RemuxSink() { Stop(); }
 
-void RemuxSink::OnStreamsReady(const media::StreamsReady& streams) noexcept {
+void RemuxSink::OnStreamsReady(const StreamsReady& streams) noexcept {
   CloseRegistration();
   impl_->OnStreamsReady(streams);
 }
 
-void RemuxSink::OnPacket(const media::PacketReady& packet) noexcept {
+void RemuxSink::OnPacket(const PacketReady& packet) noexcept {
   CloseRegistration();
   impl_->OnPacket(packet);
 }
 
-void RemuxSink::OnTimelineReset(const media::TimelineReset& reset) noexcept {
+void RemuxSink::OnTimelineReset(const TimelineReset& reset) noexcept {
   CloseRegistration();
   impl_->OnTimelineReset(reset);
 }
 
-void RemuxSink::OnInputEnded(const media::StreamEnded& end) noexcept {
+void RemuxSink::OnInputEnded(const StreamEnded& end) noexcept {
   CloseRegistration();
   impl_->OnInputEnded(end);
 }
@@ -436,7 +436,7 @@ void RemuxSink::Stop() noexcept {
   impl_->Stop();
 }
 
-sink::PacketSinkState RemuxSink::state() const noexcept {
+PacketSinkState RemuxSink::state() const noexcept {
   return impl_->state();
 }
 
@@ -444,12 +444,12 @@ std::string RemuxSink::error() const { return impl_->error(); }
 
 std::size_t RemuxSink::queue_depth() const { return impl_->queue_depth(); }
 
-performance::NodeSnapshot RemuxSink::GetOwnPerformance() const {
+NodeSnapshot RemuxSink::GetOwnPerformance() const {
   return impl_->GetOwnPerformance();
 }
 
-performance::NetworkOutputSnapshot RemuxSink::GetNetworkOutputSnapshot() const {
+NetworkOutputSnapshot RemuxSink::GetNetworkOutputSnapshot() const {
   return impl_->GetNetworkOutputSnapshot();
 }
 
-}  // namespace mw::streamer::output
+}  // namespace mw::streamer

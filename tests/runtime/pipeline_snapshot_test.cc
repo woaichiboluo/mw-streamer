@@ -8,7 +8,7 @@
 namespace {
 
 using namespace std::chrono_literals;
-using namespace mw::streamer::performance;
+using namespace mw::streamer;
 
 PipelineSnapshot Snapshot() {
   PipelineSnapshot snapshot;

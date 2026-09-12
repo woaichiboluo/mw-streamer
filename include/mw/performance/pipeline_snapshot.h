@@ -8,7 +8,7 @@
 
 #include "mw/performance/latency_snapshot.h"
 
-namespace mw::streamer::performance {
+namespace mw::streamer {
 
 enum class PerformanceType {
   kInput,
@@ -107,6 +107,6 @@ struct PipelineSnapshot {
   PipelineSnapshot WithRatesSince(const PipelineSnapshot& previous) const;
 };
 
-}  // namespace mw::streamer::performance
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_PERFORMANCE_PIPELINE_SNAPSHOT_H_

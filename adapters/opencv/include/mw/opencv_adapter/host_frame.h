@@ -5,7 +5,7 @@
 
 #include "mw/processor/processor.h"
 
-namespace mw::streamer::opencv_adapter {
+namespace mw::opencv_adapter {
 
 class HostMatAdapter;
 
@@ -47,6 +47,6 @@ class HostFrame final {
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::opencv_adapter
+}  // namespace mw::opencv_adapter
 
 #endif  // MW_STREAMER_ADAPTERS_OPENCV_INCLUDE_MW_OPENCV_ADAPTER_HOST_FRAME_H_

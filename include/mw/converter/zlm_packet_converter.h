@@ -10,12 +10,12 @@
 #include "Extension/Track.h"
 #include "mw/ffmpeg/packet.h"
 
-namespace mw::streamer::converter {
+namespace mw::streamer {
 
 class ZlmPacketConverter {
  public:
   using Ptr = std::shared_ptr<ZlmPacketConverter>;
-  using OnPacket = std::function<bool(const ffmpeg::Packet& packet)>;
+  using OnPacket = std::function<bool(const Packet& packet)>;
 
   ZlmPacketConverter(const mediakit::Track::Ptr& track, int stream_index);
 
@@ -37,6 +37,6 @@ class ZlmPacketConverter {
   mediakit::FrameMerger merger_{mediakit::FrameMerger::h264_prefix};
 };
 
-}  // namespace mw::streamer::converter
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_CONVERTER_ZLM_PACKET_CONVERTER_H_

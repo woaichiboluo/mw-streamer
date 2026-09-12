@@ -17,17 +17,17 @@ extern "C" {
 #include "mw/common/blocking_queue.h"
 #include "mw/common/thread.h"
 
-namespace mw::streamer::cache {
+namespace mw::streamer {
 
 class PacketQueue::Impl final {
  public:
-  Impl(std::chrono::milliseconds cache_duration, sink::Sink& consumer)
+  Impl(std::chrono::milliseconds cache_duration, Sink& consumer)
       : consumer_(consumer),
         cache_duration_(ValidateDuration(cache_duration)) {}
 
   ~Impl() { Stop(); }
 
-  void OnStreamsReady(const media::StreamsReady& streams) {
+  void OnStreamsReady(const StreamsReady& streams) {
     if (!aborted_.load()) {
       Work work;
       work.kind = WorkKind::kStreams;
@@ -36,7 +36,7 @@ class PacketQueue::Impl final {
     }
   }
 
-  void OnPacket(const media::PacketReady& packet) {
+  void OnPacket(const PacketReady& packet) {
     if (!aborted_.load()) {
       Work work;
       work.kind = WorkKind::kPacket;
@@ -45,7 +45,7 @@ class PacketQueue::Impl final {
     }
   }
 
-  void OnTimelineReset(const media::TimelineReset& reset) {
+  void OnTimelineReset(const TimelineReset& reset) {
     if (!aborted_.load()) {
       Work work;
       work.kind = WorkKind::kReset;
@@ -54,7 +54,7 @@ class PacketQueue::Impl final {
     }
   }
 
-  void OnInputEnded(const media::StreamEnded& end) {
+  void OnInputEnded(const StreamEnded& end) {
     if (!aborted_.load()) {
       Work work;
       work.kind = WorkKind::kEnd;
@@ -67,8 +67,8 @@ class PacketQueue::Impl final {
     {
       std::lock_guard<std::mutex> lock(status_mutex_);
       aborted_.store(true);
-      if (state_.load() != sink::PacketSinkState::kFailed) {
-        state_.store(sink::PacketSinkState::kStopped);
+      if (state_.load() != PacketSinkState::kFailed) {
+        state_.store(PacketSinkState::kStopped);
       }
     }
     input_.Close();
@@ -83,7 +83,7 @@ class PacketQueue::Impl final {
     }
   }
 
-  sink::PacketSinkState state() const noexcept { return state_.load(); }
+  PacketSinkState state() const noexcept { return state_.load(); }
 
   std::uint64_t generation() const noexcept {
     return generation_snapshot_.load();
@@ -110,10 +110,10 @@ class PacketQueue::Impl final {
 
   struct Work {
     WorkKind kind = WorkKind::kPacket;
-    std::optional<media::StreamsReady> streams;
-    std::optional<media::PacketReady> packet;
-    std::optional<media::TimelineReset> reset;
-    std::optional<media::StreamEnded> end;
+    std::optional<StreamsReady> streams;
+    std::optional<PacketReady> packet;
+    std::optional<TimelineReset> reset;
+    std::optional<StreamEnded> end;
   };
 
   void Submit(Work work) {
@@ -122,14 +122,14 @@ class PacketQueue::Impl final {
       return;
     }
     if (!worker_) {
-      worker_ = std::make_unique<common::Thread>("mw-packet-cache",
+      worker_ = std::make_unique<Thread>("mw-packet-cache",
                                                  [this]() { Run(); });
     }
     input_.Push(std::move(work));
   }
 
   struct CachedPacket {
-    ffmpeg::Packet packet;
+    Packet packet;
     std::int64_t dts_us;
   };
 
@@ -196,7 +196,7 @@ class PacketQueue::Impl final {
     }
   }
 
-  void Configure(const media::StreamsReady& streams) {
+  void Configure(const StreamsReady& streams) {
     if (streams.generation == 0 || streams.generation <= generation_ ||
         (pending_reset_ && streams.generation < pending_reset_->generation)) {
       return;
@@ -237,13 +237,13 @@ class PacketQueue::Impl final {
     end_.reset();
     drained_ = false;
     playing_ = false;
-    if (Publish(sink::PacketSinkState::kRunning, streams.generation)) {
+    if (Publish(PacketSinkState::kRunning, streams.generation)) {
       consumer_generation_ = streams.generation;
       consumer_.OnStreamsReady(streams);
     }
   }
 
-  void Reset(const media::TimelineReset& reset) {
+  void Reset(const TimelineReset& reset) {
     if (reset.generation <= generation_ ||
         (pending_reset_ && reset.generation <= pending_reset_->generation)) {
       return;
@@ -253,7 +253,7 @@ class PacketQueue::Impl final {
     playing_ = false;
     end_.reset();
     pending_reset_ = reset;
-    if (Publish(sink::PacketSinkState::kRunning, reset.generation)) {
+    if (Publish(PacketSinkState::kRunning, reset.generation)) {
       consumer_.OnTimelineReset(reset);
     }
   }
@@ -268,7 +268,7 @@ class PacketQueue::Impl final {
     return nullptr;
   }
 
-  void AcceptPacket(media::PacketReady packet) {
+  void AcceptPacket(PacketReady packet) {
     const auto* raw = packet.packet.get();
     if (packet.generation != generation_ || generation_ == 0 ||
         pending_reset_ || end_ || !raw || raw->dts == AV_NOPTS_VALUE) {
@@ -288,15 +288,15 @@ class PacketQueue::Impl final {
     }
   }
 
-  void End(const media::StreamEnded& end) {
+  void End(const StreamEnded& end) {
     if (end.generation != generation_ || generation_ == 0 || pending_reset_ ||
         end_) {
       return;
     }
     end_ = end;
-    Publish(sink::PacketSinkState::kDraining, end.generation);
-    if (end.reason == media::StreamEndReason::kStopped ||
-        end.reason == media::StreamEndReason::kFailed) {
+    Publish(PacketSinkState::kDraining, end.generation);
+    if (end.reason == StreamEndReason::kStopped ||
+        end.reason == StreamEndReason::kFailed) {
       audio_.packets.clear();
       video_.packets.clear();
       playing_ = false;
@@ -374,7 +374,7 @@ class PacketQueue::Impl final {
     }
     consumer_generation_.reset();
     consumer_.OnInputEnded(*end_);
-    Publish(sink::PacketSinkState::kEnded, generation_);
+    Publish(PacketSinkState::kEnded, generation_);
   }
 
   std::optional<Clock::time_point> Deadline() {
@@ -409,7 +409,7 @@ class PacketQueue::Impl final {
     consumer_.OnPacket({generation_, std::move(packet)});
   }
 
-  bool Publish(sink::PacketSinkState state, std::uint64_t generation) {
+  bool Publish(PacketSinkState state, std::uint64_t generation) {
     std::lock_guard<std::mutex> lock(status_mutex_);
     if (aborted_.load()) {
       return false;
@@ -422,29 +422,29 @@ class PacketQueue::Impl final {
   void Fail(const char* error) noexcept {
     {
       std::lock_guard<std::mutex> lock(status_mutex_);
-      if (state_.load() != sink::PacketSinkState::kFailed) {
+      if (state_.load() != PacketSinkState::kFailed) {
         error_ = error;
-        state_.store(sink::PacketSinkState::kFailed);
+        state_.store(PacketSinkState::kFailed);
       }
       aborted_.store(true);
     }
     input_.Close();
     input_.Clear();
     if (consumer_generation_) {
-      const media::StreamEnded end{*consumer_generation_,
-                                   media::StreamEndReason::kFailed};
+      const StreamEnded end{*consumer_generation_,
+                                   StreamEndReason::kFailed};
       consumer_generation_.reset();
       consumer_.OnInputEnded(end);
     }
   }
 
-  sink::Sink& consumer_;
+  Sink& consumer_;
   const std::chrono::microseconds cache_duration_;
-  common::BlockingQueue<Work> input_;
+  BlockingQueue<Work> input_;
   std::atomic<bool> aborted_{false};
   std::mutex stop_mutex_;
   mutable std::mutex status_mutex_;
-  std::atomic<sink::PacketSinkState> state_{sink::PacketSinkState::kIdle};
+  std::atomic<PacketSinkState> state_{PacketSinkState::kIdle};
   std::atomic<std::uint64_t> generation_snapshot_{0};
   std::string error_;
   // Scheduler-thread state; producers only touch input_ and aborted_.
@@ -452,34 +452,34 @@ class PacketQueue::Impl final {
   Track video_;
   std::uint64_t generation_ = 0;
   std::optional<std::uint64_t> consumer_generation_;
-  std::optional<media::TimelineReset> pending_reset_;
-  std::optional<media::StreamEnded> end_;
+  std::optional<TimelineReset> pending_reset_;
+  std::optional<StreamEnded> end_;
   bool drained_ = false;
   bool playing_ = false;
   std::int64_t clock_media_us_ = 0;
   Clock::time_point clock_wall_;
-  std::unique_ptr<common::Thread> worker_;
+  std::unique_ptr<Thread> worker_;
 };
 
 PacketQueue::PacketQueue(std::chrono::milliseconds cache_duration,
-                         sink::Sink& consumer)
+                         Sink& consumer)
     : impl_(std::make_unique<Impl>(cache_duration, consumer)) {}
 
 PacketQueue::~PacketQueue() = default;
 
-void PacketQueue::OnStreamsReady(const media::StreamsReady& streams) {
+void PacketQueue::OnStreamsReady(const StreamsReady& streams) {
   impl_->OnStreamsReady(streams);
 }
 
-void PacketQueue::OnPacket(const media::PacketReady& packet) {
+void PacketQueue::OnPacket(const PacketReady& packet) {
   impl_->OnPacket(packet);
 }
 
-void PacketQueue::OnTimelineReset(const media::TimelineReset& reset) {
+void PacketQueue::OnTimelineReset(const TimelineReset& reset) {
   impl_->OnTimelineReset(reset);
 }
 
-void PacketQueue::OnInputEnded(const media::StreamEnded& end) {
+void PacketQueue::OnInputEnded(const StreamEnded& end) {
   impl_->OnInputEnded(end);
 }
 
@@ -487,7 +487,7 @@ void PacketQueue::Abort() noexcept { impl_->Abort(); }
 
 void PacketQueue::Stop() noexcept { impl_->Stop(); }
 
-sink::PacketSinkState PacketQueue::state() const noexcept {
+PacketSinkState PacketQueue::state() const noexcept {
   return impl_->state();
 }
 
@@ -497,4 +497,4 @@ std::uint64_t PacketQueue::generation() const noexcept {
 
 std::string PacketQueue::error() const { return impl_->error(); }
 
-}  // namespace mw::streamer::cache
+}  // namespace mw::streamer

@@ -20,12 +20,12 @@
 #include "mw/resampler/audio_resampler.h"
 #include "mw/sink/fatal_error.h"
 
-namespace mw::streamer::decoder {
+namespace mw::streamer {
 
-class DecoderSink::Impl final : public sink::Sink {
+class DecoderSink::Impl final : public Sink {
  public:
   Impl(DecoderSink& owner, DecoderSinkConfig config)
-      : sink::Sink(owner.id() + "/queue", sink::SinkMediaType::kPacket),
+      : Sink(owner.id() + "/queue", SinkMediaType::kPacket),
         owner_(owner),
         config_(std::move(config)),
         outputs_(owner.downstream()) {
@@ -34,15 +34,15 @@ class DecoderSink::Impl final : public sink::Sink {
       throw std::invalid_argument("解码队列容量必须大于0");
     }
     queue_ =
-        std::make_unique<cache::PacketQueue>(config_.cache_duration, *this);
+        std::make_unique<PacketQueue>(config_.cache_duration, *this);
   }
 
   ~Impl() override { Stop(); }
 
-  void SubmitStreams(const media::StreamsReady& streams) noexcept {
+  void SubmitStreams(const StreamsReady& streams) noexcept {
     Guard([&]() {
       const bool offline =
-          streams.delivery_mode == media::StreamDeliveryMode::kOffline;
+          streams.delivery_mode == StreamDeliveryMode::kOffline;
       if (mode_initialized_ && offline != offline_) {
         throw std::invalid_argument("DecoderSink不能跨代次改变输入投递模式");
       }
@@ -59,7 +59,7 @@ class DecoderSink::Impl final : public sink::Sink {
     });
   }
 
-  void SubmitPacket(const media::PacketReady& packet) noexcept {
+  void SubmitPacket(const PacketReady& packet) noexcept {
     Guard([&]() {
       if (offline_) {
         OnPacket(packet);
@@ -69,7 +69,7 @@ class DecoderSink::Impl final : public sink::Sink {
     });
   }
 
-  void SubmitReset(const media::TimelineReset& reset) noexcept {
+  void SubmitReset(const TimelineReset& reset) noexcept {
     Guard([&]() {
       if (offline_) {
         OnTimelineReset(reset);
@@ -79,7 +79,7 @@ class DecoderSink::Impl final : public sink::Sink {
     });
   }
 
-  void SubmitEnd(const media::StreamEnded& end) noexcept {
+  void SubmitEnd(const StreamEnded& end) noexcept {
     Guard([&]() {
       if (offline_) {
         OnInputEnded(end);
@@ -108,21 +108,21 @@ class DecoderSink::Impl final : public sink::Sink {
       }
     }
     owner_.StopDownstream();
-    SetState(sink::PacketSinkState::kStopped);
+    SetState(PacketSinkState::kStopped);
     stopped_ = true;
   }
 
-  sink::PacketSinkState state() const noexcept {
+  PacketSinkState state() const noexcept {
     const auto current = state_.load();
     const auto queued = queue_->state();
-    if (current == sink::PacketSinkState::kFailed ||
-        queued == sink::PacketSinkState::kFailed) {
-      return sink::PacketSinkState::kFailed;
+    if (current == PacketSinkState::kFailed ||
+        queued == PacketSinkState::kFailed) {
+      return PacketSinkState::kFailed;
     }
-    if (current == sink::PacketSinkState::kRunning &&
-        queued == sink::PacketSinkState::kDraining &&
+    if (current == PacketSinkState::kRunning &&
+        queued == PacketSinkState::kDraining &&
         queue_->generation() == generation_.load()) {
-      return sink::PacketSinkState::kDraining;
+      return PacketSinkState::kDraining;
     }
     return current;
   }
@@ -137,8 +137,8 @@ class DecoderSink::Impl final : public sink::Sink {
     return queue_->error();
   }
 
-  performance::NodeSnapshot GetOwnPerformance() const override {
-    performance::NodeSnapshot snapshot;
+  NodeSnapshot GetOwnPerformance() const override {
+    NodeSnapshot snapshot;
     snapshot.name = "DecoderSink";
     snapshot.operations = {audio_performance_.GetSnapshot(),
                            video_performance_.GetSnapshot()};
@@ -152,15 +152,15 @@ class DecoderSink::Impl final : public sink::Sink {
  private:
   // This Sink consumes queue output. The public DecoderSink submits
   // input through Submit* instead, so due packets never re-enter the cache.
-  void OnStreamsReady(const media::StreamsReady& streams) noexcept override {
+  void OnStreamsReady(const StreamsReady& streams) noexcept override {
     Guard([&]() { Configure(streams); });
   }
 
-  void OnPacket(const media::PacketReady& packet) noexcept override {
+  void OnPacket(const PacketReady& packet) noexcept override {
     Guard([&]() { ForwardPacket(packet.generation, packet.packet); });
   }
 
-  void OnTimelineReset(const media::TimelineReset& reset) noexcept override {
+  void OnTimelineReset(const TimelineReset& reset) noexcept override {
     Guard([&]() {
       pending_reset_ = reset;
       for (auto& track : tracks_) {
@@ -170,11 +170,11 @@ class DecoderSink::Impl final : public sink::Sink {
     });
   }
 
-  void OnInputEnded(const media::StreamEnded& end) noexcept override {
+  void OnInputEnded(const StreamEnded& end) noexcept override {
     Guard([&]() {
-      SetState(sink::PacketSinkState::kDraining);
-      if (end.reason == media::StreamEndReason::kStopped ||
-          end.reason == media::StreamEndReason::kFailed) {
+      SetState(PacketSinkState::kDraining);
+      if (end.reason == StreamEndReason::kStopped ||
+          end.reason == StreamEndReason::kFailed) {
         for (auto& track : tracks_) {
           track->queue.EraseIf(IsPacket);
         }
@@ -188,10 +188,10 @@ class DecoderSink::Impl final : public sink::Sink {
   struct Work {
     WorkKind kind = WorkKind::kPacket;
     std::uint64_t generation = 0;
-    std::optional<ffmpeg::Packet> packet;
-    std::optional<media::TimelineReset> reset;
-    std::optional<media::StreamsReady> streams;
-    std::optional<media::StreamEnded> end;
+    std::optional<Packet> packet;
+    std::optional<TimelineReset> reset;
+    std::optional<StreamsReady> streams;
+    std::optional<StreamEnded> end;
   };
 
   static bool IsPacket(const Work& work) {
@@ -203,13 +203,13 @@ class DecoderSink::Impl final : public sink::Sink {
     std::uint64_t generation = 0;
     // Only the PacketQueue scheduling thread reads/writes recovery state.
     bool recovering = false;
-    common::BlockingQueue<Work> queue;
-    std::unique_ptr<decoder::AudioDecoder> audio;
-    std::unique_ptr<resampler::AudioResampler> resampler;
-    std::unique_ptr<decoder::VideoDecoder> video;
-    std::unique_ptr<common::Thread> worker;
+    BlockingQueue<Work> queue;
+    std::unique_ptr<AudioDecoder> audio;
+    std::unique_ptr<AudioResampler> resampler;
+    std::unique_ptr<VideoDecoder> video;
+    std::unique_ptr<Thread> worker;
     // Accessed only by this track's decode worker and synchronous callbacks.
-    performance::OperationRecorder::Call* active_call = nullptr;
+    OperationRecorder::Call* active_call = nullptr;
   };
 
   template <typename Function>
@@ -219,7 +219,7 @@ class DecoderSink::Impl final : public sink::Sink {
         return;
       }
       std::forward<Function>(function)();
-    } catch (const sink::FatalError& exception) {
+    } catch (const FatalError& exception) {
       Fail(exception.what(), true);
     } catch (const std::exception& exception) {
       Fail(exception.what());
@@ -235,7 +235,7 @@ class DecoderSink::Impl final : public sink::Sink {
     if (stopping_.load() || failed_.load()) {
       return false;
     }
-    if (queue_->state() == sink::PacketSinkState::kFailed) {
+    if (queue_->state() == PacketSinkState::kFailed) {
       const auto error = queue_->error();
       Fail(error.c_str());
       return false;
@@ -243,7 +243,7 @@ class DecoderSink::Impl final : public sink::Sink {
     return true;
   }
 
-  void Configure(const media::StreamsReady& streams) {
+  void Configure(const StreamsReady& streams) {
     if (outputs_.empty()) {
       throw std::logic_error("DecoderSink至少需要一个下游Sink");
     }
@@ -270,10 +270,10 @@ class DecoderSink::Impl final : public sink::Sink {
       }
     }
     pending_reset_.reset();
-    SetState(sink::PacketSinkState::kRunning);
+    SetState(PacketSinkState::kRunning);
   }
 
-  void OpenTracks(const media::StreamsReady& streams) {
+  void OpenTracks(const StreamsReady& streams) {
     std::lock_guard<std::mutex> lock(work_mutex_);
     bool has_audio = false;
     bool has_video = false;
@@ -290,33 +290,33 @@ class DecoderSink::Impl final : public sink::Sink {
       track->stream_index = stream.stream_index;
       track->generation = streams.generation;
       if (type == AVMEDIA_TYPE_AUDIO) {
-        track->audio = std::make_unique<decoder::AudioDecoder>(
+        track->audio = std::make_unique<AudioDecoder>(
             stream, config_.audio_decoder);
-        track->resampler = std::make_unique<resampler::AudioResampler>(stream);
+        track->resampler = std::make_unique<AudioResampler>(stream);
         track->audio->SetOnFrame(
-            [raw = track.get()](const ffmpeg::Frame& frame) {
+            [raw = track.get()](const Frame& frame) {
               raw->resampler->Resample(frame);
             });
         track->resampler->SetOnFrame([this, raw = track.get()](
-                                         const ffmpeg::Frame& frame) {
+                                         const Frame& frame) {
           audio_performance_.AddOutput(frame->nb_samples);
           if (CanProcess()) {
-            const media::FrameReady ready{raw->generation, frame.Ref()};
-            performance::OperationRecorder::Suspension pause(raw->active_call);
+            const FrameReady ready{raw->generation, frame.Ref()};
+            OperationRecorder::Suspension pause(raw->active_call);
             for (const auto& output : outputs_) {
               output->OnAudioFrame(ready);
             }
           }
         });
       } else {
-        track->video = std::make_unique<decoder::VideoDecoder>(
+        track->video = std::make_unique<VideoDecoder>(
             stream, config_.video_decoder);
         track->video->SetOnFrame([this, raw = track.get()](
-                                     const ffmpeg::Frame& frame) {
+                                     const Frame& frame) {
           video_performance_.AddOutput(1);
           if (CanProcess()) {
-            const media::FrameReady ready{raw->generation, frame.Ref()};
-            performance::OperationRecorder::Suspension pause(raw->active_call);
+            const FrameReady ready{raw->generation, frame.Ref()};
+            OperationRecorder::Suspension pause(raw->active_call);
             for (const auto& output : outputs_) {
               output->OnVideoFrame(ready);
             }
@@ -328,21 +328,21 @@ class DecoderSink::Impl final : public sink::Sink {
     if (tracks_.empty()) {
       throw std::invalid_argument("DecoderSink需要音频或视频轨道");
     }
-    barrier_ = std::make_unique<common::Barrier>(tracks_.size());
-    const media::FrameStreamsReady ready{streams.generation, streams.streams,
+    barrier_ = std::make_unique<Barrier>(tracks_.size());
+    const FrameStreamsReady ready{streams.generation, streams.streams,
                                          HardwareContext()};
     owner_.StartMessages();
     for (const auto& output : outputs_) {
       output->OnStreamsReady(ready);
     }
     for (auto& track : tracks_) {
-      track->worker = std::make_unique<common::Thread>(
+      track->worker = std::make_unique<Thread>(
           track->audio ? "mw-dec-audio" : "mw-dec-video",
           [this, raw = track.get()]() { Run(*raw); });
     }
   }
 
-  const ffmpeg::HardwareContext* HardwareContext() const {
+  const HardwareContext* HardwareContext() const {
     for (const auto& track : tracks_) {
       if (track->video) {
         return track->video->hardware_context();
@@ -351,7 +351,7 @@ class DecoderSink::Impl final : public sink::Sink {
     return nullptr;
   }
 
-  void ForwardPacket(std::uint64_t generation, const ffmpeg::Packet& packet) {
+  void ForwardPacket(std::uint64_t generation, const Packet& packet) {
     if (generation != generation_.load()) {
       return;
     }
@@ -389,7 +389,7 @@ class DecoderSink::Impl final : public sink::Sink {
     }
   }
 
-  void QueueEnd(const media::StreamEnded& end) {
+  void QueueEnd(const StreamEnded& end) {
     Work work;
     work.kind = WorkKind::kEnd;
     work.generation = end.generation;
@@ -423,7 +423,7 @@ class DecoderSink::Impl final : public sink::Sink {
     switch (work.kind) {
       case WorkKind::kPacket: {
         auto& recorder = track.audio ? audio_performance_ : video_performance_;
-        performance::OperationRecorder::Call call(recorder, track.active_call);
+        OperationRecorder::Call call(recorder, track.active_call);
         recorder.AddInput(1, work.packet->get()->size);
         track.generation = work.generation;
         if (track.audio) {
@@ -447,17 +447,17 @@ class DecoderSink::Impl final : public sink::Sink {
     return true;
   }
 
-  void CompleteReset(const media::TimelineReset& reset,
-                     const media::StreamsReady& streams) {
+  void CompleteReset(const TimelineReset& reset,
+                     const StreamsReady& streams) {
     // Barrier completion holds its lock; CanProcess may cancel that barrier.
     if (stopping_.load() || failed_.load() ||
-        queue_->state() == sink::PacketSinkState::kFailed) {
+        queue_->state() == PacketSinkState::kFailed) {
       return;
     }
     for (const auto& output : outputs_) {
       output->OnTimelineReset(reset);
     }
-    const media::FrameStreamsReady ready{streams.generation, streams.streams,
+    const FrameStreamsReady ready{streams.generation, streams.streams,
                                          HardwareContext()};
     owner_.StartMessages();
     for (const auto& output : outputs_) {
@@ -465,13 +465,13 @@ class DecoderSink::Impl final : public sink::Sink {
     }
   }
 
-  bool EndTrack(Track& track, const media::StreamEnded& end) {
-    if (end.reason != media::StreamEndReason::kEof &&
-        end.reason != media::StreamEndReason::kInterrupted) {
+  bool EndTrack(Track& track, const StreamEnded& end) {
+    if (end.reason != StreamEndReason::kEof &&
+        end.reason != StreamEndReason::kInterrupted) {
       Flush(track);
     } else {
       auto& recorder = track.audio ? audio_performance_ : video_performance_;
-      performance::OperationRecorder::Call call(recorder, track.active_call);
+      OperationRecorder::Call call(recorder, track.active_call);
       if (track.audio) {
         track.audio->Drain();
         track.resampler->Drain();
@@ -482,9 +482,9 @@ class DecoderSink::Impl final : public sink::Sink {
     return barrier_->ArriveAndWait([&]() { CompleteEnd(end); });
   }
 
-  void CompleteEnd(const media::StreamEnded& end) {
+  void CompleteEnd(const StreamEnded& end) {
     if (stopping_.load() || failed_.load() ||
-        queue_->state() == sink::PacketSinkState::kFailed) {
+        queue_->state() == PacketSinkState::kFailed) {
       return;
     }
     for (const auto& output : outputs_) {
@@ -492,25 +492,25 @@ class DecoderSink::Impl final : public sink::Sink {
     }
     std::lock_guard<std::mutex> lock(status_mutex_);
     if (end.generation != generation_.load() || stopping_.load() ||
-        failed_.load() || queue_->state() == sink::PacketSinkState::kFailed) {
+        failed_.load() || queue_->state() == PacketSinkState::kFailed) {
       return;
     }
-    if (end.reason == media::StreamEndReason::kEof) {
-      state_.store(sink::PacketSinkState::kEnded);
-    } else if (end.reason == media::StreamEndReason::kInterrupted) {
-      state_.store(sink::PacketSinkState::kRunning);
-    } else if (end.reason == media::StreamEndReason::kStopped) {
-      state_.store(sink::PacketSinkState::kStopped);
-    } else if (end.reason == media::StreamEndReason::kFailed) {
+    if (end.reason == StreamEndReason::kEof) {
+      state_.store(PacketSinkState::kEnded);
+    } else if (end.reason == StreamEndReason::kInterrupted) {
+      state_.store(PacketSinkState::kRunning);
+    } else if (end.reason == StreamEndReason::kStopped) {
+      state_.store(PacketSinkState::kStopped);
+    } else if (end.reason == StreamEndReason::kFailed) {
       error_ = "输入失败";
       failed_.store(true);
-      state_.store(sink::PacketSinkState::kFailed);
+      state_.store(PacketSinkState::kFailed);
     }
   }
 
-  void SetState(sink::PacketSinkState state) {
+  void SetState(PacketSinkState state) {
     std::lock_guard<std::mutex> lock(status_mutex_);
-    if (state_.load() != sink::PacketSinkState::kFailed) {
+    if (state_.load() != PacketSinkState::kFailed) {
       state_.store(state);
     }
   }
@@ -521,7 +521,7 @@ class DecoderSink::Impl final : public sink::Sink {
       return false;
     }
     error_ = error;
-    state_.store(sink::PacketSinkState::kFailed);
+    state_.store(PacketSinkState::kFailed);
     return true;
   }
 
@@ -541,7 +541,7 @@ class DecoderSink::Impl final : public sink::Sink {
     queue_->Abort();
     CancelWork();
     if (first_failure) {
-      log::Module<log::LogModule::kStreamer>::Error("DecoderSink失败: {}",
+      Module<LogModule::kStreamer>::Error("DecoderSink失败: {}",
                                                     error);
     }
   }
@@ -564,61 +564,61 @@ class DecoderSink::Impl final : public sink::Sink {
   // Setup is serialized on the input thread; queue forwarding reads the mode.
   bool mode_initialized_ = false;
   std::atomic<bool> offline_{false};
-  performance::OperationRecorder audio_performance_{
-      performance::PerformanceType::kAudioDecoder,
-      performance::PerformanceUnit::kPacket,
-      performance::PerformanceUnit::kSample};
-  performance::OperationRecorder video_performance_{
-      performance::PerformanceType::kVideoDecoder,
-      performance::PerformanceUnit::kPacket,
-      performance::PerformanceUnit::kFrame};
-  const std::vector<std::unique_ptr<sink::Sink>>& outputs_;
-  std::unique_ptr<cache::PacketQueue> queue_;
+  OperationRecorder audio_performance_{
+      PerformanceType::kAudioDecoder,
+      PerformanceUnit::kPacket,
+      PerformanceUnit::kSample};
+  OperationRecorder video_performance_{
+      PerformanceType::kVideoDecoder,
+      PerformanceUnit::kPacket,
+      PerformanceUnit::kFrame};
+  const std::vector<std::unique_ptr<Sink>>& outputs_;
+  std::unique_ptr<PacketQueue> queue_;
   std::vector<std::unique_ptr<Track>> tracks_;
-  std::unique_ptr<common::Barrier> barrier_;
+  std::unique_ptr<Barrier> barrier_;
   std::mutex work_mutex_;
   std::mutex stop_mutex_;
   mutable std::mutex status_mutex_;
   std::string error_;
-  std::atomic<sink::PacketSinkState> state_{sink::PacketSinkState::kIdle};
+  std::atomic<PacketSinkState> state_{PacketSinkState::kIdle};
   std::atomic<std::uint64_t> generation_{0};
   std::atomic<bool> failed_{false};
   std::atomic<bool> stopping_{false};
   bool stopped_ = false;
   // The queue thread retains the reset until replacement streams arrive, so
   // both decode workers can receive one complete generation boundary.
-  std::optional<media::TimelineReset> pending_reset_;
+  std::optional<TimelineReset> pending_reset_;
 };
 
 DecoderSink::DecoderSink(std::string id, DecoderSinkConfig config)
-    : sink::Sink(std::move(id), sink::SinkMediaType::kPacket,
-                 sink::SinkMediaType::kFrame),
+    : Sink(std::move(id), SinkMediaType::kPacket,
+                 SinkMediaType::kFrame),
       impl_(std::make_unique<Impl>(*this, std::move(config))) {}
 
 DecoderSink::~DecoderSink() { Stop(); }
 
-void DecoderSink::OnStreamsReady(const media::StreamsReady& streams) noexcept {
+void DecoderSink::OnStreamsReady(const StreamsReady& streams) noexcept {
   CloseRegistration();
   impl_->SubmitStreams(streams);
 }
 
-void DecoderSink::OnPacket(const media::PacketReady& packet) noexcept {
+void DecoderSink::OnPacket(const PacketReady& packet) noexcept {
   CloseRegistration();
   impl_->SubmitPacket(packet);
 }
 
-void DecoderSink::OnTimelineReset(const media::TimelineReset& reset) noexcept {
+void DecoderSink::OnTimelineReset(const TimelineReset& reset) noexcept {
   CloseRegistration();
   impl_->SubmitReset(reset);
 }
 
-void DecoderSink::OnInputEnded(const media::StreamEnded& end) noexcept {
+void DecoderSink::OnInputEnded(const StreamEnded& end) noexcept {
   CloseRegistration();
   impl_->SubmitEnd(end);
 }
 
 void DecoderSink::RequestStop() noexcept {
-  sink::Sink::RequestStop();
+  Sink::RequestStop();
   impl_->RequestStop();
 }
 
@@ -627,13 +627,13 @@ void DecoderSink::Stop() noexcept {
   impl_->Stop();
 }
 
-sink::PacketSinkState DecoderSink::state() const noexcept {
+PacketSinkState DecoderSink::state() const noexcept {
   return impl_->state();
 }
 
 std::string DecoderSink::error() const { return impl_->error(); }
 
-performance::NodeSnapshot DecoderSink::GetOwnPerformance() const {
+NodeSnapshot DecoderSink::GetOwnPerformance() const {
   return impl_->GetOwnPerformance();
 }
 
@@ -641,4 +641,4 @@ void DecoderSink::HandleFatalError(const std::string& error) noexcept {
   impl_->HandleFatalError(error);
 }
 
-}  // namespace mw::streamer::decoder
+}  // namespace mw::streamer

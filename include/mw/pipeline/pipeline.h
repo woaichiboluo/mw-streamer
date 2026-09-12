@@ -7,7 +7,7 @@
 #include "mw/input/input.h"
 #include "mw/sink/sink.h"
 
-namespace mw::streamer::pipeline {
+namespace mw::streamer {
 
 enum class PipelineState {
   kIdle,
@@ -29,7 +29,7 @@ enum class PipelineState {
 class Pipeline final {
  public:
   // Takes ownership of a non-null, not-yet-started input.
-  explicit Pipeline(std::unique_ptr<input::Input> input);
+  explicit Pipeline(std::unique_ptr<Input> input);
   ~Pipeline();
 
   Pipeline(const Pipeline&) = delete;
@@ -37,7 +37,7 @@ class Pipeline final {
 
   // Takes exclusive ownership. Only allowed before the first Start or Stop.
   // A null sink throws invalid_argument; late registration throws logic_error.
-  void AddSink(std::unique_ptr<sink::Sink> sink);
+  void AddSink(std::unique_ptr<Sink> sink);
 
   // Setup only. Both IDs must belong to this Pipeline's sink tree; checked at
   // Start, along with ID uniqueness. Repeated binding replaces the target.
@@ -75,20 +75,20 @@ class Pipeline final {
   // generation, error and retry information. A media boundary can precede its
   // state notification; sinks must use the reason carried by OnInputEnded.
   // Input EOF does not mean that sinks have finished processing their queues.
-  input::InputStateChanged input_status() const;
+  InputStateChanged input_status() const;
 
   // Returns an owned statistics tree, including every downstream consumer.
   // Reading never clears counters or changes another reader's sampling window.
   // Use Snapshot::Find and WithRatesSince for selection and interval rates.
   // Safe with Start/Stop/media delivery; not AddSink, downstream
   // registration or destruction. Custom nodes must honor their read contract.
-  performance::PipelineSnapshot GetPerformance() const;
+  PipelineSnapshot GetPerformance() const;
 
  private:
   class Impl;
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::pipeline
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_PIPELINE_PIPELINE_H_

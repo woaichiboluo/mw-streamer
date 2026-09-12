@@ -2,7 +2,7 @@
 
 #include <stdexcept>
 
-namespace mw::streamer::performance {
+namespace mw::streamer {
 namespace {
 
 void FindInNode(const NodeSnapshot& node, PerformanceType type,
@@ -90,4 +90,4 @@ PipelineSnapshot PipelineSnapshot::WithRatesSince(
   return result;
 }
 
-}  // namespace mw::streamer::performance
+}  // namespace mw::streamer

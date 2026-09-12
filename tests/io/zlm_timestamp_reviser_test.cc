@@ -9,8 +9,8 @@
 
 namespace {
 
-using mw::streamer::input::internal::ReviseZlmFrameTimestamp;
-using mw::streamer::input::internal::ShouldReviseZlmTimestamps;
+using mw::streamer::internal::ReviseZlmFrameTimestamp;
+using mw::streamer::internal::ShouldReviseZlmTimestamps;
 
 mediakit::Frame::Ptr MakeFrame(std::uint64_t dts) {
   auto frame = mediakit::FrameImp::create();

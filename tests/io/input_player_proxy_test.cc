@@ -23,15 +23,15 @@ extern "C" {
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::ffmpeg::Packet;
-using mw::streamer::ffmpeg::StreamInfo;
-using mw::streamer::input::ControlResult;
-using mw::streamer::input::PlayerProxy;
-using mw::streamer::input::PlayerState;
-using mw::streamer::input::ReconnectPolicy;
-using mw::streamer::input::TimelineResetReason;
-using mw::streamer::sink::PacketSink;
-using mw::streamer::zlm::PlayerConfig;
+using mw::streamer::Packet;
+using mw::streamer::StreamInfo;
+using mw::streamer::ControlResult;
+using mw::streamer::PlayerProxy;
+using mw::streamer::PlayerState;
+using mw::streamer::ReconnectPolicy;
+using mw::streamer::PlayerTimelineResetReason;
+using mw::streamer::PacketSink;
+using mw::streamer::PlayerConfig;
 using toolkit::Err_eof;
 using toolkit::Err_other;
 using toolkit::ErrCode;
@@ -136,7 +136,7 @@ TEST_CASE(
         }
       },
       [&](std::uint64_t generation,
-          const std::vector<mw::streamer::ffmpeg::StreamInfo>& streams) {
+          const std::vector<mw::streamer::StreamInfo>& streams) {
         if (generation != 1) {
           valid_packets = false;
         }
@@ -229,7 +229,7 @@ TEST_CASE("input player proxy does not retry a failed finite input") {
 
   proxy->AddPacketSink(std::make_unique<ObservingPacketSink>(
       [&](std::uint64_t, const Packet&) { ++packets; },
-      [&](std::uint64_t, const std::vector<mw::streamer::ffmpeg::StreamInfo>&) {
+      [&](std::uint64_t, const std::vector<mw::streamer::StreamInfo>&) {
         ++streams_ready;
       }));
   proxy->SetOnState([&](std::uint64_t, PlayerState state, const SockException&,
@@ -266,7 +266,7 @@ TEST_CASE("explicit restart establishes a new stream description baseline") {
   proxy->AddPacketSink(std::make_unique<ObservingPacketSink>(
       [](std::uint64_t, const Packet&) {},
       [&](std::uint64_t generation,
-          const std::vector<mw::streamer::ffmpeg::StreamInfo>& streams) {
+          const std::vector<mw::streamer::StreamInfo>& streams) {
         if (generation == 1) {
           if (streams.size() != 2) {
             valid_streams = false;
@@ -331,6 +331,8 @@ TEST_CASE(
   policy.max_delay = 20ms;
   policy.delay_step = 20ms;
   auto proxy = std::make_shared<PlayerProxy>(nullptr, policy);
+  PlayerConfig player_config;
+  player_config.connect_timeout = 200ms;
 
   std::mutex mutex;
   std::condition_variable condition;
@@ -348,7 +350,7 @@ TEST_CASE(
     }
   });
 
-  proxy->Start("rtsp://127.0.0.1:1/mw-unreachable");
+  proxy->Start("rtsp://127.0.0.1:1/mw-unreachable", player_config);
 
   REQUIRE(WaitFor(
       condition, mutex, [&]() { return failed.load(); }, 3s));
@@ -542,9 +544,9 @@ TEST_CASE("file seek starts a clean timeline generation") {
   std::atomic<ControlResult> seek_result = ControlResult::kFailed;
 
   proxy->SetOnTimelineReset([&](std::uint64_t generation,
-                                TimelineResetReason reason,
+                                PlayerTimelineResetReason reason,
                                 std::chrono::milliseconds position) {
-    if (generation != 2 || reason != TimelineResetReason::kSeek ||
+    if (generation != 2 || reason != PlayerTimelineResetReason::kSeek ||
         position != 1000ms || !proxy->poller()->isCurrentThread()) {
       valid_timeline = false;
     }
@@ -633,7 +635,8 @@ TEST_CASE("file playback rate changes pacing without changing generation") {
   std::atomic<ControlResult> rate_result = ControlResult::kFailed;
 
   proxy->SetOnTimelineReset(
-      [&](std::uint64_t, TimelineResetReason, std::chrono::milliseconds) {
+      [&](std::uint64_t, PlayerTimelineResetReason,
+          std::chrono::milliseconds) {
         reset_seen = true;
       });
   proxy->AddPacketSink(std::make_unique<ObservingPacketSink>(

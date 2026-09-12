@@ -21,25 +21,25 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::decoder::DecoderSink;
-using mw::streamer::decoder::DecoderSinkConfig;
-using mw::streamer::input::Input;
-using mw::streamer::input::InputState;
-using mw::streamer::input::ZlmInput;
-using mw::streamer::input::ZlmInputConfig;
-using mw::streamer::media::FrameReady;
-using mw::streamer::media::FrameStreamsReady;
-using mw::streamer::media::PacketReady;
-using mw::streamer::media::StreamEnded;
-using mw::streamer::media::StreamsReady;
-using mw::streamer::media::TimelineReset;
-using mw::streamer::processor::AnalysisProcessorSink;
-using mw::streamer::processor::TransformProcessorSink;
-using mw::streamer::sink::FatalError;
-using mw::streamer::sink::PacketSinkState;
-using mw::streamer::sink::Sink;
-using mw::streamer::sink::SinkMediaType;
-using namespace mw::streamer::pipeline;
+using mw::streamer::DecoderSink;
+using mw::streamer::DecoderSinkConfig;
+using mw::streamer::Input;
+using mw::streamer::InputState;
+using mw::streamer::ZlmInput;
+using mw::streamer::ZlmInputConfig;
+using mw::streamer::FrameReady;
+using mw::streamer::FrameStreamsReady;
+using mw::streamer::PacketReady;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamsReady;
+using mw::streamer::TimelineReset;
+using mw::streamer::AnalysisProcessorSink;
+using mw::streamer::TransformProcessorSink;
+using mw::streamer::FatalError;
+using mw::streamer::PacketSinkState;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
+using namespace mw::streamer;
 
 class StopProbe final {
  public:
@@ -380,7 +380,7 @@ TEST_CASE("真实Processor链路fatal自动停止Pipeline及健康旁路") {
   Pipeline pipeline(std::move(input));
   DecoderSinkConfig decoder_config;
   decoder_config.video_decoder.backend =
-      mw::streamer::decoder::VideoDecoderBackend::kSoftware;
+      mw::streamer::VideoDecoderBackend::kSoftware;
   auto decoder = std::make_unique<DecoderSink>("decoder", decoder_config);
   auto* decoder_sink = decoder.get();
   auto output = std::make_unique<FrameCounter>(output_stop);
@@ -445,7 +445,7 @@ TEST_CASE("Processor异步消息fatal穿过Sink链路自动停止Pipeline") {
   Pipeline pipeline(std::move(input));
   DecoderSinkConfig decoder_config;
   decoder_config.video_decoder.backend =
-      mw::streamer::decoder::VideoDecoderBackend::kSoftware;
+      mw::streamer::VideoDecoderBackend::kSoftware;
   auto decoder = std::make_unique<DecoderSink>("decoder", decoder_config);
   const auto* decoder_sink = decoder.get();
   MwStreamerTransformProcessorCallbacks callbacks{};

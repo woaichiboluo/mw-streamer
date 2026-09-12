@@ -41,10 +41,7 @@ extern "C" {
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::decoder::VideoDecoderBackend;
-namespace pipeline = mw::streamer::pipeline;
-namespace performance = mw::streamer::performance;
-using performance::PerformanceType;
+using namespace mw::streamer;
 
 std::atomic_bool g_stop_requested = false;
 
@@ -52,17 +49,17 @@ void HandleSignal(int) {
   g_stop_requested.store(true, std::memory_order_relaxed);
 }
 
-const char* ToString(pipeline::PipelineState state) {
+const char* ToString(PipelineState state) {
   switch (state) {
-    case pipeline::PipelineState::kIdle:
+    case PipelineState::kIdle:
       return "idle";
-    case pipeline::PipelineState::kRunning:
+    case PipelineState::kRunning:
       return "running";
-    case pipeline::PipelineState::kStopping:
+    case PipelineState::kStopping:
       return "stopping";
-    case pipeline::PipelineState::kStopped:
+    case PipelineState::kStopped:
       return "stopped";
-    case pipeline::PipelineState::kFailed:
+    case PipelineState::kFailed:
       return "failed";
   }
   return "unknown";
@@ -292,22 +289,22 @@ struct LocalSinkObserver {
   std::atomic_uint64_t invalid_frames{0};
 };
 
-class ObservingFrameSink final : public mw::streamer::sink::Sink {
+class ObservingFrameSink final : public mw::streamer::Sink {
  public:
   explicit ObservingFrameSink(LocalSinkObserver& observer)
-      : Sink("local", mw::streamer::sink::SinkMediaType::kFrame),
+      : Sink("local", mw::streamer::SinkMediaType::kFrame),
         observer_(observer) {}
 
   ~ObservingFrameSink() override { Stop(); }
 
-  void OnStreamsReady(const mw::streamer::media::FrameStreamsReady&) override {
+  void OnStreamsReady(const mw::streamer::FrameStreamsReady&) override {
     StartMessages();
     if (started_.exchange(true)) return;
     observer_.starts.fetch_add(1, std::memory_order_relaxed);
     observer_.events->Write("local_sink_started");
   }
 
-  void OnAudioFrame(const mw::streamer::media::FrameReady& ready) override {
+  void OnAudioFrame(const mw::streamer::FrameReady& ready) override {
     const auto& frame = ready.frame;
     if (!frame.get() || !frame->data[0] || frame->sample_rate <= 0 ||
         frame->ch_layout.nb_channels <= 0 || frame->nb_samples <= 0 ||
@@ -318,7 +315,7 @@ class ObservingFrameSink final : public mw::streamer::sink::Sink {
     observer_.audio_frames.fetch_add(1, std::memory_order_relaxed);
   }
 
-  void OnVideoFrame(const mw::streamer::media::FrameReady& ready) override {
+  void OnVideoFrame(const mw::streamer::FrameReady& ready) override {
     const auto& frame = ready.frame;
     if (!frame.get() || !frame->data[0] || frame->width <= 0 ||
         frame->height <= 0 || frame->format == AV_PIX_FMT_NONE ||
@@ -329,8 +326,8 @@ class ObservingFrameSink final : public mw::streamer::sink::Sink {
     observer_.video_frames.fetch_add(1, std::memory_order_relaxed);
   }
 
-  void OnTimelineReset(const mw::streamer::media::TimelineReset&) override {}
-  void OnInputEnded(const mw::streamer::media::StreamEnded&) override {}
+  void OnTimelineReset(const mw::streamer::TimelineReset&) override {}
+  void OnInputEnded(const mw::streamer::StreamEnded&) override {}
 
   void Stop() noexcept override {
     StopMessages();
@@ -358,14 +355,14 @@ struct CacheObservation {
   std::array<Track, 2> tracks;  // Audio, video.
 };
 
-class InputObservationSink final : public mw::streamer::sink::Sink {
+class InputObservationSink final : public mw::streamer::Sink {
  public:
   explicit InputObservationSink(CacheObservation& observation)
-      : Sink("input_observation", mw::streamer::sink::SinkMediaType::kPacket),
+      : Sink("input_observation", mw::streamer::SinkMediaType::kPacket),
         observation_(observation) {}
 
   void OnStreamsReady(
-      const mw::streamer::media::StreamsReady& streams) override {
+      const mw::streamer::StreamsReady& streams) override {
     std::lock_guard<std::mutex> lock(observation_.mutex);
     observation_.generation = streams.generation;
     observation_.tracks = {};
@@ -378,7 +375,7 @@ class InputObservationSink final : public mw::streamer::sink::Sink {
     }
   }
 
-  void OnPacket(const mw::streamer::media::PacketReady& ready) override {
+  void OnPacket(const mw::streamer::PacketReady& ready) override {
     std::lock_guard<std::mutex> lock(observation_.mutex);
     if (ready.generation != observation_.generation || !ready.packet.get() ||
         ready.packet->dts == AV_NOPTS_VALUE)
@@ -393,44 +390,44 @@ class InputObservationSink final : public mw::streamer::sink::Sink {
   }
 
   void OnTimelineReset(
-      const mw::streamer::media::TimelineReset& reset) override {
+      const mw::streamer::TimelineReset& reset) override {
     std::lock_guard<std::mutex> lock(observation_.mutex);
     observation_.generation = reset.generation;
     observation_.tracks = {};
   }
-  void OnInputEnded(const mw::streamer::media::StreamEnded&) override {}
+  void OnInputEnded(const mw::streamer::StreamEnded&) override {}
 
  private:
   CacheObservation& observation_;
 };
 
-class DecodedObservationSink final : public mw::streamer::sink::Sink {
+class DecodedObservationSink final : public mw::streamer::Sink {
  public:
   DecodedObservationSink(CacheObservation& observation, EventWriter& events)
-      : Sink("decoded_observation", mw::streamer::sink::SinkMediaType::kFrame,
-             mw::streamer::sink::SinkMediaType::kFrame),
+      : Sink("decoded_observation", mw::streamer::SinkMediaType::kFrame,
+             mw::streamer::SinkMediaType::kFrame),
         observation_(observation),
         events_(events) {}
   ~DecodedObservationSink() override { Stop(); }
 
   void OnStreamsReady(
-      const mw::streamer::media::FrameStreamsReady& streams) override {
+      const mw::streamer::FrameStreamsReady& streams) override {
     StartMessages();
     SendStreamsReady(streams);
   }
-  void OnAudioFrame(const mw::streamer::media::FrameReady& frame) override {
+  void OnAudioFrame(const mw::streamer::FrameReady& frame) override {
     Observe(frame, false);
     SendAudioFrame(frame);
   }
-  void OnVideoFrame(const mw::streamer::media::FrameReady& frame) override {
+  void OnVideoFrame(const mw::streamer::FrameReady& frame) override {
     Observe(frame, true);
     SendVideoFrame(frame);
   }
   void OnTimelineReset(
-      const mw::streamer::media::TimelineReset& reset) override {
+      const mw::streamer::TimelineReset& reset) override {
     SendTimelineReset(reset);
   }
-  void OnInputEnded(const mw::streamer::media::StreamEnded& end) override {
+  void OnInputEnded(const mw::streamer::StreamEnded& end) override {
     SendInputEnded(end);
   }
   void Stop() noexcept override {
@@ -439,7 +436,7 @@ class DecodedObservationSink final : public mw::streamer::sink::Sink {
   }
 
  private:
-  void Observe(const mw::streamer::media::FrameReady& ready, bool video) {
+  void Observe(const mw::streamer::FrameReady& ready, bool video) {
     std::int64_t latest_dts_us;
     const auto source_pts_us = av_rescale_q(
         ready.frame->pts, ready.frame->time_base, AVRational{1, 1000000});
@@ -787,7 +784,7 @@ constexpr std::pair<PerformanceType, const char*> kPerformanceTypes[] = {
     {PerformanceType::kRemux, "remux"},
 };
 
-std::uint64_t InputCount(const performance::PipelineSnapshot& snapshot,
+std::uint64_t InputCount(const PipelineSnapshot& snapshot,
                          PerformanceType type) {
   std::uint64_t count = 0;
   for (const auto& match : snapshot.Find(type)) {
@@ -796,7 +793,7 @@ std::uint64_t InputCount(const performance::PipelineSnapshot& snapshot,
   return count;
 }
 
-void WritePerformance(const performance::PipelineSnapshot& snapshot,
+void WritePerformance(const PipelineSnapshot& snapshot,
                       EventWriter& events, const char* phase) {
   for (const auto& [type, name] : kPerformanceTypes) {
     for (const auto& match : snapshot.Find(type)) {
@@ -850,15 +847,15 @@ struct RunResult {
   bool eof_drained = false;
 };
 
-bool CheckFailures(pipeline::Pipeline& chain,
+bool CheckFailures(Pipeline& chain,
                    const std::vector<SinkProbe>& probes, EventWriter& events) {
-  if (chain.state() == pipeline::PipelineState::kFailed) {
+  if (chain.state() == PipelineState::kFailed) {
     events.Write("pipeline_error",
                  {{"node_id", "pipeline"}, {"error", chain.error()}});
     return true;
   }
   const auto input = chain.input_status();
-  if (input.state == mw::streamer::input::InputState::kFailed &&
+  if (input.state == mw::streamer::InputState::kFailed &&
       !input.will_retry) {
     events.Write("pipeline_error",
                  {{"node_id", "input"}, {"error", input.error}});
@@ -874,7 +871,7 @@ bool CheckFailures(pipeline::Pipeline& chain,
   return false;
 }
 
-RunResult RunPipeline(pipeline::Pipeline& chain, const Arguments& arguments,
+RunResult RunPipeline(Pipeline& chain, const Arguments& arguments,
                       const std::vector<SinkProbe>& probes, EventWriter& events,
                       const ProcessorObserver* observer = nullptr) {
   RunResult result;
@@ -928,7 +925,7 @@ RunResult RunPipeline(pipeline::Pipeline& chain, const Arguments& arguments,
                                     : 0)}});
       next_heartbeat = now + 1s;
     }
-    if (chain.input_status().state == mw::streamer::input::InputState::kEnded &&
+    if (chain.input_status().state == mw::streamer::InputState::kEnded &&
         std::all_of(probes.begin(), probes.end(),
                     [](const auto& probe) { return probe.ended(); })) {
       result.eof_drained = true;
@@ -946,22 +943,22 @@ RunResult RunPipeline(pipeline::Pipeline& chain, const Arguments& arguments,
   return result;
 }
 
-std::unique_ptr<mw::streamer::output::RemuxSink> MakeRemux(
+std::unique_ptr<mw::streamer::RemuxSink> MakeRemux(
     const std::string& id, const std::string& target,
     std::vector<SinkProbe>& probes) {
-  mw::streamer::output::RemuxSinkConfig config;
+  mw::streamer::RemuxSinkConfig config;
   config.target = target;
   auto sink =
-      std::make_unique<mw::streamer::output::RemuxSink>(id, std::move(config));
-  auto probe = MakeProbe(*sink, mw::streamer::sink::PacketSinkState::kRunning,
-                         mw::streamer::sink::PacketSinkState::kEnded,
-                         mw::streamer::sink::PacketSinkState::kFailed);
+      std::make_unique<mw::streamer::RemuxSink>(id, std::move(config));
+  auto probe = MakeProbe(*sink, mw::streamer::PacketSinkState::kRunning,
+                         mw::streamer::PacketSinkState::kEnded,
+                         mw::streamer::PacketSinkState::kFailed);
   auto* node = sink.get();
   const bool network = target.find("://") != std::string::npos;
   probe.ready = [node, network] {
-    if (node->state() == mw::streamer::sink::PacketSinkState::kEnded)
+    if (node->state() == mw::streamer::PacketSinkState::kEnded)
       return true;
-    if (node->state() != mw::streamer::sink::PacketSinkState::kRunning)
+    if (node->state() != mw::streamer::PacketSinkState::kRunning)
       return false;
     const auto snapshot = node->GetPerformance();
     return !snapshot.operations.empty() &&
@@ -984,20 +981,20 @@ MwStreamerProcessorStartResult OnAnalysisStart(
   return OnProcessorStart(&adapted, user_context);
 }
 
-std::unique_ptr<mw::streamer::encoder::EncoderSink> MakeEncoder(
+std::unique_ptr<mw::streamer::EncoderSink> MakeEncoder(
     const Arguments& arguments, AVRational frame_rate,
     std::vector<SinkProbe>& probes) {
-  mw::streamer::encoder::EncoderSinkConfig config;
+  mw::streamer::EncoderSinkConfig config;
   config.video_encoder.frame_rate = {frame_rate.num, frame_rate.den};
   if (arguments.video_codec != kMwStreamerCodecUnknown) {
     config.video_encoder.codec = arguments.video_codec;
   }
   auto encoder =
-      std::make_unique<mw::streamer::encoder::EncoderSink>("encoder", config);
+      std::make_unique<mw::streamer::EncoderSink>("encoder", config);
   probes.push_back(MakeProbe(*encoder,
-                             mw::streamer::encoder::EncoderSinkState::kRunning,
-                             mw::streamer::encoder::EncoderSinkState::kEnded,
-                             mw::streamer::encoder::EncoderSinkState::kFailed));
+                             mw::streamer::EncoderSinkState::kRunning,
+                             mw::streamer::EncoderSinkState::kEnded,
+                             mw::streamer::EncoderSinkState::kFailed));
   for (std::size_t index = 0; index < arguments.outputs.size(); ++index) {
     encoder->AddSink(MakeRemux(fmt::format("output_{}", index),
                                arguments.outputs[index], probes));
@@ -1005,25 +1002,25 @@ std::unique_ptr<mw::streamer::encoder::EncoderSink> MakeEncoder(
   return encoder;
 }
 
-std::unique_ptr<mw::streamer::synchronizer::SynchronizerSink> MakeSynchronizer(
+std::unique_ptr<mw::streamer::SynchronizerSink> MakeSynchronizer(
     const Arguments& arguments, LocalSinkObserver& observer,
     std::vector<SinkProbe>& probes) {
   auto synchronizer =
-      std::make_unique<mw::streamer::synchronizer::SynchronizerSink>(
+      std::make_unique<mw::streamer::SynchronizerSink>(
           "synchronizer");
   auto probe =
       MakeProbe(*synchronizer,
-                mw::streamer::synchronizer::SynchronizerSinkState::kRunning,
-                mw::streamer::synchronizer::SynchronizerSinkState::kEnded,
-                mw::streamer::synchronizer::SynchronizerSinkState::kFailed);
+                mw::streamer::SynchronizerSinkState::kRunning,
+                mw::streamer::SynchronizerSinkState::kEnded,
+                mw::streamer::SynchronizerSinkState::kFailed);
   auto* node = synchronizer.get();
   probe.ready = [node] {
     return node->state() ==
-               mw::streamer::synchronizer::SynchronizerSinkState::kRunning ||
+               mw::streamer::SynchronizerSinkState::kRunning ||
            node->state() ==
-               mw::streamer::synchronizer::SynchronizerSinkState::kStandby ||
+               mw::streamer::SynchronizerSinkState::kStandby ||
            node->state() ==
-               mw::streamer::synchronizer::SynchronizerSinkState::kEnded;
+               mw::streamer::SynchronizerSinkState::kEnded;
   };
   probes.push_back(std::move(probe));
   if (!arguments.outputs.empty()) {
@@ -1039,7 +1036,7 @@ std::unique_ptr<mw::streamer::synchronizer::SynchronizerSink> MakeSynchronizer(
   return synchronizer;
 }
 
-std::unique_ptr<mw::streamer::sink::Sink> MakeProcessor(
+std::unique_ptr<mw::streamer::Sink> MakeProcessor(
     const Arguments& arguments, ProcessorObserver& observer,
     LocalSinkObserver& local_observer, std::vector<SinkProbe>& probes) {
   if (arguments.outputs.empty() && !arguments.local_sink) {
@@ -1048,7 +1045,7 @@ std::unique_ptr<mw::streamer::sink::Sink> MakeProcessor(
     callbacks.on_start = OnAnalysisStart;
     callbacks.on_boundary = OnProcessorBoundary;
     callbacks.on_stop = OnProcessorStop;
-    return std::make_unique<mw::streamer::processor::AnalysisProcessorSink>(
+    return std::make_unique<mw::streamer::AnalysisProcessorSink>(
         "processor", callbacks);
   }
   MwStreamerTransformProcessorCallbacks callbacks{};
@@ -1059,7 +1056,7 @@ std::unique_ptr<mw::streamer::sink::Sink> MakeProcessor(
   callbacks.on_boundary = OnProcessorBoundary;
   callbacks.on_stop = OnProcessorStop;
   auto processor =
-      std::make_unique<mw::streamer::processor::TransformProcessorSink>(
+      std::make_unique<mw::streamer::TransformProcessorSink>(
           "processor", callbacks);
   processor->AddSink(MakeSynchronizer(arguments, local_observer, probes));
   return processor;
@@ -1073,25 +1070,25 @@ int RunStreaming(const Arguments& arguments, EventWriter& events) {
   LocalSinkObserver local_sink_observer;
   local_sink_observer.events = &events;
   CacheObservation cache_observation;
-  mw::streamer::input::ZlmInputConfig input;
+  mw::streamer::ZlmInputConfig input;
   input.url = arguments.input;
-  pipeline::Pipeline chain(
-      std::make_unique<mw::streamer::input::ZlmInput>(input));
+  Pipeline chain(
+      std::make_unique<mw::streamer::ZlmInput>(input));
   if (arguments.observe_cache) {
     chain.AddSink(std::make_unique<InputObservationSink>(cache_observation));
   }
   std::vector<SinkProbe> probes;
-  mw::streamer::decoder::DecoderSinkConfig decoder_config;
+  mw::streamer::DecoderSinkConfig decoder_config;
   decoder_config.cache_duration = arguments.cache_duration;
   if (arguments.software_video) {
     decoder_config.video_decoder.backend = VideoDecoderBackend::kSoftware;
   }
-  auto decoder = std::make_unique<mw::streamer::decoder::DecoderSink>(
+  auto decoder = std::make_unique<mw::streamer::DecoderSink>(
       "decoder", decoder_config);
   probes.push_back(MakeProbe(*decoder,
-                             mw::streamer::sink::PacketSinkState::kRunning,
-                             mw::streamer::sink::PacketSinkState::kEnded,
-                             mw::streamer::sink::PacketSinkState::kFailed));
+                             mw::streamer::PacketSinkState::kRunning,
+                             mw::streamer::PacketSinkState::kEnded,
+                             mw::streamer::PacketSinkState::kFailed));
   auto processor =
       MakeProcessor(arguments, observer, local_sink_observer, probes);
   if (arguments.observe_cache) {
@@ -1145,10 +1142,10 @@ int RunStreaming(const Arguments& arguments, EventWriter& events) {
 }
 
 int RunRemux(const Arguments& arguments, EventWriter& events) {
-  mw::streamer::input::ZlmInputConfig input;
+  mw::streamer::ZlmInputConfig input;
   input.url = arguments.input;
-  pipeline::Pipeline chain(
-      std::make_unique<mw::streamer::input::ZlmInput>(input));
+  Pipeline chain(
+      std::make_unique<mw::streamer::ZlmInput>(input));
   std::vector<SinkProbe> probes;
   for (std::size_t index = 0; index < arguments.outputs.size(); ++index) {
     chain.AddSink(MakeRemux(fmt::format("output_{}", index),
@@ -1164,7 +1161,7 @@ int RunRemux(const Arguments& arguments, EventWriter& events) {
   return result.running_seen && !result.failed_seen ? 0 : 2;
 }
 
-std::uint64_t OutputCount(const performance::PipelineSnapshot& snapshot,
+std::uint64_t OutputCount(const PipelineSnapshot& snapshot,
                           PerformanceType type) {
   std::uint64_t count = 0;
   for (const auto& match : snapshot.Find(type)) {
@@ -1183,20 +1180,20 @@ int RunFile(const Arguments& arguments, EventWriter& events) {
   callbacks.process_audio = ProcessFileAudio;
   callbacks.on_boundary = OnAnalysisProcessorBoundary;
   callbacks.on_stop = OnAnalysisProcessorStop;
-  mw::streamer::input::FileInputConfig input{arguments.input};
-  pipeline::Pipeline chain(
-      std::make_unique<mw::streamer::input::FileInput>(input));
-  mw::streamer::decoder::DecoderSinkConfig decoder_config;
+  mw::streamer::FileInputConfig input{arguments.input};
+  Pipeline chain(
+      std::make_unique<mw::streamer::FileInput>(input));
+  mw::streamer::DecoderSinkConfig decoder_config;
   decoder_config.video_decoder.backend = VideoDecoderBackend::kSoftware;
-  auto decoder = std::make_unique<mw::streamer::decoder::DecoderSink>(
+  auto decoder = std::make_unique<mw::streamer::DecoderSink>(
       "decoder", decoder_config);
   std::vector<SinkProbe> probes;
   probes.push_back(MakeProbe(*decoder,
-                             mw::streamer::sink::PacketSinkState::kRunning,
-                             mw::streamer::sink::PacketSinkState::kEnded,
-                             mw::streamer::sink::PacketSinkState::kFailed));
+                             mw::streamer::PacketSinkState::kRunning,
+                             mw::streamer::PacketSinkState::kEnded,
+                             mw::streamer::PacketSinkState::kFailed));
   decoder->AddSink(
-      std::make_unique<mw::streamer::processor::AnalysisProcessorSink>(
+      std::make_unique<mw::streamer::AnalysisProcessorSink>(
           "processor", callbacks));
   chain.AddSink(std::move(decoder));
   const auto result = RunPipeline(chain, arguments, probes, events);

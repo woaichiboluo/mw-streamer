@@ -25,10 +25,10 @@ extern "C" {
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::media::FrameStreamsReady;
-using mw::streamer::synchronizer::SynchronizerSinkConfig;
-using mw::streamer::synchronizer::internal::RealtimeFrameScheduler;
-namespace ffmpeg = mw::streamer::ffmpeg;
+using mw::streamer::FrameStreamsReady;
+using mw::streamer::SynchronizerSinkConfig;
+using mw::streamer::internal::RealtimeFrameScheduler;
+using namespace mw::streamer;
 using Clock = RealtimeFrameScheduler::Clock;
 constexpr int kWidth = 256;
 constexpr int kHeight = 144;
@@ -43,9 +43,9 @@ SynchronizerSinkConfig Config() {
 }
 
 FrameStreamsReady Streams(bool audio, std::uint64_t generation = 1,
-                          const ffmpeg::HardwareContext* device = nullptr,
+                          const HardwareContext* device = nullptr,
                           AVRational video_frame_rate = {20, 1}) {
-  ffmpeg::StreamInfo stream;
+  StreamInfo stream;
   stream.stream_index = 0;
   stream.time_base = audio ? AVRational{1, 48000} : AVRational{1, 1000};
   auto* parameters = stream.codec_parameters.get();
@@ -62,8 +62,8 @@ FrameStreamsReady Streams(bool audio, std::uint64_t generation = 1,
   return {generation, {std::move(stream)}, device};
 }
 
-ffmpeg::Frame Video(std::int64_t pts, std::uint8_t marker = 32) {
-  ffmpeg::Frame frame;
+Frame Video(std::int64_t pts, std::uint8_t marker = 32) {
+  Frame frame;
   frame->format = AV_PIX_FMT_YUV420P;
   frame->width = kWidth;
   frame->height = kHeight;
@@ -71,7 +71,7 @@ ffmpeg::Frame Video(std::int64_t pts, std::uint8_t marker = 32) {
   frame->duration = 50;
   frame->time_base = {1, 1000};
   frame->color_range = AVCOL_RANGE_MPEG;
-  ffmpeg::ThrowIfError(av_frame_get_buffer(frame.get(), 32),
+  ThrowIfError(av_frame_get_buffer(frame.get(), 32),
                        "allocate scheduler video");
   for (int plane = 0; plane < 3; ++plane) {
     std::memset(frame->data[plane], plane == 0 ? marker : 128,
@@ -81,8 +81,8 @@ ffmpeg::Frame Video(std::int64_t pts, std::uint8_t marker = 32) {
   return frame;
 }
 
-ffmpeg::Frame Audio(std::int64_t pts, float marker) {
-  ffmpeg::Frame frame;
+Frame Audio(std::int64_t pts, float marker) {
+  Frame frame;
   frame->format = AV_SAMPLE_FMT_FLT;
   frame->sample_rate = 48000;
   frame->nb_samples = 960;
@@ -90,7 +90,7 @@ ffmpeg::Frame Audio(std::int64_t pts, float marker) {
   frame->duration = 960;
   frame->time_base = {1, 48000};
   av_channel_layout_default(&frame->ch_layout, 1);
-  ffmpeg::ThrowIfError(av_frame_get_buffer(frame.get(), 0),
+  ThrowIfError(av_frame_get_buffer(frame.get(), 0),
                        "allocate scheduler audio");
   auto* samples = reinterpret_cast<float*>(frame->data[0]);
   for (int index = 0; index < frame->nb_samples; ++index)
@@ -98,7 +98,7 @@ ffmpeg::Frame Audio(std::int64_t pts, float marker) {
   return frame;
 }
 
-bool IsAudioValue(const ffmpeg::Frame& frame, float expected) {
+bool IsAudioValue(const Frame& frame, float expected) {
   const auto* samples = reinterpret_cast<const float*>(frame->data[0]);
   for (int index = 0; index < frame->nb_samples; ++index) {
     if (samples[index] != expected) return false;
@@ -106,7 +106,7 @@ bool IsAudioValue(const ffmpeg::Frame& frame, float expected) {
   return true;
 }
 
-ffmpeg::Frame CudaVideo(const ffmpeg::HardwareContext& device) {
+Frame CudaVideo(const HardwareContext& device) {
   AVBufferRef* pool =
       av_hwframe_ctx_alloc(const_cast<AVBufferRef*>(device.get()));
   if (!pool) throw std::bad_alloc();
@@ -117,22 +117,22 @@ ffmpeg::Frame CudaVideo(const ffmpeg::HardwareContext& device) {
   context->height = kHeight;
   context->initial_pool_size = 2;
   try {
-    ffmpeg::ThrowIfError(av_hwframe_ctx_init(pool),
+    ThrowIfError(av_hwframe_ctx_init(pool),
                          "initialize scheduler CUDA pool");
-    ffmpeg::Frame software;
+    Frame software;
     software->format = AV_PIX_FMT_NV12;
     software->width = kWidth;
     software->height = kHeight;
-    ffmpeg::ThrowIfError(av_frame_get_buffer(software.get(), 32),
+    ThrowIfError(av_frame_get_buffer(software.get(), 32),
                          "allocate scheduler CUDA upload");
     std::memset(software->data[0], 32,
                 static_cast<std::size_t>(software->linesize[0]) * kHeight);
     std::memset(software->data[1], 128,
                 static_cast<std::size_t>(software->linesize[1]) * kHeight / 2);
-    ffmpeg::Frame frame;
-    ffmpeg::ThrowIfError(av_hwframe_get_buffer(pool, frame.get(), 0),
+    Frame frame;
+    ThrowIfError(av_hwframe_get_buffer(pool, frame.get(), 0),
                          "allocate scheduler CUDA frame");
-    ffmpeg::ThrowIfError(
+    ThrowIfError(
         av_hwframe_transfer_data(frame.get(), software.get(), 0),
         "upload scheduler CUDA frame");
     frame->time_base = {1, 1000};
@@ -148,9 +148,9 @@ ffmpeg::Frame CudaVideo(const ffmpeg::HardwareContext& device) {
   }
 }
 
-ffmpeg::Frame Download(const ffmpeg::Frame& frame) {
-  ffmpeg::Frame downloaded;
-  ffmpeg::ThrowIfError(
+Frame Download(const Frame& frame) {
+  Frame downloaded;
+  ThrowIfError(
       av_hwframe_transfer_data(downloaded.get(), frame.get(), 0),
       "download retained scheduler CUDA frame");
   return downloaded;
@@ -272,12 +272,12 @@ TEST_CASE(
     "RealtimeFrameScheduler retains CUDA original and standby frames beyond "
     "source and scheduler lifetime",
     "[.cuda]") {
-  std::optional<ffmpeg::Frame> original;
-  std::optional<ffmpeg::Frame> standby;
+  std::optional<Frame> original;
+  std::optional<Frame> standby;
   {
     RealtimeFrameScheduler scheduler(Config());
     {
-      auto device = ffmpeg::HardwareContext::CreateCuda(0);
+      auto device = HardwareContext::CreateCuda(0);
       scheduler.Configure(Streams(false, 1, &device));
       auto source = CudaVideo(device);
       scheduler.Push({1, source}, false, Epoch());

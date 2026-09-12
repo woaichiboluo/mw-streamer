@@ -7,7 +7,7 @@
 
 #include "mw/log/logging.h"
 
-namespace mw::streamer::sink {
+namespace mw::streamer {
 class Sink::Impl final {
  public:
   Impl(std::string id, SinkMediaType input, SinkMediaType output)
@@ -68,7 +68,7 @@ void Sink::SendMessage(const SinkMessage& message) const {
   if (!impl_->stopping_.load() && impl_->sender_) impl_->sender_(message);
 }
 
-void Sink::DispatchMessage(const SinkMessage& message) noexcept {
+void Sink::DispatchSinkMessage(const SinkMessage& message) noexcept {
   try {
     std::lock_guard<std::mutex> lock(impl_->message_dispatch_mutex_);
     if (impl_->ready_.load() && !impl_->stopping_.load()) OnMessage(message);
@@ -77,10 +77,10 @@ void Sink::DispatchMessage(const SinkMessage& message) noexcept {
     // Report outside the dispatch lock: failure handling may stop this sink.
     HandleFatalError(error.what());
   } catch (const std::exception& error) {
-    log::Module<log::LogModule::kStreamer>::Error("Sink消息处理失败: {}",
+    Module<LogModule::kStreamer>::Error("Sink消息处理失败: {}",
                                                   error.what());
   } catch (...) {
-    log::Module<log::LogModule::kStreamer>::Error("Sink消息处理发生未知异常");
+    Module<LogModule::kStreamer>::Error("Sink消息处理发生未知异常");
   }
 }
 
@@ -89,29 +89,29 @@ void Sink::SetOnFatalError(OnFatalError callback) {
   impl_->fatal_handler_ = std::move(callback);
 }
 
-void Sink::OnStreamsReady(const media::StreamsReady&) {
+void Sink::OnStreamsReady(const StreamsReady&) {
   if (input_type() != SinkMediaType::kPacket)
     throw std::logic_error("Sink不消费Packet");
   StartMessages();
 }
 
-void Sink::OnStreamsReady(const media::FrameStreamsReady&) {
+void Sink::OnStreamsReady(const FrameStreamsReady&) {
   if (input_type() != SinkMediaType::kFrame)
     throw std::logic_error("Sink不消费Frame");
   StartMessages();
 }
 
-void Sink::OnPacket(const media::PacketReady&) {
+void Sink::OnPacket(const PacketReady&) {
   throw std::logic_error("Sink未实现Packet处理");
 }
-void Sink::OnAudioFrame(const media::FrameReady&) {
+void Sink::OnAudioFrame(const FrameReady&) {
   throw std::logic_error("Sink未实现音频处理");
 }
-void Sink::OnVideoFrame(const media::FrameReady&) {
+void Sink::OnVideoFrame(const FrameReady&) {
   throw std::logic_error("Sink未实现视频处理");
 }
-void Sink::OnTimelineReset(const media::TimelineReset&) {}
-void Sink::OnInputEnded(const media::StreamEnded&) {}
+void Sink::OnTimelineReset(const TimelineReset&) {}
+void Sink::OnInputEnded(const StreamEnded&) {}
 void Sink::OnMessage(const SinkMessage&) {}
 
 void Sink::RequestStop() noexcept {
@@ -151,11 +151,11 @@ const std::vector<std::unique_ptr<Sink>>& Sink::downstream() const noexcept {
   return impl_->children_;
 }
 
-performance::NodeSnapshot Sink::GetOwnPerformance() const {
+NodeSnapshot Sink::GetOwnPerformance() const {
   return {{}, "Sink", {}, {}};
 }
 
-performance::NodeSnapshot Sink::GetPerformance() const {
+NodeSnapshot Sink::GetPerformance() const {
   auto result = GetOwnPerformance();
   result.id = id();
   for (const auto& child : impl_->children_)
@@ -172,26 +172,26 @@ void Sink::ReportFatalError(const std::string& error) noexcept {
     impl_->fatal_handler_(error);
 }
 
-void Sink::SendStreamsReady(const media::StreamsReady& streams) {
+void Sink::SendStreamsReady(const StreamsReady& streams) {
   for (const auto& child : impl_->children_) child->OnStreamsReady(streams);
 }
-void Sink::SendStreamsReady(const media::FrameStreamsReady& streams) {
+void Sink::SendStreamsReady(const FrameStreamsReady& streams) {
   for (const auto& child : impl_->children_) child->OnStreamsReady(streams);
 }
-void Sink::SendPacket(const media::PacketReady& packet) {
+void Sink::SendPacket(const PacketReady& packet) {
   for (const auto& child : impl_->children_) child->OnPacket(packet);
 }
-void Sink::SendAudioFrame(const media::FrameReady& frame) {
+void Sink::SendAudioFrame(const FrameReady& frame) {
   for (const auto& child : impl_->children_) child->OnAudioFrame(frame);
 }
-void Sink::SendVideoFrame(const media::FrameReady& frame) {
+void Sink::SendVideoFrame(const FrameReady& frame) {
   for (const auto& child : impl_->children_) child->OnVideoFrame(frame);
 }
-void Sink::SendTimelineReset(const media::TimelineReset& reset) {
+void Sink::SendTimelineReset(const TimelineReset& reset) {
   for (const auto& child : impl_->children_) child->OnTimelineReset(reset);
 }
-void Sink::SendInputEnded(const media::StreamEnded& end) {
+void Sink::SendInputEnded(const StreamEnded& end) {
   for (const auto& child : impl_->children_) child->OnInputEnded(end);
 }
 
-}  // namespace mw::streamer::sink
+}  // namespace mw::streamer

@@ -8,7 +8,7 @@ extern "C" {
 #include <hdr/hdr_histogram.h>
 }
 
-namespace mw::streamer::performance {
+namespace mw::streamer {
 namespace {
 
 constexpr std::int64_t kMaximumLatencyMicroseconds = 60LL * 60 * 1000 * 1000;
@@ -119,4 +119,4 @@ void OperationRecorder::Call::Finish() noexcept {
   recorder_.EndCall(elapsed_, std::uncaught_exceptions() > exceptions_);
 }
 
-}  // namespace mw::streamer::performance
+}  // namespace mw::streamer

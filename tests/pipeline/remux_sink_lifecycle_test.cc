@@ -19,9 +19,9 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::output::RemuxSink;
-using mw::streamer::output::RemuxSinkConfig;
-using mw::streamer::sink::PacketSinkState;
+using mw::streamer::RemuxSink;
+using mw::streamer::RemuxSinkConfig;
+using mw::streamer::PacketSinkState;
 
 // The sink selects its own pool member. Pause every member to make saturation
 // deterministic without exposing a test-only Poller injection API.
@@ -86,14 +86,14 @@ TEST_CASE("RemuxSink包队列满时同步失败且生命周期通知不占包配
   config.packet_queue_capacity = 1;
   RemuxSink sink("sink", config);
 
-  mw::streamer::ffmpeg::StreamInfo stream;
+  mw::streamer::StreamInfo stream;
   stream.stream_index = 0;
   stream.time_base = {1, 1000};
   stream.codec_parameters.get()->codec_type = AVMEDIA_TYPE_VIDEO;
   stream.codec_parameters.get()->codec_id = AV_CODEC_ID_H264;
   stream.codec_parameters.get()->width = 64;
   stream.codec_parameters.get()->height = 64;
-  mw::streamer::ffmpeg::Packet packet;
+  mw::streamer::Packet packet;
   packet->stream_index = 0;
   packet->pts = 0;
   packet->dts = 0;

@@ -25,15 +25,15 @@ using mediakit::Frame;
 using mediakit::FrameWriterInterface;
 using mediakit::MP4Demuxer;
 using mediakit::Track;
-using mw::streamer::converter::ZlmCodecParametersConverter;
-using mw::streamer::converter::ZlmPacketConverter;
-using mw::streamer::decoder::VideoDecoder;
-using mw::streamer::decoder::VideoDecoderBackend;
-using mw::streamer::decoder::VideoDecoderConfig;
-using mw::streamer::ffmpeg::CodecParameters;
-using mw::streamer::ffmpeg::Packet;
-using mw::streamer::ffmpeg::StreamInfo;
-using mw::streamer::processor::internal::VideoFrameAdapter;
+using mw::streamer::ZlmCodecParametersConverter;
+using mw::streamer::ZlmPacketConverter;
+using mw::streamer::VideoDecoder;
+using mw::streamer::VideoDecoderBackend;
+using mw::streamer::VideoDecoderConfig;
+using mw::streamer::CodecParameters;
+using mw::streamer::Packet;
+using mw::streamer::StreamInfo;
+using mw::streamer::internal::VideoFrameAdapter;
 
 struct VideoSample {
   StreamInfo stream_info;
@@ -114,7 +114,7 @@ TEST_CASE("software video decoder decodes drains and flushes an H264 stream") {
   std::size_t decoded_frames = 0;
   std::int64_t previous_pts = AV_NOPTS_VALUE;
   bool valid_frames = true;
-  decoder.SetOnFrame([&](const mw::streamer::ffmpeg::Frame& decoded_frame) {
+  decoder.SetOnFrame([&](const mw::streamer::Frame& decoded_frame) {
     const auto* frame = decoded_frame.get();
     if (!frame || frame->format == AV_PIX_FMT_NONE ||
         frame->format == AV_PIX_FMT_CUDA || frame->width != 64 ||
@@ -177,7 +177,7 @@ TEST_CASE("CUDA video decoder emits CUDA frames on the configured device") {
 
   std::size_t decoded_frames = 0;
   bool valid_frames = true;
-  decoder.SetOnFrame([&](const mw::streamer::ffmpeg::Frame& decoded_frame) {
+  decoder.SetOnFrame([&](const mw::streamer::Frame& decoded_frame) {
     const auto* frame = decoded_frame.get();
     if (!frame || frame->format != AV_PIX_FMT_CUDA || frame->width != 64 ||
         frame->height != 64 || !frame->hw_frames_ctx) {

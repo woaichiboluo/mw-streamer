@@ -10,7 +10,7 @@
 #include "mw/sink/sink.h"
 #include "mw/zlm/config.h"
 
-namespace mw::streamer::output {
+namespace mw::streamer {
 
 // Copies packet references into its own bounded queue, consumed on one Poller
 // selected internally from ZLToolKit's pool. No additional worker is required.
@@ -29,7 +29,7 @@ namespace mw::streamer::output {
 // PTS reordering is allowed. Temporary network failures retain ZLM retry;
 // permanent target errors and queue overflow fail only this sink. Explicit
 // FatalError additionally requests Pipeline shutdown through Sink.
-class RemuxSink final : public sink::Sink {
+class RemuxSink final : public Sink {
  public:
   explicit RemuxSink(std::string id, RemuxSinkConfig config);
   ~RemuxSink() override;
@@ -37,33 +37,33 @@ class RemuxSink final : public sink::Sink {
   RemuxSink(const RemuxSink&) = delete;
   RemuxSink& operator=(const RemuxSink&) = delete;
 
-  void OnStreamsReady(const media::StreamsReady& streams) noexcept override;
-  void OnPacket(const media::PacketReady& packet) noexcept override;
-  void OnTimelineReset(const media::TimelineReset& reset) noexcept override;
-  void OnInputEnded(const media::StreamEnded& end) noexcept override;
+  void OnStreamsReady(const StreamsReady& streams) noexcept override;
+  void OnPacket(const PacketReady& packet) noexcept override;
+  void OnTimelineReset(const TimelineReset& reset) noexcept override;
+  void OnInputEnded(const StreamEnded& end) noexcept override;
 
   // EOF drains and finalizes to kEnded; interruption waits for another
   // generation. Explicit Stop drains accepted work and finalizes to kStopped,
   // preserving kFailed. Stop/destruction must follow upstream delivery and
   // run outside this sink's Poller. No callbacks retain this sink afterwards.
   void Stop() noexcept override;
-  sink::PacketSinkState state() const noexcept;
+  PacketSinkState state() const noexcept;
   std::string error() const;
   std::size_t queue_depth() const;
   // Thread-safe snapshot for the single target. Recording has no network
   // traffic. This query is not a media/control callback and may block briefly.
-  performance::NetworkOutputSnapshot GetNetworkOutputSnapshot() const;
+  NetworkOutputSnapshot GetNetworkOutputSnapshot() const;
 
  private:
   // Calls measure local packet conversion and muxing, including startup cache
   // flushes at EOF. Startup metadata discovery and network delivery are not
   // timed. Reading never waits for the output Poller.
-  performance::NodeSnapshot GetOwnPerformance() const override;
+  NodeSnapshot GetOwnPerformance() const override;
 
   class Impl;
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::output
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_OUTPUT_REMUX_SINK_H_

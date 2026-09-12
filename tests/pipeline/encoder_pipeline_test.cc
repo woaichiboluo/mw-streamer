@@ -27,30 +27,30 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::decoder::DecoderSink;
-using mw::streamer::decoder::DecoderSinkConfig;
-using mw::streamer::encoder::EncoderSink;
-using mw::streamer::encoder::EncoderSinkConfig;
-using mw::streamer::encoder::EncoderSinkState;
-using mw::streamer::input::InputState;
-using mw::streamer::input::ZlmInput;
-using mw::streamer::input::ZlmInputConfig;
-using mw::streamer::media::FrameReady;
-using mw::streamer::media::FrameStreamsReady;
-using mw::streamer::media::PacketReady;
-using mw::streamer::media::StreamEnded;
-using mw::streamer::media::StreamsReady;
-using mw::streamer::media::TimelineReset;
-using mw::streamer::output::RemuxSink;
-using mw::streamer::output::RemuxSinkConfig;
-using mw::streamer::processor::TransformProcessorSink;
-using mw::streamer::sink::PacketSinkState;
-using mw::streamer::sink::Sink;
-using mw::streamer::sink::SinkMediaType;
-using mw::streamer::synchronizer::SynchronizerSink;
-using mw::streamer::synchronizer::SynchronizerSinkConfig;
-using mw::streamer::synchronizer::SynchronizerSinkState;
-using namespace mw::streamer::pipeline;
+using mw::streamer::DecoderSink;
+using mw::streamer::DecoderSinkConfig;
+using mw::streamer::EncoderSink;
+using mw::streamer::EncoderSinkConfig;
+using mw::streamer::EncoderSinkState;
+using mw::streamer::InputState;
+using mw::streamer::ZlmInput;
+using mw::streamer::ZlmInputConfig;
+using mw::streamer::FrameReady;
+using mw::streamer::FrameStreamsReady;
+using mw::streamer::PacketReady;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamsReady;
+using mw::streamer::TimelineReset;
+using mw::streamer::RemuxSink;
+using mw::streamer::RemuxSinkConfig;
+using mw::streamer::TransformProcessorSink;
+using mw::streamer::PacketSinkState;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
+using mw::streamer::SynchronizerSink;
+using mw::streamer::SynchronizerSinkConfig;
+using mw::streamer::SynchronizerSinkState;
+using namespace mw::streamer;
 
 class TestDirectory final {
  public:
@@ -90,7 +90,7 @@ std::unique_ptr<ZlmInput> MakeInput() {
 std::unique_ptr<DecoderSink> MakeDecoder() {
   DecoderSinkConfig config;
   config.video_decoder.backend =
-      mw::streamer::decoder::VideoDecoderBackend::kSoftware;
+      mw::streamer::VideoDecoderBackend::kSoftware;
   return std::make_unique<DecoderSink>("decoder-1", config);
 }
 
@@ -159,8 +159,8 @@ class PacketTrace final : public Sink {
   void Stop() noexcept override {}
   PacketSinkState state() const noexcept { return PacketSinkState::kRunning; }
 
-  std::vector<mw::streamer::ffmpeg::StreamInfo> streams;
-  std::vector<mw::streamer::ffmpeg::Packet> packets;
+  std::vector<mw::streamer::StreamInfo> streams;
+  std::vector<mw::streamer::Packet> packets;
 };
 
 struct SlowProcessorState {
@@ -273,15 +273,15 @@ class ScheduledFrameTrace final : public Sink {
 
 int CheckDecodableRecording(const std::filesystem::path& path) {
   INFO(path.string());
-  mw::streamer::ffmpeg::InputFormatContext input(path.string());
+  mw::streamer::InputFormatContext input(path.string());
   input.FindStreamInfo();
   REQUIRE(input->nb_streams == 2);
-  std::vector<std::unique_ptr<mw::streamer::ffmpeg::CodecContext>> decoders;
+  std::vector<std::unique_ptr<mw::streamer::CodecContext>> decoders;
   for (unsigned int index = 0; index < input->nb_streams; ++index) {
     const auto* parameters = input->streams[index]->codecpar;
     const auto* codec = avcodec_find_decoder(parameters->codec_id);
     REQUIRE(codec);
-    auto decoder = std::make_unique<mw::streamer::ffmpeg::CodecContext>(codec);
+    auto decoder = std::make_unique<mw::streamer::CodecContext>(codec);
     REQUIRE(avcodec_parameters_to_context(decoder->get(), parameters) == 0);
     REQUIRE(avcodec_open2(decoder->get(), codec, nullptr) == 0);
     decoders.push_back(std::move(decoder));
@@ -289,7 +289,7 @@ int CheckDecodableRecording(const std::filesystem::path& path) {
   int videos = 0;
   int audios = 0;
   const auto receive = [&](AVCodecContext* decoder) {
-    mw::streamer::ffmpeg::Frame frame;
+    mw::streamer::Frame frame;
     for (;;) {
       const int result = avcodec_receive_frame(decoder, frame.get());
       if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) return;
@@ -305,7 +305,7 @@ int CheckDecodableRecording(const std::filesystem::path& path) {
       frame.Unref();
     }
   };
-  mw::streamer::ffmpeg::Packet packet;
+  mw::streamer::Packet packet;
   while (input.ReadPacket(packet)) {
     auto* decoder = decoders.at(packet->stream_index)->get();
     REQUIRE(avcodec_send_packet(decoder, packet.get()) == 0);
@@ -401,7 +401,7 @@ TEST_CASE("新Pipeline通过Processor同步和Encoder一次编码输出两个独
     }
   }
   CHECK(scheduled->ended);
-  using mw::streamer::performance::PerformanceType;
+  using mw::streamer::PerformanceType;
   const auto performance = pipeline.GetPerformance().WithRatesSince(baseline);
   const auto input_stats = performance.Find(PerformanceType::kInput);
   const auto decoder_stats = performance.Find(PerformanceType::kVideoDecoder);
@@ -459,7 +459,7 @@ TEST_CASE("新Pipeline通过Processor同步和Encoder一次编码输出两个独
   REQUIRE(files.size() == 2);
   for (const auto& file : files) {
     INFO(file.string());
-    mw::streamer::ffmpeg::InputFormatContext input(file.string());
+    mw::streamer::InputFormatContext input(file.string());
     input.FindStreamInfo();
     REQUIRE(input->nb_streams == 2);
     CHECK(input->duration >= 1700000);
@@ -467,7 +467,7 @@ TEST_CASE("新Pipeline通过Processor同步和Encoder一次编码输出两个独
     int videos = 0;
     std::vector<FrameStamp> recorded_video;
     std::vector<std::string> recorded_audio_payloads;
-    mw::streamer::ffmpeg::Packet packet;
+    mw::streamer::Packet packet;
     while (input.ReadPacket(packet)) {
       const auto& codec = *input->streams[packet->stream_index]->codecpar;
       if (codec.codec_type == AVMEDIA_TYPE_VIDEO) {

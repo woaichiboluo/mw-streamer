@@ -14,10 +14,8 @@
 
 #include "cuda_driver.h"
 
-namespace mw::streamer::opencv_adapter {
+namespace mw::opencv_adapter {
 namespace {
-
-using internal::EnsureCudaDriverInitialized;
 
 constexpr std::size_t kMaxPlaneCount = 4;
 
@@ -356,4 +354,4 @@ MwStreamerVideoFrameView& CudaFrame::mutable_view() noexcept {
   return impl_->mutable_view();
 }
 
-}  // namespace mw::streamer::opencv_adapter
+}  // namespace mw::opencv_adapter

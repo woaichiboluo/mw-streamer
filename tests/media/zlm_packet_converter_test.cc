@@ -34,12 +34,12 @@ using mediakit::Frame;
 using mediakit::FrameWriterInterface;
 using mediakit::MP4Demuxer;
 using mediakit::Track;
-using mw::streamer::converter::ZlmCodecParametersConverter;
-using mw::streamer::converter::ZlmPacketConverter;
-using mw::streamer::ffmpeg::CodecContext;
-using mw::streamer::ffmpeg::CodecParameters;
-using FfmpegFrame = mw::streamer::ffmpeg::Frame;
-using mw::streamer::ffmpeg::Packet;
+using mw::streamer::ZlmCodecParametersConverter;
+using mw::streamer::ZlmPacketConverter;
+using mw::streamer::CodecContext;
+using mw::streamer::CodecParameters;
+using FfmpegFrame = mw::streamer::Frame;
+using mw::streamer::Packet;
 
 const AVCodec* FindDecoder(const CodecParameters& parameters) {
   REQUIRE(parameters.get());

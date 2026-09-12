@@ -10,10 +10,10 @@
 
 namespace {
 
-using mw::streamer::sink::Sink;
-using mw::streamer::sink::SinkMediaType;
-using mw::streamer::sink::SinkMessage;
-namespace performance = mw::streamer::performance;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
+using mw::streamer::SinkMessage;
+using mw::streamer::NodeSnapshot;
 
 class TopologySink final : public Sink {
  public:
@@ -37,7 +37,7 @@ class TopologySink final : public Sink {
   }
 
  protected:
-  performance::NodeSnapshot GetOwnPerformance() const override {
+  NodeSnapshot GetOwnPerformance() const override {
     return {{}, name_, {}, {}};
   }
 
@@ -104,7 +104,7 @@ TEST_CASE("Sink启动或停止后不允许修改拓扑") {
 
 TEST_CASE("Sink基类递归收集多个分支统计并独占销毁整棵树") {
   int destructions = 0;
-  performance::NodeSnapshot snapshot;
+  NodeSnapshot snapshot;
   {
     TopologySink decoder("decoder", SinkMediaType::kPacket,
                          SinkMediaType::kFrame, &destructions);

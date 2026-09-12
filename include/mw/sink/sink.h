@@ -12,11 +12,11 @@
 #include "mw/sink/fatal_error.h"
 #include "mw/sink/sink_message.h"
 
-namespace mw::streamer::pipeline {
+namespace mw::streamer {
 class Pipeline;
 }
 
-namespace mw::streamer::sink {
+namespace mw::streamer {
 
 enum class SinkMediaType { kNone, kPacket, kFrame };
 
@@ -69,13 +69,13 @@ class Sink {
   // Unsupported media entry points throw. Concrete sinks own event forwarding
   // times: EOF draining, codec readiness and timeline absorption differ by
   // node.
-  virtual void OnStreamsReady(const media::StreamsReady& streams);
-  virtual void OnStreamsReady(const media::FrameStreamsReady& streams);
-  virtual void OnPacket(const media::PacketReady& packet);
-  virtual void OnAudioFrame(const media::FrameReady& frame);
-  virtual void OnVideoFrame(const media::FrameReady& frame);
-  virtual void OnTimelineReset(const media::TimelineReset& reset);
-  virtual void OnInputEnded(const media::StreamEnded& end);
+  virtual void OnStreamsReady(const StreamsReady& streams);
+  virtual void OnStreamsReady(const FrameStreamsReady& streams);
+  virtual void OnPacket(const PacketReady& packet);
+  virtual void OnAudioFrame(const FrameReady& frame);
+  virtual void OnVideoFrame(const FrameReady& frame);
+  virtual void OnTimelineReset(const TimelineReset& reset);
+  virtual void OnInputEnded(const StreamEnded& end);
 
   // First shutdown phase, safe while upstream delivery is in progress. Wake
   // blocked producers and reject further work without joining workers or
@@ -91,7 +91,7 @@ class Sink {
 
   // Nondestructive owned tree, safe during media execution/Stop, not concurrent
   // registration or destruction. Concrete nodes provide only their own metrics.
-  performance::NodeSnapshot GetPerformance() const;
+  NodeSnapshot GetPerformance() const;
 
  protected:
   const std::vector<std::unique_ptr<Sink>>& downstream() const noexcept;
@@ -110,28 +110,28 @@ class Sink {
   // overlap media calls and must not invoke control methods. Default ignores.
   virtual void OnMessage(const SinkMessage& message);
 
-  void SendStreamsReady(const media::StreamsReady& streams);
-  void SendStreamsReady(const media::FrameStreamsReady& streams);
-  void SendPacket(const media::PacketReady& packet);
-  void SendAudioFrame(const media::FrameReady& frame);
-  void SendVideoFrame(const media::FrameReady& frame);
-  void SendTimelineReset(const media::TimelineReset& reset);
-  void SendInputEnded(const media::StreamEnded& end);
+  void SendStreamsReady(const StreamsReady& streams);
+  void SendStreamsReady(const FrameStreamsReady& streams);
+  void SendPacket(const PacketReady& packet);
+  void SendAudioFrame(const FrameReady& frame);
+  void SendVideoFrame(const FrameReady& frame);
+  void SendTimelineReset(const TimelineReset& reset);
+  void SendInputEnded(const StreamEnded& end);
 
-  virtual performance::NodeSnapshot GetOwnPerformance() const;
+  virtual NodeSnapshot GetOwnPerformance() const;
   // Handles child or message-callback FatalError before propagating upstream.
   virtual void HandleFatalError(const std::string& error) noexcept;
   void ReportFatalError(const std::string& error) noexcept;
 
  private:
-  friend class pipeline::Pipeline;
+  friend class Pipeline;
   // Called only by the owning Pipeline message loop. Stops wait for this call.
-  void DispatchMessage(const SinkMessage& message) noexcept;
+  void DispatchSinkMessage(const SinkMessage& message) noexcept;
 
   class Impl;
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::sink
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_SINK_SINK_H_

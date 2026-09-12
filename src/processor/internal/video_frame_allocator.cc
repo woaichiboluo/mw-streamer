@@ -13,11 +13,11 @@ extern "C" {
 #include "mw/ffmpeg/error.h"
 #include "mw/ffmpeg/hardware_context.h"
 
-namespace mw::streamer::processor::internal {
+namespace mw::streamer::internal {
 namespace {
 
 const AVHWFramesContext& GetCudaFramesContext(const AVFrame& frame) {
-  const auto* frames_context = ffmpeg::HardwareContext::GetFramesContext(frame);
+  const auto* frames_context = HardwareContext::GetFramesContext(frame);
   if (!frames_context || frames_context->format != AV_PIX_FMT_CUDA ||
       frames_context->device_ctx->type != AV_HWDEVICE_TYPE_CUDA) {
     throw std::invalid_argument("视频帧不是有效的CUDA硬件帧");
@@ -30,7 +30,7 @@ void FillBlack(AVFrame* frame, AVPixelFormat format, AVColorRange range) {
   for (std::size_t index = 0; index < linesizes.size(); ++index) {
     linesizes[index] = frame->linesize[index];
   }
-  ffmpeg::ThrowIfError(
+  ThrowIfError(
       av_image_fill_black(frame->data, linesizes.data(), format, range,
                           frame->width, frame->height),
       "填充Processor默认黑帧");
@@ -51,15 +51,15 @@ VideoFrameAllocator::~VideoFrameAllocator() {
   av_buffer_unref(&input_device_context_);
 }
 
-ffmpeg::Frame VideoFrameAllocator::Allocate(const ffmpeg::Frame& input) {
+Frame VideoFrameAllocator::Allocate(const Frame& input) {
   if (!input.get()) {
     throw std::invalid_argument("不能根据空视频Frame分配输出");
   }
   PrepareOrValidate(*input.get());
 
-  ffmpeg::Frame output;
+  Frame output;
   if (input_format_ == AV_PIX_FMT_CUDA) {
-    ffmpeg::ThrowIfError(
+    ThrowIfError(
         av_hwframe_get_buffer(output_frames_context_, output.get(), 0),
         "分配Processor CUDA输出帧");
     return output;
@@ -68,14 +68,14 @@ ffmpeg::Frame VideoFrameAllocator::Allocate(const ffmpeg::Frame& input) {
   output->format = input_format_;
   output->width = static_cast<int>(output_width_);
   output->height = static_cast<int>(output_height_);
-  ffmpeg::ThrowIfError(av_frame_get_buffer(output.get(), 32),
+  ThrowIfError(av_frame_get_buffer(output.get(), 32),
                        "分配Processor软件视频输出帧");
   return output;
 }
 
-ffmpeg::Frame VideoFrameAllocator::GetBlackFrame(
-    const ffmpeg::Frame& input,
-    const ffmpeg::HardwareContext* hardware_context) {
+Frame VideoFrameAllocator::GetBlackFrame(
+    const Frame& input,
+    const HardwareContext* hardware_context) {
   if (!input.get()) {
     throw std::invalid_argument("不能根据空视频Frame获取默认黑帧");
   }
@@ -96,8 +96,8 @@ ffmpeg::Frame VideoFrameAllocator::GetBlackFrame(
   return black_frame_->Ref();
 }
 
-ffmpeg::Frame VideoFrameAllocator::AllocateBlackFrame(
-    const ffmpeg::Frame& input) {
+Frame VideoFrameAllocator::AllocateBlackFrame(
+    const Frame& input) {
   auto output = Allocate(input);
   output->color_range = input->color_range;
   if (input_format_ != AV_PIX_FMT_CUDA) {
@@ -105,14 +105,14 @@ ffmpeg::Frame VideoFrameAllocator::AllocateBlackFrame(
     return output;
   }
 
-  ffmpeg::Frame software_black;
+  Frame software_black;
   software_black->format = storage_format_;
   software_black->width = static_cast<int>(output_width_);
   software_black->height = static_cast<int>(output_height_);
-  ffmpeg::ThrowIfError(av_frame_get_buffer(software_black.get(), 32),
+  ThrowIfError(av_frame_get_buffer(software_black.get(), 32),
                        "分配Processor CUDA黑帧暂存");
   FillBlack(software_black.get(), storage_format_, input->color_range);
-  ffmpeg::ThrowIfError(
+  ThrowIfError(
       av_hwframe_transfer_data(output.get(), software_black.get(), 0),
       "上传Processor CUDA默认黑帧");
   return output;
@@ -160,7 +160,7 @@ void VideoFrameAllocator::Prepare(const AVFrame& input) {
   output_context->width = static_cast<int>(output_width_);
   output_context->height = static_cast<int>(output_height_);
   try {
-    ffmpeg::ThrowIfError(av_hwframe_ctx_init(pending_output_context),
+    ThrowIfError(av_hwframe_ctx_init(pending_output_context),
                          "初始化Processor CUDA输出帧池");
   } catch (...) {
     av_buffer_unref(&pending_device_context);
@@ -193,4 +193,4 @@ void VideoFrameAllocator::ValidatePreparedInput(const AVFrame& input) const {
   }
 }
 
-}  // namespace mw::streamer::processor::internal
+}  // namespace mw::streamer::internal

@@ -24,21 +24,21 @@ extern "C" {
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::decoder::DecoderSink;
-using mw::streamer::decoder::DecoderSinkConfig;
-using mw::streamer::media::FrameReady;
-using mw::streamer::media::FrameStreamsReady;
-using mw::streamer::media::StreamEnded;
-using mw::streamer::media::StreamEndReason;
-using mw::streamer::media::TimelineReset;
-using mw::streamer::processor::TransformProcessorSink;
-using mw::streamer::sink::PacketSinkState;
-using mw::streamer::sink::Sink;
-using mw::streamer::sink::SinkMediaType;
-namespace ffmpeg = mw::streamer::ffmpeg;
+using mw::streamer::DecoderSink;
+using mw::streamer::DecoderSinkConfig;
+using mw::streamer::FrameReady;
+using mw::streamer::FrameStreamsReady;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
+using mw::streamer::TimelineReset;
+using mw::streamer::TransformProcessorSink;
+using mw::streamer::PacketSinkState;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
+using namespace mw::streamer;
 
 struct Recording {
-  std::vector<ffmpeg::Frame> frames;
+  std::vector<Frame> frames;
   int sources = 0;
   int ends = 0;
   int stops = 0;
@@ -91,22 +91,22 @@ class CudaRecorder final : public Sink {
 
  private:
   Recording& recording_;
-  const ffmpeg::HardwareContext* hardware_context_ = nullptr;
+  const HardwareContext* hardware_context_ = nullptr;
   bool stopped_ = false;
 };
 
 }  // namespace
 
 TEST_CASE("DecoderSink CUDA frames outlive the decoder context") {
-  ffmpeg::InputFormatContext input(std::string(MW_DECODER_SINK_TEST_DATA_DIR) +
+  InputFormatContext input(std::string(MW_DECODER_SINK_TEST_DATA_DIR) +
                                    "/h264_aac.mp4");
   input.FindStreamInfo();
-  std::vector<ffmpeg::StreamInfo> streams;
+  std::vector<StreamInfo> streams;
   for (unsigned int i = 0; i < input->nb_streams; ++i) {
     const auto* stream = input->streams[i];
     if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
       streams.push_back({stream->index,
-                         ffmpeg::CodecParameters(*stream->codecpar),
+                         CodecParameters(*stream->codecpar),
                          stream->time_base});
     }
   }
@@ -126,7 +126,7 @@ TEST_CASE("DecoderSink CUDA frames outlive the decoder context") {
     sink->AddSink(std::move(processor));
   }
   sink->OnStreamsReady({1, streams});
-  ffmpeg::Packet packet;
+  Packet packet;
   while (input.ReadPacket(packet)) {
     if (packet->stream_index == streams.front().stream_index) {
       sink->OnPacket({1, packet.Ref()});
@@ -152,7 +152,7 @@ TEST_CASE("DecoderSink CUDA frames outlive the decoder context") {
   CHECK(recording.stops == 1);
   REQUIRE(recording.frames.size() == 20);
   for (const auto& frame : recording.frames) {
-    ffmpeg::Frame downloaded;
+    Frame downloaded;
     downloaded->format = AV_PIX_FMT_NV12;
     REQUIRE(av_hwframe_transfer_data(downloaded.get(), frame.get(), 0) >= 0);
     CHECK(downloaded->width == source_width);

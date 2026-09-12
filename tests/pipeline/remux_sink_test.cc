@@ -33,21 +33,21 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::input::ZlmInput;
-using mw::streamer::input::ZlmInputConfig;
-using mw::streamer::media::StreamEndReason;
-using mw::streamer::media::TimelineResetReason;
-using mw::streamer::output::RemuxSink;
-using mw::streamer::output::RemuxSinkConfig;
-using mw::streamer::sink::PacketSinkState;
-using namespace mw::streamer::pipeline;
-using mw::streamer::converter::ZlmCodecParametersConverter;
-using mw::streamer::converter::ZlmPacketConverter;
-using mw::streamer::ffmpeg::InputFormatContext;
-using mw::streamer::ffmpeg::Packet;
-using mw::streamer::ffmpeg::StreamInfo;
-using mw::streamer::performance::PerformanceType;
-using mw::streamer::performance::PerformanceUnit;
+using mw::streamer::ZlmInput;
+using mw::streamer::ZlmInputConfig;
+using mw::streamer::StreamEndReason;
+using mw::streamer::TimelineResetReason;
+using mw::streamer::RemuxSink;
+using mw::streamer::RemuxSinkConfig;
+using mw::streamer::PacketSinkState;
+using namespace mw::streamer;
+using mw::streamer::ZlmCodecParametersConverter;
+using mw::streamer::ZlmPacketConverter;
+using mw::streamer::InputFormatContext;
+using mw::streamer::Packet;
+using mw::streamer::StreamInfo;
+using mw::streamer::PerformanceType;
+using mw::streamer::PerformanceUnit;
 
 class TestDirectory final {
  public:
@@ -521,7 +521,7 @@ TEST_CASE("fMP4时间戳保留模式支持提前初始化和单轨且默认行�
     input.FindStreamInfo();
     const auto path = directory.path() / "writer.mp4";
     auto file = std::make_shared<mediakit::MP4FileDisk>();
-    file->openFile(path.c_str(), "wb+");
+    file->openFile(path.string().c_str(), "wb+");
     auto writer = file->createWriter(
         MOV_FLAG_SEGMENT | (preserve ? MOV_FLAG_PRESERVE_TIMESTAMPS : 0), true);
     Sample expected;
@@ -532,7 +532,7 @@ TEST_CASE("fMP4时间戳保留模式支持提前初始化和单轨且默认行�
       const auto& parameters = *stream.codecpar;
       expected.streams.push_back(
           {static_cast<int>(i),
-           mw::streamer::ffmpeg::CodecParameters(parameters),
+           mw::streamer::CodecParameters(parameters),
            {1, 1000}});
       if (selected_type != AVMEDIA_TYPE_UNKNOWN &&
           parameters.codec_type != selected_type) {

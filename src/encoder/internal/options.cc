@@ -2,12 +2,12 @@
 
 #include "mw/log/logging.h"
 
-namespace mw::streamer::encoder::internal {
+namespace mw::streamer::internal {
 
 void WarnUnusedOptions(const AVDictionary* options,
                        std::string_view encoder_kind,
                        const char* encoder_name) {
-  using Log = log::Module<log::LogModule::kStreamer>;
+  using Log = Module<LogModule::kStreamer>;
 
   const AVDictionaryEntry* entry = nullptr;
   while ((entry = av_dict_get(options, "", entry, AV_DICT_IGNORE_SUFFIX))) {
@@ -16,4 +16,4 @@ void WarnUnusedOptions(const AVDictionary* options,
   }
 }
 
-}  // namespace mw::streamer::encoder::internal
+}  // namespace mw::streamer::internal

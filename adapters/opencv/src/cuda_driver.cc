@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace mw::streamer::opencv_adapter::internal {
+namespace mw::opencv_adapter {
 namespace {
 
 void InitializeCudaDriver() {
@@ -27,4 +27,4 @@ void EnsureCudaDriverInitialized() {
   std::call_once(once, InitializeCudaDriver);
 }
 
-}  // namespace mw::streamer::opencv_adapter::internal
+}  // namespace mw::opencv_adapter

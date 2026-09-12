@@ -21,9 +21,9 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::common::Barrier;
-using mw::streamer::common::BlockingQueue;
-using mw::streamer::common::Thread;
+using mw::streamer::Barrier;
+using mw::streamer::BlockingQueue;
+using mw::streamer::Thread;
 
 }  // namespace
 

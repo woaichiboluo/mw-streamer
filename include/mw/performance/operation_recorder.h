@@ -9,7 +9,7 @@
 
 struct hdr_histogram;
 
-namespace mw::streamer::performance {
+namespace mw::streamer {
 
 // Shared recording primitive for Input and Sink implementations. Recording and
 // snapshots are thread-safe; its mutex is never held across processing work.
@@ -78,6 +78,6 @@ class OperationRecorder final {
   hdr_histogram* histogram_ = nullptr;
 };
 
-}  // namespace mw::streamer::performance
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_PERFORMANCE_OPERATION_RECORDER_H_

@@ -7,7 +7,7 @@ extern "C" {
 
 #include "mw/ffmpeg/frame.h"
 
-namespace mw::streamer::processor::internal {
+namespace mw::streamer::internal {
 
 class AudioFrameAllocator final {
  public:
@@ -21,7 +21,7 @@ class AudioFrameAllocator final {
 
   // The first allocation captures the fixed output channel layout. Later
   // allocations may change nb_samples but must preserve that layout.
-  ffmpeg::Frame Allocate(const ffmpeg::Frame& input);
+  Frame Allocate(const Frame& input);
 
  private:
   void PrepareOrValidate(const AVFrame& input);
@@ -30,6 +30,6 @@ class AudioFrameAllocator final {
   bool prepared_ = false;
 };
 
-}  // namespace mw::streamer::processor::internal
+}  // namespace mw::streamer::internal
 
 #endif  // MW_STREAMER_INCLUDE_MW_PROCESSOR_INTERNAL_AUDIO_FRAME_ALLOCATOR_H_

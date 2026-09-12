@@ -31,21 +31,21 @@ extern "C" {
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::input::Input;
-using mw::streamer::input::InputState;
-using mw::streamer::media::FrameReady;
-using mw::streamer::media::FrameStreamsReady;
-using mw::streamer::media::PacketReady;
-using mw::streamer::media::StreamsReady;
-using mw::streamer::processor::AnalysisProcessorSink;
-using mw::streamer::processor::TransformProcessorSink;
-using mw::streamer::sink::FatalError;
-using mw::streamer::sink::Sink;
-using mw::streamer::sink::SinkMediaType;
-using mw::streamer::sink::SinkMessage;
-using namespace mw::streamer::pipeline;
-using mw::streamer::ffmpeg::Frame;
-using mw::streamer::ffmpeg::StreamInfo;
+using mw::streamer::Input;
+using mw::streamer::InputState;
+using mw::streamer::FrameReady;
+using mw::streamer::FrameStreamsReady;
+using mw::streamer::PacketReady;
+using mw::streamer::StreamsReady;
+using mw::streamer::AnalysisProcessorSink;
+using mw::streamer::TransformProcessorSink;
+using mw::streamer::FatalError;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
+using mw::streamer::SinkMessage;
+using namespace mw::streamer;
+using mw::streamer::Frame;
+using mw::streamer::StreamInfo;
 
 FrameStreamsReady Streams() {
   StreamInfo stream;

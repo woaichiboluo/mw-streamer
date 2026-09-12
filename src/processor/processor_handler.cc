@@ -12,10 +12,10 @@
 #include "mw/processor/internal/enum_converter.h"
 #include "mw/processor/internal/execution_context_adapter.h"
 
-namespace mw::streamer::processor {
+namespace mw::streamer {
 namespace {
 
-using Log = log::Module<log::LogModule::kProcessor>;
+using Log = Module<LogModule::kProcessor>;
 
 enum class HandlerState {
   kReady,
@@ -28,7 +28,7 @@ enum class HandlerState {
 class ProcessorHandler::Impl final {
  public:
   Impl(const MwStreamerProcessorSourceInfo& source_info,
-       const ffmpeg::HardwareContext* hardware_context)
+       const HardwareContext* hardware_context)
       : source_info_(source_info) {
     if (hardware_context && !source_info_.has_video) {
       throw std::invalid_argument("纯音频Processor不能包含硬件执行上下文");
@@ -118,13 +118,13 @@ class ProcessorHandler::Impl final {
     return execution_;
   }
 
-  const ffmpeg::HardwareContext* hardware_context() const noexcept {
+  const HardwareContext* hardware_context() const noexcept {
     return hardware_context_ ? &*hardware_context_ : nullptr;
   }
 
  private:
   MwStreamerProcessorSourceInfo source_info_{};
-  std::optional<ffmpeg::HardwareContext> hardware_context_;
+  std::optional<HardwareContext> hardware_context_;
   MwStreamerExecutionContext execution_{};
   HandlerState state_ = HandlerState::kReady;
   void* user_context_ = nullptr;
@@ -135,7 +135,7 @@ class ProcessorHandler::Impl final {
 
 ProcessorHandler::ProcessorHandler(
     const MwStreamerProcessorSourceInfo& source_info,
-    const ffmpeg::HardwareContext* hardware_context)
+    const HardwareContext* hardware_context)
     : impl_(std::make_unique<Impl>(source_info, hardware_context)) {}
 
 ProcessorHandler::~ProcessorHandler() { Stop(); }
@@ -176,9 +176,9 @@ const MwStreamerExecutionContext& ProcessorHandler::execution() const noexcept {
   return impl_->execution();
 }
 
-const ffmpeg::HardwareContext* ProcessorHandler::hardware_context()
+const HardwareContext* ProcessorHandler::hardware_context()
     const noexcept {
   return impl_->hardware_context();
 }
 
-}  // namespace mw::streamer::processor
+}  // namespace mw::streamer

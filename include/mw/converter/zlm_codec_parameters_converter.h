@@ -10,7 +10,7 @@ extern "C" {
 #include "Extension/Track.h"
 #include "mw/ffmpeg/stream_info.h"
 
-namespace mw::streamer::converter {
+namespace mw::streamer {
 
 class ZlmCodecParametersConverter {
  public:
@@ -18,13 +18,13 @@ class ZlmCodecParametersConverter {
 
   explicit ZlmCodecParametersConverter(const mediakit::Track::Ptr& track);
 
-  const ffmpeg::CodecParameters& codec_parameters() const;
+  const CodecParameters& codec_parameters() const;
   AVRational time_base() const;
 
  private:
-  ffmpeg::CodecParameters codec_parameters_;
+  CodecParameters codec_parameters_;
 };
 
-}  // namespace mw::streamer::converter
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_CONVERTER_ZLM_CODEC_PARAMETERS_CONVERTER_H_

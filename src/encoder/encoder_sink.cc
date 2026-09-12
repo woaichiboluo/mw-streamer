@@ -16,7 +16,7 @@
 #include "mw/log/logging.h"
 #include "mw/performance/operation_recorder.h"
 
-namespace mw::streamer::encoder {
+namespace mw::streamer {
 
 class EncoderSink::Impl final {
  public:
@@ -32,7 +32,7 @@ class EncoderSink::Impl final {
 
   ~Impl() { Stop(); }
 
-  void OnStreamsReady(const media::FrameStreamsReady& streams) {
+  void OnStreamsReady(const FrameStreamsReady& streams) {
     Submit([&]() {
       Work work;
       work.kind = WorkKind::kReady;
@@ -42,7 +42,7 @@ class EncoderSink::Impl final {
     });
   }
 
-  void OnFrame(const media::FrameReady& frame, bool video) {
+  void OnFrame(const FrameReady& frame, bool video) {
     Submit([&]() {
       Work work;
       work.kind = video ? WorkKind::kVideo : WorkKind::kAudio;
@@ -52,7 +52,7 @@ class EncoderSink::Impl final {
     });
   }
 
-  void OnTimelineReset(const media::TimelineReset& reset) {
+  void OnTimelineReset(const TimelineReset& reset) {
     Submit([&]() {
       queue_.EraseIf([&](const Work& work) {
         return IsFrame(work) && work.generation < reset.generation;
@@ -65,7 +65,7 @@ class EncoderSink::Impl final {
     });
   }
 
-  void OnInputEnded(const media::StreamEnded& end) {
+  void OnInputEnded(const StreamEnded& end) {
     Submit([&]() {
       Work work;
       work.kind = WorkKind::kEnd;
@@ -105,8 +105,8 @@ class EncoderSink::Impl final {
 
   std::size_t queue_depth() const { return queue_.size(); }
 
-  performance::NodeSnapshot GetOwnPerformance() const {
-    performance::NodeSnapshot snapshot;
+  NodeSnapshot GetOwnPerformance() const {
+    NodeSnapshot snapshot;
     snapshot.name = "EncoderSink";
     snapshot.operations = {audio_performance_.GetSnapshot(),
                            video_performance_.GetSnapshot()};
@@ -123,10 +123,10 @@ class EncoderSink::Impl final {
   struct Work {
     WorkKind kind = WorkKind::kReady;
     std::uint64_t generation = 0;
-    std::vector<ffmpeg::StreamInfo> streams;
-    std::optional<ffmpeg::Frame> frame;
-    std::optional<media::TimelineReset> reset;
-    std::optional<media::StreamEnded> end;
+    std::vector<StreamInfo> streams;
+    std::optional<Frame> frame;
+    std::optional<TimelineReset> reset;
+    std::optional<StreamEnded> end;
   };
 
   static bool IsFrame(const Work& work) {
@@ -147,13 +147,13 @@ class EncoderSink::Impl final {
       }
       if (!worker_) {
         worker_ =
-            std::make_unique<common::Thread>("mw-encoder", [this]() { Run(); });
+            std::make_unique<Thread>("mw-encoder", [this]() { Run(); });
       }
       if (!queue_.TryPush(make_work(), config_.frame_queue_capacity, IsFrame) &&
           !queue_.closed()) {
         throw std::runtime_error("EncoderSink编码帧队列已满");
       }
-    } catch (const sink::FatalError& error) {
+    } catch (const FatalError& error) {
       Fail(error.what(), true);
     } catch (const std::exception& error) {
       Fail(error.what());
@@ -170,7 +170,7 @@ class EncoderSink::Impl final {
         }
         Process(*work);
       }
-    } catch (const sink::FatalError& error) {
+    } catch (const FatalError& error) {
       Fail(error.what(), true);
     } catch (const std::exception& error) {
       Fail(error.what());
@@ -178,7 +178,7 @@ class EncoderSink::Impl final {
       Fail("EncoderSink编码发生未知异常");
     }
     if (failed_.load()) {
-      NotifyEnd(media::StreamEndReason::kFailed);
+      NotifyEnd(StreamEndReason::kFailed);
     }
     DiscardEncoders();
   }
@@ -232,7 +232,7 @@ class EncoderSink::Impl final {
     owner_.StartMessages();
   }
 
-  void ConfigureTrack(const ffmpeg::StreamInfo& stream) {
+  void ConfigureTrack(const StreamInfo& stream) {
     stream.Validate();
     const auto type = stream.codec_parameters.get()->codec_type;
     if (type == AVMEDIA_TYPE_AUDIO) {
@@ -240,9 +240,9 @@ class EncoderSink::Impl final {
         throw std::invalid_argument("EncoderSink只支持一路音频轨道");
       }
       audio_index_ = stream.stream_index;
-      audio_encoder_ = std::make_unique<encoder::AudioEncoder>(
+      audio_encoder_ = std::make_unique<AudioEncoder>(
           config_.audio_encoder, audio_index_);
-      audio_encoder_->SetOnPacket([this](const ffmpeg::Packet& packet) {
+      audio_encoder_->SetOnPacket([this](const Packet& packet) {
         audio_performance_.AddOutput(1, packet->size);
         HandlePacket(packet);
       });
@@ -252,9 +252,9 @@ class EncoderSink::Impl final {
       throw std::invalid_argument("EncoderSink只支持一路视频轨道");
     }
     video_index_ = stream.stream_index;
-    video_encoder_ = std::make_unique<encoder::VideoEncoder>(
+    video_encoder_ = std::make_unique<VideoEncoder>(
         config_.video_encoder, video_index_);
-    video_encoder_->SetOnPacket([this](const ffmpeg::Packet& packet) {
+    video_encoder_->SetOnPacket([this](const Packet& packet) {
       video_performance_.AddOutput(1, packet->size);
       HandlePacket(packet);
     });
@@ -284,10 +284,10 @@ class EncoderSink::Impl final {
 
   template <typename Encoder>
   void EncodeTrack(const std::unique_ptr<Encoder>& encoder,
-                   const ffmpeg::Frame& frame,
-                   performance::OperationRecorder& recorder,
+                   const Frame& frame,
+                   OperationRecorder& recorder,
                    std::uint64_t input_count) {
-    performance::OperationRecorder::Call call(recorder, active_call_);
+    OperationRecorder::Call call(recorder, active_call_);
     recorder.AddInput(input_count);
     if (!encoder) {
       throw std::invalid_argument("EncoderSink收到未声明轨道的帧");
@@ -310,7 +310,7 @@ class EncoderSink::Impl final {
     if (output_ready_ || !AllEncodersOpen() || !CanProcess()) {
       return;
     }
-    media::StreamsReady ready{generation_, {}};
+    StreamsReady ready{generation_, {}};
     if (audio_encoder_) {
       ready.streams.push_back(audio_encoder_->stream_info());
     }
@@ -329,7 +329,7 @@ class EncoderSink::Impl final {
       }
       ++ready_outputs_;
       published_outputs_ = ready_outputs_;
-      performance::OperationRecorder::Suspension pause(active_call_);
+      OperationRecorder::Suspension pause(active_call_);
       output->OnStreamsReady(ready);
     }
     for (const auto& packet : pending_packets_) {
@@ -338,7 +338,7 @@ class EncoderSink::Impl final {
     pending_packets_.clear();
   }
 
-  void HandlePacket(const ffmpeg::Packet& packet) {
+  void HandlePacket(const Packet& packet) {
     if (!CanProcess()) {
       return;
     }
@@ -352,18 +352,18 @@ class EncoderSink::Impl final {
     pending_packets_.push_back(packet.Ref());
   }
 
-  void ForwardPacket(const ffmpeg::Packet& packet) {
-    const media::PacketReady ready{generation_, packet.Ref()};
+  void ForwardPacket(const Packet& packet) {
+    const PacketReady ready{generation_, packet.Ref()};
     for (auto& output : outputs_) {
       if (!CanProcess()) {
         return;
       }
-      performance::OperationRecorder::Suspension pause(active_call_);
+      OperationRecorder::Suspension pause(active_call_);
       output->OnPacket(ready);
     }
   }
 
-  void Reset(const media::TimelineReset& reset) {
+  void Reset(const TimelineReset& reset) {
     if (reset.generation == 0 || reset.generation <= generation_) {
       return;
     }
@@ -387,11 +387,11 @@ class EncoderSink::Impl final {
     owner_.StartMessages();
   }
 
-  void End(const media::StreamEnded& end) {
+  void End(const StreamEnded& end) {
     if (!IsCurrentGeneration(end.generation)) {
       return;
     }
-    if (end.reason == media::StreamEndReason::kEof) {
+    if (end.reason == StreamEndReason::kEof) {
       CompleteEncoding();
     }
     if (!CanProcess()) {
@@ -400,15 +400,15 @@ class EncoderSink::Impl final {
     NotifyEnd(end.reason);
     input_ended_ = true;
     DiscardEncoders();
-    if (end.reason == media::StreamEndReason::kInterrupted) {
+    if (end.reason == StreamEndReason::kInterrupted) {
       return;
     }
     queue_.Close();
     queue_.Clear();
-    if (end.reason == media::StreamEndReason::kFailed) {
+    if (end.reason == StreamEndReason::kFailed) {
       Fail("EncoderSink上游输入失败");
     } else {
-      SetState(end.reason == media::StreamEndReason::kEof
+      SetState(end.reason == StreamEndReason::kEof
                    ? EncoderSinkState::kEnded
                    : EncoderSinkState::kStopped);
     }
@@ -420,23 +420,23 @@ class EncoderSink::Impl final {
     }
     SetState(EncoderSinkState::kDraining);
     if (audio_encoder_ && CanProcess()) {
-      performance::OperationRecorder::Call call(audio_performance_,
+      OperationRecorder::Call call(audio_performance_,
                                                 active_call_);
       audio_encoder_->Drain();
     }
     if (video_encoder_ && CanProcess()) {
-      performance::OperationRecorder::Call call(video_performance_,
+      OperationRecorder::Call call(video_performance_,
                                                 active_call_);
       video_encoder_->Drain();
     }
   }
 
-  void NotifyEnd(media::StreamEndReason reason) noexcept {
+  void NotifyEnd(StreamEndReason reason) noexcept {
     if (output_ended_) {
       return;
     }
     output_ended_ = true;
-    const media::StreamEnded end{generation_, reason};
+    const StreamEnded end{generation_, reason};
     for (std::size_t index = 0; index < ready_outputs_; ++index) {
       outputs_[index]->OnInputEnded(end);
     }
@@ -471,24 +471,24 @@ class EncoderSink::Impl final {
       owner_.ReportFatalError(error);
     }
     if (first_failure) {
-      log::Module<log::LogModule::kStreamer>::Error("EncoderSink失败: {}",
+      Module<LogModule::kStreamer>::Error("EncoderSink失败: {}",
                                                     error);
     }
   }
 
   EncoderSink& owner_;
   const EncoderSinkConfig config_;
-  performance::OperationRecorder audio_performance_{
-      performance::PerformanceType::kAudioEncoder,
-      performance::PerformanceUnit::kSample,
-      performance::PerformanceUnit::kPacket};
-  performance::OperationRecorder video_performance_{
-      performance::PerformanceType::kVideoEncoder,
-      performance::PerformanceUnit::kFrame,
-      performance::PerformanceUnit::kPacket};
-  const std::vector<std::unique_ptr<sink::Sink>>& outputs_;
-  common::BlockingQueue<Work> queue_;
-  std::unique_ptr<common::Thread> worker_;
+  OperationRecorder audio_performance_{
+      PerformanceType::kAudioEncoder,
+      PerformanceUnit::kSample,
+      PerformanceUnit::kPacket};
+  OperationRecorder video_performance_{
+      PerformanceType::kVideoEncoder,
+      PerformanceUnit::kFrame,
+      PerformanceUnit::kPacket};
+  const std::vector<std::unique_ptr<Sink>>& outputs_;
+  BlockingQueue<Work> queue_;
+  std::unique_ptr<Thread> worker_;
   std::mutex input_mutex_;
   std::mutex stop_mutex_;
   mutable std::mutex status_mutex_;
@@ -499,7 +499,7 @@ class EncoderSink::Impl final {
   bool stopped_ = false;
 
   // Execution state below belongs exclusively to the encoding worker.
-  performance::OperationRecorder::Call* active_call_ = nullptr;
+  OperationRecorder::Call* active_call_ = nullptr;
   std::uint64_t generation_ = 0;
   std::optional<std::uint64_t> pending_reset_;
   bool source_ready_ = false;
@@ -512,39 +512,39 @@ class EncoderSink::Impl final {
   std::size_t published_outputs_ = 0;
   int audio_index_ = -1;
   int video_index_ = -1;
-  std::unique_ptr<encoder::AudioEncoder> audio_encoder_;
-  std::unique_ptr<encoder::VideoEncoder> video_encoder_;
-  std::vector<ffmpeg::Packet> pending_packets_;
+  std::unique_ptr<AudioEncoder> audio_encoder_;
+  std::unique_ptr<VideoEncoder> video_encoder_;
+  std::vector<Packet> pending_packets_;
 };
 
 EncoderSink::EncoderSink(std::string id, EncoderSinkConfig config)
-    : sink::Sink(std::move(id), sink::SinkMediaType::kFrame,
-                 sink::SinkMediaType::kPacket),
+    : Sink(std::move(id), SinkMediaType::kFrame,
+                 SinkMediaType::kPacket),
       impl_(std::make_unique<Impl>(*this, std::move(config))) {}
 
 EncoderSink::~EncoderSink() { Stop(); }
 
-void EncoderSink::OnStreamsReady(const media::FrameStreamsReady& streams) {
+void EncoderSink::OnStreamsReady(const FrameStreamsReady& streams) {
   CloseRegistration();
   impl_->OnStreamsReady(streams);
 }
 
-void EncoderSink::OnAudioFrame(const media::FrameReady& frame) {
+void EncoderSink::OnAudioFrame(const FrameReady& frame) {
   CloseRegistration();
   impl_->OnFrame(frame, false);
 }
 
-void EncoderSink::OnVideoFrame(const media::FrameReady& frame) {
+void EncoderSink::OnVideoFrame(const FrameReady& frame) {
   CloseRegistration();
   impl_->OnFrame(frame, true);
 }
 
-void EncoderSink::OnTimelineReset(const media::TimelineReset& reset) {
+void EncoderSink::OnTimelineReset(const TimelineReset& reset) {
   CloseRegistration();
   impl_->OnTimelineReset(reset);
 }
 
-void EncoderSink::OnInputEnded(const media::StreamEnded& end) {
+void EncoderSink::OnInputEnded(const StreamEnded& end) {
   CloseRegistration();
   impl_->OnInputEnded(end);
 }
@@ -560,7 +560,7 @@ std::string EncoderSink::error() const { return impl_->error(); }
 
 std::size_t EncoderSink::queue_depth() const { return impl_->queue_depth(); }
 
-performance::NodeSnapshot EncoderSink::GetOwnPerformance() const {
+NodeSnapshot EncoderSink::GetOwnPerformance() const {
   return impl_->GetOwnPerformance();
 }
 
@@ -568,4 +568,4 @@ void EncoderSink::HandleFatalError(const std::string& error) noexcept {
   impl_->HandleFatalError(error);
 }
 
-}  // namespace mw::streamer::encoder
+}  // namespace mw::streamer

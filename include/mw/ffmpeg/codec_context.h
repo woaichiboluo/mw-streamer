@@ -5,7 +5,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 }
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 class CodecContext final {
  public:
@@ -25,6 +25,6 @@ class CodecContext final {
   AVCodecContext* context_ = nullptr;
 };
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_FFMPEG_CODEC_CONTEXT_H_

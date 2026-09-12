@@ -7,7 +7,7 @@
 
 #include "mw/media/types.h"
 
-namespace mw::streamer::sink {
+namespace mw::streamer {
 
 // Borrowed for one submission. Receivers must copy strings and payload before
 // returning if processing asynchronously. The sender supplies sink_id;
@@ -21,6 +21,6 @@ struct SinkMessage {
   std::optional<MwStreamerMediaTimestamp> timestamp;
 };
 
-}  // namespace mw::streamer::sink
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_SINK_SINK_MESSAGE_H_

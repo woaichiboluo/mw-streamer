@@ -6,7 +6,7 @@ extern "C" {
 #include <libavutil/hwcontext.h>
 }
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 class HardwareContext final {
  public:
@@ -40,6 +40,6 @@ class HardwareContext final {
   int device_index_ = -1;
 };
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_FFMPEG_HARDWARE_CONTEXT_H_

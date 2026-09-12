@@ -11,7 +11,7 @@
 #include "mw/ffmpeg/packet.h"
 #include "mw/ffmpeg/stream_info.h"
 
-namespace mw::streamer::decoder {
+namespace mw::streamer {
 
 struct AudioDecodeResult {
   std::uint64_t samples = 0;
@@ -20,9 +20,9 @@ struct AudioDecodeResult {
 
 class AudioDecoder final {
  public:
-  using OnFrame = std::function<void(const ffmpeg::Frame& frame)>;
+  using OnFrame = std::function<void(const Frame& frame)>;
 
-  explicit AudioDecoder(ffmpeg::StreamInfo stream_info,
+  explicit AudioDecoder(StreamInfo stream_info,
                         AudioDecoderConfig config = {});
   ~AudioDecoder();
 
@@ -33,14 +33,14 @@ class AudioDecoder final {
   // may produce zero or more frames. The frame is borrowed for OnFrame; copy or
   // call Ref to retain it.
   void SetOnFrame(OnFrame callback);
-  AudioDecodeResult Decode(const ffmpeg::Packet& packet);
+  AudioDecodeResult Decode(const Packet& packet);
 
   // Drain emits all delayed frames and ends the current decoder timeline.
   // Decode cannot be called again until Flush starts a new timeline.
   AudioDecodeResult Drain();
   void Flush();
 
-  const ffmpeg::StreamInfo& stream_info() const noexcept;
+  const StreamInfo& stream_info() const noexcept;
   const AudioDecoderConfig& config() const noexcept;
 
  private:
@@ -48,6 +48,6 @@ class AudioDecoder final {
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::decoder
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_DECODER_AUDIO_DECODER_H_

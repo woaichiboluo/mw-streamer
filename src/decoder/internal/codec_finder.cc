@@ -9,7 +9,7 @@ extern "C" {
 
 #include <fmt/format.h>
 
-namespace mw::streamer::decoder::internal {
+namespace mw::streamer::internal {
 namespace {
 
 const char* MediaTypeName(AVMediaType media_type) {
@@ -19,7 +19,7 @@ const char* MediaTypeName(AVMediaType media_type) {
 
 }  // namespace
 
-const AVCodec* FindDecoder(const ffmpeg::StreamInfo& stream_info,
+const AVCodec* FindDecoder(const StreamInfo& stream_info,
                            const std::string& decoder_name,
                            AVMediaType media_type) {
   stream_info.Validate();
@@ -49,4 +49,4 @@ const AVCodec* FindDecoder(const ffmpeg::StreamInfo& stream_info,
   return codec;
 }
 
-}  // namespace mw::streamer::decoder::internal
+}  // namespace mw::streamer::internal

@@ -26,21 +26,21 @@ extern "C" {
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::ffmpeg::Frame;
-using mw::streamer::ffmpeg::StreamInfo;
-using mw::streamer::media::FrameReady;
-using mw::streamer::media::FrameStreamsReady;
-using mw::streamer::media::StreamEnded;
-using mw::streamer::media::StreamEndReason;
-using mw::streamer::media::TimelineReset;
-using mw::streamer::media::TimelineResetReason;
-using mw::streamer::sink::FatalError;
-using mw::streamer::sink::Sink;
-using mw::streamer::sink::SinkMediaType;
-using mw::streamer::sink::SinkMessage;
-using mw::streamer::synchronizer::SynchronizerSink;
-using mw::streamer::synchronizer::SynchronizerSinkConfig;
-using mw::streamer::synchronizer::SynchronizerSinkState;
+using mw::streamer::Frame;
+using mw::streamer::StreamInfo;
+using mw::streamer::FrameReady;
+using mw::streamer::FrameStreamsReady;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
+using mw::streamer::TimelineReset;
+using mw::streamer::TimelineResetReason;
+using mw::streamer::FatalError;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
+using mw::streamer::SinkMessage;
+using mw::streamer::SynchronizerSink;
+using mw::streamer::SynchronizerSinkConfig;
+using mw::streamer::SynchronizerSinkState;
 using Clock = std::chrono::steady_clock;
 
 SynchronizerSinkConfig Config() {
@@ -357,7 +357,7 @@ TEST_CASE(
   REQUIRE(snapshot.downstream.size() == 1);
   const auto& operation = snapshot.operations.front();
   CHECK(operation.type ==
-        mw::streamer::performance::PerformanceType::kSynchronizer);
+        mw::streamer::PerformanceType::kSynchronizer);
   CHECK(operation.input_count == 2);
   CHECK(operation.output_count >=
         recorded.audio.size() + recorded.video.size());

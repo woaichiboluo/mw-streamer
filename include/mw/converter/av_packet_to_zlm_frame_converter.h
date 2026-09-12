@@ -14,13 +14,13 @@ extern "C" {
 #include "mw/ffmpeg/codec_parameters.h"
 #include "mw/ffmpeg/packet.h"
 
-namespace mw::streamer::converter {
+namespace mw::streamer {
 
 class AvPacketToZlmFrameConverter final {
  public:
   using Ptr = std::shared_ptr<AvPacketToZlmFrameConverter>;
 
-  AvPacketToZlmFrameConverter(const ffmpeg::CodecParameters& codec_parameters,
+  AvPacketToZlmFrameConverter(const CodecParameters& codec_parameters,
                               AVRational time_base, int stream_index);
 
   // Takes ownership of packet's reference. The returned frames keep the
@@ -29,7 +29,7 @@ class AvPacketToZlmFrameConverter final {
   // Subtracts one caller-selected origin from both timestamps after conversion
   // to milliseconds. Use the same origin for all tracks to preserve AV timing.
   std::vector<mediakit::Frame::Ptr> Convert(
-      ffmpeg::Packet packet, std::int64_t timestamp_origin_ms = 0) const;
+      Packet packet, std::int64_t timestamp_origin_ms = 0) const;
 
  private:
   mediakit::CodecId codec_id_;
@@ -38,6 +38,6 @@ class AvPacketToZlmFrameConverter final {
   std::string aac_config_;
 };
 
-}  // namespace mw::streamer::converter
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_CONVERTER_AV_PACKET_TO_ZLM_FRAME_CONVERTER_H_

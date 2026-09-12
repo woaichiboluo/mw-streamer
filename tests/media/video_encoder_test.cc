@@ -17,16 +17,16 @@ extern "C" {
 
 namespace {
 
-using mw::streamer::decoder::VideoDecoder;
-using mw::streamer::decoder::VideoDecoderBackend;
-using mw::streamer::decoder::VideoDecoderConfig;
-using mw::streamer::encoder::VideoEncodeMode;
-using mw::streamer::encoder::VideoEncoder;
-using mw::streamer::encoder::VideoEncoderConfig;
-using mw::streamer::ffmpeg::Frame;
-using mw::streamer::ffmpeg::HardwareContext;
-using mw::streamer::ffmpeg::Packet;
-using mw::streamer::ffmpeg::ThrowIfError;
+using mw::streamer::VideoDecoder;
+using mw::streamer::VideoDecoderBackend;
+using mw::streamer::VideoDecoderConfig;
+using mw::streamer::VideoEncodeMode;
+using mw::streamer::VideoEncoder;
+using mw::streamer::VideoEncoderConfig;
+using mw::streamer::Frame;
+using mw::streamer::HardwareContext;
+using mw::streamer::Packet;
+using mw::streamer::ThrowIfError;
 
 constexpr int kWidth = 64;
 constexpr int kHeight = 64;

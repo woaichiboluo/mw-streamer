@@ -21,11 +21,11 @@
 
 namespace {
 
-using mw::streamer::output::Fmp4FileTarget;
-using mw::streamer::output::HlsFmp4FileTarget;
-using mw::streamer::zlm::RecordingConfig;
-using mw::streamer::zlm::internal::ValidateOutputConfig;
-using mw::streamer::zlm::internal::ValidateRecordingConfig;
+using mw::streamer::Fmp4FileTarget;
+using mw::streamer::HlsFmp4FileTarget;
+using mw::streamer::RecordingConfig;
+using mw::streamer::internal::ValidateOutputConfig;
+using mw::streamer::internal::ValidateRecordingConfig;
 
 std::filesystem::path SamplePath() {
   return std::filesystem::path(MW_RECORDING_TARGET_TEST_DATA_DIR) /
@@ -69,7 +69,7 @@ TEST_CASE("Output配置复用统一录像配置校验") {
   recording.file_buffer_size = 0;
   CHECK_THROWS_AS(ValidateRecordingConfig(recording), std::invalid_argument);
 
-  mw::streamer::zlm::OutputConfig output;
+  mw::streamer::OutputConfig output;
   output.recording = recording;
   CHECK_THROWS_AS(ValidateOutputConfig(output), std::invalid_argument);
 }

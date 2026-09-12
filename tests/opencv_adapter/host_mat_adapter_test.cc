@@ -11,8 +11,8 @@
 
 namespace {
 
-using mw::streamer::opencv_adapter::CudaFrame;
-using mw::streamer::opencv_adapter::HostMatAdapter;
+using mw::opencv_adapter::CudaFrame;
+using mw::opencv_adapter::HostMatAdapter;
 
 MwStreamerVideoColorInfo MakeColorInfo() {
   return {

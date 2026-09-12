@@ -5,7 +5,7 @@
 
 #include "mw/ffmpeg/error.h"
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 Dictionary::~Dictionary() { av_dict_free(&dictionary_); }
 
@@ -31,4 +31,4 @@ const AVDictionary* Dictionary::get() const noexcept { return dictionary_; }
 
 AVDictionary** Dictionary::address() noexcept { return &dictionary_; }
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer

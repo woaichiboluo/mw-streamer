@@ -26,30 +26,29 @@ extern "C" {
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::encoder::EncoderSink;
-using mw::streamer::encoder::EncoderSinkConfig;
-using mw::streamer::encoder::EncoderSinkState;
-using mw::streamer::media::FrameStreamsReady;
-using mw::streamer::media::PacketReady;
-using mw::streamer::media::StreamEnded;
-using mw::streamer::media::StreamEndReason;
-using mw::streamer::media::StreamsReady;
-using mw::streamer::media::TimelineReset;
-using mw::streamer::sink::PacketSinkState;
-using mw::streamer::sink::Sink;
-using mw::streamer::sink::SinkMediaType;
-using mw::streamer::synchronizer::SynchronizerSink;
-using mw::streamer::synchronizer::SynchronizerSinkConfig;
-using mw::streamer::synchronizer::SynchronizerSinkState;
-namespace decoder = mw::streamer::decoder;
-namespace ffmpeg = mw::streamer::ffmpeg;
+using mw::streamer::EncoderSink;
+using mw::streamer::EncoderSinkConfig;
+using mw::streamer::EncoderSinkState;
+using mw::streamer::FrameStreamsReady;
+using mw::streamer::PacketReady;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
+using mw::streamer::StreamsReady;
+using mw::streamer::TimelineReset;
+using mw::streamer::PacketSinkState;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
+using mw::streamer::SynchronizerSink;
+using mw::streamer::SynchronizerSinkConfig;
+using mw::streamer::SynchronizerSinkState;
+using namespace mw::streamer;
 
 constexpr int kWidth = 256;
 constexpr int kHeight = 144;
 constexpr std::int64_t kFrameCount = 8;
 constexpr AVRational kTimeBase{1, 25};
 
-ffmpeg::Frame MakeCudaFrame(const ffmpeg::HardwareContext& device) {
+Frame MakeCudaFrame(const HardwareContext& device) {
   AVBufferRef* pool =
       av_hwframe_ctx_alloc(const_cast<AVBufferRef*>(device.get()));
   if (!pool) {
@@ -62,21 +61,21 @@ ffmpeg::Frame MakeCudaFrame(const ffmpeg::HardwareContext& device) {
   context->height = kHeight;
   context->initial_pool_size = 4;
   try {
-    ffmpeg::ThrowIfError(av_hwframe_ctx_init(pool), "初始化编码测试CUDA帧池");
-    ffmpeg::Frame software;
+    ThrowIfError(av_hwframe_ctx_init(pool), "初始化编码测试CUDA帧池");
+    Frame software;
     software->format = AV_PIX_FMT_NV12;
     software->width = kWidth;
     software->height = kHeight;
-    ffmpeg::ThrowIfError(av_frame_get_buffer(software.get(), 32),
+    ThrowIfError(av_frame_get_buffer(software.get(), 32),
                          "分配编码测试上传帧");
     std::memset(software->data[0], 32,
                 static_cast<std::size_t>(software->linesize[0]) * kHeight);
     std::memset(software->data[1], 128,
                 static_cast<std::size_t>(software->linesize[1]) * kHeight / 2);
-    ffmpeg::Frame frame;
-    ffmpeg::ThrowIfError(av_hwframe_get_buffer(pool, frame.get(), 0),
+    Frame frame;
+    ThrowIfError(av_hwframe_get_buffer(pool, frame.get(), 0),
                          "分配编码测试CUDA帧");
-    ffmpeg::ThrowIfError(
+    ThrowIfError(
         av_hwframe_transfer_data(frame.get(), software.get(), 0),
         "上传编码测试CUDA帧");
     frame->time_base = kTimeBase;
@@ -180,8 +179,8 @@ class PacketRecorder final : public Sink {
   std::atomic<std::size_t> packet_count_{0};
 };
 
-FrameStreamsReady MakeStreams(const ffmpeg::HardwareContext& device) {
-  ffmpeg::StreamInfo stream;
+FrameStreamsReady MakeStreams(const HardwareContext& device) {
+  StreamInfo stream;
   stream.stream_index = 3;
   stream.time_base = kTimeBase;
   auto* parameters = stream.codec_parameters.get();
@@ -208,7 +207,7 @@ TEST_CASE(
   config.video_encoder.frame_rate = {25, 1};
   config.video_encoder.properties = {{"preset", "p1"}, {"tune", "ull"}};
 
-  const auto device = ffmpeg::HardwareContext::CreateCuda(0);
+  const auto device = HardwareContext::CreateCuda(0);
   Recording first;
   Recording second;
   DeliveryGate gate;
@@ -261,11 +260,11 @@ TEST_CASE(
     CHECK(recording->resets == 0);
     CHECK(recording->stops == 1);
 
-    decoder::VideoDecoderConfig decoder_config;
-    decoder_config.backend = decoder::VideoDecoderBackend::kSoftware;
-    decoder::VideoDecoder decoder(stream, decoder_config);
+    VideoDecoderConfig decoder_config;
+    decoder_config.backend = VideoDecoderBackend::kSoftware;
+    VideoDecoder decoder(stream, decoder_config);
     std::size_t decoded_frames = 0;
-    decoder.SetOnFrame([&](const ffmpeg::Frame& frame) {
+    decoder.SetOnFrame([&](const Frame& frame) {
       CHECK(frame->width == kWidth);
       CHECK(frame->height == kHeight);
       CHECK(frame->pts == static_cast<std::int64_t>(decoded_frames));
@@ -289,7 +288,7 @@ TEST_CASE(
 }
 
 TEST_CASE("Synchronizer CUDA standby remains decodable through NVENC") {
-  const auto device = ffmpeg::HardwareContext::CreateCuda(0);
+  const auto device = HardwareContext::CreateCuda(0);
   Recording recording;
   auto packets = std::make_unique<PacketRecorder>("recording", recording);
   const auto* captured = packets.get();
@@ -357,12 +356,12 @@ TEST_CASE("Synchronizer CUDA standby remains decodable through NVENC") {
 
   const auto& stream = recording.sources.front().streams.front();
   CHECK(stream.codec_parameters.get()->codec_id == AV_CODEC_ID_H264);
-  decoder::VideoDecoderConfig decoder_config;
-  decoder_config.backend = decoder::VideoDecoderBackend::kSoftware;
-  decoder::VideoDecoder decoder(stream, decoder_config);
+  VideoDecoderConfig decoder_config;
+  decoder_config.backend = VideoDecoderBackend::kSoftware;
+  VideoDecoder decoder(stream, decoder_config);
   std::size_t decoded_frames = 0;
   bool standby_image_decoded = false;
-  decoder.SetOnFrame([&](const ffmpeg::Frame& frame) {
+  decoder.SetOnFrame([&](const Frame& frame) {
     CHECK(frame->width == kWidth);
     CHECK(frame->height == kHeight);
     CHECK(av_compare_ts(frame->pts, stream.time_base,

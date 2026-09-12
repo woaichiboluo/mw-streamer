@@ -16,31 +16,32 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::cache::PacketQueue;
-using mw::streamer::media::PacketReady;
-using mw::streamer::media::StreamEnded;
-using mw::streamer::media::StreamEndReason;
-using mw::streamer::media::StreamsReady;
-using mw::streamer::media::TimelineReset;
-using mw::streamer::media::TimelineResetReason;
-using mw::streamer::sink::PacketSinkState;
-using mw::streamer::sink::Sink;
-using mw::streamer::sink::SinkMediaType;
-using namespace mw::streamer::pipeline;
-namespace ffmpeg = mw::streamer::ffmpeg;
+using mw::streamer::PacketQueue;
+using mw::streamer::PacketReady;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
+using mw::streamer::StreamsReady;
+using mw::streamer::TimelineReset;
+using mw::streamer::TimelineResetReason;
+using mw::streamer::PacketSinkState;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
+using mw::streamer::CodecParameters;
+using mw::streamer::Packet;
+using mw::streamer::StreamInfo;
 using Clock = std::chrono::steady_clock;
 
-ffmpeg::StreamInfo Stream(int index, AVMediaType type,
+StreamInfo Stream(int index, AVMediaType type,
                           AVRational time_base = {1, 1000}) {
-  ffmpeg::CodecParameters parameters;
+  CodecParameters parameters;
   parameters.get()->codec_type = type;
   parameters.get()->codec_id =
       type == AVMEDIA_TYPE_AUDIO ? AV_CODEC_ID_AAC : AV_CODEC_ID_H264;
   return {index, std::move(parameters), time_base};
 }
 
-ffmpeg::Packet Packet(int index, std::int64_t dts) {
-  ffmpeg::Packet packet;
+Packet MakePacket(int index, std::int64_t dts) {
+  Packet packet;
   if (av_new_packet(packet.get(), 4) < 0) {
     throw std::runtime_error("测试Packet分配失败");
   }
@@ -166,7 +167,7 @@ bool WaitState(const PacketQueue& queue, PacketSinkState expected) {
 TEST_CASE(
     "Pipeline PacketQueue asynchronously preserves order and packet buffers") {
   Recorder recorder;
-  auto first = Packet(0, 10);
+  auto first = MakePacket(0, 10);
   const auto* buffer = first->buf->buffer;
   {
     PacketQueue queue(0ms, recorder);
@@ -175,7 +176,7 @@ TEST_CASE(
     queue.OnStreamsReady({1, {Stream(0, AVMEDIA_TYPE_VIDEO)}});
     queue.OnPacket({1, first});
     first.Unref();
-    queue.OnPacket({1, Packet(0, 20)});
+    queue.OnPacket({1, MakePacket(0, 20)});
     queue.OnInputEnded({1, StreamEndReason::kEof});
     const bool completed = recorder.WaitEnded();
     const bool dequeued = WaitState(queue, PacketSinkState::kEnded);
@@ -210,11 +211,11 @@ TEST_CASE(
   queue.OnStreamsReady({1,
                         {Stream(0, AVMEDIA_TYPE_VIDEO),
                          Stream(1, AVMEDIA_TYPE_AUDIO, {1, 48000})}});
-  queue.OnPacket({1, Packet(0, 0)});
-  queue.OnPacket({1, Packet(0, 1000)});
-  queue.OnPacket({1, Packet(1, 0)});
+  queue.OnPacket({1, MakePacket(0, 0)});
+  queue.OnPacket({1, MakePacket(0, 1000)});
+  queue.OnPacket({1, MakePacket(1, 0)});
   const bool early_packet = recorder.WaitPackets(1, 100ms);
-  queue.OnPacket({1, Packet(1, 48000)});
+  queue.OnPacket({1, MakePacket(1, 48000)});
   const bool clock_advanced = recorder.WaitPackets(3);
   queue.OnInputEnded({1, StreamEndReason::kEof});
   const bool completed = recorder.WaitEnded();
@@ -242,20 +243,20 @@ TEST_CASE(
   auto streams = std::vector{Stream(0, AVMEDIA_TYPE_VIDEO)};
   if (audio) streams.push_back(Stream(1, AVMEDIA_TYPE_AUDIO));
   queue.OnStreamsReady({1, streams});
-  queue.OnPacket({1, Packet(0, 0)});
-  queue.OnPacket({1, Packet(0, 1000)});
+  queue.OnPacket({1, MakePacket(0, 0)});
+  queue.OnPacket({1, MakePacket(0, 1000)});
   if (audio) {
-    queue.OnPacket({1, Packet(1, 0)});
-    queue.OnPacket({1, Packet(1, 2000)});
+    queue.OnPacket({1, MakePacket(1, 0)});
+    queue.OnPacket({1, MakePacket(1, 2000)});
   }
   const std::size_t initial_count = audio ? 3 : 2;
   REQUIRE(recorder.WaitPackets(initial_count));
   // Let the scheduler observe starvation. Resume with a late packet but less
   // than a new cache window; the original deadline must still apply.
   std::this_thread::sleep_for(600ms);
-  queue.OnPacket({1, Packet(0, 1100)});
+  queue.OnPacket({1, MakePacket(0, 1100)});
   const bool resumed = recorder.WaitPackets(initial_count + 1, 250ms);
-  queue.OnPacket({1, Packet(0, 2000)});
+  queue.OnPacket({1, MakePacket(0, 2000)});
   queue.OnInputEnded({1, StreamEndReason::kEof});
   const bool completed = recorder.WaitEnded();
   queue.Stop();
@@ -282,18 +283,18 @@ TEST_CASE(
   SECTION("audio outlasts video with a different time base") {}
   Recorder recorder;
   PacketQueue queue(1s, recorder);
-  std::vector<ffmpeg::StreamInfo> streams{
+  std::vector<StreamInfo> streams{
       Stream(1, AVMEDIA_TYPE_AUDIO, {1, 48000})};
   if (!audio_only) {
     streams.push_back(Stream(0, AVMEDIA_TYPE_VIDEO));
   }
   queue.OnStreamsReady({1, streams});
   if (!audio_only) {
-    queue.OnPacket({1, Packet(0, 0)});
-    queue.OnPacket({1, Packet(0, 20)});
+    queue.OnPacket({1, MakePacket(0, 0)});
+    queue.OnPacket({1, MakePacket(0, 20)});
   }
   for (const auto dts : {0, 480, 960, 1440}) {
-    queue.OnPacket({1, Packet(1, dts)});
+    queue.OnPacket({1, MakePacket(1, dts)});
   }
   queue.OnInputEnded({1, StreamEndReason::kEof});
   queue.OnInputEnded({1, StreamEndReason::kEof});
@@ -324,13 +325,13 @@ TEST_CASE(
   PacketQueue queue(1s, recorder);
   const auto streams = std::vector{Stream(0, AVMEDIA_TYPE_VIDEO)};
   queue.OnStreamsReady({1, streams});
-  queue.OnPacket({1, Packet(0, 0)});
-  queue.OnPacket({1, Packet(0, 60000)});
+  queue.OnPacket({1, MakePacket(0, 0)});
+  queue.OnPacket({1, MakePacket(0, 60000)});
   const bool first_played = recorder.WaitPackets(1);
   const auto reset_time = Clock::now();
   queue.OnTimelineReset({2, TimelineResetReason::kReconnect, std::nullopt});
   queue.OnStreamsReady({2, streams});
-  queue.OnPacket({2, Packet(0, 0)});
+  queue.OnPacket({2, MakePacket(0, 0)});
   queue.OnInputEnded({2, StreamEndReason::kEof});
   const bool completed = recorder.WaitEnded();
   queue.Stop();
@@ -365,10 +366,10 @@ TEST_CASE(
   recorder.block_packet = true;
   PacketQueue queue(0ms, recorder);
   queue.OnStreamsReady({1, {Stream(0, AVMEDIA_TYPE_VIDEO)}});
-  queue.OnPacket({1, Packet(0, 0)});
+  queue.OnPacket({1, MakePacket(0, 0)});
   const bool entered = recorder.WaitPackets(1);
   auto submitted = std::async(std::launch::async, [&] {
-    queue.OnPacket({1, Packet(0, 1)});
+    queue.OnPacket({1, MakePacket(0, 1)});
     queue.OnInputEnded({1, StreamEndReason::kEof});
   });
   const auto submission = submitted.wait_for(100ms);
@@ -378,7 +379,7 @@ TEST_CASE(
   submitted.get();
   stopped.get();
   queue.Stop();
-  queue.OnPacket({1, Packet(0, 2)});
+  queue.OnPacket({1, MakePacket(0, 2)});
   REQUIRE(entered);
   CHECK(submission == std::future_status::ready);
   CHECK(while_blocked == std::future_status::timeout);
@@ -391,10 +392,10 @@ TEST_CASE("Pipeline PacketQueue permits Abort from its own packet callback") {
   PacketQueue queue(0ms, recorder);
   recorder.abort_on_packet = &queue;
   queue.OnStreamsReady({1, {Stream(0, AVMEDIA_TYPE_VIDEO)}});
-  queue.OnPacket({1, Packet(0, 0)});
-  queue.OnPacket({1, Packet(0, 1)});
+  queue.OnPacket({1, MakePacket(0, 0)});
+  queue.OnPacket({1, MakePacket(0, 1)});
   const bool aborted = recorder.Wait([&] { return recorder.callback_aborted; });
-  queue.OnPacket({1, Packet(0, 2)});
+  queue.OnPacket({1, MakePacket(0, 2)});
   const bool extra_packet =
       recorder.Wait([&] { return recorder.packets.size() > 1; }, 50ms);
   queue.Stop();
@@ -425,7 +426,7 @@ TEST_CASE(
   Recorder recorder;
   PacketQueue queue(1s, recorder);
   queue.OnStreamsReady({1, {Stream(0, AVMEDIA_TYPE_VIDEO)}});
-  queue.OnPacket({1, Packet(0, 0)});
+  queue.OnPacket({1, MakePacket(0, 0)});
   queue.OnInputEnded({1, reason});
   queue.OnInputEnded({1, reason});
   const bool completed = recorder.WaitEnded();
@@ -445,13 +446,13 @@ TEST_CASE(
   PacketQueue queue(0ms, recorder);
   queue.OnStreamsReady({2, {Stream(0, AVMEDIA_TYPE_VIDEO)}});
   queue.OnStreamsReady({1, {Stream(0, AVMEDIA_TYPE_VIDEO)}});
-  queue.OnPacket({1, Packet(0, 0)});
-  queue.OnPacket({2, Packet(0, AV_NOPTS_VALUE)});
-  queue.OnPacket({2, Packet(-1, 0)});
-  queue.OnPacket({2, Packet(3, 0)});
-  queue.OnPacket({2, Packet(0, 10)});
-  queue.OnPacket({2, Packet(0, 9)});
-  queue.OnPacket({2, Packet(0, 11)});
+  queue.OnPacket({1, MakePacket(0, 0)});
+  queue.OnPacket({2, MakePacket(0, AV_NOPTS_VALUE)});
+  queue.OnPacket({2, MakePacket(-1, 0)});
+  queue.OnPacket({2, MakePacket(3, 0)});
+  queue.OnPacket({2, MakePacket(0, 10)});
+  queue.OnPacket({2, MakePacket(0, 9)});
+  queue.OnPacket({2, MakePacket(0, 11)});
   queue.OnInputEnded({1, StreamEndReason::kEof});
   queue.OnInputEnded({2, StreamEndReason::kEof});
   const bool completed = recorder.WaitEnded();
@@ -507,8 +508,8 @@ TEST_CASE(
   Recorder recorder;
   PacketQueue queue(1s, recorder);
   queue.OnStreamsReady({1, {Stream(0, AVMEDIA_TYPE_VIDEO)}});
-  queue.OnPacket({1, Packet(0, 0)});
-  queue.OnPacket({1, Packet(0, 60000)});
+  queue.OnPacket({1, MakePacket(0, 0)});
+  queue.OnPacket({1, MakePacket(0, 60000)});
   const bool first_played = recorder.WaitPackets(1);
   queue.OnInputEnded({1, StreamEndReason::kEof});
   const bool draining = WaitState(queue, PacketSinkState::kDraining);

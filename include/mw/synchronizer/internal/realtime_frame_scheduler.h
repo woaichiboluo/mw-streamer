@@ -9,7 +9,7 @@
 #include "mw/media/stream_event.h"
 #include "mw/synchronizer/config.h"
 
-namespace mw::streamer::synchronizer::internal {
+namespace mw::streamer::internal {
 
 // Used exclusively by SynchronizerSink's worker. Owns bounded per-track frame
 // caches, prototypes and a continuous output clock; it owns no thread itself.
@@ -18,7 +18,7 @@ class RealtimeFrameScheduler final {
   using Clock = std::chrono::steady_clock;
   struct OutputFrame {
     bool audio;
-    ffmpeg::Frame frame;
+    Frame frame;
   };
 
   explicit RealtimeFrameScheduler(SynchronizerSinkConfig config);
@@ -28,8 +28,8 @@ class RealtimeFrameScheduler final {
 
   // Copies borrowed hardware context ownership. Replacement metadata must be
   // compatible; input generation validation belongs to the containing sink.
-  void Configure(const media::FrameStreamsReady& streams);
-  void Push(const media::FrameReady& frame, bool audio, Clock::time_point now);
+  void Configure(const FrameStreamsReady& streams);
+  void Push(const FrameReady& frame, bool audio, Clock::time_point now);
   // Replaces the source mapping while preserving output clocks and prototypes.
   void Reset();
   // Ends synthesis once retained media drains. Missing initial prototypes fail.
@@ -45,6 +45,6 @@ class RealtimeFrameScheduler final {
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::synchronizer::internal
+}  // namespace mw::streamer::internal
 
 #endif  // MW_STREAMER_INCLUDE_MW_SYNCHRONIZER_INTERNAL_REALTIME_FRAME_SCHEDULER_H_

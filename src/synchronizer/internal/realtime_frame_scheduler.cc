@@ -19,7 +19,7 @@ extern "C" {
 #include "mw/ffmpeg/hardware_context.h"
 #include "mw/synchronizer/internal/standby_video_frame.h"
 
-namespace mw::streamer::synchronizer::internal {
+namespace mw::streamer::internal {
 namespace {
 
 constexpr AVRational kMicroseconds{1, 1000000};
@@ -74,8 +74,8 @@ Clock::time_point WallTime(std::int64_t microseconds) {
   return Clock::time_point(Clock::duration(ticks));
 }
 
-bool SameStream(const ffmpeg::StreamInfo& left,
-                const ffmpeg::StreamInfo& right) {
+bool SameStream(const StreamInfo& left,
+                const StreamInfo& right) {
   const auto* a = left.codec_parameters.get();
   const auto* b = right.codec_parameters.get();
   return left.stream_index == right.stream_index &&
@@ -87,17 +87,17 @@ bool SameStream(const ffmpeg::StreamInfo& left,
          av_channel_layout_compare(&a->ch_layout, &b->ch_layout) == 0;
 }
 
-ffmpeg::Frame MakeSilence(const ffmpeg::Frame& prototype) {
-  ffmpeg::Frame frame;
+Frame MakeSilence(const Frame& prototype) {
+  Frame frame;
   frame->format = prototype->format;
   frame->sample_rate = prototype->sample_rate;
   frame->nb_samples = prototype->nb_samples;
-  ffmpeg::ThrowIfError(
+  ThrowIfError(
       av_channel_layout_copy(&frame->ch_layout, &prototype->ch_layout),
       "复制实时同步静音声道布局");
-  ffmpeg::ThrowIfError(av_frame_get_buffer(frame.get(), 0),
+  ThrowIfError(av_frame_get_buffer(frame.get(), 0),
                        "分配实时同步静音帧");
-  ffmpeg::ThrowIfError(
+  ThrowIfError(
       av_samples_set_silence(frame->extended_data, 0, frame->nb_samples,
                              frame->ch_layout.nb_channels,
                              static_cast<AVSampleFormat>(frame->format)),
@@ -106,7 +106,7 @@ ffmpeg::Frame MakeSilence(const ffmpeg::Frame& prototype) {
   return frame;
 }
 
-void SetTiming(ffmpeg::Frame& frame, AVRational time_base, std::int64_t pts,
+void SetTiming(Frame& frame, AVRational time_base, std::int64_t pts,
                std::int64_t duration) {
   frame->time_base = time_base;
   frame->pts = pts;
@@ -132,7 +132,7 @@ class RealtimeFrameScheduler::Impl final {
         Rescale(config_.standby_timeout.count(), {1, 1000}, kMicroseconds);
   }
 
-  void Configure(const media::FrameStreamsReady& streams) {
+  void Configure(const FrameStreamsReady& streams) {
     bool audio = false;
     bool video = false;
     const AVCodecParameters* video_parameters = nullptr;
@@ -192,7 +192,7 @@ class RealtimeFrameScheduler::Impl final {
     configured_ = true;
   }
 
-  void Push(const media::FrameReady& ready, bool audio, Clock::time_point now) {
+  void Push(const FrameReady& ready, bool audio, Clock::time_point now) {
     auto& track = audio ? audio_ : video_;
     if (!configured_ || !track.declared || finishing_) {
       throw std::logic_error("实时同步收到未声明或已结束轨道的帧");
@@ -266,12 +266,12 @@ class RealtimeFrameScheduler::Impl final {
 
  private:
   struct TimedFrame {
-    ffmpeg::Frame frame;
+    Frame frame;
     std::int64_t source_us;
   };
   struct Track {
-    common::BlockingQueue<TimedFrame> frames;
-    std::optional<ffmpeg::Frame> prototype;
+    BlockingQueue<TimedFrame> frames;
+    std::optional<Frame> prototype;
     std::optional<std::int64_t> last_source_us;
     std::int64_t next_pts = 0;
     bool declared = false;
@@ -309,7 +309,7 @@ class RealtimeFrameScheduler::Impl final {
                  : MakeVideo(std::move(selected), now_us);
   }
 
-  void ValidateFrame(const ffmpeg::Frame& frame, const Track& track,
+  void ValidateFrame(const Frame& frame, const Track& track,
                      bool audio) const {
     if (!frame.get() || frame->pts == AV_NOPTS_VALUE ||
         frame->time_base.num <= 0 || frame->time_base.den <= 0) {
@@ -408,7 +408,7 @@ class RealtimeFrameScheduler::Impl final {
                  : video_duration_us_;
   }
 
-  std::optional<ffmpeg::Frame> SelectFrame(bool audio, std::int64_t due_us) {
+  std::optional<Frame> SelectFrame(bool audio, std::int64_t due_us) {
     if (!source_mapped_) {
       return std::nullopt;
     }
@@ -417,7 +417,7 @@ class RealtimeFrameScheduler::Impl final {
     const auto earliest = Subtract(target, lateness_us_);
     const auto latest = Add(target, SlotDurationUs(audio) / 2);
     auto& queue = audio ? audio_.frames : video_.frames;
-    std::optional<ffmpeg::Frame> selected;
+    std::optional<Frame> selected;
     while (const auto head = queue.TryPeek()) {
       if (head->source_us > latest) {
         break;
@@ -430,7 +430,7 @@ class RealtimeFrameScheduler::Impl final {
     return selected;
   }
 
-  OutputFrame MakeAudio(std::optional<ffmpeg::Frame> selected,
+  OutputFrame MakeAudio(std::optional<Frame> selected,
                         std::int64_t now_us) {
     if (selected) {
       last_real_audio_us_ = now_us;
@@ -445,7 +445,7 @@ class RealtimeFrameScheduler::Impl final {
     return {true, std::move(frame)};
   }
 
-  OutputFrame MakeVideo(std::optional<ffmpeg::Frame> selected,
+  OutputFrame MakeVideo(std::optional<Frame> selected,
                         std::int64_t now_us) {
     const bool was_standby = standby_;
     if (selected) {
@@ -474,12 +474,12 @@ class RealtimeFrameScheduler::Impl final {
   }
 
   const SynchronizerSinkConfig config_;
-  std::vector<ffmpeg::StreamInfo> streams_;
-  std::optional<ffmpeg::HardwareContext> hardware_context_;
+  std::vector<StreamInfo> streams_;
+  std::optional<HardwareContext> hardware_context_;
   Track audio_;
   Track video_;
-  std::optional<ffmpeg::Frame> silence_;
-  std::optional<ffmpeg::Frame> last_video_;
+  std::optional<Frame> silence_;
+  std::optional<Frame> last_video_;
   StandbyVideoFrame standby_video_;
   AVRational audio_time_base_{0, 1};
   AVRational video_time_base_{0, 1};
@@ -505,10 +505,10 @@ RealtimeFrameScheduler::RealtimeFrameScheduler(SynchronizerSinkConfig config)
     : impl_(std::make_unique<Impl>(std::move(config))) {}
 RealtimeFrameScheduler::~RealtimeFrameScheduler() = default;
 void RealtimeFrameScheduler::Configure(
-    const media::FrameStreamsReady& streams) {
+    const FrameStreamsReady& streams) {
   impl_->Configure(streams);
 }
-void RealtimeFrameScheduler::Push(const media::FrameReady& frame, bool audio,
+void RealtimeFrameScheduler::Push(const FrameReady& frame, bool audio,
                                   Clock::time_point now) {
   impl_->Push(frame, audio, now);
 }
@@ -528,4 +528,4 @@ std::size_t RealtimeFrameScheduler::queue_depth() const {
   return impl_->queue_depth();
 }
 
-}  // namespace mw::streamer::synchronizer::internal
+}  // namespace mw::streamer::internal

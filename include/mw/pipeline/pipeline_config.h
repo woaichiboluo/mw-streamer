@@ -12,7 +12,7 @@
 #include "mw/output/config.h"
 #include "mw/synchronizer/config.h"
 
-namespace mw::streamer::pipeline {
+namespace mw::streamer {
 
 enum class InputType { kZlm, kFile };
 enum class SinkType {
@@ -26,8 +26,8 @@ enum class SinkType {
 
 struct InputConfig {
   InputType type = InputType::kZlm;
-  input::ZlmInputConfig options;
-  input::FileInputConfig file;
+  ZlmInputConfig options;
+  FileInputConfig file;
   std::vector<std::string> downstream;
 };
 
@@ -47,7 +47,7 @@ struct SinkConfig {
 struct DecoderNodeConfig final : SinkConfig {
   using SinkConfig::SinkConfig;
   SinkType type() const noexcept override { return SinkType::kDecoder; }
-  decoder::DecoderSinkConfig options;
+  DecoderSinkConfig options;
 };
 
 struct AnalysisProcessorNodeConfig final : SinkConfig {
@@ -67,19 +67,19 @@ struct TransformProcessorNodeConfig final : SinkConfig {
 struct SynchronizerNodeConfig final : SinkConfig {
   using SinkConfig::SinkConfig;
   SinkType type() const noexcept override { return SinkType::kSynchronizer; }
-  synchronizer::SynchronizerSinkConfig options;
+  SynchronizerSinkConfig options;
 };
 
 struct EncoderNodeConfig final : SinkConfig {
   using SinkConfig::SinkConfig;
   SinkType type() const noexcept override { return SinkType::kEncoder; }
-  encoder::EncoderSinkConfig options;
+  EncoderSinkConfig options;
 };
 
 struct RemuxNodeConfig final : SinkConfig {
   using SinkConfig::SinkConfig;
   SinkType type() const noexcept override { return SinkType::kRemux; }
-  output::RemuxSinkConfig options;
+  RemuxSinkConfig options;
 };
 
 // Move-only, exclusively owns all node descriptions in declaration order.
@@ -97,6 +97,6 @@ struct PipelineConfig {
 // still checked by their owning components.
 void ValidatePipelineConfig(const PipelineConfig& config);
 
-}  // namespace mw::streamer::pipeline
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_PIPELINE_PIPELINE_CONFIG_H_

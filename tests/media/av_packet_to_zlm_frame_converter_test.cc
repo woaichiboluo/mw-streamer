@@ -18,11 +18,11 @@ extern "C" {
 
 namespace {
 
-using mw::streamer::converter::AvPacketToZlmFrameConverter;
-using mw::streamer::converter::internal::ToFfmpegCodecId;
-using mw::streamer::converter::internal::ToZlmCodecId;
-using mw::streamer::ffmpeg::CodecParameters;
-using mw::streamer::ffmpeg::Packet;
+using mw::streamer::AvPacketToZlmFrameConverter;
+using mw::streamer::internal::ToFfmpegCodecId;
+using mw::streamer::internal::ToZlmCodecId;
+using mw::streamer::CodecParameters;
+using mw::streamer::Packet;
 
 Packet MakePacket(const std::vector<std::uint8_t>& payload, int stream_index,
                   std::int64_t dts, std::int64_t pts, int flags = 0) {
@@ -65,8 +65,8 @@ TEST_CASE("FFmpeg和ZLM Codec映射支持双向转换") {
 }
 
 TEST_CASE("ZLM时间基固定为毫秒") {
-  CHECK(mw::streamer::converter::internal::kZlmTimeBase.num == 1);
-  CHECK(mw::streamer::converter::internal::kZlmTimeBase.den == 1000);
+  CHECK(mw::streamer::internal::kZlmTimeBase.num == 1);
+  CHECK(mw::streamer::internal::kZlmTimeBase.den == 1000);
 }
 
 TEST_CASE("AVPacket转换为可缓存的H264 ZLM Frame") {

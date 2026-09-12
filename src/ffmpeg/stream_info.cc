@@ -5,7 +5,7 @@
 
 #include "mw/ffmpeg/error.h"
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 StreamInfo StreamInfo::FromCodecContext(const AVCodecContext& context,
                                         int stream_index) {
@@ -33,4 +33,4 @@ void StreamInfo::Validate() const {
   }
 }
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer

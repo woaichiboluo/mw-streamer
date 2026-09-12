@@ -26,13 +26,13 @@ extern "C" {
 #include "mw/log/logging.h"
 #include "mw/media/internal/codec_bridge.h"
 
-namespace mw::streamer::encoder {
+namespace mw::streamer {
 namespace {
 
-using Log = log::Module<log::LogModule::kStreamer>;
+using Log = Module<LogModule::kStreamer>;
 
 AVCodecID RequireSupportedCodec(MwStreamerCodec codec) {
-  const auto codec_id = media::internal::ToAvCodecId(codec);
+  const auto codec_id = internal::ToAvCodecId(codec);
   if (codec_id != AV_CODEC_ID_H264 && codec_id != AV_CODEC_ID_HEVC) {
     throw std::invalid_argument("VideoEncoder首版只支持H.264和H.265");
   }
@@ -97,7 +97,7 @@ const AVCodec* FindEncoder(const VideoEncoderConfig& config,
 }
 
 const AVHWFramesContext& ValidateCudaPrototype(const AVFrame& frame) {
-  const auto* frames_context = ffmpeg::HardwareContext::GetFramesContext(frame);
+  const auto* frames_context = HardwareContext::GetFramesContext(frame);
   if (!frames_context ||
       frames_context->device_ctx->type != AV_HWDEVICE_TYPE_CUDA ||
       frames_context->width < frame.width ||
@@ -117,7 +117,7 @@ void ValidatePrototype(const AVFrame* frame) {
   const auto pixel_format = static_cast<AVPixelFormat>(frame->format);
   if (pixel_format == AV_PIX_FMT_CUDA) {
     ValidateCudaPrototype(*frame);
-  } else if (ffmpeg::IsHardwarePixelFormat(pixel_format)) {
+  } else if (IsHardwarePixelFormat(pixel_format)) {
     throw std::invalid_argument("VideoEncoder暂不支持非CUDA硬件视频帧");
   }
 }
@@ -132,9 +132,9 @@ bool ParseInteger(std::string_view text, int* value) {
   return result.ec == std::errc{} && result.ptr == end;
 }
 
-ffmpeg::Dictionary MakeOptions(const VideoEncoderConfig& config,
+Dictionary MakeOptions(const VideoEncoderConfig& config,
                                const char* encoder_name) {
-  ffmpeg::Dictionary options;
+  Dictionary options;
   const bool is_nvenc =
       std::string_view(encoder_name).find("_nvenc") != std::string_view::npos;
   for (const auto& [key, value] : config.properties) {
@@ -184,7 +184,7 @@ class VideoEncoder::Impl final {
     }
   }
 
-  void Open(const ffmpeg::Frame& prototype) {
+  void Open(const Frame& prototype) {
     if (context_) {
       throw std::logic_error("VideoEncoder只能打开一次");
     }
@@ -193,7 +193,7 @@ class VideoEncoder::Impl final {
     const auto* input = prototype.get();
     const auto pixel_format = static_cast<AVPixelFormat>(input->format);
     const auto* codec = FindEncoder(config_, pixel_format);
-    ffmpeg::CodecContext pending_context(codec);
+    CodecContext pending_context(codec);
     auto* context = pending_context.get();
     context->width = input->width;
     context->height = input->height;
@@ -220,7 +220,7 @@ class VideoEncoder::Impl final {
     }
 
     auto options = MakeOptions(config_, codec->name);
-    ffmpeg::ThrowIfError(avcodec_open2(context, codec, options.address()),
+    ThrowIfError(avcodec_open2(context, codec, options.address()),
                          "打开视频编码器");
     internal::WarnUnusedOptions(options.get(), "视频", codec->name);
     if (context->max_b_frames != 0 || context->has_b_frames != 0) {
@@ -231,7 +231,7 @@ class VideoEncoder::Impl final {
     }
 
     stream_info_.emplace(
-        ffmpeg::StreamInfo::FromCodecContext(*context, stream_index_));
+        StreamInfo::FromCodecContext(*context, stream_index_));
     input_width_ = input->width;
     input_height_ = input->height;
     input_format_ = pixel_format;
@@ -247,7 +247,7 @@ class VideoEncoder::Impl final {
 
   void SetOnPacket(OnPacket callback) { on_packet_ = std::move(callback); }
 
-  void Encode(const ffmpeg::Frame& frame, VideoEncodeMode mode) {
+  void Encode(const Frame& frame, VideoEncodeMode mode) {
     RequireOpen();
     if (drained_) {
       throw std::logic_error("VideoEncoder已Drain，不能继续编码");
@@ -281,7 +281,7 @@ class VideoEncoder::Impl final {
 
   bool is_open() const noexcept { return context_.has_value(); }
 
-  const ffmpeg::StreamInfo& stream_info() const {
+  const StreamInfo& stream_info() const {
     if (!stream_info_) {
       throw std::logic_error("VideoEncoder打开前没有StreamInfo");
     }
@@ -331,7 +331,7 @@ class VideoEncoder::Impl final {
       if (frame == nullptr && result == AVERROR_EOF) {
         break;
       }
-      ffmpeg::ThrowIfError(result,
+      ThrowIfError(result,
                            frame ? "提交视频编码帧" : "提交视频编码结束标记");
       break;
     }
@@ -346,7 +346,7 @@ class VideoEncoder::Impl final {
       if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) {
         return packet_count;
       }
-      ffmpeg::ThrowIfError(result, "接收视频编码包");
+      ThrowIfError(result, "接收视频编码包");
       packet_->stream_index = stream_index_;
       ++packet_count;
       if (on_packet_) {
@@ -357,12 +357,12 @@ class VideoEncoder::Impl final {
 
   VideoEncoderConfig config_;
   int stream_index_ = 0;
-  std::optional<ffmpeg::CodecContext> context_;
-  std::optional<ffmpeg::StreamInfo> stream_info_;
+  std::optional<CodecContext> context_;
+  std::optional<StreamInfo> stream_info_;
   int input_width_ = 0;
   int input_height_ = 0;
   AVPixelFormat input_format_ = AV_PIX_FMT_NONE;
-  ffmpeg::Packet packet_;
+  Packet packet_;
   OnPacket on_packet_;
   bool drained_ = false;
 };
@@ -372,7 +372,7 @@ VideoEncoder::VideoEncoder(VideoEncoderConfig config, int stream_index)
 
 VideoEncoder::~VideoEncoder() = default;
 
-void VideoEncoder::Open(const ffmpeg::Frame& prototype) {
+void VideoEncoder::Open(const Frame& prototype) {
   impl_->Open(prototype);
 }
 
@@ -380,7 +380,7 @@ void VideoEncoder::SetOnPacket(OnPacket callback) {
   impl_->SetOnPacket(std::move(callback));
 }
 
-void VideoEncoder::Encode(const ffmpeg::Frame& frame, VideoEncodeMode mode) {
+void VideoEncoder::Encode(const Frame& frame, VideoEncodeMode mode) {
   impl_->Encode(frame, mode);
 }
 
@@ -388,7 +388,7 @@ void VideoEncoder::Drain() { impl_->Drain(); }
 
 bool VideoEncoder::is_open() const noexcept { return impl_->is_open(); }
 
-const ffmpeg::StreamInfo& VideoEncoder::stream_info() const {
+const StreamInfo& VideoEncoder::stream_info() const {
   return impl_->stream_info();
 }
 
@@ -396,4 +396,4 @@ const VideoEncoderConfig& VideoEncoder::config() const noexcept {
   return impl_->config();
 }
 
-}  // namespace mw::streamer::encoder
+}  // namespace mw::streamer

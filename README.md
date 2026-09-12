@@ -137,15 +137,13 @@ PacketQueue 依赖 Sink 作为消费者。组件不依赖 Pipeline 的实现，F
 #include "mw/pipeline/pipeline.h"
 #include "mw/sink/sink.h"
 
-namespace pipeline = mw::streamer::pipeline;
-namespace input = mw::streamer::input;
-namespace sinks = mw::streamer::sink;
+using namespace mw::streamer;
 
-std::unique_ptr<pipeline::Pipeline> StartInput(
-    input::ZlmInputConfig config,
-    std::unique_ptr<sinks::Sink> sink) {
-  auto result = std::make_unique<pipeline::Pipeline>(
-      std::make_unique<input::ZlmInput>(std::move(config)));
+std::unique_ptr<Pipeline> StartInput(
+    ZlmInputConfig config,
+    std::unique_ptr<Sink> sink) {
+  auto result = std::make_unique<Pipeline>(
+      std::make_unique<ZlmInput>(std::move(config)));
   result->AddSink(std::move(sink));
   result->Start();
   return result;
@@ -176,18 +174,18 @@ Sink 实现，各自管理状态、封装和关闭。
 ```cpp
 #include "mw/output/remux_sink.h"
 
-namespace output = mw::streamer::output;
+using namespace mw::streamer;
 
-// chain 是已创建、尚未启动的 pipeline::Pipeline。
-output::RemuxSinkConfig recording;
+// chain 是已创建、尚未启动的 Pipeline。
+RemuxSinkConfig recording;
 recording.target = "/recordings/camera.mp4";
 chain.AddSink(
-    std::make_unique<output::RemuxSink>("recording", std::move(recording)));
+    std::make_unique<RemuxSink>("recording", std::move(recording)));
 
-output::RemuxSinkConfig publishing;
+RemuxSinkConfig publishing;
 publishing.target = "rtsp://127.0.0.1:8554/live/camera";
 chain.AddSink(
-    std::make_unique<output::RemuxSink>("publishing", std::move(publishing)));
+    std::make_unique<RemuxSink>("publishing", std::move(publishing)));
 ```
 
 Sink 自行从 ZLToolKit 单例池取得并固定使用一个 Poller，不额外创建 Worker。
@@ -213,7 +211,7 @@ PTS/DTS 间隔，不进行逐轨归零或大间隔平滑。EOF 写完启动缓�
 仅使该 Sink 进入 `kFailed`，通过 `error()` 查询原因。其他目标继续工作，显式
 `FatalError` 仍使用统一的 Pipeline 停机通道。单目标网络状态可通过
 `GetNetworkOutputSnapshot()` 查询，返回定义在
-`mw/performance/pipeline_snapshot.h` 中的 `performance::NetworkOutputSnapshot`。
+`mw/performance/pipeline_snapshot.h` 中的 `NetworkOutputSnapshot`。
 
 可运行示例：`mw_remux_sink_example input_url target [target...]`，每个 target
 创建一个独立 RemuxSink；有限输入 EOF 后等待输出完成，Ctrl+C 有序停止。
@@ -223,7 +221,7 @@ PTS/DTS 间隔，不进行逐轨归零或大间隔平滑。EOF 写完启动缓�
 `DecoderSink` 直接继承 `Sink`，消费 Packet 并输出 Frame，
 通过 `AddSink(std::unique_ptr<Sink>)` 注册多个独占的 Frame 消费者。
 它接收上述四类输入通知。
-实时输入使用 `cache::PacketQueue`：队列首次投递时启动一个调度线程，音视频分开缓存，
+实时输入使用 `PacketQueue`：队列首次投递时启动一个调度线程，音视频分开缓存，
 共用缓存时长、播放时钟和输入代次。队列用条件等待完成定时调度，不依赖 Poller，
 也不向 DecoderSink 暴露执行器。四类输入通知同步入队，由队列线程有序处理。
 到期的 Packet 再进入各自的解码工作队列，每条实际存在的轨道使用一个 Worker；
@@ -238,13 +236,13 @@ EOF 和断流会排空缓存，停止和失败会丢弃缓存，随后仅向消�
 排空缓存，`kEnded` 仅表示队列已完成交付，不代表下游解码完成。
 DecoderSink 的外层接口接收入队，内部消费者处理到期包；队列排空后才安排
 解码器结束。在显式 Stop 时先等待队列线程退出，再停止两个解码支路。
-队列内部复用 `common::BlockingQueue`。
+队列内部复用 `BlockingQueue`。
 
 音频在 DecoderSink 内解码并重采样，输出固定为 48 kHz、float32 交错格式，
 保持源声道布局，时间基为 `1/48000`。视频保持所选解码器的原始帧格式，CUDA
 解码输出仍在 GPU 上；投递前等待源 CUDA 流完成写入，业务可在自己的 context 和
 stream 中读取。`DecoderSinkConfig` 复用已有软解/CUDA 配置，不自动切换后端。
-解码工作队列统一使用 `common::BlockingQueue`，按条件限流只计算 Packet，
+解码工作队列统一使用 `BlockingQueue`，按条件限流只计算 Packet，
 重置和结束等控制消息不占限额。实时输入队列满时，音频丢弃当前包；视频清除
 排队的 Packet，等待下一个关键帧并刷新解码器后恢复。生命周期控制消息不会随
 Packet 被删除。FileInput 的离线模式使用有界等待把反压传回文件读取线程，不主动
@@ -273,16 +271,15 @@ Packet 被删除。FileInput 的离线模式使用有界等待把反压传回文
 配置由调用方提供：
 
 ```cpp
-namespace decoding = mw::streamer::decoder;
-namespace input = mw::streamer::input;
-namespace pipeline = mw::streamer::pipeline;
 
-auto decoder = std::make_unique<decoding::DecoderSink>("decoder", decoder_config);
+using namespace mw::streamer;
+
+auto decoder = std::make_unique<DecoderSink>("decoder", decoder_config);
 decoder->AddSink(std::move(frame_sink));
 decoder->AddSink(std::move(another_frame_sink));
 // 借用指针用于查询状态；所有权仍交给 Pipeline。
 auto* decoder_status = decoder.get();
-pipeline::Pipeline flow(std::make_unique<input::ZlmInput>(input_config));
+Pipeline flow(std::make_unique<ZlmInput>(input_config));
 flow.AddSink(std::move(decoder));
 flow.Start();
 ```
@@ -296,7 +293,7 @@ Input 的 EOF 状态仅表示源读完。
 
 ### Fatal 错误与整链路停止
 
-同步 Frame 处理节点的处理或边界回调可以抛出 `sink::FatalError`，
+同步 Frame 处理节点的处理或边界回调可以抛出 `FatalError`，
 定义位于 `mw/sink/fatal_error.h`。
 DecoderSink 捕获后先记录自身失败，再通过 Sink 的 fatal 通道请求 Pipeline
 停机，同时丢弃本地排队数据并取消解码边界等待。独立的异步 Sink 可以调用
@@ -442,19 +439,17 @@ Packet；EOF 在编码器排空、全部延迟包交付之后通知下游。Stop
 #include "mw/output/remux_sink.h"
 #include "mw/synchronizer/synchronizer_sink.h"
 
-namespace encoding = mw::streamer::encoder;
-namespace output = mw::streamer::output;
-namespace synchronizer = mw::streamer::synchronizer;
+using namespace mw::streamer;
 
-encoding::EncoderSinkConfig encoder_config;
+EncoderSinkConfig encoder_config;
 encoder_config.video_encoder.frame_rate = {25, 1};
-auto encoder = std::make_unique<encoding::EncoderSink>("encoder", encoder_config);
+auto encoder = std::make_unique<EncoderSink>("encoder", encoder_config);
 
-output::RemuxSinkConfig recording;
+RemuxSinkConfig recording;
 recording.target = "/recordings/processed.mp4";
 encoder->AddSink(
-    std::make_unique<output::RemuxSink>("recording", std::move(recording)));
-auto sync = std::make_unique<synchronizer::SynchronizerSink>("synchronizer");
+    std::make_unique<RemuxSink>("recording", std::move(recording)));
+auto sync = std::make_unique<SynchronizerSink>("synchronizer");
 sync->AddSink(std::move(encoder));
 // processor 是已有的 TransformProcessorSink，可继续添加其他 Frame 消费者。
 processor.AddSink(std::move(sync));
@@ -494,7 +489,7 @@ auto previous = pipeline.GetPerformance();
 auto current = pipeline.GetPerformance();
 auto snapshot = current.WithRatesSince(previous);
 for (const auto& match : snapshot.Find(
-         mw::streamer::performance::PerformanceType::kVideoEncoder)) {
+         mw::streamer::PerformanceType::kVideoEncoder)) {
   fmt::print("{}: input {:.2f} frame/s, output {:.2f} packet/s\n",
              match.node->id, match.operation->input_per_second,
              match.operation->output_per_second);
@@ -533,8 +528,8 @@ Pipeline 与 e2e 均使用统一的 Input、Sink 链路；配置支持双向转�
 
 ## 现有 PlayerProxy 输入接口
 
-`mw/sink/packet_sink.h` 定义压缩音视频消费者 `mw::streamer::sink::PacketSink`。
-单源输入 `input::PlayerProxy` 可在首次 `Start()` 前通过 `AddPacketSink()` 接收
+`mw/sink/packet_sink.h` 定义压缩音视频消费者 `mw::streamer::PacketSink`。
+单源输入 `PlayerProxy` 可在首次 `Start()` 前通过 `AddPacketSink()` 接收
 `std::unique_ptr<PacketSink>`，取得 Sink 的独占所有权。多个 Sink 按注册顺序在
 输入所属 poller 上同步调用；Sink 自己决定是否排队、使用工作线程及如何处理积压和
 错误，方法不得向输入层抛出异常。阻塞投递会同时阻塞输入和后续 Sink。
@@ -552,7 +547,7 @@ PlayerProxy，通用 Input 当前只公开 Start、Stop 与状态查询。
 
 ## Pipeline 配置与 TOML 双向转换
 
-链路使用 `pipeline::PipelineConfig`，不按实时、文件或转封装划分配置类型。
+链路使用 `PipelineConfig`，不按实时、文件或转封装划分配置类型。
 `mw/pipeline/pipeline_config.h` 定义一个 Input 和平铺的节点列表；每个节点保留
 `id`、`downstream`、可选的 `message_receiver`，并通过具体 NodeConfig 的
 `options` 成员复用已有参数结构。配置对象独占持有节点描述，只能移动，不包含
@@ -587,7 +582,7 @@ id = "analysis"
 type = "analysis_processor"
 ```
 
-结构体构建时，设置 `spec.input.type = pipeline::InputType::kFile` 和
+结构体构建时，设置 `spec.input.type = InputType::kFile` 和
 `spec.input.file.path = "./input.mp4"`，其余节点构建方式相同。
 
 `mw/config/toml.h` 提供四个统一入口：
@@ -618,21 +613,21 @@ streamer TOML，宿主通过 `Pipeline::SetProcessorConfig(id, config)` 提供�
 `mw/pipeline/pipeline_builder.h` 的 `BuildPipeline()` 同时服务 TOML 与 C++ 调用方：
 
 ```cpp
-namespace pipeline = mw::streamer::pipeline;
-namespace config = mw::streamer::config;
 
-pipeline::PipelineConfig spec;
+using namespace mw::streamer;
+
+PipelineConfig spec;
 spec.input.options.url = "rtsp://127.0.0.1/live/camera";
 spec.input.downstream = {"recording"};
-auto recording = std::make_unique<pipeline::RemuxNodeConfig>("recording");
+auto recording = std::make_unique<RemuxNodeConfig>("recording");
 recording->options.target = "./original.mp4";
 spec.sinks.push_back(std::move(recording));
 
 // 可以直接构建，也可以先保存、传输或编辑 TOML。
-auto flow = pipeline::BuildPipeline(spec);
-auto text = config::SerializePipelineConfigToToml(spec);
-auto restored = config::ParsePipelineConfigFromToml(text);
-config::SavePipelineConfigToToml(restored, "pipeline.toml");
+auto flow = BuildPipeline(spec);
+auto text = SerializePipelineConfigToToml(spec);
+auto restored = ParsePipelineConfigFromToml(text);
+SavePipelineConfigToToml(restored, "pipeline.toml");
 ```
 
 构建器复制节点参数并组装 unique_ptr 媒体树及消息路由，不启动输入，也不借用

@@ -8,7 +8,7 @@
 
 namespace {
 
-using mw::streamer::opencv_adapter::CudaFrame;
+using mw::opencv_adapter::CudaFrame;
 
 TEST_CASE("CudaFrame支持多线程并发首次初始化CUDA Driver") {
   constexpr std::uint32_t kWidth = 64;

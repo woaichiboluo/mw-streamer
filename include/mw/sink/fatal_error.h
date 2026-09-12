@@ -3,7 +3,7 @@
 
 #include <stdexcept>
 
-namespace mw::streamer::sink {
+namespace mw::streamer {
 
 // Requests Pipeline-wide shutdown when propagated out of a Sink call.
 class FatalError : public std::runtime_error {
@@ -11,6 +11,6 @@ class FatalError : public std::runtime_error {
   using std::runtime_error::runtime_error;
 };
 
-}  // namespace mw::streamer::sink
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_SINK_FATAL_ERROR_H_

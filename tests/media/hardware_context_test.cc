@@ -12,7 +12,7 @@ extern "C" {
 
 namespace {
 
-using mw::streamer::ffmpeg::HardwareContext;
+using mw::streamer::HardwareContext;
 
 TEST_CASE("HardwareContext通过FFmpeg在指定设备创建CUDA上下文") {
   const auto context = HardwareContext::CreateCuda(0);
@@ -70,12 +70,12 @@ TEST_CASE("HardwareContext可供FFmpeg分配并传输CUDA帧") {
   }
   REQUIRE(init_result >= 0);
 
-  mw::streamer::ffmpeg::Frame frame;
+  mw::streamer::Frame frame;
   const int allocate_result = av_hwframe_get_buffer(frames_ref, frame.get(), 0);
   av_buffer_unref(&frames_ref);
   REQUIRE(allocate_result >= 0);
 
-  mw::streamer::ffmpeg::Frame source;
+  mw::streamer::Frame source;
   source->format = AV_PIX_FMT_NV12;
   source->width = 64;
   source->height = 64;
@@ -85,7 +85,7 @@ TEST_CASE("HardwareContext可供FFmpeg分配并传输CUDA帧") {
   source->data[1][0] = 0xa5;
   REQUIRE(av_hwframe_transfer_data(frame.get(), source.get(), 0) >= 0);
 
-  mw::streamer::ffmpeg::Frame restored;
+  mw::streamer::Frame restored;
   restored->format = AV_PIX_FMT_NV12;
   restored->width = 64;
   restored->height = 64;

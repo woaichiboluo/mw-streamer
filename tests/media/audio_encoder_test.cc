@@ -16,13 +16,13 @@ extern "C" {
 
 namespace {
 
-using mw::streamer::decoder::AudioDecoder;
-using mw::streamer::decoder::AudioDecoderConfig;
-using mw::streamer::encoder::AudioEncoder;
-using mw::streamer::encoder::AudioEncoderConfig;
-using mw::streamer::ffmpeg::Frame;
-using mw::streamer::ffmpeg::Packet;
-using mw::streamer::ffmpeg::ThrowIfError;
+using mw::streamer::AudioDecoder;
+using mw::streamer::AudioDecoderConfig;
+using mw::streamer::AudioEncoder;
+using mw::streamer::AudioEncoderConfig;
+using mw::streamer::Frame;
+using mw::streamer::Packet;
+using mw::streamer::ThrowIfError;
 
 constexpr int kSampleRate = 48000;
 constexpr int kChannelCount = 1;

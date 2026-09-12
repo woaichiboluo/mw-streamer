@@ -14,7 +14,7 @@ extern "C" {
 #include "mw/converter/internal/codec_bridge.h"
 #include "mw/converter/internal/zlm_time_base.h"
 
-namespace mw::streamer::converter {
+namespace mw::streamer {
 namespace {
 
 std::vector<std::uint8_t> GetExtraData(const mediakit::Track::Ptr& track) {
@@ -97,7 +97,7 @@ ZlmCodecParametersConverter::ZlmCodecParametersConverter(
   SetExtraData(parameters, GetExtraData(track));
 }
 
-const ffmpeg::CodecParameters& ZlmCodecParametersConverter::codec_parameters()
+const CodecParameters& ZlmCodecParametersConverter::codec_parameters()
     const {
   return codec_parameters_;
 }
@@ -106,4 +106,4 @@ AVRational ZlmCodecParametersConverter::time_base() const {
   return internal::kZlmTimeBase;
 }
 
-}  // namespace mw::streamer::converter
+}  // namespace mw::streamer

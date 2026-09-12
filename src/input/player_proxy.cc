@@ -29,7 +29,7 @@ extern "C" {
 #include "mw/sink/packet_sink.h"
 #include "mw/zlm/internal/config_validator.h"
 
-namespace mw::streamer::input {
+namespace mw::streamer {
 namespace {
 
 void ValidatePolicy(const ReconnectPolicy& policy) {
@@ -176,8 +176,8 @@ std::optional<std::string> FindCodecParametersDifference(
 }
 
 std::optional<std::string> FindStreamsDifference(
-    const std::vector<ffmpeg::StreamInfo>& left,
-    const std::vector<ffmpeg::StreamInfo>& right) {
+    const std::vector<StreamInfo>& left,
+    const std::vector<StreamInfo>& right) {
   if (left.size() != right.size()) {
     return "track_count";
   }
@@ -211,13 +211,13 @@ class PlayerProxy::Impl final
        ReconnectPolicy reconnect_policy)
       : poller_(std::move(poller)), reconnect_policy_(reconnect_policy) {
     if (!poller_) {
-      init::internal::EnsureInitialized();
+      internal::EnsureInitialized();
       poller_ = toolkit::EventPollerPool::Instance().getPoller();
     }
     ValidatePolicy(reconnect_policy_);
   }
 
-  void AddPacketSink(std::unique_ptr<sink::PacketSink> sink) {
+  void AddPacketSink(std::unique_ptr<PacketSink> sink) {
     if (!sink) {
       throw std::invalid_argument("PacketSink不能为空");
     }
@@ -256,8 +256,8 @@ class PlayerProxy::Impl final
         false);
   }
 
-  void Start(std::string url, zlm::PlayerConfig config) {
-    zlm::internal::ValidatePlayerConfig(config);
+  void Start(std::string url, PlayerConfig config) {
+    internal::ValidatePlayerConfig(config);
     started_.store(true, std::memory_order_relaxed);
     auto self = shared_from_this();
     poller_->async(
@@ -343,7 +343,7 @@ class PlayerProxy::Impl final
   struct Binding {
     mediakit::Track::Ptr track;
     mediakit::FrameWriterInterface* delegate = nullptr;
-    converter::ZlmPacketConverter::Ptr packet_converter;
+    ZlmPacketConverter::Ptr packet_converter;
     std::unique_ptr<mediakit::Stamp> stamp;
   };
 
@@ -356,7 +356,7 @@ class PlayerProxy::Impl final
     bool revise_timestamps = false;
     bool paused = false;
     std::shared_ptr<mediakit::MediaPlayer> player;
-    std::vector<ffmpeg::StreamInfo> streams;
+    std::vector<StreamInfo> streams;
     std::vector<Binding> bindings;
   };
 
@@ -367,7 +367,7 @@ class PlayerProxy::Impl final
     }
   }
 
-  void StartOnPoller(std::string url, zlm::PlayerConfig config) {
+  void StartOnPoller(std::string url, PlayerConfig config) {
     const auto current = state();
     if (current != PlayerState::kIdle && current != PlayerState::kEnded &&
         current != PlayerState::kFailed && current != PlayerState::kStopped) {
@@ -598,7 +598,8 @@ class PlayerProxy::Impl final
     attempt->generation.store(new_generation, std::memory_order_release);
     SetSinkStreamsOnPoller(new_generation, attempt->streams);
     if (on_timeline_reset_) {
-      on_timeline_reset_(new_generation, TimelineResetReason::kSeek, position);
+      on_timeline_reset_(new_generation, PlayerTimelineResetReason::kSeek,
+                         position);
     }
 
     attempt->accepting_frames.store(true, std::memory_order_release);
@@ -779,7 +780,7 @@ class PlayerProxy::Impl final
                 return left->getIndex() < right->getIndex();
               });
 
-    std::vector<ffmpeg::StreamInfo> streams;
+    std::vector<StreamInfo> streams;
     std::vector<Binding> bindings;
     streams.reserve(tracks.size());
     bindings.reserve(tracks.size());
@@ -790,12 +791,12 @@ class PlayerProxy::Impl final
     int stream_index = 0;
     for (const auto& track : tracks) {
       auto codec_parameters =
-          std::make_shared<converter::ZlmCodecParametersConverter>(track);
+          std::make_shared<ZlmCodecParametersConverter>(track);
       auto packet_converter =
-          std::make_shared<converter::ZlmPacketConverter>(track, stream_index);
+          std::make_shared<ZlmPacketConverter>(track, stream_index);
 
       packet_converter->SetOnPacket(
-          [weak_self, weak_attempt](const ffmpeg::Packet& packet) {
+          [weak_self, weak_attempt](const Packet& packet) {
             auto self = weak_self.lock();
             auto current_attempt = weak_attempt.lock();
             if (!self || !current_attempt ||
@@ -813,7 +814,7 @@ class PlayerProxy::Impl final
             return true;
           });
 
-      ffmpeg::StreamInfo stream;
+      StreamInfo stream;
       stream.stream_index = stream_index;
       stream.codec_parameters = codec_parameters->codec_parameters();
       stream.time_base = codec_parameters->time_base();
@@ -991,7 +992,7 @@ class PlayerProxy::Impl final
 
   void SetSinkStreamsOnPoller(
       std::uint64_t generation,
-      const std::vector<ffmpeg::StreamInfo>& streams) noexcept {
+      const std::vector<StreamInfo>& streams) noexcept {
     sink_generation_ = generation;
     for (const auto& sink : packet_sinks_) {
       sink->SetStreams(generation, streams);
@@ -1018,13 +1019,13 @@ class PlayerProxy::Impl final
 
   std::shared_ptr<toolkit::EventPoller> poller_;
   ReconnectPolicy reconnect_policy_;
-  zlm::PlayerConfig config_;
+  PlayerConfig config_;
   std::string url_;
-  std::optional<std::vector<ffmpeg::StreamInfo>> initial_streams_;
+  std::optional<std::vector<StreamInfo>> initial_streams_;
   std::shared_ptr<Attempt> attempt_;
   toolkit::TaskCancelableImp<std::uint64_t()>::Ptr retry_task_;
 
-  std::vector<std::unique_ptr<sink::PacketSink>> packet_sinks_;
+  std::vector<std::unique_ptr<PacketSink>> packet_sinks_;
   std::optional<std::uint64_t> sink_generation_;
 
   OnState on_state_;
@@ -1047,7 +1048,7 @@ PlayerProxy::~PlayerProxy() {
   }
 }
 
-void PlayerProxy::AddPacketSink(std::unique_ptr<sink::PacketSink> sink) {
+void PlayerProxy::AddPacketSink(std::unique_ptr<PacketSink> sink) {
   impl_->AddPacketSink(std::move(sink));
 }
 
@@ -1059,7 +1060,7 @@ void PlayerProxy::SetOnTimelineReset(OnTimelineReset callback) {
   impl_->SetOnTimelineReset(std::move(callback));
 }
 
-void PlayerProxy::Start(std::string url, zlm::PlayerConfig config) {
+void PlayerProxy::Start(std::string url, PlayerConfig config) {
   impl_->Start(std::move(url), std::move(config));
 }
 
@@ -1098,4 +1099,4 @@ std::shared_ptr<toolkit::EventPoller> PlayerProxy::poller() const {
   return impl_->poller();
 }
 
-}  // namespace mw::streamer::input
+}  // namespace mw::streamer

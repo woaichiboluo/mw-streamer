@@ -5,7 +5,7 @@ extern "C" {
 #include <libavcodec/codec_par.h>
 }
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 class CodecParameters final {
  public:
@@ -27,6 +27,6 @@ class CodecParameters final {
   AVCodecParameters* parameters_ = nullptr;
 };
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_FFMPEG_CODEC_PARAMETERS_H_

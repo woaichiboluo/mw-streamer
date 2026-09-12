@@ -8,10 +8,10 @@ extern "C" {
 
 #include "mw/ffmpeg/hardware_context.h"
 
-namespace mw::streamer::processor::internal {
+namespace mw::streamer::internal {
 
 MwStreamerExecutionContext MakeProcessorExecutionContext(
-    const ffmpeg::HardwareContext* hardware_context) {
+    const HardwareContext* hardware_context) {
   if (!hardware_context) {
     return {kMwStreamerExecutionCpu};
   }
@@ -24,4 +24,4 @@ MwStreamerExecutionContext MakeProcessorExecutionContext(
   }
 }
 
-}  // namespace mw::streamer::processor::internal
+}  // namespace mw::streamer::internal

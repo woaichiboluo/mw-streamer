@@ -15,11 +15,11 @@ namespace toolkit {
 class EventPoller;
 }
 
-namespace mw::streamer::sink {
+namespace mw::streamer {
 class PacketSink;
 }
 
-namespace mw::streamer::input {
+namespace mw::streamer {
 
 enum class PlayerState {
   kIdle,
@@ -39,7 +39,7 @@ enum class ControlResult {
   kFailed,
 };
 
-enum class TimelineResetReason {
+enum class PlayerTimelineResetReason {
   kSeek,
 };
 
@@ -50,7 +50,8 @@ class PlayerProxy final {
       std::uint64_t generation, PlayerState state,
       const toolkit::SockException& reason, bool will_retry)>;
   using OnTimelineReset =
-      std::function<void(std::uint64_t generation, TimelineResetReason reason,
+      std::function<void(std::uint64_t generation,
+                         PlayerTimelineResetReason reason,
                          std::chrono::milliseconds position)>;
   using OnControlCompleted =
       std::function<void(ControlResult result, std::uint64_t generation)>;
@@ -72,7 +73,7 @@ class PlayerProxy final {
   // EndInput, and SetOnState is notified afterwards. No queue or worker is
   // added. Sink methods must not control or
   // destroy this proxy or register another Sink from inside a delivery call.
-  void AddPacketSink(std::unique_ptr<sink::PacketSink> sink);
+  void AddPacketSink(std::unique_ptr<PacketSink> sink);
 
   // Callback setters and control methods are serialized on the owner poller.
   // Callbacks are invoked on that poller. Media delivery belongs to PacketSink;
@@ -83,7 +84,7 @@ class PlayerProxy final {
 
   // One proxy manages one active URL. Start again only after stop completes or
   // the previous finite input reaches a terminal state.
-  void Start(std::string url, zlm::PlayerConfig config = {});
+  void Start(std::string url, PlayerConfig config = {});
 
   // Playback controls are accepted only while a finite local input is Ready.
   // Completion reports that validation passed and the command was synchronously
@@ -108,6 +109,6 @@ class PlayerProxy final {
   std::shared_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::input
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_INPUT_PLAYER_PROXY_H_

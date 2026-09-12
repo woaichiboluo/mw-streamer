@@ -24,14 +24,14 @@ using mediakit::Frame;
 using mediakit::FrameWriterInterface;
 using mediakit::MP4Demuxer;
 using mediakit::Track;
-using mw::streamer::converter::ZlmCodecParametersConverter;
-using mw::streamer::converter::ZlmPacketConverter;
-using mw::streamer::decoder::AudioDecoder;
-using mw::streamer::decoder::AudioDecoderConfig;
-using mw::streamer::ffmpeg::CodecParameters;
-using mw::streamer::ffmpeg::Packet;
-using mw::streamer::ffmpeg::StreamInfo;
-using mw::streamer::resampler::AudioResampler;
+using mw::streamer::ZlmCodecParametersConverter;
+using mw::streamer::ZlmPacketConverter;
+using mw::streamer::AudioDecoder;
+using mw::streamer::AudioDecoderConfig;
+using mw::streamer::CodecParameters;
+using mw::streamer::Packet;
+using mw::streamer::StreamInfo;
+using mw::streamer::AudioResampler;
 
 std::string SamplePath() {
   return std::string(MW_AUDIO_DECODER_TEST_DATA_DIR) + "/h264_aac.mp4";
@@ -79,7 +79,7 @@ TEST_CASE("audio decoder decodes drains and flushes an AAC stream") {
   std::int64_t previous_resampled_pts = AV_NOPTS_VALUE;
   bool valid_frames = true;
   bool valid_resampled_frames = true;
-  resampler.SetOnFrame([&](const mw::streamer::ffmpeg::Frame& output) {
+  resampler.SetOnFrame([&](const mw::streamer::Frame& output) {
     const auto* frame = output.get();
     if (!frame || frame->format != AV_SAMPLE_FMT_FLT ||
         frame->sample_rate != AudioResampler::kOutputSampleRate ||
@@ -97,7 +97,7 @@ TEST_CASE("audio decoder decodes drains and flushes an AAC stream") {
     ++resampled_frames;
     resampled_samples += frame->nb_samples;
   });
-  decoder.SetOnFrame([&](const mw::streamer::ffmpeg::Frame& decoded_frame) {
+  decoder.SetOnFrame([&](const mw::streamer::Frame& decoded_frame) {
     const auto* frame = decoded_frame.get();
     if (!frame || frame->format == AV_SAMPLE_FMT_NONE ||
         frame->sample_rate != 48000 || frame->ch_layout.nb_channels != 1 ||

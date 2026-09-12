@@ -6,7 +6,7 @@
 #include "mw/opencv_adapter/host_frame.h"
 #include "mw/processor/processor.h"
 
-namespace mw::streamer::opencv_adapter {
+namespace mw::opencv_adapter {
 
 class CudaMatAdapter;
 
@@ -49,6 +49,6 @@ class CudaFrame final {
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::opencv_adapter
+}  // namespace mw::opencv_adapter
 
 #endif  // MW_STREAMER_ADAPTERS_OPENCV_INCLUDE_MW_OPENCV_ADAPTER_CUDA_FRAME_H_

@@ -18,10 +18,10 @@
 #include "mw/log/logging.h"
 #include "mw/zlm/internal/config_validator.h"
 
-namespace mw::streamer::output {
+namespace mw::streamer {
 namespace {
 
-using Log = log::Module<log::LogModule::kStreamer>;
+using Log = Module<LogModule::kStreamer>;
 
 constexpr std::string_view kMp4Extension = ".mp4";
 constexpr std::string_view kHlsExtension = ".m3u8";
@@ -170,11 +170,11 @@ class Fmp4FileTarget::Muxer final : public mediakit::MP4MuxerInterface {
 class HlsFmp4FileTarget::Recorder final : public mediakit::MP4MuxerMemory {
  public:
   Recorder(const std::filesystem::path& path,
-           const zlm::RecordingConfig& config, bool preserve_packets)
+           const RecordingConfig& config, bool preserve_packets)
       : preserve_packets_(preserve_packets),
         path_(path),
         hls_(std::make_shared<mediakit::HlsMakerImp>(
-            true, path.string(), std::string(),
+            true, path.generic_string(), std::string(),
             static_cast<std::uint32_t>(config.file_buffer_size),
             static_cast<float>(config.hls_segment_duration.count()) / 1000.0F,
             kHlsRecordingSegmentCount, false, ".mp4")) {
@@ -217,12 +217,12 @@ class HlsFmp4FileTarget::Recorder final : public mediakit::MP4MuxerMemory {
 
 Fmp4FileTarget::Fmp4FileTarget(const std::filesystem::path& requested_path,
                                const std::vector<mediakit::Track::Ptr>& tracks,
-                               zlm::RecordingConfig config,
+                               RecordingConfig config,
                                std::chrono::system_clock::time_point start_time,
                                bool preserve_packets)
     : preserve_packets_(preserve_packets),
       path_(MakeTimestampedFilePath(requested_path, start_time)) {
-  zlm::internal::ValidateRecordingConfig(config);
+  internal::ValidateRecordingConfig(config);
   muxer_ =
       std::make_shared<Muxer>(path_, config.file_buffer_size, preserve_packets);
   try {
@@ -266,11 +266,11 @@ const std::filesystem::path& Fmp4FileTarget::path() const noexcept {
 HlsFmp4FileTarget::HlsFmp4FileTarget(
     const std::filesystem::path& requested_path,
     const std::vector<mediakit::Track::Ptr>& tracks,
-    zlm::RecordingConfig config,
+    RecordingConfig config,
     std::chrono::system_clock::time_point start_time, bool preserve_packets)
     : preserve_packets_(preserve_packets),
       path_(MakeTimestampedHlsPath(requested_path, start_time)) {
-  zlm::internal::ValidateRecordingConfig(config);
+  internal::ValidateRecordingConfig(config);
   recorder_ = std::make_shared<Recorder>(path_, config, preserve_packets);
   try {
     AddTracks(*recorder_, tracks);
@@ -308,4 +308,4 @@ const std::filesystem::path& HlsFmp4FileTarget::path() const noexcept {
   return path_;
 }
 
-}  // namespace mw::streamer::output
+}  // namespace mw::streamer

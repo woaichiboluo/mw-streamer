@@ -7,7 +7,7 @@
 #include "mw/input/config.h"
 #include "mw/input/input.h"
 
-namespace mw::streamer::input {
+namespace mw::streamer {
 
 // Reads one local file as fast as the synchronous observer accepts packets.
 // Selects at most one audio and one video track, excluding cover artwork.
@@ -31,13 +31,13 @@ class FileInput final : public Input {
   // forcibly interrupted. Calling Stop from a callback terminates.
   void Stop() noexcept override;
   InputState state() const noexcept override;
-  performance::NodeSnapshot GetPerformance() const override;
+  NodeSnapshot GetPerformance() const override;
 
  private:
   class Impl;
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::input
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_INPUT_FILE_INPUT_H_

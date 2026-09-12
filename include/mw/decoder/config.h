@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <string>
 
-namespace mw::streamer::decoder {
+namespace mw::streamer {
 
 enum class VideoDecoderBackend {
   kSoftware,
@@ -32,10 +32,10 @@ struct DecoderSinkConfig {
   // These limits exclude the upstream time cache and lifecycle messages.
   std::size_t audio_decode_queue_capacity = 256;
   std::size_t video_decode_queue_capacity = 128;
-  decoder::AudioDecoderConfig audio_decoder;
-  decoder::VideoDecoderConfig video_decoder;
+  AudioDecoderConfig audio_decoder;
+  VideoDecoderConfig video_decoder;
 };
 
-}  // namespace mw::streamer::decoder
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_DECODER_CONFIG_H_

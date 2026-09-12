@@ -5,9 +5,9 @@
 
 namespace {
 
-using mw::streamer::processor::internal::ExecutionTypeFromName;
-using mw::streamer::processor::internal::ProcessorBoundaryFromName;
-using mw::streamer::processor::internal::ToName;
+using mw::streamer::internal::ExecutionTypeFromName;
+using mw::streamer::internal::ProcessorBoundaryFromName;
+using mw::streamer::internal::ToName;
 
 TEST_CASE("Processor枚举名称支持双向转换") {
   CHECK(ToName(kMwStreamerProcessorTimelineReset) == "timeline_reset");

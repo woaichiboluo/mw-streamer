@@ -3,7 +3,7 @@
 #include <array>
 #include <utility>
 
-namespace mw::streamer::converter::internal {
+namespace mw::streamer::internal {
 namespace {
 
 constexpr std::array kCodecMappings{
@@ -38,4 +38,4 @@ AVCodecID ToFfmpegCodecId(mediakit::CodecId codec_id) noexcept {
   return AV_CODEC_ID_NONE;
 }
 
-}  // namespace mw::streamer::converter::internal
+}  // namespace mw::streamer::internal

@@ -14,16 +14,16 @@
 
 namespace {
 
-using mw::streamer::input::InputState;
-using mw::streamer::input::ZlmInput;
-using mw::streamer::input::ZlmInputConfig;
-using mw::streamer::output::RemuxSink;
-using mw::streamer::output::RemuxSinkConfig;
-using mw::streamer::performance::OperationSnapshot;
-using mw::streamer::performance::PerformanceType;
-using mw::streamer::performance::PipelineSnapshot;
-using mw::streamer::sink::PacketSinkState;
-using namespace mw::streamer::pipeline;
+using mw::streamer::InputState;
+using mw::streamer::ZlmInput;
+using mw::streamer::ZlmInputConfig;
+using mw::streamer::RemuxSink;
+using mw::streamer::RemuxSinkConfig;
+using mw::streamer::OperationSnapshot;
+using mw::streamer::PerformanceType;
+using mw::streamer::PipelineSnapshot;
+using mw::streamer::PacketSinkState;
+using namespace mw::streamer;
 
 void PrintPerformance(Pipeline& pipeline,
                       std::optional<PipelineSnapshot>* previous) {

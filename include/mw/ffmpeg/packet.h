@@ -5,7 +5,7 @@ extern "C" {
 #include <libavcodec/packet.h>
 }
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 class Packet final {
  public:
@@ -33,6 +33,6 @@ class Packet final {
   AVPacket* packet_ = nullptr;
 };
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_FFMPEG_PACKET_H_

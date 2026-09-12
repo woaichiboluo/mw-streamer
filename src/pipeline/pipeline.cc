@@ -20,7 +20,7 @@
 #include "mw/processor/analysis_processor_sink.h"
 #include "mw/processor/transform_processor_sink.h"
 
-namespace mw::streamer::pipeline {
+namespace mw::streamer {
 namespace {
 
 std::atomic<std::uint64_t> next_performance_id{1};
@@ -31,7 +31,7 @@ struct OwnedMessage {
   std::vector<std::uint8_t> payload;
   std::optional<MwStreamerMediaTimestamp> timestamp;
 
-  explicit OwnedMessage(const sink::SinkMessage& message)
+  explicit OwnedMessage(const SinkMessage& message)
       : sink_id(message.sink_id),
         type(message.type),
         timestamp(message.timestamp) {
@@ -42,16 +42,16 @@ struct OwnedMessage {
       std::memcpy(payload.data(), message.payload, message.payload_size);
     }
   }
-  sink::SinkMessage view() const {
+  SinkMessage view() const {
     return {sink_id, type, payload.data(), payload.size(), timestamp};
   }
 };
 
 }  // namespace
 
-class Pipeline::Impl final : public input::Input::Observer {
+class Pipeline::Impl final : public Input::Observer {
  public:
-  explicit Impl(std::unique_ptr<input::Input> input)
+  explicit Impl(std::unique_ptr<Input> input)
       : input_(std::move(input)) {
     if (!input_) {
       throw std::invalid_argument("Pipeline输入不能为空");
@@ -67,7 +67,7 @@ class Pipeline::Impl final : public input::Input::Observer {
     sinks_.clear();
   }
 
-  void AddSink(std::unique_ptr<sink::Sink> sink) {
+  void AddSink(std::unique_ptr<Sink> sink) {
     std::lock_guard<std::mutex> lock(control_mutex_);
     if (started_ || stopped_) {
       throw std::logic_error("Sink只能在Pipeline启动或停止之前注册");
@@ -75,7 +75,7 @@ class Pipeline::Impl final : public input::Input::Observer {
     if (!sink) {
       throw std::invalid_argument("Sink不能为空");
     }
-    if (sink->input_type() != sink::SinkMediaType::kPacket) {
+    if (sink->input_type() != SinkMediaType::kPacket) {
       throw std::invalid_argument("Pipeline输入下游必须消费Packet");
     }
     sink->SetOnFatalError(
@@ -103,18 +103,18 @@ class Pipeline::Impl final : public input::Input::Observer {
     if (stopped_) {
       throw std::logic_error("Pipeline停止后不能更新Processor配置");
     }
-    sink::Sink* target = FindSink(processor_id);
+    Sink* target = FindSink(processor_id);
     if (!target) {
       throw std::invalid_argument(
           fmt::format("Processor不存在: {}", processor_id));
     }
     if (auto* analysis =
-            dynamic_cast<processor::AnalysisProcessorSink*>(target)) {
+            dynamic_cast<AnalysisProcessorSink*>(target)) {
       analysis->UpdateConfig(std::move(config));
       return;
     }
     if (auto* transform =
-            dynamic_cast<processor::TransformProcessorSink*>(target)) {
+            dynamic_cast<TransformProcessorSink*>(target)) {
       transform->UpdateConfig(std::move(config));
       return;
     }
@@ -133,7 +133,7 @@ class Pipeline::Impl final : public input::Input::Observer {
     started_ = true;
     try {
       StartMessages();
-      stop_thread_ = std::make_unique<common::Thread>("mw-pipeline-stop",
+      stop_thread_ = std::make_unique<Thread>("mw-pipeline-stop",
                                                       [this]() { RunStop(); });
       SetState(PipelineState::kRunning);
       input_->Start(*this);
@@ -170,13 +170,13 @@ class Pipeline::Impl final : public input::Input::Observer {
     return fatal_error_;
   }
 
-  input::InputStateChanged input_status() const {
+  InputStateChanged input_status() const {
     std::lock_guard<std::mutex> lock(status_mutex_);
     return input_status_;
   }
 
-  performance::PipelineSnapshot GetPerformance() const {
-    performance::PipelineSnapshot snapshot;
+  PipelineSnapshot GetPerformance() const {
+    PipelineSnapshot snapshot;
     snapshot.pipeline_id = performance_id_;
     snapshot.input = input_->GetPerformance();
     snapshot.input.id = "input";
@@ -193,7 +193,7 @@ class Pipeline::Impl final : public input::Input::Observer {
   }
 
  private:
-  sink::Sink* FindSink(const std::string& id) const {
+  Sink* FindSink(const std::string& id) const {
     if (!sinks_by_id_.empty()) {
       const auto found = sinks_by_id_.find(id);
       return found == sinks_by_id_.end() ? nullptr : found->second;
@@ -204,7 +204,7 @@ class Pipeline::Impl final : public input::Input::Observer {
     return nullptr;
   }
 
-  static sink::Sink* FindSink(sink::Sink& sink, const std::string& id) {
+  static Sink* FindSink(Sink& sink, const std::string& id) {
     if (sink.id() == id) return &sink;
     for (const auto& child : sink.downstream()) {
       if (auto* found = FindSink(*child, id)) return found;
@@ -212,7 +212,7 @@ class Pipeline::Impl final : public input::Input::Observer {
     return nullptr;
   }
 
-  void IndexSink(sink::Sink& sink) {
+  void IndexSink(Sink& sink) {
     if (!sinks_by_id_.emplace(sink.id(), &sink).second) {
       throw std::invalid_argument(fmt::format("Sink ID重复: {}", sink.id()));
     }
@@ -227,7 +227,7 @@ class Pipeline::Impl final : public input::Input::Observer {
             "消息路由引用不存在的Sink: {} -> {}", sender, receiver));
       }
       sinks_by_id_.at(sender)->SetMessageSender(
-          [this, target_id = receiver](const sink::SinkMessage& message) {
+          [this, target_id = receiver](const SinkMessage& message) {
             PostMessage(target_id, message);
           });
     }
@@ -238,7 +238,7 @@ class Pipeline::Impl final : public input::Input::Observer {
   }
 
   void PostMessage(const std::string& target_id,
-                   const sink::SinkMessage& message) {
+                   const SinkMessage& message) {
     // Poller already serializes its task queue. This lock only orders task
     // submission before Stop's barrier, preventing a late captured Impl.
     std::lock_guard<std::mutex> lock(message_submission_mutex_);
@@ -251,7 +251,7 @@ class Pipeline::Impl final : public input::Input::Observer {
           }
           // Never hold the submission lock across business callbacks: they
           // may send another message. All sinks outlive Stop's barrier.
-          sinks_by_id_.at(target_id)->DispatchMessage(copy.view());
+          sinks_by_id_.at(target_id)->DispatchSinkMessage(copy.view());
         },
         false);
   }
@@ -277,7 +277,7 @@ class Pipeline::Impl final : public input::Input::Observer {
       state_.store(PipelineState::kFailed);
     }
     stop_requested_.notify_one();
-    log::Module<log::LogModule::kStreamer>::Error("Pipeline发生fatal错误: {}",
+    Module<LogModule::kStreamer>::Error("Pipeline发生fatal错误: {}",
                                                   error);
   }
 
@@ -329,7 +329,7 @@ class Pipeline::Impl final : public input::Input::Observer {
     stop_requested_.notify_one();
   }
 
-  void OnStreamsReady(const media::StreamsReady& streams) noexcept override {
+  void OnStreamsReady(const StreamsReady& streams) noexcept override {
     for (const auto& sink : sinks_) {
       if (state() == PipelineState::kFailed) {
         return;
@@ -338,7 +338,7 @@ class Pipeline::Impl final : public input::Input::Observer {
     }
   }
 
-  void OnPacket(const media::PacketReady& packet) noexcept override {
+  void OnPacket(const PacketReady& packet) noexcept override {
     for (const auto& sink : sinks_) {
       if (state() == PipelineState::kFailed) {
         return;
@@ -347,7 +347,7 @@ class Pipeline::Impl final : public input::Input::Observer {
     }
   }
 
-  void OnTimelineReset(const media::TimelineReset& reset) noexcept override {
+  void OnTimelineReset(const TimelineReset& reset) noexcept override {
     for (const auto& sink : sinks_) {
       if (state() == PipelineState::kFailed) {
         return;
@@ -356,7 +356,7 @@ class Pipeline::Impl final : public input::Input::Observer {
     }
   }
 
-  void OnInputEnded(const media::StreamEnded& end) noexcept override {
+  void OnInputEnded(const StreamEnded& end) noexcept override {
     for (const auto& sink : sinks_) {
       if (state() == PipelineState::kFailed) {
         return;
@@ -366,7 +366,7 @@ class Pipeline::Impl final : public input::Input::Observer {
   }
 
   void OnInputStateChanged(
-      const input::InputStateChanged& state) noexcept override {
+      const InputStateChanged& state) noexcept override {
     std::lock_guard<std::mutex> lock(status_mutex_);
     input_status_ = state;
   }
@@ -384,28 +384,28 @@ class Pipeline::Impl final : public input::Input::Observer {
   std::atomic<PipelineState> state_{PipelineState::kIdle};
   bool started_ = false;
   bool stopped_ = false;
-  input::InputStateChanged input_status_{
-      0, input::InputState::kIdle, {}, false};
+  InputStateChanged input_status_{
+      0, InputState::kIdle, {}, false};
   // Setup-only routes and immutable runtime index; ownership stays in sinks_.
   std::unordered_map<std::string, std::string> message_routes_;
-  std::unordered_map<std::string, sink::Sink*> sinks_by_id_;
+  std::unordered_map<std::string, Sink*> sinks_by_id_;
   std::mutex message_submission_mutex_;
   toolkit::EventPoller::Ptr message_poller_;
   bool messages_open_ = false;
-  std::vector<std::unique_ptr<sink::Sink>> sinks_;
-  std::unique_ptr<input::Input> input_;
-  std::unique_ptr<common::Thread> stop_thread_;
+  std::vector<std::unique_ptr<Sink>> sinks_;
+  std::unique_ptr<Input> input_;
+  std::unique_ptr<Thread> stop_thread_;
 };
 
-Pipeline::Pipeline(std::unique_ptr<input::Input> input)
+Pipeline::Pipeline(std::unique_ptr<Input> input)
     : impl_([&input] {
-        init::internal::EnsureInitialized();
+        internal::EnsureInitialized();
         return std::make_unique<Impl>(std::move(input));
       }()) {}
 
 Pipeline::~Pipeline() = default;
 
-void Pipeline::AddSink(std::unique_ptr<sink::Sink> sink) {
+void Pipeline::AddSink(std::unique_ptr<Sink> sink) {
   impl_->AddSink(std::move(sink));
 }
 
@@ -427,12 +427,12 @@ PipelineState Pipeline::state() const noexcept { return impl_->state(); }
 
 std::string Pipeline::error() const { return impl_->error(); }
 
-input::InputStateChanged Pipeline::input_status() const {
+InputStateChanged Pipeline::input_status() const {
   return impl_->input_status();
 }
 
-performance::PipelineSnapshot Pipeline::GetPerformance() const {
+PipelineSnapshot Pipeline::GetPerformance() const {
   return impl_->GetPerformance();
 }
 
-}  // namespace mw::streamer::pipeline
+}  // namespace mw::streamer

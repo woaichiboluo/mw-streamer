@@ -6,7 +6,7 @@
 
 #include "mw/ffmpeg/error.h"
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 Packet::Packet() : packet_(av_packet_alloc()) {
   if (!packet_) {
@@ -79,4 +79,4 @@ void Packet::Unref() noexcept {
   }
 }
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer

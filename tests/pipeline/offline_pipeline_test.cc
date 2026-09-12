@@ -15,19 +15,19 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::decoder::DecoderSink;
-using mw::streamer::decoder::DecoderSinkConfig;
-using mw::streamer::input::FileInput;
-using mw::streamer::input::FileInputConfig;
-using mw::streamer::input::InputState;
-using mw::streamer::media::FrameReady;
-using mw::streamer::media::FrameStreamsReady;
-using mw::streamer::media::StreamEnded;
-using mw::streamer::media::StreamEndReason;
-using mw::streamer::sink::FatalError;
-using mw::streamer::sink::Sink;
-using mw::streamer::sink::SinkMediaType;
-using namespace mw::streamer::pipeline;
+using mw::streamer::DecoderSink;
+using mw::streamer::DecoderSinkConfig;
+using mw::streamer::FileInput;
+using mw::streamer::FileInputConfig;
+using mw::streamer::InputState;
+using mw::streamer::FrameReady;
+using mw::streamer::FrameStreamsReady;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
+using mw::streamer::FatalError;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
+using namespace mw::streamer;
 
 struct FileFrames {
   std::mutex mutex;
@@ -101,7 +101,7 @@ std::unique_ptr<DecoderSink> MakeDecoder(FileFrames& frames) {
   config.audio_decode_queue_capacity = 1;
   config.video_decode_queue_capacity = 1;
   config.video_decoder.backend =
-      mw::streamer::decoder::VideoDecoderBackend::kSoftware;
+      mw::streamer::VideoDecoderBackend::kSoftware;
   auto decoder = std::make_unique<DecoderSink>("decoder", config);
   decoder->AddSink(std::make_unique<FileCounter>(frames));
   return decoder;

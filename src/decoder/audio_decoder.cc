@@ -15,27 +15,27 @@ extern "C" {
 #include "mw/log/logging.h"
 #include "mw/performance/internal/stopwatch.h"
 
-namespace mw::streamer::decoder {
+namespace mw::streamer {
 namespace {
 
-using Log = log::Module<log::LogModule::kStreamer>;
+using Log = Module<LogModule::kStreamer>;
 
 }  // namespace
 
 class AudioDecoder::Impl final {
  public:
-  Impl(ffmpeg::StreamInfo stream_info, AudioDecoderConfig config)
+  Impl(StreamInfo stream_info, AudioDecoderConfig config)
       : stream_info_(std::move(stream_info)),
         config_(std::move(config)),
         context_(internal::FindDecoder(stream_info_, config_.decoder_name,
                                        AVMEDIA_TYPE_AUDIO)) {
     const auto* codec = context_.get()->codec;
-    ffmpeg::ThrowIfError(
+    ThrowIfError(
         avcodec_parameters_to_context(context_.get(),
                                       stream_info_.codec_parameters.get()),
         "复制音频解码参数");
     context_.get()->pkt_timebase = stream_info_.time_base;
-    ffmpeg::ThrowIfError(avcodec_open2(context_.get(), codec, nullptr),
+    ThrowIfError(avcodec_open2(context_.get(), codec, nullptr),
                          "打开音频解码器");
     Log::Info(
         "音频解码器已打开: stream_index={}, decoder_name={}, sample_rate={}, "
@@ -47,7 +47,7 @@ class AudioDecoder::Impl final {
 
   void SetOnFrame(OnFrame callback) { on_frame_ = std::move(callback); }
 
-  AudioDecodeResult Decode(const ffmpeg::Packet& packet) {
+  AudioDecodeResult Decode(const Packet& packet) {
     const auto* raw_packet = packet.get();
     if (!raw_packet || raw_packet->stream_index != stream_info_.stream_index) {
       throw std::invalid_argument("音频AVPacket为空或stream_index不匹配");
@@ -57,7 +57,7 @@ class AudioDecoder::Impl final {
     }
 
     AudioDecodeResult result;
-    performance::internal::Stopwatch stopwatch;
+    internal::Stopwatch stopwatch;
     SendPacket(raw_packet, result, stopwatch);
     result.service_time = stopwatch.elapsed();
     return result;
@@ -69,7 +69,7 @@ class AudioDecoder::Impl final {
       return decode_result;
     }
 
-    performance::internal::Stopwatch stopwatch;
+    internal::Stopwatch stopwatch;
     for (;;) {
       const auto result = stopwatch.Measure(
           [this]() { return avcodec_send_packet(context_.get(), nullptr); });
@@ -80,7 +80,7 @@ class AudioDecoder::Impl final {
         continue;
       }
       if (result != AVERROR_EOF) {
-        ffmpeg::ThrowIfError(result, "提交音频解码结束标记");
+        ThrowIfError(result, "提交音频解码结束标记");
       }
       break;
     }
@@ -99,7 +99,7 @@ class AudioDecoder::Impl final {
     Log::Debug("音频解码器已刷新: stream_index={}", stream_info_.stream_index);
   }
 
-  const ffmpeg::StreamInfo& stream_info() const noexcept {
+  const StreamInfo& stream_info() const noexcept {
     return stream_info_;
   }
 
@@ -107,7 +107,7 @@ class AudioDecoder::Impl final {
 
  private:
   void SendPacket(const AVPacket* packet, AudioDecodeResult& decode_result,
-                  performance::internal::Stopwatch& stopwatch) {
+                  internal::Stopwatch& stopwatch) {
     for (;;) {
       const auto result = stopwatch.Measure([this, packet]() {
         return avcodec_send_packet(context_.get(), packet);
@@ -118,7 +118,7 @@ class AudioDecoder::Impl final {
         }
         continue;
       }
-      ffmpeg::ThrowIfError(result, "提交音频压缩包");
+      ThrowIfError(result, "提交音频压缩包");
       break;
     }
     ReceiveFrames(&decode_result, &stopwatch);
@@ -126,7 +126,7 @@ class AudioDecoder::Impl final {
 
   std::size_t ReceiveFrames(
       AudioDecodeResult* decode_result = nullptr,
-      performance::internal::Stopwatch* stopwatch = nullptr) {
+      internal::Stopwatch* stopwatch = nullptr) {
     std::size_t frame_count = 0;
     for (;;) {
       frame_.Unref();
@@ -138,7 +138,7 @@ class AudioDecoder::Impl final {
       if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) {
         return frame_count;
       }
-      ffmpeg::ThrowIfError(result, "接收音频解码帧");
+      ThrowIfError(result, "接收音频解码帧");
       ++frame_count;
       if (decode_result) {
         decode_result->samples +=
@@ -150,15 +150,15 @@ class AudioDecoder::Impl final {
     }
   }
 
-  ffmpeg::StreamInfo stream_info_;
+  StreamInfo stream_info_;
   AudioDecoderConfig config_;
-  ffmpeg::CodecContext context_;
-  ffmpeg::Frame frame_;
+  CodecContext context_;
+  Frame frame_;
   OnFrame on_frame_;
   bool drained_ = false;
 };
 
-AudioDecoder::AudioDecoder(ffmpeg::StreamInfo stream_info,
+AudioDecoder::AudioDecoder(StreamInfo stream_info,
                            AudioDecoderConfig config)
     : impl_(std::make_unique<Impl>(std::move(stream_info), std::move(config))) {
 }
@@ -169,7 +169,7 @@ void AudioDecoder::SetOnFrame(OnFrame callback) {
   impl_->SetOnFrame(std::move(callback));
 }
 
-AudioDecodeResult AudioDecoder::Decode(const ffmpeg::Packet& packet) {
+AudioDecodeResult AudioDecoder::Decode(const Packet& packet) {
   return impl_->Decode(packet);
 }
 
@@ -177,7 +177,7 @@ AudioDecodeResult AudioDecoder::Drain() { return impl_->Drain(); }
 
 void AudioDecoder::Flush() { impl_->Flush(); }
 
-const ffmpeg::StreamInfo& AudioDecoder::stream_info() const noexcept {
+const StreamInfo& AudioDecoder::stream_info() const noexcept {
   return impl_->stream_info();
 }
 
@@ -185,4 +185,4 @@ const AudioDecoderConfig& AudioDecoder::config() const noexcept {
   return impl_->config();
 }
 
-}  // namespace mw::streamer::decoder
+}  // namespace mw::streamer

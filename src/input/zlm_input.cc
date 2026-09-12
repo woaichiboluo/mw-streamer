@@ -17,42 +17,42 @@
 #include "mw/sink/packet_sink.h"
 #include "mw/zlm/internal/config_validator.h"
 
-namespace mw::streamer::input {
+namespace mw::streamer {
 namespace {
 
-InputState MapState(input::PlayerState state) noexcept {
+InputState MapState(PlayerState state) noexcept {
   switch (state) {
-    case input::PlayerState::kIdle:
+    case PlayerState::kIdle:
       return InputState::kIdle;
-    case input::PlayerState::kConnecting:
+    case PlayerState::kConnecting:
       return InputState::kConnecting;
-    case input::PlayerState::kReady:
+    case PlayerState::kReady:
       return InputState::kReady;
-    case input::PlayerState::kWaitingRetry:
+    case PlayerState::kWaitingRetry:
       return InputState::kWaitingRetry;
-    case input::PlayerState::kEnded:
+    case PlayerState::kEnded:
       return InputState::kEnded;
-    case input::PlayerState::kFailed:
+    case PlayerState::kFailed:
       return InputState::kFailed;
-    case input::PlayerState::kStopped:
+    case PlayerState::kStopped:
       return InputState::kStopped;
   }
   std::terminate();
 }
 
-media::StreamEndReason MapEndReason(input::PlayerState state) noexcept {
+StreamEndReason MapEndReason(PlayerState state) noexcept {
   switch (state) {
-    case input::PlayerState::kEnded:
-      return media::StreamEndReason::kEof;
-    case input::PlayerState::kWaitingRetry:
-      return media::StreamEndReason::kInterrupted;
-    case input::PlayerState::kFailed:
-      return media::StreamEndReason::kFailed;
-    case input::PlayerState::kStopped:
-      return media::StreamEndReason::kStopped;
-    case input::PlayerState::kIdle:
-    case input::PlayerState::kConnecting:
-    case input::PlayerState::kReady:
+    case PlayerState::kEnded:
+      return StreamEndReason::kEof;
+    case PlayerState::kWaitingRetry:
+      return StreamEndReason::kInterrupted;
+    case PlayerState::kFailed:
+      return StreamEndReason::kFailed;
+    case PlayerState::kStopped:
+      return StreamEndReason::kStopped;
+    case PlayerState::kIdle:
+    case PlayerState::kConnecting:
+    case PlayerState::kReady:
       std::terminate();
   }
   std::terminate();
@@ -83,9 +83,9 @@ class ZlmInput::Impl final {
     if (config_.url.empty()) {
       throw std::invalid_argument("输入URL不能为空");
     }
-    zlm::internal::ValidatePlayerConfig(config_.player);
-    init::internal::EnsureInitialized();
-    player_ = std::make_unique<input::PlayerProxy>(
+    internal::ValidatePlayerConfig(config_.player);
+    internal::EnsureInitialized();
+    player_ = std::make_unique<PlayerProxy>(
         toolkit::EventPollerPool::Instance().extractPoller(),
         config_.reconnect_policy);
     if (player_->poller()->isCurrentThread()) {
@@ -95,7 +95,7 @@ class ZlmInput::Impl final {
     }
     player_->AddPacketSink(std::make_unique<Bridge>(*this));
     player_->SetOnState(
-        [this](std::uint64_t generation, input::PlayerState state,
+        [this](std::uint64_t generation, PlayerState state,
                const toolkit::SockException& reason, bool will_retry) {
           state_.store(MapState(state), std::memory_order_relaxed);
           if (observer_) {
@@ -138,35 +138,35 @@ class ZlmInput::Impl final {
     return state_.load(std::memory_order_relaxed);
   }
 
-  performance::NodeSnapshot GetPerformance() const {
-    performance::NodeSnapshot snapshot;
+  NodeSnapshot GetPerformance() const {
+    NodeSnapshot snapshot;
     snapshot.name = "ZlmInput";
     snapshot.operations.push_back(performance_.GetSnapshot());
     return snapshot;
   }
 
  private:
-  class Bridge final : public sink::PacketSink {
+  class Bridge final : public PacketSink {
    public:
     explicit Bridge(Impl& owner) : owner_(owner) {}
 
     void SetStreams(
         std::uint64_t generation,
-        const std::vector<ffmpeg::StreamInfo>& streams) noexcept override {
+        const std::vector<StreamInfo>& streams) noexcept override {
       if (owner_.observer_) {
         if (generation_ && *generation_ != generation) {
-          owner_.observer_->OnTimelineReset(media::TimelineReset{
-              generation, media::TimelineResetReason::kReconnect,
+          owner_.observer_->OnTimelineReset(TimelineReset{
+              generation, TimelineResetReason::kReconnect,
               std::nullopt});
         }
         owner_.observer_->OnStreamsReady(
-            media::StreamsReady{generation, streams});
+            StreamsReady{generation, streams});
       }
       generation_ = generation;
     }
 
     void Write(std::uint64_t generation,
-               const ffmpeg::Packet& packet) noexcept override {
+               const Packet& packet) noexcept override {
       if (owner_.observer_) {
         // Delivery may synchronously execute downstream business work. Input
         // throughput counts packets here without timing that downstream work.
@@ -174,7 +174,7 @@ class ZlmInput::Impl final {
           owner_.performance_.AddOutput(1, packet->size);
         }
         owner_.observer_->OnPacket(
-            media::PacketReady{generation, packet.Ref()});
+            PacketReady{generation, packet.Ref()});
       }
     }
 
@@ -183,7 +183,7 @@ class ZlmInput::Impl final {
       owner_.state_.store(MapState(state), std::memory_order_relaxed);
       if (owner_.observer_) {
         owner_.observer_->OnInputEnded(
-            media::StreamEnded{generation, MapEndReason(state)});
+            StreamEnded{generation, MapEndReason(state)});
       }
     }
 
@@ -197,10 +197,10 @@ class ZlmInput::Impl final {
   bool started_ = false;
   bool stopped_ = false;
   std::atomic<InputState> state_{InputState::kIdle};
-  performance::OperationRecorder performance_{
-      performance::PerformanceType::kInput, performance::PerformanceUnit::kNone,
-      performance::PerformanceUnit::kPacket};
-  std::unique_ptr<input::PlayerProxy> player_;
+  OperationRecorder performance_{
+      PerformanceType::kInput, PerformanceUnit::kNone,
+      PerformanceUnit::kPacket};
+  std::unique_ptr<PlayerProxy> player_;
   // Accessed only on the player's owner poller.
   Observer* observer_ = nullptr;
 };
@@ -216,8 +216,8 @@ void ZlmInput::Stop() noexcept { impl_->Stop(); }
 
 InputState ZlmInput::state() const noexcept { return impl_->state(); }
 
-performance::NodeSnapshot ZlmInput::GetPerformance() const {
+NodeSnapshot ZlmInput::GetPerformance() const {
   return impl_->GetPerformance();
 }
 
-}  // namespace mw::streamer::input
+}  // namespace mw::streamer

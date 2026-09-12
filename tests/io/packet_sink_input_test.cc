@@ -16,12 +16,12 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::ffmpeg::Packet;
-using mw::streamer::ffmpeg::StreamInfo;
-using mw::streamer::input::ControlResult;
-using mw::streamer::input::PlayerProxy;
-using mw::streamer::input::PlayerState;
-using mw::streamer::sink::PacketSink;
+using mw::streamer::Packet;
+using mw::streamer::StreamInfo;
+using mw::streamer::ControlResult;
+using mw::streamer::PlayerProxy;
+using mw::streamer::PlayerState;
+using mw::streamer::PacketSink;
 
 std::string SamplePath() {
   return std::string(MW_INPUT_PLAYER_PROXY_TEST_DATA_DIR) + "/h264_aac.mp4";

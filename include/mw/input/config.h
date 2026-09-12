@@ -6,7 +6,7 @@
 
 #include "mw/zlm/config.h"
 
-namespace mw::streamer::input {
+namespace mw::streamer {
 
 struct ReconnectPolicy {
   // Number of retries after the initial attempt. A negative value retries
@@ -23,10 +23,10 @@ struct FileInputConfig {
 
 struct ZlmInputConfig {
   std::string url;
-  input::ReconnectPolicy reconnect_policy;
-  zlm::PlayerConfig player;
+  ReconnectPolicy reconnect_policy;
+  PlayerConfig player;
 };
 
-}  // namespace mw::streamer::input
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_INPUT_CONFIG_H_

@@ -4,7 +4,7 @@
 
 #include "mw/media/internal/codec_bridge.h"
 
-namespace mw::streamer::processor::internal {
+namespace mw::streamer::internal {
 namespace {
 
 MwStreamerRational ToProcessorRational(AVRational value) {
@@ -14,14 +14,14 @@ MwStreamerRational ToProcessorRational(AVRational value) {
 }  // namespace
 
 MwStreamerProcessorSourceInfo MakeProcessorSourceInfo(
-    const std::optional<ffmpeg::StreamInfo>& audio_stream,
-    const std::optional<ffmpeg::StreamInfo>& video_stream) {
+    const std::optional<StreamInfo>& audio_stream,
+    const std::optional<StreamInfo>& video_stream) {
   MwStreamerProcessorSourceInfo source_info{};
   if (video_stream) {
     const auto* parameters = video_stream->codec_parameters.get();
     source_info.has_video = 1;
     source_info.video.codec =
-        media::internal::ToMwStreamerCodec(parameters->codec_id);
+        internal::ToMwStreamerCodec(parameters->codec_id);
     source_info.video.width = static_cast<std::uint32_t>(parameters->width);
     source_info.video.height = static_cast<std::uint32_t>(parameters->height);
     source_info.video.frame_rate =
@@ -34,7 +34,7 @@ MwStreamerProcessorSourceInfo MakeProcessorSourceInfo(
     const auto* parameters = audio_stream->codec_parameters.get();
     source_info.has_audio = 1;
     source_info.audio.codec =
-        media::internal::ToMwStreamerCodec(parameters->codec_id);
+        internal::ToMwStreamerCodec(parameters->codec_id);
     source_info.audio.sample_rate =
         static_cast<std::uint32_t>(parameters->sample_rate);
     source_info.audio.channel_count =
@@ -44,4 +44,4 @@ MwStreamerProcessorSourceInfo MakeProcessorSourceInfo(
   return source_info;
 }
 
-}  // namespace mw::streamer::processor::internal
+}  // namespace mw::streamer::internal

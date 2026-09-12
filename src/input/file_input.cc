@@ -15,7 +15,7 @@ extern "C" {
 #include "mw/ffmpeg/input_format_context.h"
 #include "mw/performance/operation_recorder.h"
 
-namespace mw::streamer::input {
+namespace mw::streamer {
 namespace {
 
 // Checking before acquiring the control mutex also catches a callback trying
@@ -43,18 +43,18 @@ int FindBestStream(AVFormatContext& context, AVMediaType media_type) {
   return -1;
 }
 
-media::StreamsReady SelectStreams(AVFormatContext& context) {
-  media::StreamsReady result{
-      kGeneration, {}, media::StreamDeliveryMode::kOffline};
+StreamsReady SelectStreams(AVFormatContext& context) {
+  StreamsReady result{
+      kGeneration, {}, StreamDeliveryMode::kOffline};
   for (const auto type : {AVMEDIA_TYPE_AUDIO, AVMEDIA_TYPE_VIDEO}) {
     const int index = FindBestStream(context, type);
     if (index < 0) {
       continue;
     }
     const auto& stream = *context.streams[index];
-    ffmpeg::StreamInfo info;
+    StreamInfo info;
     info.stream_index = stream.index;
-    info.codec_parameters = ffmpeg::CodecParameters(*stream.codecpar);
+    info.codec_parameters = CodecParameters(*stream.codecpar);
     info.time_base = stream.time_base;
     info.Validate();
     result.streams.push_back(std::move(info));
@@ -86,7 +86,7 @@ class FileInput::Impl final {
     observer_ = &observer;
     try {
       worker_ =
-          std::make_unique<common::Thread>("file-input", [this] { Run(); });
+          std::make_unique<Thread>("file-input", [this] { Run(); });
       started_ = true;
     } catch (...) {
       observer_ = nullptr;
@@ -116,7 +116,7 @@ class FileInput::Impl final {
     return state_.load(std::memory_order_relaxed);
   }
 
-  performance::NodeSnapshot GetPerformance() const {
+  NodeSnapshot GetPerformance() const {
     return {{}, "FileInput", {performance_.GetSnapshot()}, {}};
   }
 
@@ -134,7 +134,7 @@ class FileInput::Impl final {
 
   void ReadFile() {
     // An absolute path prevents FFmpeg interpreting a local name as a protocol.
-    ffmpeg::InputFormatContext context(
+    InputFormatContext context(
         std::filesystem::absolute(config_.path).string(), {InterruptIo, this});
     context.FindStreamInfo();
     if (stop_requested_.load(std::memory_order_relaxed)) {
@@ -145,7 +145,7 @@ class FileInput::Impl final {
     observer_->OnStreamsReady(streams);
     SetState(InputState::kReady);
 
-    media::PacketReady packet{kGeneration, ffmpeg::Packet{}};
+    PacketReady packet{kGeneration, Packet{}};
     while (!stop_requested_.load(std::memory_order_relaxed)) {
       packet.packet.Unref();
       if (!context.ReadPacket(packet.packet)) {
@@ -167,11 +167,11 @@ class FileInput::Impl final {
     SetState(InputState::kConnecting);
     std::string error;
     auto state = InputState::kFailed;
-    auto reason = media::StreamEndReason::kFailed;
+    auto reason = StreamEndReason::kFailed;
     try {
       ReadFile();
       state = InputState::kEnded;
-      reason = media::StreamEndReason::kEof;
+      reason = StreamEndReason::kEof;
     } catch (const std::exception& exception) {
       error = exception.what();
     } catch (...) {
@@ -179,7 +179,7 @@ class FileInput::Impl final {
     }
     if (stop_requested_.load(std::memory_order_relaxed)) {
       state = InputState::kStopped;
-      reason = media::StreamEndReason::kStopped;
+      reason = StreamEndReason::kStopped;
       error.clear();
     }
     state_.store(state, std::memory_order_relaxed);
@@ -196,13 +196,13 @@ class FileInput::Impl final {
   bool stopped_ = false;
   std::atomic<bool> stop_requested_{false};
   std::atomic<InputState> state_{InputState::kIdle};
-  std::unique_ptr<common::Thread> worker_;
+  std::unique_ptr<Thread> worker_;
   // Borrowed until Join; accessed only on the file thread while running.
   Observer* observer_ = nullptr;
   bool streams_ready_ = false;
-  performance::OperationRecorder performance_{
-      performance::PerformanceType::kInput, performance::PerformanceUnit::kNone,
-      performance::PerformanceUnit::kPacket};
+  OperationRecorder performance_{
+      PerformanceType::kInput, PerformanceUnit::kNone,
+      PerformanceUnit::kPacket};
 };
 
 FileInput::FileInput(FileInputConfig config)
@@ -212,8 +212,8 @@ FileInput::~FileInput() = default;
 void FileInput::Start(Observer& observer) { impl_->Start(observer); }
 void FileInput::Stop() noexcept { impl_->Stop(); }
 InputState FileInput::state() const noexcept { return impl_->state(); }
-performance::NodeSnapshot FileInput::GetPerformance() const {
+NodeSnapshot FileInput::GetPerformance() const {
   return impl_->GetPerformance();
 }
 
-}  // namespace mw::streamer::input
+}  // namespace mw::streamer

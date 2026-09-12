@@ -9,7 +9,7 @@
 #include "mw/ffmpeg/packet.h"
 #include "mw/ffmpeg/stream_info.h"
 
-namespace mw::streamer::encoder {
+namespace mw::streamer {
 
 enum class VideoEncodeMode {
   kAutomatic,
@@ -18,7 +18,7 @@ enum class VideoEncodeMode {
 
 class VideoEncoder final {
  public:
-  using OnPacket = std::function<void(const ffmpeg::Packet& packet)>;
+  using OnPacket = std::function<void(const Packet& packet)>;
 
   explicit VideoEncoder(VideoEncoderConfig config, int stream_index = 0);
   ~VideoEncoder();
@@ -28,14 +28,14 @@ class VideoEncoder final {
 
   // Open configures the encoder from the first Processor output frame. CUDA
   // frames reuse its hw_frames_ctx; host frames remain on the host path.
-  void Open(const ffmpeg::Frame& prototype);
+  void Open(const Frame& prototype);
 
   // Encoding and callbacks are synchronous on the calling thread. The packet
   // is borrowed for OnPacket; copy or call Ref to retain it.
   void SetOnPacket(OnPacket callback);
   // CUDA frame pools may change while the FFmpeg device context, underlying
   // pixel format, frame dimensions and time_base remain unchanged.
-  void Encode(const ffmpeg::Frame& frame,
+  void Encode(const Frame& frame,
               VideoEncodeMode mode = VideoEncodeMode::kAutomatic);
 
   // Drain emits all delayed packets and ends this encoder. Encode cannot be
@@ -43,7 +43,7 @@ class VideoEncoder final {
   void Drain();
 
   bool is_open() const noexcept;
-  const ffmpeg::StreamInfo& stream_info() const;
+  const StreamInfo& stream_info() const;
   const VideoEncoderConfig& config() const noexcept;
 
  private:
@@ -51,6 +51,6 @@ class VideoEncoder final {
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::encoder
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_ENCODER_VIDEO_ENCODER_H_

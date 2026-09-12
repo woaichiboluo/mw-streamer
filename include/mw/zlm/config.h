@@ -5,10 +5,10 @@
 #include <cstddef>
 #include <string>
 
-namespace mw::streamer::zlm {
+namespace mw::streamer {
 
 // Process-wide ZLToolKit configuration consumed by Pipeline TOML [zlm].
-struct Config {
+struct ZlmConfig {
   // Zero lets ZLToolKit use std::thread::hardware_concurrency().
   std::size_t event_poller_threads = 0;
   std::size_t work_threads = 0;
@@ -44,6 +44,6 @@ struct OutputConfig {
   RecordingConfig recording;
 };
 
-}  // namespace mw::streamer::zlm
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_ZLM_CONFIG_H_

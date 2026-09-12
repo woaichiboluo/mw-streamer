@@ -3,7 +3,7 @@
 #include <new>
 #include <utility>
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 CodecContext::CodecContext(const AVCodec* codec)
     : context_(avcodec_alloc_context3(codec)) {
@@ -35,4 +35,4 @@ void CodecContext::FlushBuffers() noexcept {
   }
 }
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer

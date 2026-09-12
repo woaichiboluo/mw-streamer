@@ -7,11 +7,11 @@
 #include "mw/ffmpeg/frame.h"
 #include "mw/processor/processor.h"
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 class HardwareContext;
 }
 
-namespace mw::streamer::processor {
+namespace mw::streamer {
 
 class ProcessorHandler {
  public:
@@ -26,7 +26,7 @@ class ProcessorHandler {
 
  protected:
   ProcessorHandler(const MwStreamerProcessorSourceInfo& source_info,
-                   const ffmpeg::HardwareContext* hardware_context);
+                   const HardwareContext* hardware_context);
 
   void RequireStarted(const char* operation) const;
   void MarkStarted(void* user_context,
@@ -38,13 +38,13 @@ class ProcessorHandler {
 
   const MwStreamerProcessorSourceInfo& source_info() const noexcept;
   const MwStreamerExecutionContext& execution() const noexcept;
-  const ffmpeg::HardwareContext* hardware_context() const noexcept;
+  const HardwareContext* hardware_context() const noexcept;
 
  private:
   class Impl;
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::processor
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_PROCESSOR_PROCESSOR_HANDLER_H_

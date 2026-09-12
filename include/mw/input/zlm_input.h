@@ -8,7 +8,7 @@
 #include "mw/input/input.h"
 #include "mw/zlm/config.h"
 
-namespace mw::streamer::input {
+namespace mw::streamer {
 
 // Adapts PlayerProxy without exposing its callbacks to consumers. Events are
 // delivered synchronously on an exclusively extracted pool poller, retained
@@ -33,13 +33,13 @@ class ZlmInput final : public Input {
   // Repeated calls from outside that poller are harmless.
   void Stop() noexcept override;
   InputState state() const noexcept override;
-  performance::NodeSnapshot GetPerformance() const override;
+  NodeSnapshot GetPerformance() const override;
 
  private:
   class Impl;
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::input
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_INPUT_ZLM_INPUT_H_

@@ -3,15 +3,15 @@
 
 #include "mw/processor/processor.h"
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 class HardwareContext;
 }
 
-namespace mw::streamer::processor::internal {
+namespace mw::streamer::internal {
 
 MwStreamerExecutionContext MakeProcessorExecutionContext(
-    const ffmpeg::HardwareContext* hardware_context);
+    const HardwareContext* hardware_context);
 
-}  // namespace mw::streamer::processor::internal
+}  // namespace mw::streamer::internal
 
 #endif  // MW_STREAMER_INCLUDE_MW_PROCESSOR_INTERNAL_EXECUTION_CONTEXT_ADAPTER_H_

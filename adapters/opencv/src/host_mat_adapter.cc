@@ -14,7 +14,7 @@ extern "C" {
 #include <stdexcept>
 #include <string>
 
-namespace mw::streamer::opencv_adapter {
+namespace mw::opencv_adapter {
 namespace {
 
 struct PixelFormatInfo {
@@ -257,4 +257,4 @@ HostFrame HostMatAdapter::FromBgr(const cv::Mat& source,
   return destination;
 }
 
-}  // namespace mw::streamer::opencv_adapter
+}  // namespace mw::opencv_adapter

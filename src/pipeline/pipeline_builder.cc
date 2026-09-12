@@ -20,7 +20,7 @@
 #include "mw/synchronizer/synchronizer_sink.h"
 #include "mw/zlm/internal/config_validator.h"
 
-namespace mw::streamer::pipeline {
+namespace mw::streamer {
 namespace {
 
 using NodeIndex = std::unordered_map<std::string, const SinkConfig*>;
@@ -42,8 +42,8 @@ void Require(bool valid, const SinkConfig& config, const char* reason) {
 }
 
 struct MediaContract {
-  sink::SinkMediaType input;
-  sink::SinkMediaType output;
+  SinkMediaType input;
+  SinkMediaType output;
 };
 
 MediaContract ValidateNode(const SinkConfig& config) {
@@ -58,27 +58,27 @@ MediaContract ValidateNode(const SinkConfig& config) {
                                                 options.cache_duration <= 30s),
               config, "cache_duration_ms必须为0或1000到30000");
       Require(options.video_decoder.backend ==
-                      decoder::VideoDecoderBackend::kSoftware ||
+                      VideoDecoderBackend::kSoftware ||
                   options.video_decoder.backend ==
-                      decoder::VideoDecoderBackend::kCuda,
+                      VideoDecoderBackend::kCuda,
               config, "未知视频解码后端");
       Require(options.video_decoder.backend !=
-                      decoder::VideoDecoderBackend::kCuda ||
+                      VideoDecoderBackend::kCuda ||
                   options.video_decoder.device_index >= 0,
               config, "CUDA设备索引不能为负数");
-      return {sink::SinkMediaType::kPacket, sink::SinkMediaType::kFrame};
+      return {SinkMediaType::kPacket, SinkMediaType::kFrame};
     }
     case SinkType::kAnalysisProcessor:
-      return {sink::SinkMediaType::kFrame, sink::SinkMediaType::kNone};
+      return {SinkMediaType::kFrame, SinkMediaType::kNone};
     case SinkType::kTransformProcessor:
-      return {sink::SinkMediaType::kFrame, sink::SinkMediaType::kFrame};
+      return {SinkMediaType::kFrame, SinkMediaType::kFrame};
     case SinkType::kSynchronizer: {
       const auto& options = Options<SynchronizerNodeConfig>(config);
       Require(options.frame_queue_capacity > 0 &&
                   options.max_frame_lateness >= 0ms &&
                   options.standby_timeout >= 0ms,
               config, "同步队列容量或等待时间无效");
-      return {sink::SinkMediaType::kFrame, sink::SinkMediaType::kFrame};
+      return {SinkMediaType::kFrame, SinkMediaType::kFrame};
     }
     case SinkType::kEncoder: {
       const auto& options = Options<EncoderNodeConfig>(config);
@@ -91,15 +91,15 @@ MediaContract ValidateNode(const SinkConfig& config) {
       Require(options.video_encoder.frame_rate.num >= 0 &&
                   options.video_encoder.frame_rate.den > 0,
               config, "视频编码帧率必须为非负有理数");
-      return {sink::SinkMediaType::kFrame, sink::SinkMediaType::kPacket};
+      return {SinkMediaType::kFrame, SinkMediaType::kPacket};
     }
     case SinkType::kRemux: {
       const auto& options = Options<RemuxNodeConfig>(config);
       Require(options.packet_queue_capacity > 0, config,
               "Remux队列容量必须大于0");
-      output::internal::ValidateRemuxOutputConfig(
+      internal::ValidateRemuxOutputConfig(
           {options.target, options.zlm});
-      return {sink::SinkMediaType::kPacket, sink::SinkMediaType::kNone};
+      return {SinkMediaType::kPacket, SinkMediaType::kNone};
     }
   }
   throw std::invalid_argument(fmt::format("未知Sink配置类型: {}", config.id));
@@ -137,32 +137,32 @@ Callbacks FindCallbacks(const std::map<std::string, Callbacks>& bindings,
   return found == bindings.end() ? Callbacks{} : found->second;
 }
 
-std::unique_ptr<sink::Sink> CreateSink(const SinkConfig& config,
+std::unique_ptr<Sink> CreateSink(const SinkConfig& config,
                                        const ProcessorBindings& bindings) {
   switch (config.type()) {
     case SinkType::kDecoder:
-      return std::make_unique<decoder::DecoderSink>(
+      return std::make_unique<DecoderSink>(
           config.id, Options<DecoderNodeConfig>(config));
     case SinkType::kAnalysisProcessor:
-      return std::make_unique<processor::AnalysisProcessorSink>(
+      return std::make_unique<AnalysisProcessorSink>(
           config.id, FindCallbacks(bindings.analysis, config.id));
     case SinkType::kTransformProcessor:
-      return std::make_unique<processor::TransformProcessorSink>(
+      return std::make_unique<TransformProcessorSink>(
           config.id, FindCallbacks(bindings.transform, config.id));
     case SinkType::kSynchronizer:
-      return std::make_unique<synchronizer::SynchronizerSink>(
+      return std::make_unique<SynchronizerSink>(
           config.id, Options<SynchronizerNodeConfig>(config));
     case SinkType::kEncoder:
-      return std::make_unique<encoder::EncoderSink>(
+      return std::make_unique<EncoderSink>(
           config.id, Options<EncoderNodeConfig>(config));
     case SinkType::kRemux:
-      return std::make_unique<output::RemuxSink>(
+      return std::make_unique<RemuxSink>(
           config.id, Options<RemuxNodeConfig>(config));
   }
   throw std::invalid_argument("未知Sink配置类型");
 }
 
-std::unique_ptr<sink::Sink> BuildSink(const SinkConfig& config,
+std::unique_ptr<Sink> BuildSink(const SinkConfig& config,
                                       const NodeIndex& index,
                                       const ProcessorBindings& bindings) {
   auto sink = CreateSink(config, bindings);
@@ -185,7 +185,7 @@ void ValidateInput(const InputConfig& input) {
   if (input.type != InputType::kZlm || input.options.url.empty()) {
     throw std::invalid_argument("Input类型无效或url为空");
   }
-  zlm::internal::ValidatePlayerConfig(input.options.player);
+  internal::ValidatePlayerConfig(input.options.player);
   const auto& reconnect = input.options.reconnect_policy;
   if (reconnect.max_retries < -1 || reconnect.min_delay.count() <= 0 ||
       reconnect.max_delay < reconnect.min_delay ||
@@ -195,14 +195,14 @@ void ValidateInput(const InputConfig& input) {
 }
 
 void ValidateEdges(const std::vector<std::string>& downstream,
-                   sink::SinkMediaType output, const std::string& parent,
+                   SinkMediaType output, const std::string& parent,
                    const std::unordered_map<std::string, MediaContract>& media,
                    std::unordered_set<std::string>& parented) {
-  if (output == sink::SinkMediaType::kNone && !downstream.empty()) {
+  if (output == SinkMediaType::kNone && !downstream.empty()) {
     throw std::invalid_argument(
         fmt::format("终端Sink不能配置媒体下游: {}", parent));
   }
-  if (output != sink::SinkMediaType::kNone && downstream.empty()) {
+  if (output != SinkMediaType::kNone && downstream.empty()) {
     throw std::invalid_argument(
         fmt::format("节点至少需要一个媒体下游: {}", parent));
   }
@@ -266,7 +266,7 @@ void ValidatePipelineConfig(const PipelineConfig& config) {
     }
   }
   std::unordered_set<std::string> parented;
-  ValidateEdges(config.input.downstream, sink::SinkMediaType::kPacket, "input",
+  ValidateEdges(config.input.downstream, SinkMediaType::kPacket, "input",
                 media, parented);
   for (const auto& node : config.sinks) {
     ValidateEdges(node->downstream, media.at(node->id).output, node->id, media,
@@ -281,11 +281,11 @@ std::unique_ptr<Pipeline> BuildPipeline(const PipelineConfig& config,
   const auto index = IndexNodes(config);
   ValidateBindings(bindings.analysis, SinkType::kAnalysisProcessor, index);
   ValidateBindings(bindings.transform, SinkType::kTransformProcessor, index);
-  std::unique_ptr<input::Input> input;
+  std::unique_ptr<Input> input;
   if (config.input.type == InputType::kFile) {
-    input = std::make_unique<input::FileInput>(config.input.file);
+    input = std::make_unique<FileInput>(config.input.file);
   } else {
-    input = std::make_unique<input::ZlmInput>(config.input.options);
+    input = std::make_unique<ZlmInput>(config.input.options);
   }
   auto pipeline = std::make_unique<Pipeline>(std::move(input));
   for (const auto& id : config.input.downstream) {
@@ -299,4 +299,4 @@ std::unique_ptr<Pipeline> BuildPipeline(const PipelineConfig& config,
   return pipeline;
 }
 
-}  // namespace mw::streamer::pipeline
+}  // namespace mw::streamer

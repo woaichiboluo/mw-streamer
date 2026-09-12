@@ -28,27 +28,27 @@ extern "C" {
 
 namespace {
 
-using mw::streamer::ffmpeg::Frame;
-using mw::streamer::ffmpeg::StreamInfo;
-using mw::streamer::input::Input;
-using mw::streamer::input::InputState;
-using mw::streamer::media::FrameReady;
-using mw::streamer::media::FrameStreamsReady;
-using mw::streamer::media::StreamEnded;
-using mw::streamer::media::StreamEndReason;
-using mw::streamer::media::StreamsReady;
-using mw::streamer::media::TimelineReset;
-using mw::streamer::media::TimelineResetReason;
-using mw::streamer::performance::NodeSnapshot;
-using mw::streamer::performance::OperationSnapshot;
-using mw::streamer::performance::PerformanceType;
-using mw::streamer::performance::PerformanceUnit;
-using mw::streamer::processor::AnalysisProcessorSink;
-using mw::streamer::processor::TransformProcessorSink;
-using mw::streamer::sink::Sink;
-using mw::streamer::sink::SinkMediaType;
-using mw::streamer::sink::SinkMessage;
-using namespace mw::streamer::pipeline;
+using mw::streamer::Frame;
+using mw::streamer::StreamInfo;
+using mw::streamer::Input;
+using mw::streamer::InputState;
+using mw::streamer::FrameReady;
+using mw::streamer::FrameStreamsReady;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
+using mw::streamer::StreamsReady;
+using mw::streamer::TimelineReset;
+using mw::streamer::TimelineResetReason;
+using mw::streamer::NodeSnapshot;
+using mw::streamer::OperationSnapshot;
+using mw::streamer::PerformanceType;
+using mw::streamer::PerformanceUnit;
+using mw::streamer::AnalysisProcessorSink;
+using mw::streamer::TransformProcessorSink;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
+using mw::streamer::SinkMessage;
+using namespace mw::streamer;
 
 FrameStreamsReady Streams(std::uint64_t generation = 1) {
   StreamInfo video;
@@ -460,7 +460,7 @@ TEST_CASE("TransformProcessorSink拒绝处理期间改变输出尺寸") {
   sink.OnStreamsReady(Streams());
   sink.OnVideoFrame({1, Video()});
   CHECK_THROWS_AS(sink.OnVideoFrame({1, Video()}),
-                  mw::streamer::sink::FatalError);
+                  mw::streamer::FatalError);
 }
 
 TEST_CASE("TransformProcessorSink回调使用独立输出并向多个下游保留结果") {

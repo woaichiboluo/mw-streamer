@@ -9,7 +9,7 @@
 #include "ext-codec/H265.h"
 #include "mw/converter/internal/zlm_time_base.h"
 
-namespace mw::streamer::converter {
+namespace mw::streamer {
 
 ZlmPacketConverter::ZlmPacketConverter(const mediakit::Track::Ptr& track,
                                        int stream_index)
@@ -108,7 +108,7 @@ bool ZlmPacketConverter::EmitPacket(const char* data, size_t size,
     return false;
   }
 
-  ffmpeg::Packet packet;
+  Packet packet;
   if (av_new_packet(packet.get(), static_cast<int>(size)) < 0) {
     return false;
   }
@@ -126,4 +126,4 @@ bool ZlmPacketConverter::EmitPacket(const char* data, size_t size,
   return on_packet_(packet);
 }
 
-}  // namespace mw::streamer::converter
+}  // namespace mw::streamer

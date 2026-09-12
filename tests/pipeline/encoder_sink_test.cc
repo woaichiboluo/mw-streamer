@@ -30,24 +30,24 @@ extern "C" {
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::encoder::EncoderSink;
-using mw::streamer::encoder::EncoderSinkConfig;
-using mw::streamer::encoder::EncoderSinkState;
-using mw::streamer::ffmpeg::Frame;
-using mw::streamer::ffmpeg::StreamInfo;
-using mw::streamer::ffmpeg::ThrowIfError;
-using mw::streamer::media::FrameStreamsReady;
-using mw::streamer::media::PacketReady;
-using mw::streamer::media::StreamEnded;
-using mw::streamer::media::StreamEndReason;
-using mw::streamer::media::StreamsReady;
-using mw::streamer::media::TimelineReset;
-using mw::streamer::media::TimelineResetReason;
-using mw::streamer::performance::PerformanceType;
-using mw::streamer::performance::PerformanceUnit;
-using mw::streamer::sink::PacketSinkState;
-using mw::streamer::sink::Sink;
-using mw::streamer::sink::SinkMediaType;
+using mw::streamer::EncoderSink;
+using mw::streamer::EncoderSinkConfig;
+using mw::streamer::EncoderSinkState;
+using mw::streamer::Frame;
+using mw::streamer::StreamInfo;
+using mw::streamer::ThrowIfError;
+using mw::streamer::FrameStreamsReady;
+using mw::streamer::PacketReady;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
+using mw::streamer::StreamsReady;
+using mw::streamer::TimelineReset;
+using mw::streamer::TimelineResetReason;
+using mw::streamer::PerformanceType;
+using mw::streamer::PerformanceUnit;
+using mw::streamer::PacketSinkState;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
 
 EncoderSinkConfig SoftwareConfig(bool delayed = false) {
   EncoderSinkConfig config;
@@ -234,7 +234,7 @@ class PacketRecorder final : public Sink {
 
 std::size_t DecodeVideo(const Recording& recording,
                         std::uint64_t generation = 1) {
-  using namespace mw::streamer::decoder;
+  using namespace mw::streamer;
   VideoDecoderConfig config;
   config.backend = VideoDecoderBackend::kSoftware;
   std::size_t count = 0;
@@ -275,7 +275,7 @@ std::size_t DecodeAudio(const Recording& recording) {
       }
       CHECK(stream.codec_parameters.get()->sample_rate == 48000);
       CHECK(stream.codec_parameters.get()->ch_layout.nb_channels == 1);
-      mw::streamer::decoder::AudioDecoder decoder(stream);
+      mw::streamer::AudioDecoder decoder(stream);
       decoder.SetOnFrame([&](const Frame& frame) {
         CHECK(frame->sample_rate == 48000);
         samples += frame->nb_samples;

@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <string>
 
-namespace mw::streamer::synchronizer {
+namespace mw::streamer {
 
 struct SynchronizerSinkConfig {
   // Positive per-track limits for ingress and scheduled frames separately.
@@ -21,6 +21,6 @@ struct SynchronizerSinkConfig {
   std::string standby_image_path;
 };
 
-}  // namespace mw::streamer::synchronizer
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_SYNCHRONIZER_CONFIG_H_

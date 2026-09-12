@@ -26,15 +26,15 @@ extern "C" {
 
 namespace {
 
-using mw::streamer::ffmpeg::CodecContext;
-using mw::streamer::ffmpeg::CodecParameters;
-using mw::streamer::ffmpeg::ErrorText;
-using mw::streamer::ffmpeg::Frame;
-using mw::streamer::ffmpeg::InputFormatContext;
-using mw::streamer::ffmpeg::IsHardwarePixelFormat;
-using mw::streamer::ffmpeg::Packet;
-using mw::streamer::ffmpeg::StreamInfo;
-using mw::streamer::ffmpeg::ThrowIfError;
+using mw::streamer::CodecContext;
+using mw::streamer::CodecParameters;
+using mw::streamer::ErrorText;
+using mw::streamer::Frame;
+using mw::streamer::InputFormatContext;
+using mw::streamer::IsHardwarePixelFormat;
+using mw::streamer::Packet;
+using mw::streamer::StreamInfo;
+using mw::streamer::ThrowIfError;
 
 static_assert(std::is_copy_constructible_v<CodecParameters>);
 static_assert(std::is_copy_assignable_v<CodecParameters>);

@@ -33,30 +33,30 @@ extern "C" {
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::decoder::DecoderSink;
-using mw::streamer::decoder::DecoderSinkConfig;
-using mw::streamer::input::ZlmInput;
-using mw::streamer::input::ZlmInputConfig;
-using mw::streamer::media::FrameReady;
-using mw::streamer::media::FrameStreamsReady;
-using mw::streamer::media::StreamEnded;
-using mw::streamer::media::StreamEndReason;
-using mw::streamer::media::TimelineReset;
-using mw::streamer::media::TimelineResetReason;
-using mw::streamer::processor::AnalysisProcessorSink;
-using mw::streamer::processor::TransformProcessorSink;
-using mw::streamer::sink::FatalError;
-using mw::streamer::sink::PacketSinkState;
-using mw::streamer::sink::Sink;
-using mw::streamer::sink::SinkMediaType;
-using namespace mw::streamer::pipeline;
-using mw::streamer::decoder::VideoDecoderBackend;
-using mw::streamer::ffmpeg::CodecParameters;
-using mw::streamer::ffmpeg::InputFormatContext;
-using mw::streamer::ffmpeg::Packet;
-using mw::streamer::ffmpeg::StreamInfo;
-using mw::streamer::performance::PerformanceType;
-using mw::streamer::performance::PerformanceUnit;
+using mw::streamer::DecoderSink;
+using mw::streamer::DecoderSinkConfig;
+using mw::streamer::ZlmInput;
+using mw::streamer::ZlmInputConfig;
+using mw::streamer::FrameReady;
+using mw::streamer::FrameStreamsReady;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
+using mw::streamer::TimelineReset;
+using mw::streamer::TimelineResetReason;
+using mw::streamer::AnalysisProcessorSink;
+using mw::streamer::TransformProcessorSink;
+using mw::streamer::FatalError;
+using mw::streamer::PacketSinkState;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
+using namespace mw::streamer;
+using mw::streamer::VideoDecoderBackend;
+using mw::streamer::CodecParameters;
+using mw::streamer::InputFormatContext;
+using mw::streamer::Packet;
+using mw::streamer::StreamInfo;
+using mw::streamer::PerformanceType;
+using mw::streamer::PerformanceUnit;
 
 std::string SamplePath() {
   return std::string(MW_DECODER_SINK_TEST_DATA_DIR) + "/h264_aac.mp4";

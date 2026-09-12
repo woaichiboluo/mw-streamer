@@ -11,9 +11,9 @@
 
 namespace {
 
-using mw::streamer::performance::OperationRecorder;
-using mw::streamer::performance::PerformanceType;
-using mw::streamer::performance::PerformanceUnit;
+using mw::streamer::OperationRecorder;
+using mw::streamer::PerformanceType;
+using mw::streamer::PerformanceUnit;
 
 }  // namespace
 

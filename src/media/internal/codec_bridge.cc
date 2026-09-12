@@ -3,7 +3,7 @@
 #include <array>
 #include <utility>
 
-namespace mw::streamer::media::internal {
+namespace mw::streamer::internal {
 namespace {
 
 constexpr std::array kCodecMappings = {
@@ -39,4 +39,4 @@ AVCodecID ToAvCodecId(MwStreamerCodec codec) noexcept {
   return AV_CODEC_ID_NONE;
 }
 
-}  // namespace mw::streamer::media::internal
+}  // namespace mw::streamer::internal

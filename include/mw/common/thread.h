@@ -9,7 +9,7 @@
 
 #include "Util/util.h"
 
-namespace mw::streamer::common {
+namespace mw::streamer {
 
 class Thread final {
  public:
@@ -61,6 +61,6 @@ class Thread final {
   std::thread thread_;
 };
 
-}  // namespace mw::streamer::common
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_COMMON_THREAD_H_

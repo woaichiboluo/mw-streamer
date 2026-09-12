@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <string>
 
-namespace mw::streamer::input {
+namespace mw::streamer {
 
 // Source state only: kEnded does not mean downstream sinks have drained.
 enum class InputState {
@@ -24,6 +24,6 @@ struct InputStateChanged {
   bool will_retry = false;
 };
 
-}  // namespace mw::streamer::input
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_INPUT_INPUT_STATE_H_

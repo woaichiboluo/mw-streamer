@@ -8,7 +8,7 @@ extern "C" {
 
 #include <fmt/format.h>
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 std::string ErrorText(int error) {
   char buffer[AV_ERROR_MAX_STRING_SIZE] = {};
@@ -25,4 +25,4 @@ void ThrowIfError(int result, const char* operation) {
   }
 }
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer

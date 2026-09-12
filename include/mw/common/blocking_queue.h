@@ -10,7 +10,7 @@
 #include <optional>
 #include <utility>
 
-namespace mw::streamer::common {
+namespace mw::streamer {
 
 template <typename T>
 class BlockingQueue final {
@@ -196,6 +196,6 @@ class BlockingQueue final {
   bool closed_ = false;
 };
 
-}  // namespace mw::streamer::common
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_COMMON_BLOCKING_QUEUE_H_

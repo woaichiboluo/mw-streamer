@@ -16,15 +16,15 @@ namespace toolkit {
 class EventPoller;
 }
 
-namespace mw::streamer::performance {
+namespace mw::streamer {
 class OperationRecorder;
 }
 
-namespace mw::streamer::output::internal {
+namespace mw::streamer::internal {
 
 struct RemuxOutputConfig {
   std::string target;
-  zlm::OutputConfig zlm;
+  OutputConfig zlm;
   std::size_t startup_packet_capacity = 384;
 };
 
@@ -44,28 +44,28 @@ class RemuxOutput final {
   // mean packets handed to the local muxer, including startup packets at EOF;
   // they do not acknowledge remote delivery. Calls measure actual packet
   // conversion and muxing, excluding startup metadata discovery and its errors.
-  RemuxOutput(RemuxOutputConfig config, std::vector<ffmpeg::StreamInfo> streams,
+  RemuxOutput(RemuxOutputConfig config, std::vector<StreamInfo> streams,
               std::shared_ptr<toolkit::EventPoller> poller,
               std::function<void(const std::string&)> on_failed,
-              performance::OperationRecorder* performance = nullptr);
+              OperationRecorder* performance = nullptr);
   ~RemuxOutput();
 
   RemuxOutput(const RemuxOutput&) = delete;
   RemuxOutput& operator=(const RemuxOutput&) = delete;
 
   void Open();
-  void Write(const ffmpeg::Packet& packet);
+  void Write(const Packet& packet);
   // Writes pending startup packets and finalizes recordings, or throws if
   // metadata is incomplete or the output cannot preserve the submitted data.
   void Finish();
   void Close() noexcept;
-  performance::NetworkOutputSnapshot GetNetworkOutputSnapshot() const;
+  NetworkOutputSnapshot GetNetworkOutputSnapshot() const;
 
  private:
   class Impl;
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::output::internal
+}  // namespace mw::streamer::internal
 
 #endif  // MW_STREAMER_INCLUDE_MW_OUTPUT_INTERNAL_REMUX_OUTPUT_H_

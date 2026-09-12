@@ -10,7 +10,7 @@
 #include "Extension/Track.h"
 #include "mw/zlm/config.h"
 
-namespace mw::streamer::output {
+namespace mw::streamer {
 
 // Internal recording targets. Construction, Write(), and Close() must be
 // serialized on the same thread. preserve_packets disables first-keyframe
@@ -19,7 +19,7 @@ class Fmp4FileTarget final {
  public:
   Fmp4FileTarget(const std::filesystem::path& requested_path,
                  const std::vector<mediakit::Track::Ptr>& tracks,
-                 zlm::RecordingConfig config = {},
+                 RecordingConfig config = {},
                  std::chrono::system_clock::time_point start_time =
                      std::chrono::system_clock::now(),
                  bool preserve_packets = false);
@@ -45,7 +45,7 @@ class HlsFmp4FileTarget final {
  public:
   HlsFmp4FileTarget(const std::filesystem::path& requested_path,
                     const std::vector<mediakit::Track::Ptr>& tracks,
-                    zlm::RecordingConfig config = {},
+                    RecordingConfig config = {},
                     std::chrono::system_clock::time_point start_time =
                         std::chrono::system_clock::now(),
                     bool preserve_packets = false);
@@ -67,6 +67,6 @@ class HlsFmp4FileTarget final {
   std::shared_ptr<Recorder> recorder_;
 };
 
-}  // namespace mw::streamer::output
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_OUTPUT_RECORDING_TARGET_H_

@@ -17,10 +17,9 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::input::FileInputConfig;
-using mw::streamer::input::InputState;
-using namespace mw::streamer::pipeline;
-namespace config = mw::streamer::config;
+using mw::streamer::FileInputConfig;
+using mw::streamer::InputState;
+using namespace mw::streamer;
 
 class TestDirectory final {
  public:
@@ -121,11 +120,11 @@ MwStreamerAnalysisProcessorCallbacks AnalysisCallbacks(AnalysisState& state) {
 }
 
 void CheckRecordedMedia(const std::filesystem::path& path) {
-  mw::streamer::ffmpeg::InputFormatContext input(path.string());
+  mw::streamer::InputFormatContext input(path.string());
   input.FindStreamInfo();
   REQUIRE(input->nb_streams == 2);
   std::vector<int> counts(input->nb_streams, 0);
-  mw::streamer::ffmpeg::Packet packet;
+  mw::streamer::Packet packet;
   while (input.ReadPacket(packet)) {
     ++counts.at(packet->stream_index);
     packet.Unref();
@@ -157,7 +156,7 @@ TEST_CASE("Pipeline builder owns typed configuration and binds analysis by ID",
     config.input.downstream = {"decode"};
     auto decoder = std::make_unique<DecoderNodeConfig>("decode");
     decoder->options.video_decoder.backend =
-        mw::streamer::decoder::VideoDecoderBackend::kSoftware;
+        mw::streamer::VideoDecoderBackend::kSoftware;
     decoder->downstream = {"analysis"};
     auto analysis = std::make_unique<AnalysisProcessorNodeConfig>("analysis");
 
@@ -202,10 +201,10 @@ TEST_CASE("Round-tripped TOML builds a playable local stream-copy recording",
     auto recording = std::make_unique<RemuxNodeConfig>("recording");
     recording->options.target = (directory.path() / "original.mp4").string();
     original.sinks.push_back(std::move(recording));
-    auto parsed = config::ParsePipelineConfigFromToml(
-        config::SerializePipelineConfigToToml(original));
-    auto restored = config::ParsePipelineConfigFromToml(
-        config::SerializePipelineConfigToToml(parsed));
+    auto parsed = ParsePipelineConfigFromToml(
+        SerializePipelineConfigToToml(original));
+    auto restored = ParsePipelineConfigFromToml(
+        SerializePipelineConfigToToml(parsed));
     return BuildPipeline(restored);
   }();
 

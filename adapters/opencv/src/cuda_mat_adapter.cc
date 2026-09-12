@@ -14,7 +14,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace mw::streamer::opencv_adapter {
+namespace mw::opencv_adapter {
 namespace {
 
 enum class PixelLayout {
@@ -719,4 +719,4 @@ CudaFrame CudaMatAdapter::FromBgr(const cv::cuda::GpuMat& source,
   return destination;
 }
 
-}  // namespace mw::streamer::opencv_adapter
+}  // namespace mw::opencv_adapter

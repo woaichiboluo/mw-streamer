@@ -6,7 +6,7 @@
 #include <type_traits>
 #include <utility>
 
-namespace mw::streamer::performance::internal {
+namespace mw::streamer::internal {
 
 class Stopwatch final {
  public:
@@ -32,6 +32,6 @@ class Stopwatch final {
   std::chrono::steady_clock::duration elapsed_{};
 };
 
-}  // namespace mw::streamer::performance::internal
+}  // namespace mw::streamer::internal
 
 #endif  // MW_STREAMER_INCLUDE_MW_PERFORMANCE_INTERNAL_STOPWATCH_H_

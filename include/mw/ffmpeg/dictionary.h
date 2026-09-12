@@ -5,7 +5,7 @@ extern "C" {
 #include <libavutil/dict.h>
 }
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 class Dictionary final {
  public:
@@ -26,6 +26,6 @@ class Dictionary final {
   AVDictionary* dictionary_ = nullptr;
 };
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_FFMPEG_DICTIONARY_H_

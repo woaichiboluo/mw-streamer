@@ -25,10 +25,10 @@ extern "C" {
 #include "mw/ffmpeg/error.h"
 #include "mw/log/logging.h"
 
-namespace mw::streamer::encoder {
+namespace mw::streamer {
 namespace {
 
-using Log = log::Module<log::LogModule::kStreamer>;
+using Log = Module<LogModule::kStreamer>;
 
 constexpr int kProcessorAudioSampleRate = 48000;
 constexpr AVRational kAudioTimeBase{1, kProcessorAudioSampleRate};
@@ -104,8 +104,8 @@ void ValidatePrototype(const AVFrame* frame) {
   }
 }
 
-ffmpeg::Dictionary MakeOptions(const EncoderProperties& properties) {
-  ffmpeg::Dictionary options;
+Dictionary MakeOptions(const EncoderProperties& properties) {
+  Dictionary options;
   for (const auto& [key, value] : properties) {
     if (key.empty()) {
       Log::Warning("忽略键为空的AAC编码器属性");
@@ -133,7 +133,7 @@ class AudioEncoder::Impl final {
     av_channel_layout_uninit(&input_layout_);
   }
 
-  void Open(const ffmpeg::Frame& prototype) {
+  void Open(const Frame& prototype) {
     if (context_) {
       throw std::logic_error("AudioEncoder只能打开一次");
     }
@@ -145,17 +145,17 @@ class AudioEncoder::Impl final {
           "AAC编码器不支持48kHz采样率: encoder_name={}", codec->name));
     }
 
-    ffmpeg::CodecContext pending_context(codec);
+    CodecContext pending_context(codec);
     auto* context = pending_context.get();
     context->sample_rate = kProcessorAudioSampleRate;
     context->sample_fmt = SelectSampleFormat(*codec);
     context->time_base = kAudioTimeBase;
-    ffmpeg::ThrowIfError(av_channel_layout_copy(&context->ch_layout,
+    ThrowIfError(av_channel_layout_copy(&context->ch_layout,
                                                 &prototype.get()->ch_layout),
                          "复制AAC编码声道布局");
 
     auto options = MakeOptions(config_.properties);
-    ffmpeg::ThrowIfError(avcodec_open2(context, codec, options.address()),
+    ThrowIfError(avcodec_open2(context, codec, options.address()),
                          "打开AAC编码器");
     internal::WarnUnusedOptions(options.get(), "AAC", codec->name);
 
@@ -163,17 +163,17 @@ class AudioEncoder::Impl final {
     AVAudioFifo* pending_fifo = nullptr;
     AVChannelLayout pending_input_layout{};
     try {
-      ffmpeg::ThrowIfError(av_channel_layout_copy(&pending_input_layout,
+      ThrowIfError(av_channel_layout_copy(&pending_input_layout,
                                                   &prototype.get()->ch_layout),
                            "保存AAC输入声道布局");
-      ffmpeg::ThrowIfError(
+      ThrowIfError(
           swr_alloc_set_opts2(
               &pending_resampler, &context->ch_layout, context->sample_fmt,
               context->sample_rate, &prototype.get()->ch_layout,
               static_cast<AVSampleFormat>(prototype.get()->format),
               prototype.get()->sample_rate, 0, nullptr),
           "配置AAC输入采样格式转换");
-      ffmpeg::ThrowIfError(swr_init(pending_resampler),
+      ThrowIfError(swr_init(pending_resampler),
                            "初始化AAC输入采样格式转换");
       pending_fifo = av_audio_fifo_alloc(
           context->sample_fmt, context->ch_layout.nb_channels,
@@ -182,7 +182,7 @@ class AudioEncoder::Impl final {
         throw std::bad_alloc();
       }
       stream_info_.emplace(
-          ffmpeg::StreamInfo::FromCodecContext(*context, stream_index_));
+          StreamInfo::FromCodecContext(*context, stream_index_));
     } catch (...) {
       av_audio_fifo_free(pending_fifo);
       swr_free(&pending_resampler);
@@ -205,7 +205,7 @@ class AudioEncoder::Impl final {
 
   void SetOnPacket(OnPacket callback) { on_packet_ = std::move(callback); }
 
-  void Encode(const ffmpeg::Frame& frame) {
+  void Encode(const Frame& frame) {
     RequireOpen();
     if (drained_) {
       throw std::logic_error("AudioEncoder已Drain，不能继续编码");
@@ -239,7 +239,7 @@ class AudioEncoder::Impl final {
 
   bool is_open() const noexcept { return context_.has_value(); }
 
-  const ffmpeg::StreamInfo& stream_info() const {
+  const StreamInfo& stream_info() const {
     if (!stream_info_) {
       throw std::logic_error("AudioEncoder打开前没有StreamInfo");
     }
@@ -264,17 +264,17 @@ class AudioEncoder::Impl final {
     }
   }
 
-  ffmpeg::Frame AllocateConvertedFrame(int sample_capacity) const {
-    ffmpeg::Frame output;
+  Frame AllocateConvertedFrame(int sample_capacity) const {
+    Frame output;
     const auto* context = context_->get();
     output->format = context->sample_fmt;
     output->sample_rate = context->sample_rate;
     output->time_base = context->time_base;
     output->nb_samples = sample_capacity;
-    ffmpeg::ThrowIfError(
+    ThrowIfError(
         av_channel_layout_copy(&output->ch_layout, &context->ch_layout),
         "复制AAC转换输出声道布局");
-    ffmpeg::ThrowIfError(av_frame_get_buffer(output.get(), 0),
+    ThrowIfError(av_frame_get_buffer(output.get(), 0),
                          "分配AAC转换输出帧");
     return output;
   }
@@ -282,20 +282,20 @@ class AudioEncoder::Impl final {
   void ConvertAndStore(const AVFrame& input) {
     const int output_capacity =
         swr_get_out_samples(resampler_, input.nb_samples);
-    ffmpeg::ThrowIfError(output_capacity, "计算AAC转换输出容量");
+    ThrowIfError(output_capacity, "计算AAC转换输出容量");
     auto converted = AllocateConvertedFrame(std::max(output_capacity, 1));
     const int output_samples =
         swr_convert(resampler_, converted->extended_data, converted->nb_samples,
                     const_cast<const std::uint8_t**>(input.extended_data),
                     input.nb_samples);
-    ffmpeg::ThrowIfError(output_samples, "转换AAC输入采样格式");
+    ThrowIfError(output_samples, "转换AAC输入采样格式");
     Store(converted, output_samples);
   }
 
   void DrainResampler() {
     for (;;) {
       const int output_capacity = swr_get_out_samples(resampler_, 0);
-      ffmpeg::ThrowIfError(output_capacity, "计算AAC转换尾部容量");
+      ThrowIfError(output_capacity, "计算AAC转换尾部容量");
       if (output_capacity == 0) {
         return;
       }
@@ -304,7 +304,7 @@ class AudioEncoder::Impl final {
       const int output_samples =
           swr_convert(resampler_, converted->extended_data,
                       converted->nb_samples, nullptr, 0);
-      ffmpeg::ThrowIfError(output_samples, "排空AAC输入采样格式转换");
+      ThrowIfError(output_samples, "排空AAC输入采样格式转换");
       if (output_samples == 0) {
         return;
       }
@@ -312,13 +312,13 @@ class AudioEncoder::Impl final {
     }
   }
 
-  void Store(ffmpeg::Frame& frame, int sample_count) {
+  void Store(Frame& frame, int sample_count) {
     if (sample_count <= 0) {
       return;
     }
     const int current_size = av_audio_fifo_size(fifo_);
-    ffmpeg::ThrowIfError(current_size, "读取AAC FIFO大小");
-    ffmpeg::ThrowIfError(
+    ThrowIfError(current_size, "读取AAC FIFO大小");
+    ThrowIfError(
         av_audio_fifo_realloc(fifo_, current_size + sample_count),
         "扩展AAC FIFO");
     const int written = av_audio_fifo_write(
@@ -329,8 +329,8 @@ class AudioEncoder::Impl final {
     }
   }
 
-  ffmpeg::Frame ReadFrame(int sample_count) {
-    ffmpeg::Frame frame;
+  Frame ReadFrame(int sample_count) {
+    Frame frame;
     const auto* context = context_->get();
     frame->format = context->sample_fmt;
     frame->sample_rate = context->sample_rate;
@@ -338,10 +338,10 @@ class AudioEncoder::Impl final {
     frame->nb_samples = sample_count;
     frame->pts = *next_frame_pts_;
     frame->duration = sample_count;
-    ffmpeg::ThrowIfError(
+    ThrowIfError(
         av_channel_layout_copy(&frame->ch_layout, &context->ch_layout),
         "复制AAC编码帧声道布局");
-    ffmpeg::ThrowIfError(av_frame_get_buffer(frame.get(), 0), "分配AAC编码帧");
+    ThrowIfError(av_frame_get_buffer(frame.get(), 0), "分配AAC编码帧");
 
     const int read = av_audio_fifo_read(
         fifo_, reinterpret_cast<void**>(frame->extended_data), sample_count);
@@ -358,7 +358,7 @@ class AudioEncoder::Impl final {
     const int frame_size = context_->get()->frame_size;
     for (;;) {
       const int available = av_audio_fifo_size(fifo_);
-      ffmpeg::ThrowIfError(available, "读取AAC FIFO大小");
+      ThrowIfError(available, "读取AAC FIFO大小");
       if (available == 0 ||
           (!include_partial && frame_size > 0 && available < frame_size)) {
         return;
@@ -382,7 +382,7 @@ class AudioEncoder::Impl final {
       if (frame == nullptr && result == AVERROR_EOF) {
         break;
       }
-      ffmpeg::ThrowIfError(result,
+      ThrowIfError(result,
                            frame ? "提交AAC编码帧" : "提交AAC编码结束标记");
       break;
     }
@@ -397,7 +397,7 @@ class AudioEncoder::Impl final {
       if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) {
         return packet_count;
       }
-      ffmpeg::ThrowIfError(result, "接收AAC编码包");
+      ThrowIfError(result, "接收AAC编码包");
       packet_->stream_index = stream_index_;
       ++packet_count;
       if (on_packet_) {
@@ -408,14 +408,14 @@ class AudioEncoder::Impl final {
 
   AudioEncoderConfig config_;
   int stream_index_ = 0;
-  std::optional<ffmpeg::CodecContext> context_;
-  std::optional<ffmpeg::StreamInfo> stream_info_;
+  std::optional<CodecContext> context_;
+  std::optional<StreamInfo> stream_info_;
   SwrContext* resampler_ = nullptr;
   AVAudioFifo* fifo_ = nullptr;
   AVChannelLayout input_layout_{};
   AVSampleFormat input_format_ = AV_SAMPLE_FMT_NONE;
   std::optional<std::int64_t> next_frame_pts_;
-  ffmpeg::Packet packet_;
+  Packet packet_;
   OnPacket on_packet_;
   bool drained_ = false;
 };
@@ -425,7 +425,7 @@ AudioEncoder::AudioEncoder(AudioEncoderConfig config, int stream_index)
 
 AudioEncoder::~AudioEncoder() = default;
 
-void AudioEncoder::Open(const ffmpeg::Frame& prototype) {
+void AudioEncoder::Open(const Frame& prototype) {
   impl_->Open(prototype);
 }
 
@@ -433,13 +433,13 @@ void AudioEncoder::SetOnPacket(OnPacket callback) {
   impl_->SetOnPacket(std::move(callback));
 }
 
-void AudioEncoder::Encode(const ffmpeg::Frame& frame) { impl_->Encode(frame); }
+void AudioEncoder::Encode(const Frame& frame) { impl_->Encode(frame); }
 
 void AudioEncoder::Drain() { impl_->Drain(); }
 
 bool AudioEncoder::is_open() const noexcept { return impl_->is_open(); }
 
-const ffmpeg::StreamInfo& AudioEncoder::stream_info() const {
+const StreamInfo& AudioEncoder::stream_info() const {
   return impl_->stream_info();
 }
 
@@ -447,4 +447,4 @@ const AudioEncoderConfig& AudioEncoder::config() const noexcept {
   return impl_->config();
 }
 
-}  // namespace mw::streamer::encoder
+}  // namespace mw::streamer

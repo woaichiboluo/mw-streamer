@@ -9,7 +9,7 @@
 #include "mw/decoder/config.h"
 #include "mw/sink/sink.h"
 
-namespace mw::streamer::decoder {
+namespace mw::streamer {
 
 // Owns a PacketQueue with its own scheduling thread, separate audio/video
 // storage and one shared clock. No caller-owned executor is required.
@@ -24,7 +24,7 @@ namespace mw::streamer::decoder {
 // Downstream FatalError fails this sink and reports through SetOnFatalError;
 // ordinary exceptions only fail this sink. Shutdown never joins a worker from
 // its own callback: the fatal callback only requests external control work.
-class DecoderSink final : public sink::Sink {
+class DecoderSink final : public Sink {
  public:
   explicit DecoderSink(std::string id, DecoderSinkConfig config);
   ~DecoderSink() override;
@@ -33,10 +33,10 @@ class DecoderSink final : public sink::Sink {
   DecoderSink& operator=(const DecoderSink&) = delete;
 
   // Missing consumers fail the sink when the first stream is configured.
-  void OnStreamsReady(const media::StreamsReady& streams) noexcept override;
-  void OnPacket(const media::PacketReady& packet) noexcept override;
-  void OnTimelineReset(const media::TimelineReset& reset) noexcept override;
-  void OnInputEnded(const media::StreamEnded& end) noexcept override;
+  void OnStreamsReady(const StreamsReady& streams) noexcept override;
+  void OnPacket(const PacketReady& packet) noexcept override;
+  void OnTimelineReset(const TimelineReset& reset) noexcept override;
+  void OnInputEnded(const StreamEnded& end) noexcept override;
 
   void RequestStop() noexcept override;
 
@@ -45,17 +45,22 @@ class DecoderSink final : public sink::Sink {
   // decode and downstream callback threads. Destruction follows the same
   // contract.
   void Stop() noexcept override;
-  sink::PacketSinkState state() const noexcept;
+  PacketSinkState state() const noexcept;
   std::string error() const;
 
  private:
-  performance::NodeSnapshot GetOwnPerformance() const override;
+  using Sink::downstream;
+  using Sink::ReportFatalError;
+  using Sink::StartMessages;
+  using Sink::StopDownstream;
+
+  NodeSnapshot GetOwnPerformance() const override;
   void HandleFatalError(const std::string& error) noexcept override;
 
   class Impl;
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::decoder
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_DECODER_DECODER_SINK_H_

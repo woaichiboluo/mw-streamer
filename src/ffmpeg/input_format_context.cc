@@ -11,7 +11,7 @@ extern "C" {
 #include "mw/ffmpeg/error.h"
 #include "mw/ffmpeg/packet.h"
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 InputFormatContext::InputFormatContext(const std::string& input,
                                        AVIOInterruptCB interrupt_callback) {
@@ -81,4 +81,4 @@ bool InputFormatContext::ReadPacket(Packet& packet) {
   return true;
 }
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer

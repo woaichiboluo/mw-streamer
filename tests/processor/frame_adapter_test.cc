@@ -19,12 +19,12 @@ extern "C" {
 
 namespace {
 
-using mw::streamer::ffmpeg::AudioFrameViewAdapter;
-using mw::streamer::ffmpeg::Frame;
-using mw::streamer::ffmpeg::HardwareContext;
-using mw::streamer::ffmpeg::VideoFrameViewAdapter;
-using mw::streamer::processor::internal::AudioBufferAdapter;
-using mw::streamer::processor::internal::VideoBufferAdapter;
+using mw::streamer::AudioFrameViewAdapter;
+using mw::streamer::Frame;
+using mw::streamer::HardwareContext;
+using mw::streamer::VideoFrameViewAdapter;
+using mw::streamer::internal::AudioBufferAdapter;
+using mw::streamer::internal::VideoBufferAdapter;
 
 struct PixelFormatCase {
   AVPixelFormat ffmpeg_format;

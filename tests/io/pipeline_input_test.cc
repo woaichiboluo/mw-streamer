@@ -24,21 +24,21 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::common::BlockingQueue;
-using mw::streamer::ffmpeg::Packet;
-using mw::streamer::input::Input;
-using mw::streamer::input::InputState;
-using mw::streamer::input::InputStateChanged;
-using mw::streamer::input::ZlmInput;
-using mw::streamer::input::ZlmInputConfig;
-using mw::streamer::media::PacketReady;
-using mw::streamer::media::StreamEnded;
-using mw::streamer::media::StreamEndReason;
-using mw::streamer::media::StreamsReady;
-using mw::streamer::media::TimelineReset;
-using mw::streamer::sink::PacketSinkState;
-using mw::streamer::sink::Sink;
-using mw::streamer::sink::SinkMediaType;
+using mw::streamer::BlockingQueue;
+using mw::streamer::Packet;
+using mw::streamer::Input;
+using mw::streamer::InputState;
+using mw::streamer::InputStateChanged;
+using mw::streamer::ZlmInput;
+using mw::streamer::ZlmInputConfig;
+using mw::streamer::PacketReady;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
+using mw::streamer::StreamsReady;
+using mw::streamer::TimelineReset;
+using mw::streamer::PacketSinkState;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
 
 ZlmInputConfig SampleConfig() {
   ZlmInputConfig config;

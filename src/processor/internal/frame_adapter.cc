@@ -75,7 +75,7 @@ void MapVideoBuffer(const AVFrame& frame,
   auto storage_format = static_cast<AVPixelFormat>(frame.format);
   if (storage_format == AV_PIX_FMT_CUDA) {
     const auto* frames_context =
-        ffmpeg::HardwareContext::GetFramesContext(frame);
+        HardwareContext::GetFramesContext(frame);
     if (!frames_context ||
         frames_context->device_ctx->type != AV_HWDEVICE_TYPE_CUDA) {
       throw std::invalid_argument("视频帧不是有效的CUDA硬件帧");
@@ -89,7 +89,7 @@ void MapVideoBuffer(const AVFrame& frame,
     throw std::invalid_argument("视频帧包含无效的存储格式");
   }
   if (memory_type == kMwStreamerMemoryHost &&
-      ffmpeg::IsHardwarePixelFormat(storage_format)) {
+      IsHardwarePixelFormat(storage_format)) {
     throw std::invalid_argument(
         fmt::format("Processor暂不支持硬件视频帧格式: {}",
                     PixelFormatName(storage_format)));
@@ -105,7 +105,7 @@ void MapVideoBuffer(const AVFrame& frame,
   const auto mapped_plane_count = static_cast<std::uint32_t>(plane_count);
 
   std::array<int, 4> row_bytes{};
-  ffmpeg::ThrowIfError(
+  ThrowIfError(
       av_image_fill_linesizes(row_bytes.data(), storage_format, frame.width),
       "计算视频平面有效行宽");
 
@@ -313,8 +313,8 @@ void ValidateAudioStorage(const AVFrame& frame) {
 
 }  // namespace
 
-ffmpeg::VideoFrameViewAdapter::VideoFrameViewAdapter(
-    const ffmpeg::Frame& frame) {
+VideoFrameViewAdapter::VideoFrameViewAdapter(
+    const Frame& frame) {
   if (!frame.get()) {
     throw std::invalid_argument("不能映射空视频Frame");
   }
@@ -323,26 +323,26 @@ ffmpeg::VideoFrameViewAdapter::VideoFrameViewAdapter(
   view_.timestamp = MapTimestamp(*frame.get());
 }
 
-const MwStreamerVideoFrameView& ffmpeg::VideoFrameViewAdapter::view()
+const MwStreamerVideoFrameView& VideoFrameViewAdapter::view()
     const noexcept {
   return view_;
 }
 
-processor::internal::VideoBufferAdapter::VideoBufferAdapter(
-    ffmpeg::Frame& frame) {
+internal::VideoBufferAdapter::VideoBufferAdapter(
+    Frame& frame) {
   if (!frame.get()) {
     throw std::invalid_argument("不能映射空视频Frame");
   }
   MapVideoBuffer(*frame.get(), &planes_, &view_);
 }
 
-const MwStreamerVideoBufferView& processor::internal::VideoBufferAdapter::view()
+const MwStreamerVideoBufferView& internal::VideoBufferAdapter::view()
     const noexcept {
   return view_;
 }
 
-ffmpeg::AudioFrameViewAdapter::AudioFrameViewAdapter(
-    const ffmpeg::Frame& frame) {
+AudioFrameViewAdapter::AudioFrameViewAdapter(
+    const Frame& frame) {
   if (!frame.get()) {
     throw std::invalid_argument("不能映射空音频Frame");
   }
@@ -356,13 +356,13 @@ ffmpeg::AudioFrameViewAdapter::AudioFrameViewAdapter(
   };
 }
 
-const MwStreamerAudioFrameView& ffmpeg::AudioFrameViewAdapter::view()
+const MwStreamerAudioFrameView& AudioFrameViewAdapter::view()
     const noexcept {
   return view_;
 }
 
-processor::internal::AudioBufferAdapter::AudioBufferAdapter(
-    ffmpeg::Frame& frame) {
+internal::AudioBufferAdapter::AudioBufferAdapter(
+    Frame& frame) {
   if (!frame.get()) {
     throw std::invalid_argument("不能映射空音频Frame");
   }
@@ -374,7 +374,7 @@ processor::internal::AudioBufferAdapter::AudioBufferAdapter(
   };
 }
 
-const MwStreamerAudioBufferView& processor::internal::AudioBufferAdapter::view()
+const MwStreamerAudioBufferView& internal::AudioBufferAdapter::view()
     const noexcept {
   return view_;
 }

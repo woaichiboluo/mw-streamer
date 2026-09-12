@@ -4,7 +4,7 @@
 #include <chrono>
 #include <cstdint>
 
-namespace mw::streamer::performance {
+namespace mw::streamer {
 
 struct LatencySnapshot {
   std::uint64_t sample_count = 0;
@@ -14,6 +14,6 @@ struct LatencySnapshot {
   std::chrono::microseconds max{0};
 };
 
-}  // namespace mw::streamer::performance
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_PERFORMANCE_LATENCY_SNAPSHOT_H_

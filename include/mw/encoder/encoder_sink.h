@@ -8,7 +8,7 @@
 #include "mw/encoder/config.h"
 #include "mw/sink/sink.h"
 
-namespace mw::streamer::encoder {
+namespace mw::streamer {
 
 enum class EncoderSinkState {
   kIdle,
@@ -31,7 +31,7 @@ enum class EncoderSinkState {
 // Submission/encoding errors fail this sink and are available through error();
 // explicit FatalError and downstream fatal reports also request Pipeline stop.
 // Ordinary downstream failures remain owned by their respective sinks.
-class EncoderSink final : public sink::Sink {
+class EncoderSink final : public Sink {
  public:
   explicit EncoderSink(std::string id, EncoderSinkConfig config = {});
   ~EncoderSink() override;
@@ -39,17 +39,17 @@ class EncoderSink final : public sink::Sink {
   EncoderSink(const EncoderSink&) = delete;
   EncoderSink& operator=(const EncoderSink&) = delete;
 
-  void OnStreamsReady(const media::FrameStreamsReady& streams) override;
-  void OnAudioFrame(const media::FrameReady& frame) override;
-  void OnVideoFrame(const media::FrameReady& frame) override;
+  void OnStreamsReady(const FrameStreamsReady& streams) override;
+  void OnAudioFrame(const FrameReady& frame) override;
+  void OnVideoFrame(const FrameReady& frame) override;
   // Discards queued frames from older generations and recreates encoders.
   // Downstream reset precedes the next encoded StreamsReady; no old packet
   // is emitted after that reset. Discarded codec delay is not drained.
-  void OnTimelineReset(const media::TimelineReset& reset) override;
+  void OnTimelineReset(const TimelineReset& reset) override;
   // EOF drains codecs before downstream EOF. A declared track with no frames
   // is an error. Interruption discards codec delay and permits a new
   // generation.
-  void OnInputEnded(const media::StreamEnded& end) override;
+  void OnInputEnded(const StreamEnded& end) override;
 
   // Stops admission, discards pending frames, joins the worker, then stops all
   // consumers. Does not manufacture EOF. Upstream delivery must have stopped;
@@ -60,13 +60,13 @@ class EncoderSink final : public sink::Sink {
   std::size_t queue_depth() const;
 
  private:
-  performance::NodeSnapshot GetOwnPerformance() const override;
+  NodeSnapshot GetOwnPerformance() const override;
   void HandleFatalError(const std::string& error) noexcept override;
 
   class Impl;
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::encoder
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_ENCODER_ENCODER_SINK_H_

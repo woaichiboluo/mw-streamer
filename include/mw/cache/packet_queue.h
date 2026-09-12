@@ -8,7 +8,7 @@
 
 #include "mw/sink/sink.h"
 
-namespace mw::streamer::cache {
+namespace mw::streamer {
 
 // Owns its scheduling thread and separate audio/video caches sharing one clock.
 // Input notifications are copied and processed in submission order. Zero cache
@@ -26,7 +26,7 @@ class PacketQueue final {
   // Invalid durations throw before the thread starts. Asynchronous scheduling
   // errors are retained in error()/state(); an open generation receives one
   // failed end notification after the error has been published.
-  PacketQueue(std::chrono::milliseconds cache_duration, sink::Sink& consumer);
+  PacketQueue(std::chrono::milliseconds cache_duration, Sink& consumer);
   ~PacketQueue();
 
   PacketQueue(const PacketQueue&) = delete;
@@ -35,10 +35,10 @@ class PacketQueue final {
   // Copy/reference acquisition can throw synchronously. Calls after Abort are
   // ignored. Streams must precede packets; every replacement generation must
   // have a preceding reset. Stale and duplicate notifications are ignored.
-  void OnStreamsReady(const media::StreamsReady& streams);
-  void OnPacket(const media::PacketReady& packet);
-  void OnTimelineReset(const media::TimelineReset& reset);
-  void OnInputEnded(const media::StreamEnded& end);
+  void OnStreamsReady(const StreamsReady& streams);
+  void OnPacket(const PacketReady& packet);
+  void OnTimelineReset(const TimelineReset& reset);
+  void OnInputEnded(const StreamEnded& end);
 
   // Discards pending input and wakes the scheduler without waiting for it.
   // Thread-safe, including from callbacks or decoder workers. It does not
@@ -54,7 +54,7 @@ class PacketQueue final {
   // A reset publishes its new generation immediately, even before replacement
   // streams arrive. Abort and Stop preserve a failure and its diagnostic;
   // snapshots remain readable.
-  sink::PacketSinkState state() const noexcept;
+  PacketSinkState state() const noexcept;
   std::uint64_t generation() const noexcept;
   std::string error() const;
 
@@ -63,6 +63,6 @@ class PacketQueue final {
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace mw::streamer::cache
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_CACHE_PACKET_QUEUE_H_

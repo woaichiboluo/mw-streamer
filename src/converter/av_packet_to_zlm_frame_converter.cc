@@ -15,12 +15,12 @@
 #include "mw/converter/internal/codec_bridge.h"
 #include "mw/converter/internal/zlm_time_base.h"
 
-namespace mw::streamer::converter {
+namespace mw::streamer {
 namespace {
 
 class AvPacketBuffer final : public toolkit::Buffer {
  public:
-  static std::shared_ptr<AvPacketBuffer> Create(ffmpeg::Packet packet) {
+  static std::shared_ptr<AvPacketBuffer> Create(Packet packet) {
     try {
       return std::shared_ptr<AvPacketBuffer>(
           new AvPacketBuffer(std::move(packet)));
@@ -38,9 +38,9 @@ class AvPacketBuffer final : public toolkit::Buffer {
   }
 
  private:
-  explicit AvPacketBuffer(ffmpeg::Packet packet) : packet_(std::move(packet)) {}
+  explicit AvPacketBuffer(Packet packet) : packet_(std::move(packet)) {}
 
-  ffmpeg::Packet packet_;
+  Packet packet_;
 };
 
 bool HasValidTimestamp(const AVPacket& packet) {
@@ -50,7 +50,7 @@ bool HasValidTimestamp(const AVPacket& packet) {
 }  // namespace
 
 AvPacketToZlmFrameConverter::AvPacketToZlmFrameConverter(
-    const ffmpeg::CodecParameters& codec_parameters, AVRational time_base,
+    const CodecParameters& codec_parameters, AVRational time_base,
     int stream_index)
     : codec_id_(internal::ToZlmCodecId(codec_parameters.get()->codec_id)),
       time_base_(time_base),
@@ -76,7 +76,7 @@ AvPacketToZlmFrameConverter::AvPacketToZlmFrameConverter(
 }
 
 std::vector<mediakit::Frame::Ptr> AvPacketToZlmFrameConverter::Convert(
-    ffmpeg::Packet packet, std::int64_t timestamp_origin_ms) const {
+    Packet packet, std::int64_t timestamp_origin_ms) const {
   const auto* raw_packet = packet.get();
   if (!raw_packet || !raw_packet->data || raw_packet->size <= 0 ||
       raw_packet->stream_index != stream_index_ ||
@@ -169,4 +169,4 @@ std::vector<mediakit::Frame::Ptr> AvPacketToZlmFrameConverter::Convert(
   return frames;
 }
 
-}  // namespace mw::streamer::converter
+}  // namespace mw::streamer

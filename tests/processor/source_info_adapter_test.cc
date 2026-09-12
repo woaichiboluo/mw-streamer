@@ -14,10 +14,10 @@ extern "C" {
 
 namespace {
 
-using mw::streamer::ffmpeg::StreamInfo;
-using mw::streamer::media::internal::ToAvCodecId;
-using mw::streamer::media::internal::ToMwStreamerCodec;
-using mw::streamer::processor::internal::MakeProcessorSourceInfo;
+using mw::streamer::StreamInfo;
+using mw::streamer::internal::ToAvCodecId;
+using mw::streamer::internal::ToMwStreamerCodec;
+using mw::streamer::internal::MakeProcessorSourceInfo;
 
 StreamInfo MakeVideoStream(AVCodecID codec_id) {
   StreamInfo stream;

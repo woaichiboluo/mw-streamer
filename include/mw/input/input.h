@@ -5,7 +5,7 @@
 #include "mw/media/stream_event.h"
 #include "mw/performance/pipeline_snapshot.h"
 
-namespace mw::streamer::input {
+namespace mw::streamer {
 
 // Owns source acquisition, independently of downstream queues and processing.
 // Start, Stop and destruction must run outside the input's execution context;
@@ -22,11 +22,11 @@ class Input {
     // Within a generation, streams precede packets and end follows the last
     // packet. A timeline reset precedes replacement streams.
     virtual void OnStreamsReady(
-        const media::StreamsReady& streams) noexcept = 0;
-    virtual void OnPacket(const media::PacketReady& packet) noexcept = 0;
+        const StreamsReady& streams) noexcept = 0;
+    virtual void OnPacket(const PacketReady& packet) noexcept = 0;
     virtual void OnTimelineReset(
-        const media::TimelineReset& reset) noexcept = 0;
-    virtual void OnInputEnded(const media::StreamEnded& end) noexcept = 0;
+        const TimelineReset& reset) noexcept = 0;
+    virtual void OnInputEnded(const StreamEnded& end) noexcept = 0;
 
     // Source connection/retry/error notification for the coordinating owner.
     // The input state snapshot is updated before this call.
@@ -52,11 +52,11 @@ class Input {
 
   // Nondestructive statistics; safe during acquisition and Stop, but not
   // destruction. Custom inputs may override to expose their own recording.
-  virtual performance::NodeSnapshot GetPerformance() const {
+  virtual NodeSnapshot GetPerformance() const {
     return {{}, "Input", {}, {}};
   }
 };
 
-}  // namespace mw::streamer::input
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_INPUT_INPUT_H_

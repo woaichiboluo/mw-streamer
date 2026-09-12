@@ -3,11 +3,11 @@
 
 #include <string>
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 std::string ErrorText(int error);
 void ThrowIfError(int result, const char* operation);
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_FFMPEG_ERROR_H_

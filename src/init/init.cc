@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -7,10 +8,10 @@
 #include "mw/init/internal/runtime.h"
 #include "srt/SrtEpollReactor.h"
 
-namespace mw::streamer::init::internal {
+namespace mw::streamer::internal {
 namespace {
 
-void ConfigureZlmThreadPools(const zlm::Config& config) {
+void ConfigureZlmThreadPools(const ZlmConfig& config) {
   toolkit::EventPollerPool::setPoolSize(config.event_poller_threads);
   toolkit::EventPollerPool::enableCpuAffinity(config.enable_cpu_affinity);
   toolkit::WorkThreadPool::setPoolSize(config.work_threads);
@@ -20,8 +21,8 @@ void ConfigureZlmThreadPools(const zlm::Config& config) {
 class Initializer final {
  public:
   static Initializer& Instance() {
-    static Initializer initializer;
-    return initializer;
+    static auto* initializer = new Initializer;
+    return *initializer;
   }
 
   void EnsureInitialized(const RuntimeConfig& config) {
@@ -38,6 +39,7 @@ class Initializer final {
     std::call_once(init_once_, [this, &config]() {
       logging_.emplace(config.log);
       ConfigureZlmThreadPools(config.zlm);
+      (void)std::atexit(&Initializer::ShutdownAtExit);
     });
     if (!logging_) {
       throw std::logic_error(
@@ -48,6 +50,12 @@ class Initializer final {
  private:
   Initializer() = default;
 
+  static void ShutdownAtExit() noexcept {
+    auto& initializer = Instance();
+    std::lock_guard<std::mutex> lock(initializer.mutex_);
+    initializer.logging_.reset();
+  }
+
   static bool IsSrtReactorStopped() noexcept {
     return mediakit::SrtEpollReactor::isCreated() &&
            !mediakit::SrtEpollReactor::Instance().available();
@@ -55,7 +63,7 @@ class Initializer final {
 
   std::mutex mutex_;
   std::once_flag init_once_;
-  std::optional<log::Logging> logging_;
+  std::optional<Logging> logging_;
 };
 
 }  // namespace
@@ -64,4 +72,4 @@ void EnsureInitialized(const RuntimeConfig& config) {
   Initializer::Instance().EnsureInitialized(config);
 }
 
-}  // namespace mw::streamer::init::internal
+}  // namespace mw::streamer::internal

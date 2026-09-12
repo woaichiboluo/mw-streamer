@@ -5,7 +5,7 @@
 
 #include "mw/ffmpeg/error.h"
 
-namespace mw::streamer::ffmpeg {
+namespace mw::streamer {
 
 CodecParameters::CodecParameters() : parameters_(avcodec_parameters_alloc()) {
   if (!parameters_) {
@@ -59,4 +59,4 @@ void CodecParameters::Swap(CodecParameters& other) noexcept {
   std::swap(parameters_, other.parameters_);
 }
 
-}  // namespace mw::streamer::ffmpeg
+}  // namespace mw::streamer

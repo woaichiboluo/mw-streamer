@@ -16,7 +16,7 @@
 #include "mw/pipeline/pipeline_builder.h"
 
 struct MwPipeline {
-  std::unique_ptr<mw::streamer::pipeline::Pipeline> pipeline;
+  std::unique_ptr<mw::streamer::Pipeline> pipeline;
 };
 
 namespace {
@@ -71,8 +71,8 @@ void AddBindings(const Binding* bindings, std::size_t count,
   }
 }
 
-MwPipelineState ConvertState(mw::streamer::pipeline::PipelineState state) {
-  using PipelineState = mw::streamer::pipeline::PipelineState;
+MwPipelineState ConvertState(mw::streamer::PipelineState state) {
+  using PipelineState = mw::streamer::PipelineState;
   switch (state) {
     case PipelineState::kIdle:
       return kMwPipelineIdle;
@@ -88,8 +88,8 @@ MwPipelineState ConvertState(mw::streamer::pipeline::PipelineState state) {
   throw std::runtime_error("未知的Pipeline状态");
 }
 
-MwInputState ConvertInputState(mw::streamer::input::InputState state) {
-  using InputState = mw::streamer::input::InputState;
+MwInputState ConvertInputState(mw::streamer::InputState state) {
+  using InputState = mw::streamer::InputState;
   switch (state) {
     case InputState::kIdle:
       return kMwInputIdle;
@@ -118,7 +118,7 @@ void CopyString(const std::string& source, char (&destination)[Size]) {
 }
 
 MwOperationSnapshot ConvertOperation(
-    const mw::streamer::performance::OperationSnapshot& source) {
+    const mw::streamer::OperationSnapshot& source) {
   MwOperationSnapshot result{};
   result.type = static_cast<MwPerformanceType>(source.type);
   result.input_unit = static_cast<MwPerformanceUnit>(source.input_unit);
@@ -148,7 +148,7 @@ MwOperationSnapshot ConvertOperation(
   return result;
 }
 
-void FlattenNode(const mw::streamer::performance::NodeSnapshot& source,
+void FlattenNode(const mw::streamer::NodeSnapshot& source,
                  std::size_t parent_index, MwPerformanceSnapshot* output) {
   if (output->node_count >= MW_STREAMER_MAX_PERFORMANCE_NODES) {
     throw std::length_error("性能节点数量超过C API容量");
@@ -172,7 +172,7 @@ void FlattenNode(const mw::streamer::performance::NodeSnapshot& source,
 }
 
 MwPerformanceSnapshot ConvertPerformance(
-    const mw::streamer::performance::PipelineSnapshot& source) {
+    const mw::streamer::PipelineSnapshot& source) {
   MwPerformanceSnapshot result{};
   result.pipeline_id = source.pipeline_id;
   result.sampled_at_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -270,14 +270,14 @@ MwResult mw_pipeline_create_from_toml(const MwPipelineCreateInfo* create_info,
         create_info->toml_path[0] == '\0') {
       throw std::invalid_argument("Pipeline创建参数不能为空");
     }
-    mw::streamer::pipeline::ProcessorBindings bindings;
+    mw::streamer::ProcessorBindings bindings;
     AddBindings(create_info->analysis_processors,
                 create_info->analysis_processor_count, &bindings.analysis);
     AddBindings(create_info->transform_processors,
                 create_info->transform_processor_count, &bindings.transform);
     auto handle = std::make_unique<MwPipeline>();
     building = true;
-    handle->pipeline = mw::streamer::config::BuildPipelineFromToml(
+    handle->pipeline = mw::streamer::BuildPipelineFromToml(
         create_info->toml_path, bindings);
     *output = handle.release();
     return kMwResultSuccess;

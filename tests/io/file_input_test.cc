@@ -18,18 +18,18 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::ffmpeg::InputFormatContext;
-using mw::streamer::ffmpeg::Packet;
-using mw::streamer::input::FileInput;
-using mw::streamer::input::Input;
-using mw::streamer::input::InputState;
-using mw::streamer::input::InputStateChanged;
-using mw::streamer::media::PacketReady;
-using mw::streamer::media::StreamDeliveryMode;
-using mw::streamer::media::StreamEnded;
-using mw::streamer::media::StreamEndReason;
-using mw::streamer::media::StreamsReady;
-using mw::streamer::media::TimelineReset;
+using mw::streamer::InputFormatContext;
+using mw::streamer::Packet;
+using mw::streamer::FileInput;
+using mw::streamer::Input;
+using mw::streamer::InputState;
+using mw::streamer::InputStateChanged;
+using mw::streamer::PacketReady;
+using mw::streamer::StreamDeliveryMode;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
+using mw::streamer::StreamsReady;
+using mw::streamer::TimelineReset;
 
 std::string Fixture(const char* name) {
   return std::string(MW_FILE_INPUT_TEST_DATA_DIR) + "/" + name;

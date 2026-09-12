@@ -7,7 +7,7 @@
 
 #include "mw/media/types.h"
 
-namespace mw::streamer::encoder {
+namespace mw::streamer {
 
 using EncoderProperties = std::map<std::string, std::string>;
 
@@ -27,14 +27,14 @@ struct VideoEncoderConfig {
 };
 
 struct EncoderSinkConfig {
-  encoder::AudioEncoderConfig audio_encoder;
-  encoder::VideoEncoderConfig video_encoder;
+  AudioEncoderConfig audio_encoder;
+  VideoEncoderConfig video_encoder;
   // Positive limits. Lifecycle notifications do not consume frame quota.
   std::size_t frame_queue_capacity = 256;
   // Encoded packets retained until all declared tracks have opened encoders.
   std::size_t startup_packet_capacity = 256;
 };
 
-}  // namespace mw::streamer::encoder
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_INCLUDE_MW_ENCODER_CONFIG_H_
