@@ -23,15 +23,15 @@ extern "C" {
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::Packet;
-using mw::streamer::StreamInfo;
 using mw::streamer::ControlResult;
-using mw::streamer::PlayerProxy;
-using mw::streamer::PlayerState;
-using mw::streamer::ReconnectPolicy;
-using mw::streamer::PlayerTimelineResetReason;
+using mw::streamer::Packet;
 using mw::streamer::PacketSink;
 using mw::streamer::PlayerConfig;
+using mw::streamer::PlayerProxy;
+using mw::streamer::PlayerState;
+using mw::streamer::PlayerTimelineResetReason;
+using mw::streamer::ReconnectPolicy;
+using mw::streamer::StreamInfo;
 using toolkit::Err_eof;
 using toolkit::Err_other;
 using toolkit::ErrCode;
@@ -635,8 +635,7 @@ TEST_CASE("file playback rate changes pacing without changing generation") {
   std::atomic<ControlResult> rate_result = ControlResult::kFailed;
 
   proxy->SetOnTimelineReset(
-      [&](std::uint64_t, PlayerTimelineResetReason,
-          std::chrono::milliseconds) {
+      [&](std::uint64_t, PlayerTimelineResetReason, std::chrono::milliseconds) {
         reset_seen = true;
       });
   proxy->AddPacketSink(std::make_unique<ObservingPacketSink>(

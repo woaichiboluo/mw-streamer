@@ -122,8 +122,8 @@ class PacketQueue::Impl final {
       return;
     }
     if (!worker_) {
-      worker_ = std::make_unique<Thread>("mw-packet-cache",
-                                                 [this]() { Run(); });
+      worker_ =
+          std::make_unique<Thread>("mw-packet-cache", [this]() { Run(); });
     }
     input_.Push(std::move(work));
   }
@@ -431,8 +431,7 @@ class PacketQueue::Impl final {
     input_.Close();
     input_.Clear();
     if (consumer_generation_) {
-      const StreamEnded end{*consumer_generation_,
-                                   StreamEndReason::kFailed};
+      const StreamEnded end{*consumer_generation_, StreamEndReason::kFailed};
       consumer_generation_.reset();
       consumer_.OnInputEnded(end);
     }
@@ -487,9 +486,7 @@ void PacketQueue::Abort() noexcept { impl_->Abort(); }
 
 void PacketQueue::Stop() noexcept { impl_->Stop(); }
 
-PacketSinkState PacketQueue::state() const noexcept {
-  return impl_->state();
-}
+PacketSinkState PacketQueue::state() const noexcept { return impl_->state(); }
 
 std::uint64_t PacketQueue::generation() const noexcept {
   return impl_->generation();

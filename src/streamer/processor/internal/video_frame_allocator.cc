@@ -30,10 +30,9 @@ void FillBlack(AVFrame* frame, AVPixelFormat format, AVColorRange range) {
   for (std::size_t index = 0; index < linesizes.size(); ++index) {
     linesizes[index] = frame->linesize[index];
   }
-  ThrowIfError(
-      av_image_fill_black(frame->data, linesizes.data(), format, range,
-                          frame->width, frame->height),
-      "填充Processor默认黑帧");
+  ThrowIfError(av_image_fill_black(frame->data, linesizes.data(), format, range,
+                                   frame->width, frame->height),
+               "填充Processor默认黑帧");
 }
 
 }  // namespace
@@ -59,9 +58,8 @@ Frame VideoFrameAllocator::Allocate(const Frame& input) {
 
   Frame output;
   if (input_format_ == AV_PIX_FMT_CUDA) {
-    ThrowIfError(
-        av_hwframe_get_buffer(output_frames_context_, output.get(), 0),
-        "分配Processor CUDA输出帧");
+    ThrowIfError(av_hwframe_get_buffer(output_frames_context_, output.get(), 0),
+                 "分配Processor CUDA输出帧");
     return output;
   }
 
@@ -69,13 +67,12 @@ Frame VideoFrameAllocator::Allocate(const Frame& input) {
   output->width = static_cast<int>(output_width_);
   output->height = static_cast<int>(output_height_);
   ThrowIfError(av_frame_get_buffer(output.get(), 32),
-                       "分配Processor软件视频输出帧");
+               "分配Processor软件视频输出帧");
   return output;
 }
 
 Frame VideoFrameAllocator::GetBlackFrame(
-    const Frame& input,
-    const HardwareContext* hardware_context) {
+    const Frame& input, const HardwareContext* hardware_context) {
   if (!input.get()) {
     throw std::invalid_argument("不能根据空视频Frame获取默认黑帧");
   }
@@ -96,8 +93,7 @@ Frame VideoFrameAllocator::GetBlackFrame(
   return black_frame_->Ref();
 }
 
-Frame VideoFrameAllocator::AllocateBlackFrame(
-    const Frame& input) {
+Frame VideoFrameAllocator::AllocateBlackFrame(const Frame& input) {
   auto output = Allocate(input);
   output->color_range = input->color_range;
   if (input_format_ != AV_PIX_FMT_CUDA) {
@@ -110,11 +106,10 @@ Frame VideoFrameAllocator::AllocateBlackFrame(
   software_black->width = static_cast<int>(output_width_);
   software_black->height = static_cast<int>(output_height_);
   ThrowIfError(av_frame_get_buffer(software_black.get(), 32),
-                       "分配Processor CUDA黑帧暂存");
+               "分配Processor CUDA黑帧暂存");
   FillBlack(software_black.get(), storage_format_, input->color_range);
-  ThrowIfError(
-      av_hwframe_transfer_data(output.get(), software_black.get(), 0),
-      "上传Processor CUDA默认黑帧");
+  ThrowIfError(av_hwframe_transfer_data(output.get(), software_black.get(), 0),
+               "上传Processor CUDA默认黑帧");
   return output;
 }
 
@@ -161,7 +156,7 @@ void VideoFrameAllocator::Prepare(const AVFrame& input) {
   output_context->height = static_cast<int>(output_height_);
   try {
     ThrowIfError(av_hwframe_ctx_init(pending_output_context),
-                         "初始化Processor CUDA输出帧池");
+                 "初始化Processor CUDA输出帧池");
   } catch (...) {
     av_buffer_unref(&pending_device_context);
     av_buffer_unref(&pending_output_context);

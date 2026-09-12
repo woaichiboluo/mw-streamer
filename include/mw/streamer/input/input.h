@@ -21,11 +21,9 @@ class Input {
     // Must not call Input control methods or destroy Input from this callback.
     // Within a generation, streams precede packets and end follows the last
     // packet. A timeline reset precedes replacement streams.
-    virtual void OnStreamsReady(
-        const StreamsReady& streams) noexcept = 0;
+    virtual void OnStreamsReady(const StreamsReady& streams) noexcept = 0;
     virtual void OnPacket(const PacketReady& packet) noexcept = 0;
-    virtual void OnTimelineReset(
-        const TimelineReset& reset) noexcept = 0;
+    virtual void OnTimelineReset(const TimelineReset& reset) noexcept = 0;
     virtual void OnInputEnded(const StreamEnded& end) noexcept = 0;
 
     // Source connection/retry/error notification for the coordinating owner.
@@ -52,9 +50,7 @@ class Input {
 
   // Nondestructive statistics; safe during acquisition and Stop, but not
   // destruction. Custom inputs may override to expose their own recording.
-  virtual NodeSnapshot GetPerformance() const {
-    return {{}, "Input", {}, {}};
-  }
+  virtual NodeSnapshot GetPerformance() const { return {{}, "Input", {}, {}}; }
 };
 
 }  // namespace mw::streamer

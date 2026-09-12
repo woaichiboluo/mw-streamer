@@ -72,7 +72,7 @@ Frame Video(std::int64_t pts, std::uint8_t marker = 32) {
   frame->time_base = {1, 1000};
   frame->color_range = AVCOL_RANGE_MPEG;
   ThrowIfError(av_frame_get_buffer(frame.get(), 32),
-                       "allocate scheduler video");
+               "allocate scheduler video");
   for (int plane = 0; plane < 3; ++plane) {
     std::memset(frame->data[plane], plane == 0 ? marker : 128,
                 static_cast<std::size_t>(frame->linesize[plane]) *
@@ -90,8 +90,7 @@ Frame Audio(std::int64_t pts, float marker) {
   frame->duration = 960;
   frame->time_base = {1, 48000};
   av_channel_layout_default(&frame->ch_layout, 1);
-  ThrowIfError(av_frame_get_buffer(frame.get(), 0),
-                       "allocate scheduler audio");
+  ThrowIfError(av_frame_get_buffer(frame.get(), 0), "allocate scheduler audio");
   auto* samples = reinterpret_cast<float*>(frame->data[0]);
   for (int index = 0; index < frame->nb_samples; ++index)
     samples[index] = marker;
@@ -117,24 +116,22 @@ Frame CudaVideo(const HardwareContext& device) {
   context->height = kHeight;
   context->initial_pool_size = 2;
   try {
-    ThrowIfError(av_hwframe_ctx_init(pool),
-                         "initialize scheduler CUDA pool");
+    ThrowIfError(av_hwframe_ctx_init(pool), "initialize scheduler CUDA pool");
     Frame software;
     software->format = AV_PIX_FMT_NV12;
     software->width = kWidth;
     software->height = kHeight;
     ThrowIfError(av_frame_get_buffer(software.get(), 32),
-                         "allocate scheduler CUDA upload");
+                 "allocate scheduler CUDA upload");
     std::memset(software->data[0], 32,
                 static_cast<std::size_t>(software->linesize[0]) * kHeight);
     std::memset(software->data[1], 128,
                 static_cast<std::size_t>(software->linesize[1]) * kHeight / 2);
     Frame frame;
     ThrowIfError(av_hwframe_get_buffer(pool, frame.get(), 0),
-                         "allocate scheduler CUDA frame");
-    ThrowIfError(
-        av_hwframe_transfer_data(frame.get(), software.get(), 0),
-        "upload scheduler CUDA frame");
+                 "allocate scheduler CUDA frame");
+    ThrowIfError(av_hwframe_transfer_data(frame.get(), software.get(), 0),
+                 "upload scheduler CUDA frame");
     frame->time_base = {1, 1000};
     frame->pts = 0;
     frame->duration = 50;
@@ -150,9 +147,8 @@ Frame CudaVideo(const HardwareContext& device) {
 
 Frame Download(const Frame& frame) {
   Frame downloaded;
-  ThrowIfError(
-      av_hwframe_transfer_data(downloaded.get(), frame.get(), 0),
-      "download retained scheduler CUDA frame");
+  ThrowIfError(av_hwframe_transfer_data(downloaded.get(), frame.get(), 0),
+               "download retained scheduler CUDA frame");
   return downloaded;
 }
 

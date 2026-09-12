@@ -21,17 +21,17 @@ using namespace std::chrono_literals;
 using mw::streamer::Input;
 using mw::streamer::InputState;
 using mw::streamer::InputStateChanged;
-using mw::streamer::ZlmInput;
-using mw::streamer::ZlmInputConfig;
 using mw::streamer::PacketReady;
+using mw::streamer::PacketSinkState;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
 using mw::streamer::StreamEnded;
 using mw::streamer::StreamEndReason;
 using mw::streamer::StreamsReady;
 using mw::streamer::TimelineReset;
 using mw::streamer::TimelineResetReason;
-using mw::streamer::PacketSinkState;
-using mw::streamer::Sink;
-using mw::streamer::SinkMediaType;
+using mw::streamer::ZlmInput;
+using mw::streamer::ZlmInputConfig;
 using namespace mw::streamer;
 using mw::streamer::BlockingQueue;
 
@@ -382,8 +382,7 @@ TEST_CASE("pipeline stop waits for a sink callback and leaves sinks alive") {
   CHECK(blocked_result == std::future_status::timeout);
   CHECK(performance_result == std::future_status::ready);
   const auto snapshot = performance.get();
-  const auto input_stats =
-      snapshot.Find(mw::streamer::PerformanceType::kInput);
+  const auto input_stats = snapshot.Find(mw::streamer::PerformanceType::kInput);
   REQUIRE(input_stats.size() == 1);
   CHECK(input_stats[0].operation->output_count > 0);
   CHECK(snapshot.sinks.size() == 1);

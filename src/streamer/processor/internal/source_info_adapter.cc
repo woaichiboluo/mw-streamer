@@ -20,8 +20,7 @@ MwStreamerProcessorSourceInfo MakeProcessorSourceInfo(
   if (video_stream) {
     const auto* parameters = video_stream->codec_parameters.get();
     source_info.has_video = 1;
-    source_info.video.codec =
-        internal::ToMwStreamerCodec(parameters->codec_id);
+    source_info.video.codec = internal::ToMwStreamerCodec(parameters->codec_id);
     source_info.video.width = static_cast<std::uint32_t>(parameters->width);
     source_info.video.height = static_cast<std::uint32_t>(parameters->height);
     source_info.video.frame_rate =
@@ -33,8 +32,7 @@ MwStreamerProcessorSourceInfo MakeProcessorSourceInfo(
   if (audio_stream) {
     const auto* parameters = audio_stream->codec_parameters.get();
     source_info.has_audio = 1;
-    source_info.audio.codec =
-        internal::ToMwStreamerCodec(parameters->codec_id);
+    source_info.audio.codec = internal::ToMwStreamerCodec(parameters->codec_id);
     source_info.audio.sample_rate =
         static_cast<std::uint32_t>(parameters->sample_rate);
     source_info.audio.channel_count =

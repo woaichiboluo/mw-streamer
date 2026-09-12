@@ -327,7 +327,7 @@ class DecoderSink::Impl final : public Sink {
     }
     barrier_ = std::make_unique<Barrier>(tracks_.size());
     const FrameStreamsReady ready{streams.generation, streams.streams,
-                                  HardwareContext()};
+                                  hardware_context()};
     owner_.StartMessages();
     for (const auto& output : outputs_) {
       output->OnStreamsReady(ready);
@@ -339,7 +339,7 @@ class DecoderSink::Impl final : public Sink {
     }
   }
 
-  const HardwareContext* HardwareContext() const {
+  const HardwareContext* hardware_context() const {
     for (const auto& track : tracks_) {
       if (track->video) {
         return track->video->hardware_context();
@@ -454,7 +454,7 @@ class DecoderSink::Impl final : public Sink {
       output->OnTimelineReset(reset);
     }
     const FrameStreamsReady ready{streams.generation, streams.streams,
-                                  HardwareContext()};
+                                  hardware_context()};
     owner_.StartMessages();
     for (const auto& output : outputs_) {
       output->OnStreamsReady(ready);

@@ -18,12 +18,12 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::InputFormatContext;
-using mw::streamer::Packet;
 using mw::streamer::FileInput;
 using mw::streamer::Input;
+using mw::streamer::InputFormatContext;
 using mw::streamer::InputState;
 using mw::streamer::InputStateChanged;
+using mw::streamer::Packet;
 using mw::streamer::PacketReady;
 using mw::streamer::StreamDeliveryMode;
 using mw::streamer::StreamEnded;

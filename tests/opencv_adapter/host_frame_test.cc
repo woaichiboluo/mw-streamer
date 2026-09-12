@@ -17,20 +17,20 @@ extern "C" {
 #include <libavutil/hwcontext_cuda.h>
 }
 
+#include "mw/opencv_adapter/cuda_frame.h"
+#include "mw/opencv_adapter/host_frame.h"
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/ffmpeg/frame.h"
 #include "mw/streamer/ffmpeg/hardware_context.h"
-#include "mw/opencv_adapter/cuda_frame.h"
-#include "mw/opencv_adapter/host_frame.h"
 #include "mw/streamer/processor/internal/frame_adapter.h"
 
 namespace {
 
+using mw::opencv_adapter::CudaFrame;
+using mw::opencv_adapter::HostFrame;
 using mw::streamer::Frame;
 using mw::streamer::HardwareContext;
 using mw::streamer::ThrowIfError;
-using mw::opencv_adapter::CudaFrame;
-using mw::opencv_adapter::HostFrame;
 using mw::streamer::internal::VideoFrameAdapter;
 
 static_assert(!std::is_copy_constructible_v<HostFrame>);

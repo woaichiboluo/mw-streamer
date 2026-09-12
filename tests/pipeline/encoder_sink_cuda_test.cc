@@ -31,16 +31,16 @@ using mw::streamer::EncoderSinkConfig;
 using mw::streamer::EncoderSinkState;
 using mw::streamer::FrameStreamsReady;
 using mw::streamer::PacketReady;
-using mw::streamer::StreamEnded;
-using mw::streamer::StreamEndReason;
-using mw::streamer::StreamsReady;
-using mw::streamer::TimelineReset;
 using mw::streamer::PacketSinkState;
 using mw::streamer::Sink;
 using mw::streamer::SinkMediaType;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
+using mw::streamer::StreamsReady;
 using mw::streamer::SynchronizerSink;
 using mw::streamer::SynchronizerSinkConfig;
 using mw::streamer::SynchronizerSinkState;
+using mw::streamer::TimelineReset;
 using namespace mw::streamer;
 
 constexpr int kWidth = 256;
@@ -66,18 +66,16 @@ Frame MakeCudaFrame(const HardwareContext& device) {
     software->format = AV_PIX_FMT_NV12;
     software->width = kWidth;
     software->height = kHeight;
-    ThrowIfError(av_frame_get_buffer(software.get(), 32),
-                         "分配编码测试上传帧");
+    ThrowIfError(av_frame_get_buffer(software.get(), 32), "分配编码测试上传帧");
     std::memset(software->data[0], 32,
                 static_cast<std::size_t>(software->linesize[0]) * kHeight);
     std::memset(software->data[1], 128,
                 static_cast<std::size_t>(software->linesize[1]) * kHeight / 2);
     Frame frame;
     ThrowIfError(av_hwframe_get_buffer(pool, frame.get(), 0),
-                         "分配编码测试CUDA帧");
-    ThrowIfError(
-        av_hwframe_transfer_data(frame.get(), software.get(), 0),
-        "上传编码测试CUDA帧");
+                 "分配编码测试CUDA帧");
+    ThrowIfError(av_hwframe_transfer_data(frame.get(), software.get(), 0),
+                 "上传编码测试CUDA帧");
     frame->time_base = kTimeBase;
     frame->pts = 0;
     frame->duration = 1;

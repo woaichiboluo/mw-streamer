@@ -23,8 +23,7 @@ class VideoDecoder final {
  public:
   using OnFrame = std::function<void(const Frame& frame)>;
 
-  explicit VideoDecoder(StreamInfo stream_info,
-                        VideoDecoderConfig config = {});
+  explicit VideoDecoder(StreamInfo stream_info, VideoDecoderConfig config = {});
   ~VideoDecoder();
 
   VideoDecoder(const VideoDecoder&) = delete;

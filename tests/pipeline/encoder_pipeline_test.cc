@@ -32,24 +32,24 @@ using mw::streamer::DecoderSinkConfig;
 using mw::streamer::EncoderSink;
 using mw::streamer::EncoderSinkConfig;
 using mw::streamer::EncoderSinkState;
-using mw::streamer::InputState;
-using mw::streamer::ZlmInput;
-using mw::streamer::ZlmInputConfig;
 using mw::streamer::FrameReady;
 using mw::streamer::FrameStreamsReady;
+using mw::streamer::InputState;
 using mw::streamer::PacketReady;
-using mw::streamer::StreamEnded;
-using mw::streamer::StreamsReady;
-using mw::streamer::TimelineReset;
+using mw::streamer::PacketSinkState;
 using mw::streamer::RemuxSink;
 using mw::streamer::RemuxSinkConfig;
-using mw::streamer::TransformProcessorSink;
-using mw::streamer::PacketSinkState;
 using mw::streamer::Sink;
 using mw::streamer::SinkMediaType;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamsReady;
 using mw::streamer::SynchronizerSink;
 using mw::streamer::SynchronizerSinkConfig;
 using mw::streamer::SynchronizerSinkState;
+using mw::streamer::TimelineReset;
+using mw::streamer::TransformProcessorSink;
+using mw::streamer::ZlmInput;
+using mw::streamer::ZlmInputConfig;
 using namespace mw::streamer;
 
 class TestDirectory final {
@@ -89,8 +89,7 @@ std::unique_ptr<ZlmInput> MakeInput() {
 
 std::unique_ptr<DecoderSink> MakeDecoder() {
   DecoderSinkConfig config;
-  config.video_decoder.backend =
-      mw::streamer::VideoDecoderBackend::kSoftware;
+  config.video_decoder.backend = mw::streamer::VideoDecoderBackend::kSoftware;
   return std::make_unique<DecoderSink>("decoder-1", config);
 }
 

@@ -49,10 +49,9 @@ class PlayerProxy final {
   using OnState = std::function<void(
       std::uint64_t generation, PlayerState state,
       const toolkit::SockException& reason, bool will_retry)>;
-  using OnTimelineReset =
-      std::function<void(std::uint64_t generation,
-                         PlayerTimelineResetReason reason,
-                         std::chrono::milliseconds position)>;
+  using OnTimelineReset = std::function<void(
+      std::uint64_t generation, PlayerTimelineResetReason reason,
+      std::chrono::milliseconds position)>;
   using OnControlCompleted =
       std::function<void(ControlResult result, std::uint64_t generation)>;
   using OnStopped = std::function<void()>;

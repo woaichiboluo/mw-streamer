@@ -97,8 +97,7 @@ ZlmCodecParametersConverter::ZlmCodecParametersConverter(
   SetExtraData(parameters, GetExtraData(track));
 }
 
-const CodecParameters& ZlmCodecParametersConverter::codec_parameters()
-    const {
+const CodecParameters& ZlmCodecParametersConverter::codec_parameters() const {
   return codec_parameters_;
 }
 

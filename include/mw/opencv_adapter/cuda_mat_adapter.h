@@ -3,8 +3,8 @@
 
 #include <opencv2/core/cuda.hpp>
 
-#include "mw/opencv_adapter/cuda_frame.h"
 #include "mw/export.h"
+#include "mw/opencv_adapter/cuda_frame.h"
 #include "mw/streamer/processor/processor.h"
 
 namespace mw::opencv_adapter {

@@ -74,8 +74,7 @@ void MapVideoBuffer(const AVFrame& frame,
   auto memory_type = kMwStreamerMemoryHost;
   auto storage_format = static_cast<AVPixelFormat>(frame.format);
   if (storage_format == AV_PIX_FMT_CUDA) {
-    const auto* frames_context =
-        HardwareContext::GetFramesContext(frame);
+    const auto* frames_context = HardwareContext::GetFramesContext(frame);
     if (!frames_context ||
         frames_context->device_ctx->type != AV_HWDEVICE_TYPE_CUDA) {
       throw std::invalid_argument("视频帧不是有效的CUDA硬件帧");
@@ -313,8 +312,7 @@ void ValidateAudioStorage(const AVFrame& frame) {
 
 }  // namespace
 
-VideoFrameViewAdapter::VideoFrameViewAdapter(
-    const Frame& frame) {
+VideoFrameViewAdapter::VideoFrameViewAdapter(const Frame& frame) {
   if (!frame.get()) {
     throw std::invalid_argument("不能映射空视频Frame");
   }
@@ -323,13 +321,11 @@ VideoFrameViewAdapter::VideoFrameViewAdapter(
   view_.timestamp = MapTimestamp(*frame.get());
 }
 
-const MwStreamerVideoFrameView& VideoFrameViewAdapter::view()
-    const noexcept {
+const MwStreamerVideoFrameView& VideoFrameViewAdapter::view() const noexcept {
   return view_;
 }
 
-internal::VideoBufferAdapter::VideoBufferAdapter(
-    Frame& frame) {
+internal::VideoBufferAdapter::VideoBufferAdapter(Frame& frame) {
   if (!frame.get()) {
     throw std::invalid_argument("不能映射空视频Frame");
   }
@@ -341,8 +337,7 @@ const MwStreamerVideoBufferView& internal::VideoBufferAdapter::view()
   return view_;
 }
 
-AudioFrameViewAdapter::AudioFrameViewAdapter(
-    const Frame& frame) {
+AudioFrameViewAdapter::AudioFrameViewAdapter(const Frame& frame) {
   if (!frame.get()) {
     throw std::invalid_argument("不能映射空音频Frame");
   }
@@ -356,13 +351,11 @@ AudioFrameViewAdapter::AudioFrameViewAdapter(
   };
 }
 
-const MwStreamerAudioFrameView& AudioFrameViewAdapter::view()
-    const noexcept {
+const MwStreamerAudioFrameView& AudioFrameViewAdapter::view() const noexcept {
   return view_;
 }
 
-internal::AudioBufferAdapter::AudioBufferAdapter(
-    Frame& frame) {
+internal::AudioBufferAdapter::AudioBufferAdapter(Frame& frame) {
   if (!frame.get()) {
     throw std::invalid_argument("不能映射空音频Frame");
   }

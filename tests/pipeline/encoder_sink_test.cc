@@ -34,20 +34,20 @@ using mw::streamer::EncoderSink;
 using mw::streamer::EncoderSinkConfig;
 using mw::streamer::EncoderSinkState;
 using mw::streamer::Frame;
-using mw::streamer::StreamInfo;
-using mw::streamer::ThrowIfError;
 using mw::streamer::FrameStreamsReady;
 using mw::streamer::PacketReady;
-using mw::streamer::StreamEnded;
-using mw::streamer::StreamEndReason;
-using mw::streamer::StreamsReady;
-using mw::streamer::TimelineReset;
-using mw::streamer::TimelineResetReason;
+using mw::streamer::PacketSinkState;
 using mw::streamer::PerformanceType;
 using mw::streamer::PerformanceUnit;
-using mw::streamer::PacketSinkState;
 using mw::streamer::Sink;
 using mw::streamer::SinkMediaType;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
+using mw::streamer::StreamInfo;
+using mw::streamer::StreamsReady;
+using mw::streamer::ThrowIfError;
+using mw::streamer::TimelineReset;
+using mw::streamer::TimelineResetReason;
 
 EncoderSinkConfig SoftwareConfig(bool delayed = false) {
   EncoderSinkConfig config;

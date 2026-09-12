@@ -28,26 +28,26 @@ extern "C" {
 
 namespace {
 
+using mw::streamer::AnalysisProcessorSink;
 using mw::streamer::Frame;
-using mw::streamer::StreamInfo;
-using mw::streamer::Input;
-using mw::streamer::InputState;
 using mw::streamer::FrameReady;
 using mw::streamer::FrameStreamsReady;
-using mw::streamer::StreamEnded;
-using mw::streamer::StreamEndReason;
-using mw::streamer::StreamsReady;
-using mw::streamer::TimelineReset;
-using mw::streamer::TimelineResetReason;
+using mw::streamer::Input;
+using mw::streamer::InputState;
 using mw::streamer::NodeSnapshot;
 using mw::streamer::OperationSnapshot;
 using mw::streamer::PerformanceType;
 using mw::streamer::PerformanceUnit;
-using mw::streamer::AnalysisProcessorSink;
-using mw::streamer::TransformProcessorSink;
 using mw::streamer::Sink;
 using mw::streamer::SinkMediaType;
 using mw::streamer::SinkMessage;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
+using mw::streamer::StreamInfo;
+using mw::streamer::StreamsReady;
+using mw::streamer::TimelineReset;
+using mw::streamer::TimelineResetReason;
+using mw::streamer::TransformProcessorSink;
 using namespace mw::streamer;
 
 FrameStreamsReady Streams(std::uint64_t generation = 1) {
@@ -459,8 +459,7 @@ TEST_CASE("TransformProcessorSink拒绝处理期间改变输出尺寸") {
   sink.AddSink(std::make_unique<Recorder>(recorded));
   sink.OnStreamsReady(Streams());
   sink.OnVideoFrame({1, Video()});
-  CHECK_THROWS_AS(sink.OnVideoFrame({1, Video()}),
-                  mw::streamer::FatalError);
+  CHECK_THROWS_AS(sink.OnVideoFrame({1, Video()}), mw::streamer::FatalError);
 }
 
 TEST_CASE("TransformProcessorSink回调使用独立输出并向多个下游保留结果") {

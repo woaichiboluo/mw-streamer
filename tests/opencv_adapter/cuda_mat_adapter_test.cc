@@ -12,11 +12,11 @@
 #include <opencv2/core/mat.hpp>
 #include <vector>
 
+#include "mw/opencv_adapter/cuda_frame.h"
+#include "mw/opencv_adapter/host_mat_adapter.h"
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/ffmpeg/frame.h"
 #include "mw/streamer/ffmpeg/hardware_context.h"
-#include "mw/opencv_adapter/cuda_frame.h"
-#include "mw/opencv_adapter/host_mat_adapter.h"
 #include "mw/streamer/processor/internal/frame_adapter.h"
 
 extern "C" {
@@ -25,12 +25,12 @@ extern "C" {
 
 namespace {
 
-using mw::streamer::Frame;
-using mw::streamer::HardwareContext;
-using mw::streamer::ThrowIfError;
 using mw::opencv_adapter::CudaFrame;
 using mw::opencv_adapter::CudaMatAdapter;
 using mw::opencv_adapter::HostMatAdapter;
+using mw::streamer::Frame;
+using mw::streamer::HardwareContext;
+using mw::streamer::ThrowIfError;
 using mw::streamer::internal::VideoFrameAdapter;
 
 constexpr std::uint32_t kWidth = 64;

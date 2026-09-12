@@ -21,9 +21,8 @@ class PacketSink {
   // Precedes packets for this generation. A newer generation replaces the old
   // timeline, including after a seek; the replaced timeline need not receive
   // EndInput. Streams are borrowed for this call and must be copied to retain.
-  virtual void SetStreams(
-      std::uint64_t generation,
-      const std::vector<StreamInfo>& streams) noexcept = 0;
+  virtual void SetStreams(std::uint64_t generation,
+                          const std::vector<StreamInfo>& streams) noexcept = 0;
 
   // Borrows a read-only packet for this call. Copy or Ref it before returning
   // to retain it for asynchronous work. Referenced buffers remain read-only

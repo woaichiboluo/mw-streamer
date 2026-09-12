@@ -19,9 +19,9 @@
 namespace {
 
 using namespace std::chrono_literals;
+using mw::streamer::PacketSinkState;
 using mw::streamer::RemuxSink;
 using mw::streamer::RemuxSinkConfig;
-using mw::streamer::PacketSinkState;
 
 // The sink selects its own pool member. Pause every member to make saturation
 // deterministic without exposing a test-only Poller injection API.

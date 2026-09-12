@@ -74,8 +74,7 @@ Clock::time_point WallTime(std::int64_t microseconds) {
   return Clock::time_point(Clock::duration(ticks));
 }
 
-bool SameStream(const StreamInfo& left,
-                const StreamInfo& right) {
+bool SameStream(const StreamInfo& left, const StreamInfo& right) {
   const auto* a = left.codec_parameters.get();
   const auto* b = right.codec_parameters.get();
   return left.stream_index == right.stream_index &&
@@ -92,11 +91,9 @@ Frame MakeSilence(const Frame& prototype) {
   frame->format = prototype->format;
   frame->sample_rate = prototype->sample_rate;
   frame->nb_samples = prototype->nb_samples;
-  ThrowIfError(
-      av_channel_layout_copy(&frame->ch_layout, &prototype->ch_layout),
-      "复制实时同步静音声道布局");
-  ThrowIfError(av_frame_get_buffer(frame.get(), 0),
-                       "分配实时同步静音帧");
+  ThrowIfError(av_channel_layout_copy(&frame->ch_layout, &prototype->ch_layout),
+               "复制实时同步静音声道布局");
+  ThrowIfError(av_frame_get_buffer(frame.get(), 0), "分配实时同步静音帧");
   ThrowIfError(
       av_samples_set_silence(frame->extended_data, 0, frame->nb_samples,
                              frame->ch_layout.nb_channels,
@@ -309,8 +306,7 @@ class RealtimeFrameScheduler::Impl final {
                  : MakeVideo(std::move(selected), now_us);
   }
 
-  void ValidateFrame(const Frame& frame, const Track& track,
-                     bool audio) const {
+  void ValidateFrame(const Frame& frame, const Track& track, bool audio) const {
     if (!frame.get() || frame->pts == AV_NOPTS_VALUE ||
         frame->time_base.num <= 0 || frame->time_base.den <= 0) {
       throw std::invalid_argument("实时同步原始帧时间戳无效");
@@ -430,8 +426,7 @@ class RealtimeFrameScheduler::Impl final {
     return selected;
   }
 
-  OutputFrame MakeAudio(std::optional<Frame> selected,
-                        std::int64_t now_us) {
+  OutputFrame MakeAudio(std::optional<Frame> selected, std::int64_t now_us) {
     if (selected) {
       last_real_audio_us_ = now_us;
     }
@@ -445,8 +440,7 @@ class RealtimeFrameScheduler::Impl final {
     return {true, std::move(frame)};
   }
 
-  OutputFrame MakeVideo(std::optional<Frame> selected,
-                        std::int64_t now_us) {
+  OutputFrame MakeVideo(std::optional<Frame> selected, std::int64_t now_us) {
     const bool was_standby = standby_;
     if (selected) {
       last_real_video_us_ = now_us;
@@ -504,8 +498,7 @@ class RealtimeFrameScheduler::Impl final {
 RealtimeFrameScheduler::RealtimeFrameScheduler(SynchronizerSinkConfig config)
     : impl_(std::make_unique<Impl>(std::move(config))) {}
 RealtimeFrameScheduler::~RealtimeFrameScheduler() = default;
-void RealtimeFrameScheduler::Configure(
-    const FrameStreamsReady& streams) {
+void RealtimeFrameScheduler::Configure(const FrameStreamsReady& streams) {
   impl_->Configure(streams);
 }
 void RealtimeFrameScheduler::Push(const FrameReady& frame, bool audio,

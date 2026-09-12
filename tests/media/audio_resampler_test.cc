@@ -18,10 +18,10 @@ extern "C" {
 
 namespace {
 
+using mw::streamer::AudioResampler;
 using mw::streamer::CodecParameters;
 using mw::streamer::Frame;
 using mw::streamer::StreamInfo;
-using mw::streamer::AudioResampler;
 
 StreamInfo MakeAudioStream(int sample_rate, int channel_count) {
   CodecParameters parameters;

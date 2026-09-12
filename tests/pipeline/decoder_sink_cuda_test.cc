@@ -28,13 +28,13 @@ using mw::streamer::DecoderSink;
 using mw::streamer::DecoderSinkConfig;
 using mw::streamer::FrameReady;
 using mw::streamer::FrameStreamsReady;
+using mw::streamer::PacketSinkState;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
 using mw::streamer::StreamEnded;
 using mw::streamer::StreamEndReason;
 using mw::streamer::TimelineReset;
 using mw::streamer::TransformProcessorSink;
-using mw::streamer::PacketSinkState;
-using mw::streamer::Sink;
-using mw::streamer::SinkMediaType;
 using namespace mw::streamer;
 
 struct Recording {
@@ -99,14 +99,13 @@ class CudaRecorder final : public Sink {
 
 TEST_CASE("DecoderSink CUDA frames outlive the decoder context") {
   InputFormatContext input(std::string(MW_DECODER_SINK_TEST_DATA_DIR) +
-                                   "/h264_aac.mp4");
+                           "/h264_aac.mp4");
   input.FindStreamInfo();
   std::vector<StreamInfo> streams;
   for (unsigned int i = 0; i < input->nb_streams; ++i) {
     const auto* stream = input->streams[i];
     if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-      streams.push_back({stream->index,
-                         CodecParameters(*stream->codecpar),
+      streams.push_back({stream->index, CodecParameters(*stream->codecpar),
                          stream->time_base});
     }
   }

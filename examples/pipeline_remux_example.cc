@@ -15,14 +15,14 @@
 namespace {
 
 using mw::streamer::InputState;
-using mw::streamer::ZlmInput;
-using mw::streamer::ZlmInputConfig;
-using mw::streamer::RemuxSink;
-using mw::streamer::RemuxSinkConfig;
 using mw::streamer::OperationSnapshot;
+using mw::streamer::PacketSinkState;
 using mw::streamer::PerformanceType;
 using mw::streamer::PipelineSnapshot;
-using mw::streamer::PacketSinkState;
+using mw::streamer::RemuxSink;
+using mw::streamer::RemuxSinkConfig;
+using mw::streamer::ZlmInput;
+using mw::streamer::ZlmInputConfig;
 using namespace mw::streamer;
 
 void PrintPerformance(Pipeline& pipeline,

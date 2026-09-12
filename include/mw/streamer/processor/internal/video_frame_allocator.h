@@ -35,7 +35,7 @@ class VideoFrameAllocator final {
   // Validates every input before returning a cached black frame. The cache is
   // rebuilt when the input color range changes.
   Frame GetBlackFrame(const Frame& input,
-                              const HardwareContext* hardware_context);
+                      const HardwareContext* hardware_context);
 
  private:
   Frame AllocateBlackFrame(const Frame& input);

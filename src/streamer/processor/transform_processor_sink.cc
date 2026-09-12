@@ -13,10 +13,10 @@
 #include <utility>
 #include <vector>
 
-#include "mw/streamer/processor/internal/processor_sink_context.h"
 #include "mw/streamer/performance/operation_recorder.h"
 #include "mw/streamer/processor/internal/audio_frame_allocator.h"
 #include "mw/streamer/processor/internal/frame_adapter.h"
+#include "mw/streamer/processor/internal/processor_sink_context.h"
 #include "mw/streamer/processor/internal/video_frame_allocator.h"
 #include "mw/streamer/sink/fatal_error.h"
 
@@ -110,7 +110,7 @@ class TransformProcessorSink::Impl final {
       return;
     }
     const FrameReady result{frame.generation,
-                                   ProcessVideo(frame.frame, context)};
+                            ProcessVideo(frame.frame, context)};
     video_performance_.AddOutput(1);
     for (auto& output : outputs_) {
       output->OnVideoFrame(result);
@@ -233,7 +233,7 @@ class TransformProcessorSink::Impl final {
   }
 
   Frame ProcessVideo(const Frame& frame,
-                             internal::ProcessorSinkContext& context) {
+                     internal::ProcessorSinkContext& context) {
     OperationRecorder::Call call(video_performance_);
     const internal::VideoFrameAdapter input(frame);
     context.ValidateVideoInput(*frame.get(), input.view());
@@ -273,14 +273,12 @@ class TransformProcessorSink::Impl final {
     context_.reset();
   }
 
-  OperationRecorder audio_performance_{
-      PerformanceType::kAudioProcessor,
-      PerformanceUnit::kSample,
-      PerformanceUnit::kSample};
-  OperationRecorder video_performance_{
-      PerformanceType::kVideoProcessor,
-      PerformanceUnit::kFrame,
-      PerformanceUnit::kFrame};
+  OperationRecorder audio_performance_{PerformanceType::kAudioProcessor,
+                                       PerformanceUnit::kSample,
+                                       PerformanceUnit::kSample};
+  OperationRecorder video_performance_{PerformanceType::kVideoProcessor,
+                                       PerformanceUnit::kFrame,
+                                       PerformanceUnit::kFrame};
   TransformProcessorSink& owner_;
   std::string processor_config_;
   const MwStreamerTransformProcessorCallbacks callbacks_;
@@ -299,8 +297,7 @@ class TransformProcessorSink::Impl final {
 
 TransformProcessorSink::TransformProcessorSink(
     std::string id, MwStreamerTransformProcessorCallbacks callbacks)
-    : Sink(std::move(id), SinkMediaType::kFrame,
-                 SinkMediaType::kFrame),
+    : Sink(std::move(id), SinkMediaType::kFrame, SinkMediaType::kFrame),
       impl_(std::make_unique<Impl>(*this, callbacks)) {}
 
 TransformProcessorSink::~TransformProcessorSink() { Stop(); }
@@ -309,8 +306,7 @@ NodeSnapshot TransformProcessorSink::GetOwnPerformance() const {
   return impl_->GetPerformance();
 }
 
-void TransformProcessorSink::OnStreamsReady(
-    const FrameStreamsReady& streams) {
+void TransformProcessorSink::OnStreamsReady(const FrameStreamsReady& streams) {
   CloseRegistration();
   impl_->OnStreamsReady(streams);
 }
@@ -325,8 +321,7 @@ void TransformProcessorSink::OnVideoFrame(const FrameReady& frame) {
   impl_->OnVideoFrame(frame);
 }
 
-void TransformProcessorSink::OnTimelineReset(
-    const TimelineReset& reset) {
+void TransformProcessorSink::OnTimelineReset(const TimelineReset& reset) {
   CloseRegistration();
   impl_->OnTimelineReset(reset);
 }

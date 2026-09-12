@@ -5,8 +5,8 @@
 
 #include "Poller/EventPoller.h"
 #include "Thread/WorkThreadPool.h"
-#include "mw/streamer/log/internal/third_party_log_bridge.h"
 #include "mw/streamer/init/internal/runtime.h"
+#include "mw/streamer/log/internal/third_party_log_bridge.h"
 #include "srt/SrtEpollReactor.h"
 
 namespace mw::streamer::internal {

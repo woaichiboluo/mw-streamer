@@ -31,18 +31,18 @@ extern "C" {
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::Input;
-using mw::streamer::InputState;
+using mw::streamer::AnalysisProcessorSink;
+using mw::streamer::FatalError;
 using mw::streamer::FrameReady;
 using mw::streamer::FrameStreamsReady;
+using mw::streamer::Input;
+using mw::streamer::InputState;
 using mw::streamer::PacketReady;
-using mw::streamer::StreamsReady;
-using mw::streamer::AnalysisProcessorSink;
-using mw::streamer::TransformProcessorSink;
-using mw::streamer::FatalError;
 using mw::streamer::Sink;
 using mw::streamer::SinkMediaType;
 using mw::streamer::SinkMessage;
+using mw::streamer::StreamsReady;
+using mw::streamer::TransformProcessorSink;
 using namespace mw::streamer;
 using mw::streamer::Frame;
 using mw::streamer::StreamInfo;

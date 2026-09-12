@@ -44,8 +44,7 @@ int FindBestStream(AVFormatContext& context, AVMediaType media_type) {
 }
 
 StreamsReady SelectStreams(AVFormatContext& context) {
-  StreamsReady result{
-      kGeneration, {}, StreamDeliveryMode::kOffline};
+  StreamsReady result{kGeneration, {}, StreamDeliveryMode::kOffline};
   for (const auto type : {AVMEDIA_TYPE_AUDIO, AVMEDIA_TYPE_VIDEO}) {
     const int index = FindBestStream(context, type);
     if (index < 0) {
@@ -85,8 +84,7 @@ class FileInput::Impl final {
     }
     observer_ = &observer;
     try {
-      worker_ =
-          std::make_unique<Thread>("file-input", [this] { Run(); });
+      worker_ = std::make_unique<Thread>("file-input", [this] { Run(); });
       started_ = true;
     } catch (...) {
       observer_ = nullptr;
@@ -134,8 +132,8 @@ class FileInput::Impl final {
 
   void ReadFile() {
     // An absolute path prevents FFmpeg interpreting a local name as a protocol.
-    InputFormatContext context(
-        std::filesystem::absolute(config_.path).string(), {InterruptIo, this});
+    InputFormatContext context(std::filesystem::absolute(config_.path).string(),
+                               {InterruptIo, this});
     context.FindStreamInfo();
     if (stop_requested_.load(std::memory_order_relaxed)) {
       return;
@@ -200,9 +198,9 @@ class FileInput::Impl final {
   // Borrowed until Join; accessed only on the file thread while running.
   Observer* observer_ = nullptr;
   bool streams_ready_ = false;
-  OperationRecorder performance_{
-      PerformanceType::kInput, PerformanceUnit::kNone,
-      PerformanceUnit::kPacket};
+  OperationRecorder performance_{PerformanceType::kInput,
+                                 PerformanceUnit::kNone,
+                                 PerformanceUnit::kPacket};
 };
 
 FileInput::FileInput(FileInputConfig config)

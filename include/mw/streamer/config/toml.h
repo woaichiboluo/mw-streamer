@@ -17,10 +17,8 @@ namespace mw::streamer {
 // String parsing preserves paths. File loading resolves local paths against
 // the source file's directory; URLs and empty optional paths stay unchanged.
 PipelineConfig ParsePipelineConfigFromToml(std::string_view text);
-std::string SerializePipelineConfigToToml(
-    const PipelineConfig& config);
-PipelineConfig LoadPipelineConfigFromToml(
-    const std::filesystem::path& path);
+std::string SerializePipelineConfigToToml(const PipelineConfig& config);
+PipelineConfig LoadPipelineConfigFromToml(const std::filesystem::path& path);
 void SavePipelineConfigToToml(const PipelineConfig& config,
                               const std::filesystem::path& path);
 
@@ -28,8 +26,7 @@ void SavePipelineConfigToToml(const PipelineConfig& config,
 // [zlm] sections configure the process runtime before any media object is
 // created. The returned Pipeline is not started.
 std::unique_ptr<Pipeline> BuildPipelineFromToml(
-    const std::filesystem::path& path,
-    const ProcessorBindings& bindings = {});
+    const std::filesystem::path& path, const ProcessorBindings& bindings = {});
 
 }  // namespace mw::streamer
 

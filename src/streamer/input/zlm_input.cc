@@ -94,16 +94,16 @@ class ZlmInput::Impl final {
       throw std::logic_error("ZlmInput控制操作不能在输入执行上下文中调用");
     }
     player_->AddPacketSink(std::make_unique<Bridge>(*this));
-    player_->SetOnState(
-        [this](std::uint64_t generation, PlayerState state,
-               const toolkit::SockException& reason, bool will_retry) {
-          state_.store(MapState(state), std::memory_order_relaxed);
-          if (observer_) {
-            observer_->OnInputStateChanged(
-                InputStateChanged{generation, MapState(state),
-                                  reason ? reason.what() : "", will_retry});
-          }
-        });
+    player_->SetOnState([this](std::uint64_t generation, PlayerState state,
+                               const toolkit::SockException& reason,
+                               bool will_retry) {
+      state_.store(MapState(state), std::memory_order_relaxed);
+      if (observer_) {
+        observer_->OnInputStateChanged(
+            InputStateChanged{generation, MapState(state),
+                              reason ? reason.what() : "", will_retry});
+      }
+    });
     player_->poller()->sync([this, &observer] { observer_ = &observer; });
     started_ = true;
     try {
@@ -150,17 +150,14 @@ class ZlmInput::Impl final {
    public:
     explicit Bridge(Impl& owner) : owner_(owner) {}
 
-    void SetStreams(
-        std::uint64_t generation,
-        const std::vector<StreamInfo>& streams) noexcept override {
+    void SetStreams(std::uint64_t generation,
+                    const std::vector<StreamInfo>& streams) noexcept override {
       if (owner_.observer_) {
         if (generation_ && *generation_ != generation) {
           owner_.observer_->OnTimelineReset(TimelineReset{
-              generation, TimelineResetReason::kReconnect,
-              std::nullopt});
+              generation, TimelineResetReason::kReconnect, std::nullopt});
         }
-        owner_.observer_->OnStreamsReady(
-            StreamsReady{generation, streams});
+        owner_.observer_->OnStreamsReady(StreamsReady{generation, streams});
       }
       generation_ = generation;
     }
@@ -173,8 +170,7 @@ class ZlmInput::Impl final {
         if (packet.get()) {
           owner_.performance_.AddOutput(1, packet->size);
         }
-        owner_.observer_->OnPacket(
-            PacketReady{generation, packet.Ref()});
+        owner_.observer_->OnPacket(PacketReady{generation, packet.Ref()});
       }
     }
 
@@ -197,9 +193,9 @@ class ZlmInput::Impl final {
   bool started_ = false;
   bool stopped_ = false;
   std::atomic<InputState> state_{InputState::kIdle};
-  OperationRecorder performance_{
-      PerformanceType::kInput, PerformanceUnit::kNone,
-      PerformanceUnit::kPacket};
+  OperationRecorder performance_{PerformanceType::kInput,
+                                 PerformanceUnit::kNone,
+                                 PerformanceUnit::kPacket};
   std::unique_ptr<PlayerProxy> player_;
   // Accessed only on the player's owner poller.
   Observer* observer_ = nullptr;

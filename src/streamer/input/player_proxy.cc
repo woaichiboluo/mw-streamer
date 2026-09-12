@@ -176,8 +176,7 @@ std::optional<std::string> FindCodecParametersDifference(
 }
 
 std::optional<std::string> FindStreamsDifference(
-    const std::vector<StreamInfo>& left,
-    const std::vector<StreamInfo>& right) {
+    const std::vector<StreamInfo>& left, const std::vector<StreamInfo>& right) {
   if (left.size() != right.size()) {
     return "track_count";
   }
@@ -990,9 +989,8 @@ class PlayerProxy::Impl final
     }
   }
 
-  void SetSinkStreamsOnPoller(
-      std::uint64_t generation,
-      const std::vector<StreamInfo>& streams) noexcept {
+  void SetSinkStreamsOnPoller(std::uint64_t generation,
+                              const std::vector<StreamInfo>& streams) noexcept {
     sink_generation_ = generation;
     for (const auto& sink : packet_sinks_) {
       sink->SetStreams(generation, streams);

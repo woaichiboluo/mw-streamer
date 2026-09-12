@@ -15,11 +15,11 @@
 #include "mw/streamer/input/zlm_input.h"
 #include "mw/streamer/output/internal/remux_output.h"
 #include "mw/streamer/output/remux_sink.h"
+#include "mw/streamer/pipeline/internal/pipeline_builder.h"
 #include "mw/streamer/processor/analysis_processor_sink.h"
 #include "mw/streamer/processor/transform_processor_sink.h"
 #include "mw/streamer/synchronizer/synchronizer_sink.h"
 #include "mw/streamer/zlm/internal/config_validator.h"
-#include "mw/streamer/pipeline/internal/pipeline_builder.h"
 
 namespace mw::streamer {
 namespace {

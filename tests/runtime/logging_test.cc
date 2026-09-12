@@ -1,5 +1,3 @@
-#include "mw/log.h"
-
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <filesystem>
@@ -7,6 +5,7 @@
 #include <sstream>
 #include <string>
 
+#include "mw/log.h"
 
 extern "C" {
 #include <libavutil/log.h>

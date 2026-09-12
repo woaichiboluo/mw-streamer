@@ -1,5 +1,3 @@
-#include "mw/log.h"
-
 #include <spdlog/async.h>
 #include <spdlog/async_logger.h>
 #include <spdlog/details/thread_pool.h>
@@ -16,6 +14,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "mw/log.h"
 
 namespace mw::log {
 namespace {

@@ -16,23 +16,23 @@
 namespace {
 
 using namespace std::chrono_literals;
+using mw::streamer::CodecParameters;
+using mw::streamer::Packet;
 using mw::streamer::PacketQueue;
 using mw::streamer::PacketReady;
-using mw::streamer::StreamEnded;
-using mw::streamer::StreamEndReason;
-using mw::streamer::StreamsReady;
-using mw::streamer::TimelineReset;
-using mw::streamer::TimelineResetReason;
 using mw::streamer::PacketSinkState;
 using mw::streamer::Sink;
 using mw::streamer::SinkMediaType;
-using mw::streamer::CodecParameters;
-using mw::streamer::Packet;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
 using mw::streamer::StreamInfo;
+using mw::streamer::StreamsReady;
+using mw::streamer::TimelineReset;
+using mw::streamer::TimelineResetReason;
 using Clock = std::chrono::steady_clock;
 
 StreamInfo Stream(int index, AVMediaType type,
-                          AVRational time_base = {1, 1000}) {
+                  AVRational time_base = {1, 1000}) {
   CodecParameters parameters;
   parameters.get()->codec_type = type;
   parameters.get()->codec_id =
@@ -283,8 +283,7 @@ TEST_CASE(
   SECTION("audio outlasts video with a different time base") {}
   Recorder recorder;
   PacketQueue queue(1s, recorder);
-  std::vector<StreamInfo> streams{
-      Stream(1, AVMEDIA_TYPE_AUDIO, {1, 48000})};
+  std::vector<StreamInfo> streams{Stream(1, AVMEDIA_TYPE_AUDIO, {1, 48000})};
   if (!audio_only) {
     streams.push_back(Stream(0, AVMEDIA_TYPE_VIDEO));
   }

@@ -22,8 +22,7 @@ class AudioDecoder final {
  public:
   using OnFrame = std::function<void(const Frame& frame)>;
 
-  explicit AudioDecoder(StreamInfo stream_info,
-                        AudioDecoderConfig config = {});
+  explicit AudioDecoder(StreamInfo stream_info, AudioDecoderConfig config = {});
   ~AudioDecoder();
 
   AudioDecoder(const AudioDecoder&) = delete;

@@ -15,9 +15,9 @@ extern "C" {
 namespace {
 
 using mw::streamer::StreamInfo;
+using mw::streamer::internal::MakeProcessorSourceInfo;
 using mw::streamer::internal::ToAvCodecId;
 using mw::streamer::internal::ToMwStreamerCodec;
-using mw::streamer::internal::MakeProcessorSourceInfo;
 
 StreamInfo MakeVideoStream(AVCodecID codec_id) {
   StreamInfo stream;

@@ -10,10 +10,10 @@
 
 namespace {
 
+using mw::streamer::NodeSnapshot;
 using mw::streamer::Sink;
 using mw::streamer::SinkMediaType;
 using mw::streamer::SinkMessage;
-using mw::streamer::NodeSnapshot;
 
 class TopologySink final : public Sink {
  public:

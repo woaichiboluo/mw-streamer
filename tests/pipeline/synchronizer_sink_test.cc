@@ -26,21 +26,21 @@ extern "C" {
 namespace {
 
 using namespace std::chrono_literals;
+using mw::streamer::FatalError;
 using mw::streamer::Frame;
-using mw::streamer::StreamInfo;
 using mw::streamer::FrameReady;
 using mw::streamer::FrameStreamsReady;
-using mw::streamer::StreamEnded;
-using mw::streamer::StreamEndReason;
-using mw::streamer::TimelineReset;
-using mw::streamer::TimelineResetReason;
-using mw::streamer::FatalError;
 using mw::streamer::Sink;
 using mw::streamer::SinkMediaType;
 using mw::streamer::SinkMessage;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
+using mw::streamer::StreamInfo;
 using mw::streamer::SynchronizerSink;
 using mw::streamer::SynchronizerSinkConfig;
 using mw::streamer::SynchronizerSinkState;
+using mw::streamer::TimelineReset;
+using mw::streamer::TimelineResetReason;
 using Clock = std::chrono::steady_clock;
 
 SynchronizerSinkConfig Config() {
@@ -356,8 +356,7 @@ TEST_CASE(
   REQUIRE(snapshot.operations.size() == 1);
   REQUIRE(snapshot.downstream.size() == 1);
   const auto& operation = snapshot.operations.front();
-  CHECK(operation.type ==
-        mw::streamer::PerformanceType::kSynchronizer);
+  CHECK(operation.type == mw::streamer::PerformanceType::kSynchronizer);
   CHECK(operation.input_count == 2);
   CHECK(operation.output_count >=
         recorded.audio.size() + recorded.video.size());

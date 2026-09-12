@@ -27,11 +27,10 @@ TEST_CASE("CudaFrame支持多线程并发首次初始化CUDA Driver") {
   source.buffer.pixel_format = kMwStreamerVideoPixelFormatNv12;
   source.buffer.width = kWidth;
   source.buffer.height = kHeight;
-  source.buffer.storage.linear = {
-      planes.data(), static_cast<std::uint32_t>(planes.size())};
+  source.buffer.storage.linear = {planes.data(),
+                                  static_cast<std::uint32_t>(planes.size())};
   source.color = {kMwStreamerColorRangeLimited, kMwStreamerColorSpaceBt709,
-                  kMwStreamerColorPrimariesBt709,
-                  kMwStreamerColorTransferBt709,
+                  kMwStreamerColorPrimariesBt709, kMwStreamerColorTransferBt709,
                   kMwStreamerChromaLocationLeft};
   source.timestamp = {1, 1, {1, 25}};
 

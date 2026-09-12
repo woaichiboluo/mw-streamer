@@ -17,8 +17,7 @@ class StandbyVideoFrame final {
  public:
   explicit StandbyVideoFrame(std::string image_path);
 
-  void Prepare(const Frame& prototype,
-               const HardwareContext* hardware_context);
+  void Prepare(const Frame& prototype, const HardwareContext* hardware_context);
   bool prepared() const noexcept;
   Frame Ref() const;
 

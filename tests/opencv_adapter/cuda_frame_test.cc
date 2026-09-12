@@ -14,19 +14,19 @@ extern "C" {
 #include <libavutil/hwcontext.h>
 }
 
+#include "mw/opencv_adapter/cuda_frame.h"
+#include "mw/opencv_adapter/host_frame.h"
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/ffmpeg/frame.h"
 #include "mw/streamer/ffmpeg/hardware_context.h"
-#include "mw/opencv_adapter/cuda_frame.h"
-#include "mw/opencv_adapter/host_frame.h"
 #include "mw/streamer/processor/internal/frame_adapter.h"
 
 namespace {
 
+using mw::opencv_adapter::CudaFrame;
 using mw::streamer::Frame;
 using mw::streamer::HardwareContext;
 using mw::streamer::ThrowIfError;
-using mw::opencv_adapter::CudaFrame;
 using mw::streamer::internal::VideoBufferAdapter;
 using mw::streamer::internal::VideoFrameAdapter;
 

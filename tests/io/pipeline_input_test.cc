@@ -25,20 +25,20 @@ namespace {
 
 using namespace std::chrono_literals;
 using mw::streamer::BlockingQueue;
-using mw::streamer::Packet;
 using mw::streamer::Input;
 using mw::streamer::InputState;
 using mw::streamer::InputStateChanged;
-using mw::streamer::ZlmInput;
-using mw::streamer::ZlmInputConfig;
+using mw::streamer::Packet;
 using mw::streamer::PacketReady;
+using mw::streamer::PacketSinkState;
+using mw::streamer::Sink;
+using mw::streamer::SinkMediaType;
 using mw::streamer::StreamEnded;
 using mw::streamer::StreamEndReason;
 using mw::streamer::StreamsReady;
 using mw::streamer::TimelineReset;
-using mw::streamer::PacketSinkState;
-using mw::streamer::Sink;
-using mw::streamer::SinkMediaType;
+using mw::streamer::ZlmInput;
+using mw::streamer::ZlmInputConfig;
 
 ZlmInputConfig SampleConfig() {
   ZlmInputConfig config;

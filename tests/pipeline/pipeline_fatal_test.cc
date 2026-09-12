@@ -21,24 +21,24 @@
 namespace {
 
 using namespace std::chrono_literals;
+using mw::streamer::AnalysisProcessorSink;
 using mw::streamer::DecoderSink;
 using mw::streamer::DecoderSinkConfig;
-using mw::streamer::Input;
-using mw::streamer::InputState;
-using mw::streamer::ZlmInput;
-using mw::streamer::ZlmInputConfig;
+using mw::streamer::FatalError;
 using mw::streamer::FrameReady;
 using mw::streamer::FrameStreamsReady;
+using mw::streamer::Input;
+using mw::streamer::InputState;
 using mw::streamer::PacketReady;
-using mw::streamer::StreamEnded;
-using mw::streamer::StreamsReady;
-using mw::streamer::TimelineReset;
-using mw::streamer::AnalysisProcessorSink;
-using mw::streamer::TransformProcessorSink;
-using mw::streamer::FatalError;
 using mw::streamer::PacketSinkState;
 using mw::streamer::Sink;
 using mw::streamer::SinkMediaType;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamsReady;
+using mw::streamer::TimelineReset;
+using mw::streamer::TransformProcessorSink;
+using mw::streamer::ZlmInput;
+using mw::streamer::ZlmInputConfig;
 using namespace mw::streamer;
 
 class StopProbe final {

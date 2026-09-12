@@ -472,7 +472,9 @@ TEST_CASE("文件加载解析本地路径而字符串解析保留路径") {
   auto loaded = LoadPipelineConfigFromToml(file);
   CHECK(loaded.input.options.url == (directory.path() / "input.mp4").string());
   CHECK(FindNode<RemuxNodeConfig>(loaded, "raw").options.target ==
-        (directory.path() / "recordings/original.mp4").lexically_normal().string());
+        (directory.path() / "recordings/original.mp4")
+            .lexically_normal()
+            .string());
   CHECK(FindNode<SynchronizerNodeConfig>(loaded, "sync")
             .options.standby_image_path ==
         (directory.path() / "images/standby.png").lexically_normal().string());

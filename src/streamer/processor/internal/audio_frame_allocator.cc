@@ -20,20 +20,17 @@ Frame AudioFrameAllocator::Allocate(const Frame& input) {
   output->format = input->format;
   output->sample_rate = input->sample_rate;
   output->nb_samples = input->nb_samples;
-  ThrowIfError(
-      av_channel_layout_copy(&output->ch_layout, &channel_layout_),
-      "复制Processor输出音频声道布局");
-  ThrowIfError(av_frame_get_buffer(output.get(), 0),
-                       "分配Processor音频输出帧");
+  ThrowIfError(av_channel_layout_copy(&output->ch_layout, &channel_layout_),
+               "复制Processor输出音频声道布局");
+  ThrowIfError(av_frame_get_buffer(output.get(), 0), "分配Processor音频输出帧");
   return output;
 }
 
 void AudioFrameAllocator::PrepareOrValidate(const AVFrame& input) {
   if (!prepared_) {
     AVChannelLayout pending_layout{};
-    ThrowIfError(
-        av_channel_layout_copy(&pending_layout, &input.ch_layout),
-        "初始化Processor音频分配器");
+    ThrowIfError(av_channel_layout_copy(&pending_layout, &input.ch_layout),
+                 "初始化Processor音频分配器");
     channel_layout_ = pending_layout;
     prepared_ = true;
     return;

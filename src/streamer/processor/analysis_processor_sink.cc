@@ -8,9 +8,9 @@
 #include <stdexcept>
 #include <utility>
 
-#include "mw/streamer/processor/internal/processor_sink_context.h"
 #include "mw/streamer/performance/operation_recorder.h"
 #include "mw/streamer/processor/internal/frame_adapter.h"
+#include "mw/streamer/processor/internal/processor_sink_context.h"
 
 namespace mw::streamer {
 
@@ -161,14 +161,12 @@ class AnalysisProcessorSink::Impl final {
     }
   }
 
-  OperationRecorder audio_performance_{
-      PerformanceType::kAudioProcessor,
-      PerformanceUnit::kSample,
-      PerformanceUnit::kNone};
-  OperationRecorder video_performance_{
-      PerformanceType::kVideoProcessor,
-      PerformanceUnit::kFrame,
-      PerformanceUnit::kNone};
+  OperationRecorder audio_performance_{PerformanceType::kAudioProcessor,
+                                       PerformanceUnit::kSample,
+                                       PerformanceUnit::kNone};
+  OperationRecorder video_performance_{PerformanceType::kVideoProcessor,
+                                       PerformanceUnit::kFrame,
+                                       PerformanceUnit::kNone};
   AnalysisProcessorSink& owner_;
   std::string processor_config_;
   const MwStreamerAnalysisProcessorCallbacks callbacks_;
@@ -190,8 +188,7 @@ NodeSnapshot AnalysisProcessorSink::GetOwnPerformance() const {
   return impl_->GetPerformance();
 }
 
-void AnalysisProcessorSink::OnStreamsReady(
-    const FrameStreamsReady& streams) {
+void AnalysisProcessorSink::OnStreamsReady(const FrameStreamsReady& streams) {
   CloseRegistration();
   impl_->OnStreamsReady(streams);
 }

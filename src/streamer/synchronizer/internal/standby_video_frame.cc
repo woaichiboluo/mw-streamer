@@ -43,9 +43,9 @@ Frame DecodeImage(const std::string& path) {
   }
   CodecContext decoder(codec);
   ThrowIfError(avcodec_parameters_to_context(decoder.get(), parameters),
-                       "复制备播图片解码参数");
+               "复制备播图片解码参数");
   ThrowIfError(avcodec_open2(decoder.get(), codec, nullptr),
-                       "打开备播图片解码器");
+               "打开备播图片解码器");
 
   Packet packet;
   for (;;) {
@@ -53,12 +53,12 @@ Frame DecodeImage(const std::string& path) {
     const bool has_packet = input.ReadPacket(packet);
     if (!has_packet) {
       ThrowIfError(avcodec_send_packet(decoder.get(), nullptr),
-                           "提交备播图片结束标记");
+                   "提交备播图片结束标记");
     } else if (packet->stream_index != stream_index) {
       continue;
     } else {
       ThrowIfError(avcodec_send_packet(decoder.get(), packet.get()),
-                           "提交备播图片数据");
+                   "提交备播图片数据");
     }
 
     Frame decoded;
@@ -67,8 +67,7 @@ Frame DecodeImage(const std::string& path) {
     if (receive_result == 0) {
       if (decoded->width <= 0 || decoded->height <= 0 ||
           decoded->format == AV_PIX_FMT_NONE ||
-          IsHardwarePixelFormat(
-              static_cast<AVPixelFormat>(decoded->format))) {
+          IsHardwarePixelFormat(static_cast<AVPixelFormat>(decoded->format))) {
         throw std::invalid_argument("备播图片解码结果无效");
       }
       return decoded;
@@ -100,8 +99,7 @@ Frame AllocateRgbaCanvas(int width, int height) {
   frame->format = AV_PIX_FMT_RGBA;
   frame->width = width;
   frame->height = height;
-  ThrowIfError(av_frame_get_buffer(frame.get(), 32),
-                       "分配备播RGBA画布");
+  ThrowIfError(av_frame_get_buffer(frame.get(), 32), "分配备播RGBA画布");
   for (int row = 0; row < height; ++row) {
     auto* line = frame->data[0] + row * frame->linesize[0];
     for (int column = 0; column < width; ++column) {
@@ -235,14 +233,12 @@ void DrawDecodedImage(AVFrame* canvas, const AVFrame& decoded) {
   }
 }
 
-Frame ConvertCanvas(const Frame& canvas,
-                            AVPixelFormat target_format) {
+Frame ConvertCanvas(const Frame& canvas, AVPixelFormat target_format) {
   Frame output;
   output->format = target_format;
   output->width = canvas->width;
   output->height = canvas->height;
-  ThrowIfError(av_frame_get_buffer(output.get(), 32),
-                       "分配备播软件视频帧");
+  ThrowIfError(av_frame_get_buffer(output.get(), 32), "分配备播软件视频帧");
   auto scaler = MakeScaleContext(canvas->width, canvas->height, AV_PIX_FMT_RGBA,
                                  output->width, output->height, target_format);
   const int rows = sws_scale(scaler.get(), canvas->data, canvas->linesize, 0,
@@ -258,9 +254,8 @@ Frame ConvertCanvas(const Frame& canvas,
 StandbyVideoFrame::StandbyVideoFrame(std::string image_path)
     : image_path_(std::move(image_path)) {}
 
-void StandbyVideoFrame::Prepare(
-    const Frame& prototype,
-    const HardwareContext* hardware_context) {
+void StandbyVideoFrame::Prepare(const Frame& prototype,
+                                const HardwareContext* hardware_context) {
   if (prepared_) {
     return;
   }
@@ -292,9 +287,8 @@ void StandbyVideoFrame::Prepare(
     ThrowIfError(
         av_hwframe_get_buffer(prototype->hw_frames_ctx, hardware.get(), 0),
         "分配CUDA备播视频帧");
-    ThrowIfError(
-        av_hwframe_transfer_data(hardware.get(), software.get(), 0),
-        "上传CUDA备播视频帧");
+    ThrowIfError(av_hwframe_transfer_data(hardware.get(), software.get(), 0),
+                 "上传CUDA备播视频帧");
     frame_ = std::move(hardware);
   }
 

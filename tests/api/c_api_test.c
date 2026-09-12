@@ -1,8 +1,8 @@
-#include "mw/streamer.h"
-
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
+
+#include "mw/streamer.h"
 
 static int Check(int condition) { return condition ? 0 : 1; }
 

@@ -201,10 +201,10 @@ TEST_CASE("Round-tripped TOML builds a playable local stream-copy recording",
     auto recording = std::make_unique<RemuxNodeConfig>("recording");
     recording->options.target = (directory.path() / "original.mp4").string();
     original.sinks.push_back(std::move(recording));
-    auto parsed = ParsePipelineConfigFromToml(
-        SerializePipelineConfigToToml(original));
-    auto restored = ParsePipelineConfigFromToml(
-        SerializePipelineConfigToToml(parsed));
+    auto parsed =
+        ParsePipelineConfigFromToml(SerializePipelineConfigToToml(original));
+    auto restored =
+        ParsePipelineConfigFromToml(SerializePipelineConfigToToml(parsed));
     return BuildPipeline(restored);
   }();
 

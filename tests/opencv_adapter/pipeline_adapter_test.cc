@@ -19,28 +19,28 @@ extern "C" {
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "mw/opencv_adapter/cuda_mat_adapter.h"
+#include "mw/opencv_adapter/host_mat_adapter.h"
 #include "mw/streamer/decoder/video_decoder.h"
 #include "mw/streamer/ffmpeg/codec_parameters.h"
 #include "mw/streamer/ffmpeg/input_format_context.h"
 #include "mw/streamer/ffmpeg/packet.h"
 #include "mw/streamer/ffmpeg/stream_info.h"
-#include "mw/opencv_adapter/cuda_mat_adapter.h"
-#include "mw/opencv_adapter/host_mat_adapter.h"
 #include "mw/streamer/pipeline/pipeline_builder.h"
 #include "mw/streamer/processor/internal/frame_adapter.h"
 
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::VideoDecoder;
-using mw::streamer::VideoDecoderBackend;
-using mw::streamer::VideoDecoderConfig;
-using mw::streamer::CodecParameters;
+using mw::opencv_adapter::CudaMatAdapter;
+using mw::opencv_adapter::HostMatAdapter;
 using mw::streamer::BuildPipeline;
+using mw::streamer::CodecParameters;
 using mw::streamer::DecoderNodeConfig;
 using mw::streamer::EncoderNodeConfig;
 using mw::streamer::InputFormatContext;
 using mw::streamer::Packet;
+using mw::streamer::PerformanceType;
 using mw::streamer::PipelineConfig;
 using mw::streamer::PipelineState;
 using mw::streamer::ProcessorBindings;
@@ -48,9 +48,9 @@ using mw::streamer::RemuxNodeConfig;
 using mw::streamer::StreamInfo;
 using mw::streamer::SynchronizerNodeConfig;
 using mw::streamer::TransformProcessorNodeConfig;
-using mw::opencv_adapter::CudaMatAdapter;
-using mw::opencv_adapter::HostMatAdapter;
-using mw::streamer::PerformanceType;
+using mw::streamer::VideoDecoder;
+using mw::streamer::VideoDecoderBackend;
+using mw::streamer::VideoDecoderConfig;
 using mw::streamer::internal::VideoFrameAdapter;
 
 constexpr std::uint32_t kWidth = 160;
@@ -271,19 +271,17 @@ void ProcessVideo(const MwStreamerTransformVideoProcessRequest* request,
   state->condition.notify_all();
 }
 
-PipelineConfig MakePipelineConfig(
-    const PipelineCase& test_case, const std::filesystem::path& output) {
+PipelineConfig MakePipelineConfig(const PipelineCase& test_case,
+                                  const std::filesystem::path& output) {
   PipelineConfig config;
   config.input.options.url = SamplePath().string();
   config.input.downstream = {"decode"};
   auto decoder = std::make_unique<DecoderNodeConfig>("decode");
   decoder->options.video_decoder.backend = test_case.decoder;
   decoder->downstream = {"process"};
-  auto processor =
-      std::make_unique<TransformProcessorNodeConfig>("process");
+  auto processor = std::make_unique<TransformProcessorNodeConfig>("process");
   processor->downstream = {"sync"};
-  auto synchronizer =
-      std::make_unique<SynchronizerNodeConfig>("sync");
+  auto synchronizer = std::make_unique<SynchronizerNodeConfig>("sync");
   synchronizer->downstream = {"encode"};
   auto encoder = std::make_unique<EncoderNodeConfig>("encode");
   encoder->downstream = {"record"};

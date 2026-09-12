@@ -33,21 +33,21 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::ZlmInput;
-using mw::streamer::ZlmInputConfig;
-using mw::streamer::StreamEndReason;
-using mw::streamer::TimelineResetReason;
+using mw::streamer::PacketSinkState;
 using mw::streamer::RemuxSink;
 using mw::streamer::RemuxSinkConfig;
-using mw::streamer::PacketSinkState;
+using mw::streamer::StreamEndReason;
+using mw::streamer::TimelineResetReason;
+using mw::streamer::ZlmInput;
+using mw::streamer::ZlmInputConfig;
 using namespace mw::streamer;
-using mw::streamer::ZlmCodecParametersConverter;
-using mw::streamer::ZlmPacketConverter;
 using mw::streamer::InputFormatContext;
 using mw::streamer::Packet;
-using mw::streamer::StreamInfo;
 using mw::streamer::PerformanceType;
 using mw::streamer::PerformanceUnit;
+using mw::streamer::StreamInfo;
+using mw::streamer::ZlmCodecParametersConverter;
+using mw::streamer::ZlmPacketConverter;
 
 class TestDirectory final {
  public:
@@ -530,10 +530,9 @@ TEST_CASE("fMP4时间戳保留模式支持提前初始化和单轨且默认行�
     for (unsigned int i = 0; i < input->nb_streams; ++i) {
       const auto& stream = *input->streams[i];
       const auto& parameters = *stream.codecpar;
-      expected.streams.push_back(
-          {static_cast<int>(i),
-           mw::streamer::CodecParameters(parameters),
-           {1, 1000}});
+      expected.streams.push_back({static_cast<int>(i),
+                                  mw::streamer::CodecParameters(parameters),
+                                  {1, 1000}});
       if (selected_type != AVMEDIA_TYPE_UNKNOWN &&
           parameters.codec_type != selected_type) {
         continue;

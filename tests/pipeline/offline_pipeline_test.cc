@@ -17,16 +17,16 @@ namespace {
 using namespace std::chrono_literals;
 using mw::streamer::DecoderSink;
 using mw::streamer::DecoderSinkConfig;
+using mw::streamer::FatalError;
 using mw::streamer::FileInput;
 using mw::streamer::FileInputConfig;
-using mw::streamer::InputState;
 using mw::streamer::FrameReady;
 using mw::streamer::FrameStreamsReady;
-using mw::streamer::StreamEnded;
-using mw::streamer::StreamEndReason;
-using mw::streamer::FatalError;
+using mw::streamer::InputState;
 using mw::streamer::Sink;
 using mw::streamer::SinkMediaType;
+using mw::streamer::StreamEnded;
+using mw::streamer::StreamEndReason;
 using namespace mw::streamer;
 
 struct FileFrames {
@@ -100,8 +100,7 @@ std::unique_ptr<DecoderSink> MakeDecoder(FileFrames& frames) {
   DecoderSinkConfig config;
   config.audio_decode_queue_capacity = 1;
   config.video_decode_queue_capacity = 1;
-  config.video_decoder.backend =
-      mw::streamer::VideoDecoderBackend::kSoftware;
+  config.video_decoder.backend = mw::streamer::VideoDecoderBackend::kSoftware;
   auto decoder = std::make_unique<DecoderSink>("decoder", config);
   decoder->AddSink(std::make_unique<FileCounter>(frames));
   return decoder;

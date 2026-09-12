@@ -1,5 +1,3 @@
-#include "mw/streamer/api.h"
-
 #include <chrono>
 #include <cstring>
 #include <exception>
@@ -9,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "mw/streamer/api.h"
 #include "mw/streamer/config/toml.h"
 #include "mw/streamer/input/input_state.h"
 #include "mw/streamer/performance/pipeline_snapshot.h"
@@ -277,8 +276,8 @@ MwResult mw_pipeline_create_from_toml(const MwPipelineCreateInfo* create_info,
                 create_info->transform_processor_count, &bindings.transform);
     auto handle = std::make_unique<MwPipeline>();
     building = true;
-    handle->pipeline = mw::streamer::BuildPipelineFromToml(
-        create_info->toml_path, bindings);
+    handle->pipeline =
+        mw::streamer::BuildPipelineFromToml(create_info->toml_path, bindings);
     *output = handle.release();
     return kMwResultSuccess;
   } catch (const std::bad_alloc& error) {

@@ -19,10 +19,10 @@ extern "C" {
 namespace {
 
 using mw::streamer::AvPacketToZlmFrameConverter;
-using mw::streamer::internal::ToFfmpegCodecId;
-using mw::streamer::internal::ToZlmCodecId;
 using mw::streamer::CodecParameters;
 using mw::streamer::Packet;
+using mw::streamer::internal::ToFfmpegCodecId;
+using mw::streamer::internal::ToZlmCodecId;
 
 Packet MakePacket(const std::vector<std::uint8_t>& payload, int stream_index,
                   std::int64_t dts, std::int64_t pts, int flags = 0) {
