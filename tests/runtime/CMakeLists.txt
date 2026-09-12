@@ -60,7 +60,7 @@ target_link_libraries(mw_logging_tests
         mw::streamer_test
 )
 
-catch_discover_tests(mw_logging_tests)
+catch_discover_tests(mw_logging_tests DISCOVERY_MODE PRE_TEST)
 
 add_executable(mw_zlm_logger_lifecycle_tests
     zlm_logger_lifecycle_test.cc

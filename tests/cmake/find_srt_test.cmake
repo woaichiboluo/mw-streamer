@@ -15,6 +15,12 @@ file(WRITE "${_package_root}/include/srt/version.h"
 
 set(_system_arguments)
 set(_expected_target_type UNKNOWN_LIBRARY)
+if(CASE MATCHES "^linux_")
+    list(APPEND _system_arguments
+        -DCMAKE_SYSTEM_NAME=Linux
+        -DCMAKE_SYSTEM_PROCESSOR=x86_64
+    )
+endif()
 if(CASE STREQUAL "linux_shared")
     file(MAKE_DIRECTORY "${_package_root}/lib")
     file(WRITE "${_package_root}/lib/libsrt.so" "")

@@ -6,9 +6,14 @@ list(PREPEND CMAKE_MODULE_PATH "${FIND_FFMPEG_MODULE_DIR}")
 find_package(FFmpeg REQUIRED COMPONENTS AVCODEC)
 
 get_target_property(_target_type FFmpeg::avcodec TYPE)
-if(NOT _target_type STREQUAL "UNKNOWN_LIBRARY")
+if(CASE STREQUAL "windows_shared")
+    set(_expected_target_type "SHARED_LIBRARY")
+else()
+    set(_expected_target_type "UNKNOWN_LIBRARY")
+endif()
+if(NOT _target_type STREQUAL _expected_target_type)
     message(FATAL_ERROR
-        "Expected FFmpeg::avcodec type UNKNOWN_LIBRARY, "
+        "Expected FFmpeg::avcodec type ${_expected_target_type}, "
         "got ${_target_type}"
     )
 endif()

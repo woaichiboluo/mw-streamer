@@ -16,6 +16,13 @@ file(WRITE "${_package_root}/include/libavcodec/avcodec.h" "")
 set(_system_arguments)
 set(_write_pkg_config TRUE)
 set(_pkg_config_version 61.19.100)
+if(CASE MATCHES "^linux_" OR CASE STREQUAL "root_selection" OR
+   CASE STREQUAL "old_avcodec" OR CASE STREQUAL "pkg_config_required")
+    list(APPEND _system_arguments
+        -DCMAKE_SYSTEM_NAME=Linux
+        -DCMAKE_SYSTEM_PROCESSOR=x86_64
+    )
+endif()
 if(CASE STREQUAL "pkg_config_required")
     set(_write_pkg_config FALSE)
     file(WRITE "${_package_root}/lib/libavcodec.so" "")

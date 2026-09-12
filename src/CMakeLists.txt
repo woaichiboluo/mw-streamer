@@ -68,9 +68,9 @@ target_link_libraries(mw_streamer
     PUBLIC
         ZLMediaKit::MediaKit
         ZLMediaKit::ToolKit
+        SRT::SRT
         fmt::fmt
     PRIVATE
-        SRT::SRT
         HdrHistogram::HdrHistogram
         ZLMediaKit::ext-codec
         ZLMediaKit::SRT

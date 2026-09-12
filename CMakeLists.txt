@@ -21,7 +21,8 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(MSVC)
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+    add_compile_options(/utf-8)
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
@@ -35,11 +36,11 @@ find_package(FFmpeg REQUIRED COMPONENTS
     SWRESAMPLE
     SWSCALE
 )
-find_package(SRT REQUIRED)
 if(OPENSSL_ROOT)
     set(OPENSSL_ROOT_DIR "${OPENSSL_ROOT}")
 endif()
 find_package(OpenSSL REQUIRED COMPONENTS SSL Crypto)
+find_package(SRT REQUIRED)
 
 add_subdirectory(third_party/ZLMediaKit)
 add_subdirectory(third_party/HdrHistogram_c)

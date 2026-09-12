@@ -65,7 +65,7 @@ if (WIN32)
     endif ()
     update_cached_list(TK_LINK_LIBRARIES WS2_32 Iphlpapi shlwapi)
     #防止Windows.h包含Winsock.h
-    update_cached_list(TK_COMPILE_DEFINITIONS WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS _WINSOCK_DEPRECATED_NO_WARNINGS)
+    update_cached_list(TK_COMPILE_DEFINITIONS WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS _WINSOCK_DEPRECATED_NO_WARNINGS)
 else ()
     update_cached_list(TK_COMPILE_OPTIONS "-Wno-comment" "-Wno-deprecated-declarations" "-Wno-predefined-identifier-outside-function")
 endif ()

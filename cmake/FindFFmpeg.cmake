@@ -307,7 +307,13 @@ foreach(_requested_component IN LISTS FFmpeg_FIND_COMPONENTS)
 
     string(TOLOWER "${_component}" _lower_component)
     if(NOT TARGET FFmpeg::${_lower_component})
-      add_library(FFmpeg::${_lower_component} UNKNOWN IMPORTED GLOBAL)
+      if(WIN32 AND NOT _component_static)
+        set(_imported_library_type SHARED)
+      else()
+        set(_imported_library_type UNKNOWN)
+      endif()
+      add_library(FFmpeg::${_lower_component}
+        ${_imported_library_type} IMPORTED GLOBAL)
       set_target_properties(
         FFmpeg::${_lower_component}
         PROPERTIES
@@ -410,6 +416,7 @@ foreach(_requested_component IN LISTS FFmpeg_FIND_COMPONENTS)
               "${PC_${_component}_STATIC_LDFLAGS_OTHER}"
         )
       endif()
+      unset(_imported_library_type)
     endif()
   endif()
 
