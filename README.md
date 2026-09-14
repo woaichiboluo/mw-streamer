@@ -30,13 +30,15 @@ target_link_libraries(app PRIVATE
     mw::streamer
 )
 
-# 构建并安装了可选 OpenCV adapter 时可用。
+# OpenCV adapter 是独立的 CMake 包，仅在需要时查找 OpenCV 和 CUDA。
+find_package(mw_opencv_adapter 0.1 CONFIG REQUIRED)
 target_link_libraries(app PRIVATE mw::opencv_adapter)
 ```
 
-安装前缀不在 CMake 默认搜索路径时，将该前缀加入 `CMAKE_PREFIX_PATH`，或设置
-`mw_streamer_DIR` 指向 `lib/cmake/mw_streamer`。静态包仍要求系统能够找到 FFmpeg、
-SRT、OpenSSL、OpenCV 和 CUDA；项目自带的 fmt 及其他私有静态实现依赖会随包安装。
+安装前缀不在 CMake 默认搜索路径时，可以设置 `mw_streamer_ROOT`；使用 Adapter 时
+设置 `mw_opencv_adapter_ROOT`。动态 `mw_streamer` 不查找 FFmpeg、SRT、OpenSSL、
+OpenCV 或 CUDA。静态包仍要求系统能够找到其链接依赖；项目自带的 fmt 及其他私有
+静态实现依赖会随包安装。
 
 项目交付供 C++ 宿主使用的静态库，公开接口位于 `include/mw/`，按模块组织。
 Processor 的 callback、context 和 frame view 保留纯 C 兼容结构体与函数指针；

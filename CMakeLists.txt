@@ -114,7 +114,6 @@ set(MW_STREAMER_INSTALL_CMAKEDIR
     "${CMAKE_INSTALL_LIBDIR}/cmake/mw_streamer"
 )
 set(MW_STREAMER_PACKAGE_IS_SHARED ${BUILD_SHARED})
-set(MW_STREAMER_PACKAGE_HAS_OPENCV_ADAPTER ${BUILD_OPENCV_ADAPTER})
 
 configure_package_config_file(
     cmake/mw_streamerConfig.cmake.in
@@ -137,6 +136,28 @@ install(FILES
     cmake/FindSRT.cmake
     DESTINATION "${MW_STREAMER_INSTALL_CMAKEDIR}/modules"
 )
+
+if(TARGET mw_opencv_adapter)
+    set(MW_OPENCV_ADAPTER_INSTALL_CMAKEDIR
+        "${CMAKE_INSTALL_LIBDIR}/cmake/mw_opencv_adapter"
+    )
+    set(MW_OPENCV_ADAPTER_PACKAGE_IS_SHARED ${BUILD_SHARED})
+    configure_package_config_file(
+        cmake/mw_opencv_adapterConfig.cmake.in
+        "${CMAKE_CURRENT_BINARY_DIR}/mw_opencv_adapterConfig.cmake"
+        INSTALL_DESTINATION "${MW_OPENCV_ADAPTER_INSTALL_CMAKEDIR}"
+    )
+    write_basic_package_version_file(
+        "${CMAKE_CURRENT_BINARY_DIR}/mw_opencv_adapterConfigVersion.cmake"
+        VERSION ${PROJECT_VERSION}
+        COMPATIBILITY SameMajorVersion
+    )
+    install(FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/mw_opencv_adapterConfig.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/mw_opencv_adapterConfigVersion.cmake"
+        DESTINATION "${MW_OPENCV_ADAPTER_INSTALL_CMAKEDIR}"
+    )
+endif()
 
 install(FILES
     include/mw/export.h

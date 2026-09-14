@@ -3,7 +3,6 @@
 include(CMakeFindDependencyMacro)
 
 set(_mw_package_is_shared @MW_STREAMER_PACKAGE_IS_SHARED@)
-set(_mw_package_has_opencv_adapter @MW_STREAMER_PACKAGE_HAS_OPENCV_ADAPTER@)
 set(_mw_saved_module_path "${CMAKE_MODULE_PATH}")
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/modules")
 
@@ -152,36 +151,8 @@ if(NOT _mw_package_is_shared)
     endif()
 endif()
 
-if(_mw_package_has_opencv_adapter)
-    find_dependency(OpenCV COMPONENTS core cudaarithm)
-    _mw_import_public(
-        mw::opencv_adapter
-        mw_opencv_adapter
-        MW_OPENCV_ADAPTER_STATIC_LIBRARY
-    )
-    if(TARGET mw::opencv_adapter)
-        set_property(TARGET mw::opencv_adapter APPEND PROPERTY
-            INTERFACE_INCLUDE_DIRECTORIES "${OpenCV_INCLUDE_DIRS}"
-        )
-        set_property(TARGET mw::opencv_adapter APPEND PROPERTY
-            INTERFACE_LINK_LIBRARIES "${OpenCV_LIBS}"
-        )
-    endif()
-
-    if(NOT _mw_package_is_shared)
-        find_dependency(CUDAToolkit)
-        if(TARGET mw::opencv_adapter)
-            set_property(TARGET mw::opencv_adapter APPEND PROPERTY
-                INTERFACE_LINK_LIBRARIES
-                    "mw::log;CUDA::cuda_driver;CUDA::cudart;CUDA::nppc;CUDA::nppial;CUDA::nppicc;CUDA::nppidei;CUDA::nppig;CUDA::nppitc;FFmpeg::swscale;FFmpeg::avutil"
-            )
-        endif()
-    endif()
-endif()
-
 set(CMAKE_MODULE_PATH "${_mw_saved_module_path}")
 unset(_mw_saved_module_path)
 unset(_mw_package_is_shared)
-unset(_mw_package_has_opencv_adapter)
 
 check_required_components(mw_streamer)
