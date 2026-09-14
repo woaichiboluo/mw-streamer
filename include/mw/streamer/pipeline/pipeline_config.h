@@ -19,6 +19,7 @@ enum class SinkType {
   kDecoder,
   kAnalysisProcessor,
   kTransformProcessor,
+  kCustom,
   kSynchronizer,
   kEncoder,
   kRemux,
@@ -62,6 +63,11 @@ struct TransformProcessorNodeConfig final : SinkConfig {
   SinkType type() const noexcept override {
     return SinkType::kTransformProcessor;
   }
+};
+
+struct CustomNodeConfig final : SinkConfig {
+  using SinkConfig::SinkConfig;
+  SinkType type() const noexcept override { return SinkType::kCustom; }
 };
 
 struct SynchronizerNodeConfig final : SinkConfig {

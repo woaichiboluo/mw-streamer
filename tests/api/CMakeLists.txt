@@ -22,3 +22,16 @@ target_link_libraries(mw_c_api_tests
 set_target_properties(mw_c_api_tests PROPERTIES LINKER_LANGUAGE CXX)
 
 add_test(NAME mw_c_api_tests COMMAND mw_c_api_tests)
+
+add_executable(mw_tomlplusplus_public_api_tests
+    tomlplusplus_public_api_test.cc
+)
+
+target_link_libraries(mw_tomlplusplus_public_api_tests
+    PRIVATE
+        mw::streamer
+)
+
+add_test(NAME mw_tomlplusplus_public_api_tests
+    COMMAND mw_tomlplusplus_public_api_tests
+)

@@ -33,6 +33,9 @@ class ProcessorSinkContext final : public ProcessorHandler {
         (generation_ != 0 && pending_generation_ != streams.generation)) {
       throw std::logic_error("Processor新代次轨道必须先收到时间线重置");
     }
+    if (!SameSourceInfo(source_info(), SourceInfo(streams))) {
+      throw std::invalid_argument("Processor不能跨代次改变源流信息");
+    }
     const auto* previous = hardware_context();
     const auto* next = streams.hardware_context;
     if ((previous == nullptr) != (next == nullptr) ||
@@ -91,6 +94,27 @@ class ProcessorSinkContext final : public ProcessorHandler {
   }
 
  private:
+  static bool SameRational(const MwStreamerRational& lhs,
+                           const MwStreamerRational& rhs) {
+    return lhs.num == rhs.num && lhs.den == rhs.den;
+  }
+
+  static bool SameSourceInfo(const MwStreamerProcessorSourceInfo& lhs,
+                             const MwStreamerProcessorSourceInfo& rhs) {
+    return lhs.has_video == rhs.has_video && lhs.has_audio == rhs.has_audio &&
+           (!lhs.has_video ||
+            (lhs.video.codec == rhs.video.codec &&
+             lhs.video.width == rhs.video.width &&
+             lhs.video.height == rhs.video.height &&
+             SameRational(lhs.video.frame_rate, rhs.video.frame_rate) &&
+             SameRational(lhs.video.time_base, rhs.video.time_base))) &&
+           (!lhs.has_audio ||
+            (lhs.audio.codec == rhs.audio.codec &&
+             lhs.audio.sample_rate == rhs.audio.sample_rate &&
+             lhs.audio.channel_count == rhs.audio.channel_count &&
+             SameRational(lhs.audio.time_base, rhs.audio.time_base)));
+  }
+
   static MwStreamerProcessorSourceInfo SourceInfo(
       const FrameStreamsReady& streams) {
     if (streams.generation == 0) {

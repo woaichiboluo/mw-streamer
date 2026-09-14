@@ -8,6 +8,7 @@
 #include "mw/streamer/pipeline/pipeline.h"
 #include "mw/streamer/pipeline/pipeline_config.h"
 #include "mw/streamer/processor/processor.h"
+#include "mw/streamer/sink/custom_sink.h"
 
 namespace mw::streamer {
 
@@ -17,7 +18,14 @@ namespace mw::streamer {
 struct ProcessorBindings {
   std::map<std::string, MwStreamerAnalysisProcessorCallbacks> analysis;
   std::map<std::string, MwStreamerTransformProcessorCallbacks> transform;
+  // A binding is required for every Custom Sink node. Unlike Processor
+  // callbacks, Custom Sink callbacks are not serialized into TOML.
+  std::map<std::string, MwStreamerCustomSinkCallbacks> custom_sinks;
 };
+
+// Preferred name now that the collection also contains Custom Sink bindings.
+// ProcessorBindings remains source-compatible for existing callers.
+using PipelineBindings = ProcessorBindings;
 
 // Validates and constructs an exclusively owned tree, with message routes
 // bound by ID. Does not start the Pipeline or borrow the configuration object.

@@ -478,6 +478,13 @@ std::unique_ptr<SinkConfig> ReadProcessorNode(const Table& table,
   return std::make_unique<TransformProcessorNodeConfig>(std::move(id));
 }
 
+std::unique_ptr<SinkConfig> ReadCustomNode(const Table& table, std::string id,
+                                           std::string_view path) {
+  WarnUnknownKeys(table, {"id", "type", "downstream", "message_receiver"},
+                  path);
+  return std::make_unique<CustomNodeConfig>(std::move(id));
+}
+
 std::unique_ptr<SinkConfig> ReadSynchronizerNode(const Table& table,
                                                  std::string id,
                                                  std::string_view path) {
@@ -549,6 +556,7 @@ std::unique_ptr<SinkConfig> ReadSinkNode(const Table& table,
            {{"decoder", SinkType::kDecoder},
             {"analysis_processor", SinkType::kAnalysisProcessor},
             {"transform_processor", SinkType::kTransformProcessor},
+            {"custom", SinkType::kCustom},
             {"synchronizer", SinkType::kSynchronizer},
             {"encoder", SinkType::kEncoder},
             {"remux", SinkType::kRemux}},
@@ -561,6 +569,9 @@ std::unique_ptr<SinkConfig> ReadSinkNode(const Table& table,
     case SinkType::kAnalysisProcessor:
     case SinkType::kTransformProcessor:
       result = ReadProcessorNode(table, std::move(id), type, path);
+      break;
+    case SinkType::kCustom:
+      result = ReadCustomNode(table, std::move(id), path);
       break;
     case SinkType::kSynchronizer:
       result = ReadSynchronizerNode(table, std::move(id), path);
@@ -733,6 +744,9 @@ Table WriteSinkNode(const SinkConfig& node) {
       break;
     case SinkType::kTransformProcessor:
       result.insert("type", "transform_processor");
+      break;
+    case SinkType::kCustom:
+      result.insert("type", "custom");
       break;
     case SinkType::kSynchronizer:
       result.insert("type", "synchronizer");

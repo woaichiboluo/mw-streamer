@@ -18,6 +18,7 @@
 #include "mw/streamer/pipeline/internal/pipeline_builder.h"
 #include "mw/streamer/processor/analysis_processor_sink.h"
 #include "mw/streamer/processor/transform_processor_sink.h"
+#include "mw/streamer/sink/custom_sink_node.h"
 #include "mw/streamer/synchronizer/synchronizer_sink.h"
 #include "mw/streamer/zlm/internal/config_validator.h"
 
@@ -70,6 +71,8 @@ MediaContract ValidateNode(const SinkConfig& config) {
       return {SinkMediaType::kFrame, SinkMediaType::kNone};
     case SinkType::kTransformProcessor:
       return {SinkMediaType::kFrame, SinkMediaType::kFrame};
+    case SinkType::kCustom:
+      return {SinkMediaType::kFrame, SinkMediaType::kNone};
     case SinkType::kSynchronizer: {
       const auto& options = Options<SynchronizerNodeConfig>(config);
       Require(options.frame_queue_capacity > 0 &&
@@ -122,7 +125,20 @@ void ValidateBindings(const std::map<std::string, Callbacks>& bindings,
     const auto found = index.find(entry.first);
     if (found == index.end() || found->second->type() != expected) {
       throw std::invalid_argument(fmt::format(
-          "Processor回调绑定的ID不存在或类型不匹配: {}", entry.first));
+          "回调绑定的ID不存在或类型不匹配: {}", entry.first));
+    }
+  }
+}
+
+void ValidateCustomBindings(
+    const std::map<std::string, MwStreamerCustomSinkCallbacks>& bindings,
+    const NodeIndex& index) {
+  ValidateBindings(bindings, SinkType::kCustom, index);
+  for (const auto& entry : index) {
+    if (entry.second->type() == SinkType::kCustom &&
+        !bindings.count(entry.first)) {
+      throw std::invalid_argument(
+          fmt::format("Custom Sink缺少回调绑定: {}", entry.first));
     }
   }
 }
@@ -146,6 +162,14 @@ std::unique_ptr<Sink> CreateSink(const SinkConfig& config,
     case SinkType::kTransformProcessor:
       return std::make_unique<TransformProcessorSink>(
           config.id, FindCallbacks(bindings.transform, config.id));
+    case SinkType::kCustom: {
+      const auto found = bindings.custom_sinks.find(config.id);
+      if (found == bindings.custom_sinks.end()) {
+        throw std::invalid_argument(
+            fmt::format("Custom Sink缺少回调绑定: {}", config.id));
+      }
+      return std::make_unique<CustomSink>(config.id, found->second);
+    }
     case SinkType::kSynchronizer:
       return std::make_unique<SynchronizerSink>(
           config.id, Options<SynchronizerNodeConfig>(config));
@@ -287,6 +311,7 @@ std::unique_ptr<Pipeline> BuildPipelineWithRuntime(
   const auto index = IndexNodes(config);
   ValidateBindings(bindings.analysis, SinkType::kAnalysisProcessor, index);
   ValidateBindings(bindings.transform, SinkType::kTransformProcessor, index);
+  ValidateCustomBindings(bindings.custom_sinks, index);
   std::unique_ptr<Input> input;
   if (config.input.type == InputType::kFile) {
     input = std::make_unique<FileInput>(config.input.file);

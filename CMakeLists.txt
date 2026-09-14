@@ -86,6 +86,12 @@ install(DIRECTORY "${fmt_SOURCE_DIR}/include/fmt"
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
+# toml++ is header-only and part of the public C++ convenience interface in
+# mw/streamer.h. Keep the C API usable by including it there only for C++.
+install(DIRECTORY "${tomlplusplus_SOURCE_DIR}/include/toml++"
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
 # A static mw_streamer archive cannot absorb the object code of its private
 # static dependencies. Install those archives and let the package config expose
 # them only through mw::streamer's transitive link interface.
@@ -152,6 +158,11 @@ install(FILES
 install(FILES
     include/mw/streamer/processor/processor.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mw/streamer/processor
+)
+
+install(FILES
+    include/mw/streamer/sink/custom_sink.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mw/streamer/sink
 )
 
 if(TARGET mw_opencv_adapter)

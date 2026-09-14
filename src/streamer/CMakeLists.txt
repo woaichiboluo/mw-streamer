@@ -49,6 +49,7 @@ set(MW_STREAMER_SOURCES
     processor/transform_processor_sink.cc
     resampler/audio_resampler.cc
     sink/sink.cc
+    sink/custom_sink.cc
     synchronizer/internal/realtime_frame_scheduler.cc
     synchronizer/internal/standby_video_frame.cc
     synchronizer/synchronizer_sink.cc
@@ -69,13 +70,13 @@ target_link_libraries(mw_streamer
         ZLMediaKit::MediaKit
         ZLMediaKit::ToolKit
         SRT::SRT
+        tomlplusplus::tomlplusplus
     PRIVATE
         mw::log
         fmt::fmt
         HdrHistogram::HdrHistogram
         ZLMediaKit::ext-codec
         ZLMediaKit::SRT
-        tomlplusplus::tomlplusplus
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

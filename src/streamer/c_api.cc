@@ -70,6 +70,22 @@ void AddBindings(const Binding* bindings, std::size_t count,
   }
 }
 
+void AddCustomSinkBindings(
+    const MwCustomSinkBinding* bindings, std::size_t count,
+    std::map<std::string, MwStreamerCustomSinkCallbacks>* output) {
+  if (count != 0 && bindings == nullptr) {
+    throw std::invalid_argument("Custom Sink binding数组不能为空");
+  }
+  for (std::size_t i = 0; i < count; ++i) {
+    if (bindings[i].sink_id == nullptr || bindings[i].sink_id[0] == '\0') {
+      throw std::invalid_argument("Custom Sink ID不能为空");
+    }
+    if (!output->emplace(bindings[i].sink_id, bindings[i].callbacks).second) {
+      throw std::invalid_argument("Custom Sink ID不能重复");
+    }
+  }
+}
+
 MwPipelineState ConvertState(mw::streamer::PipelineState state) {
   using PipelineState = mw::streamer::PipelineState;
   switch (state) {
@@ -274,6 +290,9 @@ MwResult mw_pipeline_create_from_toml(const MwPipelineCreateInfo* create_info,
                 create_info->analysis_processor_count, &bindings.analysis);
     AddBindings(create_info->transform_processors,
                 create_info->transform_processor_count, &bindings.transform);
+    AddCustomSinkBindings(create_info->custom_sinks,
+                          create_info->custom_sink_count,
+                          &bindings.custom_sinks);
     auto handle = std::make_unique<MwPipeline>();
     building = true;
     handle->pipeline =

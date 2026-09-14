@@ -95,6 +95,13 @@ codec = "h264"
 encoder_name = "h264_nvenc"
 frame_rate = { num = 25, den = 1 }
 
+# FFmpeg编码器原生属性。g为GOP帧数；具体rc和preset取值由编码器决定。
+[sinks.video_encoder.properties]
+b = "4M"
+g = "50"
+rc = "cbr"
+preset = "p4"
+
 [[sinks]]
 id = "publish"
 type = "remux"

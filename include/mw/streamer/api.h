@@ -6,6 +6,7 @@
 
 #include "mw/export.h"
 #include "mw/streamer/processor/processor.h"
+#include "mw/streamer/sink/custom_sink.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -70,6 +71,12 @@ typedef struct MwTransformProcessorBinding {
   MwStreamerTransformProcessorCallbacks callbacks;
 } MwTransformProcessorBinding;
 
+typedef struct MwCustomSinkBinding {
+  // TOML Custom Sink node ID. Borrowed only during Pipeline creation.
+  const char* sink_id;
+  MwStreamerCustomSinkCallbacks callbacks;
+} MwCustomSinkBinding;
+
 typedef struct MwPipelineCreateInfo {
   // Path and binding arrays are borrowed only for the duration of creation.
   const char* toml_path;
@@ -77,6 +84,8 @@ typedef struct MwPipelineCreateInfo {
   size_t analysis_processor_count;
   const MwTransformProcessorBinding* transform_processors;
   size_t transform_processor_count;
+  const MwCustomSinkBinding* custom_sinks;
+  size_t custom_sink_count;
 } MwPipelineCreateInfo;
 
 typedef enum MwPerformanceType {
@@ -156,7 +165,7 @@ typedef struct MwPerformanceSnapshot {
 // library owns the string until the next C API call on the same thread.
 MW_STREAMER_API const char* mw_last_error(void);
 
-// Loads TOML, copies callback tables into the corresponding Processor maps and
+// Loads TOML, copies callback tables into the corresponding node maps and
 // constructs an idle Pipeline. On failure, *output is set to NULL. Each
 // callback user_context remains caller-owned and must outlive Stop.
 MW_STREAMER_API MwResult mw_pipeline_create_from_toml(

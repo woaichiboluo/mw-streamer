@@ -269,6 +269,59 @@ type = "analysis_processor"
   for (const auto& node : again.sinks) CHECK(node->message_receiver.empty());
 }
 
+TEST_CASE("统一配置支持Custom终端并按ID绑定回调") {
+  auto config = ParsePipelineConfigFromToml(R"(
+[input]
+type = "zlm"
+url = "rtsp://127.0.0.1/live/camera"
+downstream = ["decode"]
+[[sinks]]
+id = "decode"
+type = "decoder"
+downstream = ["business"]
+[[sinks]]
+id = "business"
+type = "custom"
+message_receiver = "decode"
+)");
+  const auto& custom = FindNode<CustomNodeConfig>(config, "business");
+  CHECK(custom.type() == SinkType::kCustom);
+  CHECK(custom.downstream.empty());
+  CHECK(custom.message_receiver == "decode");
+
+  const auto text = SerializePipelineConfigToToml(config);
+  auto parsed = ParsePipelineConfigFromToml(text);
+  CHECK(FindNode<CustomNodeConfig>(parsed, "business").type() ==
+        SinkType::kCustom);
+
+  CHECK_THROWS_AS(BuildPipeline(parsed), std::invalid_argument);
+  ProcessorBindings bindings;
+  bindings.custom_sinks["business"] = {};
+  CHECK_NOTHROW(BuildPipeline(parsed, bindings));
+  bindings.custom_sinks["missing"] = {};
+  CHECK_THROWS_AS(BuildPipeline(parsed, bindings), std::invalid_argument);
+}
+
+TEST_CASE("Custom终端拒绝媒体下游") {
+  CHECK_THROWS_AS(ParsePipelineConfigFromToml(R"(
+[input]
+type = "zlm"
+url = "rtsp://127.0.0.1/live/camera"
+downstream = ["decode"]
+[[sinks]]
+id = "decode"
+type = "decoder"
+downstream = ["business"]
+[[sinks]]
+id = "business"
+type = "custom"
+downstream = ["analysis"]
+[[sinks]]
+id = "analysis"
+type = "analysis_processor"
+)"), std::invalid_argument);
+}
+
 TEST_CASE("统一配置严格拒绝错误TOML结构") {
   const std::vector<std::string> invalid = {
       "",

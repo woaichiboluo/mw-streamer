@@ -3,4 +3,8 @@
 
 #include "mw/streamer/api.h"
 
+#ifdef __cplusplus
+#include <toml++/toml.hpp>
+#endif
+
 #endif  // MW_STREAMER_H_
