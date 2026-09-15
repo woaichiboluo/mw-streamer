@@ -1,5 +1,3 @@
-#include "mw/streamer/sink/custom_sink_node.h"
-
 #include <algorithm>
 #include <atomic>
 #include <exception>
@@ -11,6 +9,7 @@
 #include "mw/streamer/performance/operation_recorder.h"
 #include "mw/streamer/processor/internal/frame_adapter.h"
 #include "mw/streamer/processor/internal/processor_sink_context.h"
+#include "mw/streamer/sink/custom_sink_node.h"
 
 namespace mw::streamer {
 
@@ -141,8 +140,7 @@ class CustomSink::Impl final {
   bool stopped_ = false;
 };
 
-CustomSink::CustomSink(std::string id,
-                       MwStreamerCustomSinkCallbacks callbacks)
+CustomSink::CustomSink(std::string id, MwStreamerCustomSinkCallbacks callbacks)
     : Sink(std::move(id), SinkMediaType::kFrame),
       impl_(std::make_unique<Impl>(*this, callbacks)) {}
 

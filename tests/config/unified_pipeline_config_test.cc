@@ -319,7 +319,8 @@ downstream = ["analysis"]
 [[sinks]]
 id = "analysis"
 type = "analysis_processor"
-)"), std::invalid_argument);
+)"),
+                  std::invalid_argument);
 }
 
 TEST_CASE("统一配置严格拒绝错误TOML结构") {

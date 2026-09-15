@@ -124,8 +124,8 @@ TEST_CASE("Custom Sink exposes source, frames and message sender",
   CHECK(state.audios == 1);
 
   const char payload[] = "control";
-  state.sender.send(state.sender.context, "seek", payload,
-                    std::strlen(payload), nullptr);
+  state.sender.send(state.sender.context, "seek", payload, std::strlen(payload),
+                    nullptr);
   CHECK(received_type == "seek");
   CHECK(received_payload == "control");
   sink.Stop();
@@ -144,14 +144,12 @@ TEST_CASE("Custom Sink starts once across stable generations",
   sink.Stop();
 }
 
-TEST_CASE("Custom Sink rejects changed source information",
-          "[custom-sink]") {
+TEST_CASE("Custom Sink rejects changed source information", "[custom-sink]") {
   CallbackState state;
   CustomSink sink("custom", Callbacks(state));
   sink.OnStreamsReady(Streams(1));
   sink.OnTimelineReset({2, TimelineResetReason::kReconnect});
-  CHECK_THROWS_AS(sink.OnStreamsReady(Streams(2, 128)),
-                  std::invalid_argument);
+  CHECK_THROWS_AS(sink.OnStreamsReady(Streams(2, 128)), std::invalid_argument);
   CHECK(state.starts == 1);
 }
 

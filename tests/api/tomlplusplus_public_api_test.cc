@@ -1,6 +1,6 @@
-#include "mw/streamer.h"
-
 #include <string>
+
+#include "mw/streamer.h"
 
 int main() {
   const auto document = toml::parse("name = 'mw-streamer'");

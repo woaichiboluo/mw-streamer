@@ -124,8 +124,8 @@ void ValidateBindings(const std::map<std::string, Callbacks>& bindings,
   for (const auto& entry : bindings) {
     const auto found = index.find(entry.first);
     if (found == index.end() || found->second->type() != expected) {
-      throw std::invalid_argument(fmt::format(
-          "回调绑定的ID不存在或类型不匹配: {}", entry.first));
+      throw std::invalid_argument(
+          fmt::format("回调绑定的ID不存在或类型不匹配: {}", entry.first));
     }
   }
 }
