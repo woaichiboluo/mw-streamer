@@ -1,5 +1,4 @@
-set(MW_STREAMER_SOURCES
-    c_api.cc
+set(MW_STREAMER_CORE_SOURCES
     cache/packet_queue.cc
     config/toml.cc
     converter/av_packet_to_zlm_frame_converter.cc
@@ -56,58 +55,113 @@ set(MW_STREAMER_SOURCES
     zlm/internal/config_validator.cc
 )
 
+set(MW_STREAMER_PUBLIC_DEPENDENCIES
+    ZLMediaKit::MediaKit
+    ZLMediaKit::ToolKit
+    SRT::SRT
+    tomlplusplus::tomlplusplus
+)
+
+set(MW_STREAMER_PRIVATE_DEPENDENCIES
+    mw::log
+    fmt::fmt
+    HdrHistogram::HdrHistogram
+    ZLMediaKit::ext-codec
+    ZLMediaKit::SRT
+)
+
+set(MW_STREAMER_FFMPEG_DEPENDENCIES
+    FFmpeg::avcodec
+    FFmpeg::avformat
+    FFmpeg::avutil
+    FFmpeg::swresample
+    FFmpeg::swscale
+)
+
+add_library(mw_streamer_core_objects OBJECT ${MW_STREAMER_CORE_SOURCES})
+
+target_link_libraries(mw_streamer_core_objects
+    PRIVATE
+        ${MW_STREAMER_PUBLIC_DEPENDENCIES}
+        ${MW_STREAMER_PRIVATE_DEPENDENCIES}
+        ${MW_STREAMER_FFMPEG_DEPENDENCIES}
+)
+
+target_include_directories(mw_streamer_core_objects
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/streamer"
+)
+
 if(BUILD_SHARED)
-    add_library(mw_streamer SHARED ${MW_STREAMER_SOURCES})
+    add_library(mw_streamer SHARED
+        c_api.cc
+        $<TARGET_OBJECTS:mw_streamer_core_objects>
+    )
     target_compile_definitions(mw_streamer PRIVATE MW_STREAMER_BUILDING_LIBRARY)
+
+    set_target_properties(mw_streamer_core_objects PROPERTIES
+        C_VISIBILITY_PRESET hidden
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN YES
+    )
 else()
-    add_library(mw_streamer STATIC ${MW_STREAMER_SOURCES})
+    add_library(mw_streamer STATIC
+        c_api.cc
+        $<TARGET_OBJECTS:mw_streamer_core_objects>
+    )
+    target_compile_definitions(mw_streamer_core_objects
+        PRIVATE MW_STREAMER_STATIC_LIBRARY
+    )
     target_compile_definitions(mw_streamer PUBLIC MW_STREAMER_STATIC_LIBRARY)
 endif()
 add_library(mw::streamer ALIAS mw_streamer)
 
-target_link_libraries(mw_streamer
-    PUBLIC
-        ZLMediaKit::MediaKit
-        ZLMediaKit::ToolKit
-        SRT::SRT
-        tomlplusplus::tomlplusplus
-    PRIVATE
-        mw::log
-        fmt::fmt
-        HdrHistogram::HdrHistogram
-        ZLMediaKit::ext-codec
-        ZLMediaKit::SRT
-)
+function(_mw_configure_streamer_target target)
+    target_link_libraries(${target}
+        PUBLIC
+            ${MW_STREAMER_PUBLIC_DEPENDENCIES}
+        PRIVATE
+            ${MW_STREAMER_PRIVATE_DEPENDENCIES}
+    )
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_link_libraries(mw_streamer
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_libraries(${target}
+            PUBLIC
+                "-Wl,--no-as-needed"
+                ${MW_STREAMER_FFMPEG_DEPENDENCIES}
+                "-Wl,--as-needed"
+        )
+    else()
+        target_link_libraries(${target}
+            PUBLIC
+                ${MW_STREAMER_FFMPEG_DEPENDENCIES}
+        )
+    endif()
+
+    target_include_directories(${target}
         PUBLIC
-            "-Wl,--no-as-needed"
-            FFmpeg::avcodec
-            FFmpeg::avformat
-            FFmpeg::avutil
-            FFmpeg::swresample
-            FFmpeg::swscale
-            "-Wl,--as-needed"
+            "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+            "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+        PRIVATE
+            "${PROJECT_SOURCE_DIR}/src/streamer"
     )
-else()
-    target_link_libraries(mw_streamer
-        PUBLIC
-            FFmpeg::avcodec
-            FFmpeg::avformat
-            FFmpeg::avutil
-            FFmpeg::swresample
-            FFmpeg::swscale
+endfunction()
+
+_mw_configure_streamer_target(mw_streamer)
+
+if(BUILD_SHARED AND BUILD_TESTS)
+    # Internal tests exercise implementation details that are intentionally
+    # hidden from the shared library ABI. Reuse the production object files so
+    # those tests do not require exporting private C++ symbols.
+    add_library(mw_streamer_test STATIC
+        $<TARGET_OBJECTS:mw_streamer_core_objects>
     )
+    target_compile_definitions(mw_streamer_test
+        PUBLIC MW_STREAMER_STATIC_LIBRARY
+    )
+    _mw_configure_streamer_target(mw_streamer_test)
 endif()
-
-target_include_directories(mw_streamer
-    PUBLIC
-        "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
-        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
-    PRIVATE
-        "${PROJECT_SOURCE_DIR}/src/streamer"
-)
 
 if(BUILD_SHARED)
     set_target_properties(mw_streamer PROPERTIES

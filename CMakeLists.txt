@@ -52,7 +52,11 @@ add_subdirectory(src)
 if(BUILD_TESTS)
     enable_testing()
 
-    add_library(mw::streamer_test ALIAS mw_streamer)
+    if(BUILD_SHARED)
+        add_library(mw::streamer_test ALIAS mw_streamer_test)
+    else()
+        add_library(mw::streamer_test ALIAS mw_streamer)
+    endif()
     add_library(mw::log_test ALIAS mw_log)
 
     add_subdirectory(tests)
