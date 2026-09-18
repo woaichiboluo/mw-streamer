@@ -24,10 +24,10 @@ enum class SynchronizerSinkState {
 // Real-time raw-frame scheduling on one owned thread. Submissions retain
 // read-only buffer references and do not wait for output. Late/queued frames
 // may be discarded. Audio has a continuous sample clock; video has a fixed
-// frame-rate clock. Both clocks share a fixed max_frame_lateness playout
+// frame-rate clock. Both clocks share a fixed max_frame_lateness_ms playout
 // buffer; source selection and output PTS do not move with frame arrivals.
 // Missing audio becomes silence; video repeats briefly,
-// then uses the standby image after standby_timeout without usable frames.
+// then uses the standby image after standby_timeout_ms without usable frames.
 // Initial output requires one prototype from every declared track. Before
 // that, queues stay bounded but unavailable formats cannot be synthesized.
 //

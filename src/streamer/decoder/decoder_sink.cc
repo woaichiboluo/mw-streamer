@@ -33,7 +33,7 @@ class DecoderSink::Impl final : public Sink {
         config_.video_decode_queue_capacity == 0) {
       throw std::invalid_argument("解码队列容量必须大于0");
     }
-    queue_ = std::make_unique<PacketQueue>(config_.cache_duration, *this);
+    queue_ = std::make_unique<PacketQueue>(config_.cache_duration_ms, *this);
   }
 
   ~Impl() override { Stop(); }
@@ -45,7 +45,7 @@ class DecoderSink::Impl final : public Sink {
       if (mode_initialized_ && offline != offline_) {
         throw std::invalid_argument("DecoderSink不能跨代次改变输入投递模式");
       }
-      if (offline && config_.cache_duration.count() != 0) {
+      if (offline && config_.cache_duration_ms.count() != 0) {
         throw std::invalid_argument("离线文件解码不能配置播放缓存时长");
       }
       offline_ = offline;

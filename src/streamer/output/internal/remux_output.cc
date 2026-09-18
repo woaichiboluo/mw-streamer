@@ -121,7 +121,7 @@ mediakit::ProtocolOption MakeProtocolOption(TargetKind kind,
   option.add_mute_audio = false;
   option.auto_close = false;
   option.paced_sender_ms =
-      static_cast<std::uint32_t>(config.paced_sender_interval.count());
+      static_cast<std::uint32_t>(config.paced_sender_interval_ms.count());
   option.enable_hls = false;
   option.enable_hls_fmp4 = false;
   option.enable_mp4 = false;
@@ -431,7 +431,7 @@ class RemuxOutput::Impl final {
       return socket;
     });
     (*pusher)[mediakit::Client::kTimeoutMS] =
-        config_.zlm.pusher.connect_timeout.count();
+        config_.zlm.pusher.connect_timeout_ms.count();
     if (!config_.zlm.pusher.local_bind_ip.empty()) {
       (*pusher)[mediakit::Client::kNetAdapter] =
           config_.zlm.pusher.local_bind_ip;

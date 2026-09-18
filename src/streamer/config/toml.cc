@@ -288,8 +288,9 @@ void ReadPlayerConfig(const Table& table, PlayerConfig* config,
                       std::string_view path) {
   WarnUnknownKeys(
       table, {"connect_timeout_ms", "media_timeout_ms", "local_bind_ip"}, path);
-  ReadMilliseconds(table, "connect_timeout_ms", path, &config->connect_timeout);
-  ReadMilliseconds(table, "media_timeout_ms", path, &config->media_timeout);
+  ReadMilliseconds(table, "connect_timeout_ms", path,
+                   &config->connect_timeout_ms);
+  ReadMilliseconds(table, "media_timeout_ms", path, &config->media_timeout_ms);
   ReadString(table, "local_bind_ip", path, &config->local_bind_ip);
 }
 
@@ -301,7 +302,7 @@ void ReadOutputConfig(const Table& table, OutputConfig* config,
     WarnUnknownKeys(*pusher, {"connect_timeout_ms", "local_bind_ip"},
                     child_path);
     ReadMilliseconds(*pusher, "connect_timeout_ms", child_path,
-                     &config->pusher.connect_timeout);
+                     &config->pusher.connect_timeout_ms);
     ReadString(*pusher, "local_bind_ip", child_path,
                &config->pusher.local_bind_ip);
   }
@@ -309,7 +310,7 @@ void ReadOutputConfig(const Table& table, OutputConfig* config,
     const auto child_path = FieldPath(path, "muxer");
     WarnUnknownKeys(*muxer, {"paced_sender_interval_ms"}, child_path);
     ReadMilliseconds(*muxer, "paced_sender_interval_ms", child_path,
-                     &config->muxer.paced_sender_interval);
+                     &config->muxer.paced_sender_interval_ms);
   }
   if (const auto* recording = OptionalTable(table, "recording", path)) {
     const auto child_path = FieldPath(path, "recording");
@@ -318,7 +319,7 @@ void ReadOutputConfig(const Table& table, OutputConfig* config,
     ReadInteger(*recording, "file_buffer_size", child_path,
                 &config->recording.file_buffer_size);
     ReadMilliseconds(*recording, "hls_segment_duration_ms", child_path,
-                     &config->recording.hls_segment_duration);
+                     &config->recording.hls_segment_duration_ms);
   }
 }
 
@@ -328,9 +329,9 @@ void ReadReconnectPolicyAt(const Table& table, ReconnectPolicy* config,
       table, {"max_retries", "min_delay_ms", "max_delay_ms", "delay_step_ms"},
       path);
   ReadInteger(table, "max_retries", path, &config->max_retries);
-  ReadMilliseconds(table, "min_delay_ms", path, &config->min_delay);
-  ReadMilliseconds(table, "max_delay_ms", path, &config->max_delay);
-  ReadMilliseconds(table, "delay_step_ms", path, &config->delay_step);
+  ReadMilliseconds(table, "min_delay_ms", path, &config->min_delay_ms);
+  ReadMilliseconds(table, "max_delay_ms", path, &config->max_delay_ms);
+  ReadMilliseconds(table, "delay_step_ms", path, &config->delay_step_ms);
 }
 
 void ReadAudioDecoderConfigAt(const Table& table, AudioDecoderConfig* config,
@@ -449,7 +450,7 @@ std::unique_ptr<SinkConfig> ReadDecoderNode(const Table& table, std::string id,
       path);
   auto node = std::make_unique<DecoderNodeConfig>(std::move(id));
   auto& config = node->options;
-  ReadMilliseconds(table, "cache_duration_ms", path, &config.cache_duration);
+  ReadMilliseconds(table, "cache_duration_ms", path, &config.cache_duration_ms);
   ReadInteger(table, "audio_decode_queue_capacity", path,
               &config.audio_decode_queue_capacity);
   ReadInteger(table, "video_decode_queue_capacity", path,
@@ -498,8 +499,9 @@ std::unique_ptr<SinkConfig> ReadSynchronizerNode(const Table& table,
   ReadInteger(table, "frame_queue_capacity", path,
               &config.frame_queue_capacity);
   ReadMilliseconds(table, "max_frame_lateness_ms", path,
-                   &config.max_frame_lateness);
-  ReadMilliseconds(table, "standby_timeout_ms", path, &config.standby_timeout);
+                   &config.max_frame_lateness_ms);
+  ReadMilliseconds(table, "standby_timeout_ms", path,
+                   &config.standby_timeout_ms);
   ReadString(table, "standby_image_path", path, &config.standby_image_path);
   return node;
 }
@@ -654,18 +656,18 @@ Table WriteInput(const InputConfig& input) {
       {"url", config.url},
       {"downstream", WriteStringArray(input.downstream)},
       {"player",
-       Table{{"connect_timeout_ms", config.player.connect_timeout.count()},
-             {"media_timeout_ms", config.player.media_timeout.count()},
+       Table{{"connect_timeout_ms", config.player.connect_timeout_ms.count()},
+             {"media_timeout_ms", config.player.media_timeout_ms.count()},
              {"local_bind_ip", config.player.local_bind_ip}}},
       {"reconnect_policy",
        Table{{"max_retries", reconnect.max_retries},
-             {"min_delay_ms", reconnect.min_delay.count()},
-             {"max_delay_ms", reconnect.max_delay.count()},
-             {"delay_step_ms", reconnect.delay_step.count()}}}};
+             {"min_delay_ms", reconnect.min_delay_ms.count()},
+             {"max_delay_ms", reconnect.max_delay_ms.count()},
+             {"delay_step_ms", reconnect.delay_step_ms.count()}}}};
 }
 
 void WriteDecoderNode(Table& table, const DecoderSinkConfig& config) {
-  table.insert("cache_duration_ms", config.cache_duration.count());
+  table.insert("cache_duration_ms", config.cache_duration_ms.count());
   table.insert("audio_decode_queue_capacity",
                WriteCapacity(config.audio_decode_queue_capacity));
   table.insert("video_decode_queue_capacity",
@@ -684,8 +686,8 @@ void WriteDecoderNode(Table& table, const DecoderSinkConfig& config) {
 void WriteSynchronizerNode(Table& table, const SynchronizerSinkConfig& config) {
   table.insert("frame_queue_capacity",
                WriteCapacity(config.frame_queue_capacity));
-  table.insert("max_frame_lateness_ms", config.max_frame_lateness.count());
-  table.insert("standby_timeout_ms", config.standby_timeout.count());
+  table.insert("max_frame_lateness_ms", config.max_frame_lateness_ms.count());
+  table.insert("standby_timeout_ms", config.standby_timeout_ms.count());
   table.insert("standby_image_path", config.standby_image_path);
 }
 
@@ -716,15 +718,15 @@ void WriteRemuxNode(Table& table, const RemuxSinkConfig& config) {
   table.insert(
       "zlm",
       Table{{"pusher", Table{{"connect_timeout_ms",
-                              output.pusher.connect_timeout.count()},
+                              output.pusher.connect_timeout_ms.count()},
                              {"local_bind_ip", output.pusher.local_bind_ip}}},
             {"muxer", Table{{"paced_sender_interval_ms",
-                             output.muxer.paced_sender_interval.count()}}},
+                             output.muxer.paced_sender_interval_ms.count()}}},
             {"recording",
              Table{{"file_buffer_size",
                     WriteCapacity(output.recording.file_buffer_size)},
                    {"hls_segment_duration_ms",
-                    output.recording.hls_segment_duration.count()}}}});
+                    output.recording.hls_segment_duration_ms.count()}}}});
 }
 
 Table WriteSinkNode(const SinkConfig& node) {

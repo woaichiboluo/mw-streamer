@@ -36,14 +36,14 @@ void ValidatePolicy(const ReconnectPolicy& policy) {
   if (policy.max_retries < -1) {
     throw std::invalid_argument("max_retries不能小于-1");
   }
-  if (policy.min_delay.count() <= 0) {
-    throw std::invalid_argument("min_delay必须大于0");
+  if (policy.min_delay_ms.count() <= 0) {
+    throw std::invalid_argument("min_delay_ms必须大于0");
   }
-  if (policy.max_delay < policy.min_delay) {
-    throw std::invalid_argument("max_delay不能小于min_delay");
+  if (policy.max_delay_ms < policy.min_delay_ms) {
+    throw std::invalid_argument("max_delay_ms不能小于min_delay_ms");
   }
-  if (policy.delay_step.count() <= 0) {
-    throw std::invalid_argument("delay_step必须大于0");
+  if (policy.delay_step_ms.count() <= 0) {
+    throw std::invalid_argument("delay_step_ms必须大于0");
   }
 }
 
@@ -404,9 +404,9 @@ class PlayerProxy::Impl final
     attempt_ = attempt;
 
     (*attempt->player)[mediakit::Client::kTimeoutMS] =
-        config_.connect_timeout.count();
+        config_.connect_timeout_ms.count();
     (*attempt->player)[mediakit::Client::kMediaTimeoutMS] =
-        config_.media_timeout.count();
+        config_.media_timeout_ms.count();
     if (!config_.local_bind_ip.empty()) {
       (*attempt->player)[mediakit::Client::kNetAdapter] = config_.local_bind_ip;
     }
@@ -749,10 +749,10 @@ class PlayerProxy::Impl final
   void ScheduleRetryOnPoller(std::uint64_t failed_generation,
                              const toolkit::SockException& ex) {
     const auto scaled_delay =
-        reconnect_policy_.delay_step * consecutive_failures_;
+        reconnect_policy_.delay_step_ms * consecutive_failures_;
     const auto delay =
-        std::max(reconnect_policy_.min_delay,
-                 std::min(scaled_delay, reconnect_policy_.max_delay));
+        std::max(reconnect_policy_.min_delay_ms,
+                 std::min(scaled_delay, reconnect_policy_.max_delay_ms));
     ++consecutive_failures_;
     reconnect_count_.fetch_add(1, std::memory_order_relaxed);
 

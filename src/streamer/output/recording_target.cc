@@ -174,7 +174,8 @@ class HlsFmp4FileTarget::Recorder final : public mediakit::MP4MuxerMemory {
         hls_(std::make_shared<mediakit::HlsMakerImp>(
             true, path.generic_string(), std::string(),
             static_cast<std::uint32_t>(config.file_buffer_size),
-            static_cast<float>(config.hls_segment_duration.count()) / 1000.0F,
+            static_cast<float>(config.hls_segment_duration_ms.count()) /
+                1000.0F,
             kHlsRecordingSegmentCount, false, ".mp4")) {
     setPreservePackets(preserve_packets);
   }

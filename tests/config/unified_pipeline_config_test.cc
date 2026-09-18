@@ -177,13 +177,13 @@ TEST_CASE("统一配置完整参数双向转换并保持节点与连接顺序") 
   CHECK(config.input.type == InputType::kZlm);
   CHECK(config.input.options.url == "rtsp://127.0.0.1/live/camera");
   CHECK(config.input.downstream == std::vector<std::string>{"raw", "decode"});
-  CHECK(config.input.options.player.connect_timeout == 3100ms);
-  CHECK(config.input.options.player.media_timeout == 4200ms);
+  CHECK(config.input.options.player.connect_timeout_ms == 3100ms);
+  CHECK(config.input.options.player.media_timeout_ms == 4200ms);
   CHECK(config.input.options.player.local_bind_ip == "127.0.0.2");
   CHECK(config.input.options.reconnect_policy.max_retries == 7);
-  CHECK(config.input.options.reconnect_policy.min_delay == 110ms);
-  CHECK(config.input.options.reconnect_policy.max_delay == 1200ms);
-  CHECK(config.input.options.reconnect_policy.delay_step == 70ms);
+  CHECK(config.input.options.reconnect_policy.min_delay_ms == 110ms);
+  CHECK(config.input.options.reconnect_policy.max_delay_ms == 1200ms);
+  CHECK(config.input.options.reconnect_policy.delay_step_ms == 70ms);
   REQUIRE(config.sinks.size() == 8);
   std::vector<std::string> ids;
   for (const auto& node : config.sinks) ids.push_back(node->id);
@@ -196,7 +196,7 @@ TEST_CASE("统一配置完整参数双向转换并保持节点与连接顺序") 
   CHECK(decoder.downstream ==
         std::vector<std::string>{"analysis", "transform"});
   CHECK(decoder.message_receiver.empty());
-  CHECK(decoder.options.cache_duration == 1500ms);
+  CHECK(decoder.options.cache_duration_ms == 1500ms);
   CHECK(decoder.options.audio_decode_queue_capacity == 31);
   CHECK(decoder.options.video_decode_queue_capacity == 32);
   CHECK(decoder.options.audio_decoder.decoder_name == "aac");
@@ -215,8 +215,8 @@ TEST_CASE("统一配置完整参数双向转换并保持节点与连接顺序") 
 
   const auto& sync = FindNode<SynchronizerNodeConfig>(config, "sync").options;
   CHECK(sync.frame_queue_capacity == 41);
-  CHECK(sync.max_frame_lateness == 42ms);
-  CHECK(sync.standby_timeout == 430ms);
+  CHECK(sync.max_frame_lateness_ms == 42ms);
+  CHECK(sync.standby_timeout_ms == 430ms);
   CHECK(sync.standby_image_path == "./images/standby.png");
   const auto& encoder = FindNode<EncoderNodeConfig>(config, "encode");
   CHECK(encoder.message_receiver == "transform");
@@ -235,11 +235,11 @@ TEST_CASE("统一配置完整参数双向转换并保持节点与连接顺序") 
   const auto& remux = FindNode<RemuxNodeConfig>(config, "publish").options;
   CHECK(remux.target == "rtmp://127.0.0.1/live/processed");
   CHECK(remux.packet_queue_capacity == 51);
-  CHECK(remux.zlm.pusher.connect_timeout == 5200ms);
+  CHECK(remux.zlm.pusher.connect_timeout_ms == 5200ms);
   CHECK(remux.zlm.pusher.local_bind_ip == "127.0.0.3");
-  CHECK(remux.zlm.muxer.paced_sender_interval == 6ms);
+  CHECK(remux.zlm.muxer.paced_sender_interval_ms == 6ms);
   CHECK(remux.zlm.recording.file_buffer_size == 131072);
-  CHECK(remux.zlm.recording.hls_segment_duration == 1400ms);
+  CHECK(remux.zlm.recording.hls_segment_duration_ms == 1400ms);
 }
 
 TEST_CASE("统一配置省略参数保持默认值且没有隐式消息连接") {
@@ -257,12 +257,12 @@ id = "analysis"
 type = "analysis_processor"
 )");
   const auto& decoder = FindNode<DecoderNodeConfig>(config, "decode");
-  CHECK(decoder.options.cache_duration == 0ms);
+  CHECK(decoder.options.cache_duration_ms == 0ms);
   CHECK(decoder.options.audio_decode_queue_capacity == 256);
   CHECK(decoder.options.video_decode_queue_capacity == 128);
   CHECK(decoder.options.video_decoder.backend ==
         mw::streamer::VideoDecoderBackend::kCuda);
-  CHECK(config.input.options.player.connect_timeout == 10000ms);
+  CHECK(config.input.options.player.connect_timeout_ms == 10000ms);
   CHECK(config.input.options.reconnect_policy.max_retries == -1);
   const auto serialized = SerializePipelineConfigToToml(config);
   auto again = ParsePipelineConfigFromToml(serialized);
@@ -426,7 +426,7 @@ TEST_CASE("统一配置校验媒体树与消息引用") {
 TEST_CASE("统一配置校验节点参数无需启动媒体资源") {
   auto config = ParsePipelineConfigFromToml(kCompleteToml);
   SECTION("Decoder缓存时长") {
-    FindNode<DecoderNodeConfig>(config, "decode").options.cache_duration =
+    FindNode<DecoderNodeConfig>(config, "decode").options.cache_duration_ms =
         500ms;
   }
   SECTION("Decoder队列") {
@@ -449,7 +449,7 @@ TEST_CASE("统一配置校验节点参数无需启动媒体资源") {
   }
   SECTION("Synchronizer延迟") {
     FindNode<SynchronizerNodeConfig>(config, "sync")
-        .options.max_frame_lateness = -1ms;
+        .options.max_frame_lateness_ms = -1ms;
   }
   SECTION("Remux目标") {
     FindNode<RemuxNodeConfig>(config, "raw").options.target.clear();
@@ -457,13 +457,13 @@ TEST_CASE("统一配置校验节点参数无需启动媒体资源") {
   SECTION("Remux队列") {
     FindNode<RemuxNodeConfig>(config, "raw").options.packet_queue_capacity = 0;
   }
-  SECTION("Input超时") { config.input.options.player.connect_timeout = 0ms; }
+  SECTION("Input超时") { config.input.options.player.connect_timeout_ms = 0ms; }
   SECTION("Reconnect重试次数") {
     config.input.options.reconnect_policy.max_retries = -2;
   }
   SECTION("Reconnect延迟顺序") {
-    config.input.options.reconnect_policy.min_delay = 10s;
-    config.input.options.reconnect_policy.max_delay = 1s;
+    config.input.options.reconnect_policy.min_delay_ms = 10s;
+    config.input.options.reconnect_policy.max_delay_ms = 1s;
   }
   CHECK_THROWS_AS(ValidatePipelineConfig(config), std::invalid_argument);
 }
@@ -639,6 +639,6 @@ TEST_CASE("全速文件输入拒绝无效路径并忽略实时配置") {
   config.input.type = InputType::kFile;
   config.input.file.path = "a.mp4";
   CHECK_THROWS_AS(ValidatePipelineConfig(config), std::invalid_argument);
-  FindNode<DecoderNodeConfig>(config, "decode").options.cache_duration = 0ms;
+  FindNode<DecoderNodeConfig>(config, "decode").options.cache_duration_ms = 0ms;
   CHECK_NOTHROW(ValidatePipelineConfig(config));
 }

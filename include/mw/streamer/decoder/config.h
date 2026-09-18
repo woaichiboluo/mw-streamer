@@ -27,7 +27,7 @@ struct VideoDecoderConfig {
 
 struct DecoderSinkConfig {
   // Zero forwards immediately; otherwise one to thirty seconds, inclusive.
-  std::chrono::milliseconds cache_duration{0};
+  std::chrono::milliseconds cache_duration_ms{0};
   // Maximum queued packets awaiting decoding per track; must be positive.
   // These limits exclude the upstream time cache and lifecycle messages.
   std::size_t audio_decode_queue_capacity = 256;

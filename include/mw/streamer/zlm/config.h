@@ -18,24 +18,24 @@ struct ZlmConfig {
 };
 
 struct PlayerConfig {
-  std::chrono::milliseconds connect_timeout{10000};
-  std::chrono::milliseconds media_timeout{5000};
+  std::chrono::milliseconds connect_timeout_ms{10000};
+  std::chrono::milliseconds media_timeout_ms{5000};
   std::string local_bind_ip;
 };
 
 struct PusherConfig {
-  std::chrono::milliseconds connect_timeout{10000};
+  std::chrono::milliseconds connect_timeout_ms{10000};
   std::string local_bind_ip;
 };
 
 struct MuxerConfig {
   // Zero disables ZLM paced sending.
-  std::chrono::milliseconds paced_sender_interval{0};
+  std::chrono::milliseconds paced_sender_interval_ms{0};
 };
 
 struct RecordingConfig {
   std::size_t file_buffer_size = 64 * 1024;
-  std::chrono::milliseconds hls_segment_duration{2000};
+  std::chrono::milliseconds hls_segment_duration_ms{2000};
 };
 
 struct OutputConfig {

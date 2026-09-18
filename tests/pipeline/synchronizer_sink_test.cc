@@ -45,8 +45,8 @@ using Clock = std::chrono::steady_clock;
 
 SynchronizerSinkConfig Config() {
   SynchronizerSinkConfig config;
-  config.max_frame_lateness = 60ms;
-  config.standby_timeout = 100ms;
+  config.max_frame_lateness_ms = 60ms;
+  config.standby_timeout_ms = 100ms;
   return config;
 }
 
@@ -602,7 +602,7 @@ TEST_CASE("SynchronizerSink validates configuration and source contracts") {
   }
   SECTION("negative lateness") {
     auto config = Config();
-    config.max_frame_lateness = -1ms;
+    config.max_frame_lateness_ms = -1ms;
     CHECK_THROWS_AS(SynchronizerSink("synchronizer", config),
                     std::invalid_argument);
   }

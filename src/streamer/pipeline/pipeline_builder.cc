@@ -56,8 +56,9 @@ MediaContract ValidateNode(const SinkConfig& config) {
       Require(options.audio_decode_queue_capacity > 0 &&
                   options.video_decode_queue_capacity > 0,
               config, "解码队列容量必须大于0");
-      Require(options.cache_duration == 0ms || (options.cache_duration >= 1s &&
-                                                options.cache_duration <= 30s),
+      Require(options.cache_duration_ms == 0ms ||
+                  (options.cache_duration_ms >= 1s &&
+                   options.cache_duration_ms <= 30s),
               config, "cache_duration_ms必须为0或1000到30000");
       Require(options.video_decoder.backend == VideoDecoderBackend::kSoftware ||
                   options.video_decoder.backend == VideoDecoderBackend::kCuda,
@@ -76,8 +77,8 @@ MediaContract ValidateNode(const SinkConfig& config) {
     case SinkType::kSynchronizer: {
       const auto& options = Options<SynchronizerNodeConfig>(config);
       Require(options.frame_queue_capacity > 0 &&
-                  options.max_frame_lateness >= 0ms &&
-                  options.standby_timeout >= 0ms,
+                  options.max_frame_lateness_ms >= 0ms &&
+                  options.standby_timeout_ms >= 0ms,
               config, "同步队列容量或等待时间无效");
       return {SinkMediaType::kFrame, SinkMediaType::kFrame};
     }
@@ -208,9 +209,9 @@ void ValidateInput(const InputConfig& input) {
   }
   internal::ValidatePlayerConfig(input.options.player);
   const auto& reconnect = input.options.reconnect_policy;
-  if (reconnect.max_retries < -1 || reconnect.min_delay.count() <= 0 ||
-      reconnect.max_delay < reconnect.min_delay ||
-      reconnect.delay_step.count() <= 0) {
+  if (reconnect.max_retries < -1 || reconnect.min_delay_ms.count() <= 0 ||
+      reconnect.max_delay_ms < reconnect.min_delay_ms ||
+      reconnect.delay_step_ms.count() <= 0) {
     throw std::invalid_argument("Input重连策略参数无效");
   }
 }
@@ -275,7 +276,7 @@ void ValidatePipelineConfig(const PipelineConfig& config) {
     media.emplace(node->id, ValidateNode(*node));
     if (config.input.type == InputType::kFile) {
       const auto* decoder = dynamic_cast<const DecoderNodeConfig*>(node.get());
-      if (decoder && decoder->options.cache_duration.count() != 0) {
+      if (decoder && decoder->options.cache_duration_ms.count() != 0) {
         throw std::invalid_argument("离线文件解码不能配置延迟缓存");
       }
     }

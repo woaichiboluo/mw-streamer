@@ -1062,7 +1062,7 @@ int RunStreaming(const Arguments& arguments, EventWriter& events) {
   }
   std::vector<SinkProbe> probes;
   mw::streamer::DecoderSinkConfig decoder_config;
-  decoder_config.cache_duration = arguments.cache_duration;
+  decoder_config.cache_duration_ms = arguments.cache_duration;
   if (arguments.software_video) {
     decoder_config.video_decoder.backend = VideoDecoderBackend::kSoftware;
   }

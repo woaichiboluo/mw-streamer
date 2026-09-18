@@ -37,8 +37,8 @@ Clock::time_point Epoch() { return Clock::time_point(100s); }
 
 SynchronizerSinkConfig Config() {
   SynchronizerSinkConfig config;
-  config.max_frame_lateness = 40ms;
-  config.standby_timeout = 100ms;
+  config.max_frame_lateness_ms = 40ms;
+  config.standby_timeout_ms = 100ms;
   return config;
 }
 
@@ -158,14 +158,14 @@ TEST_CASE(
     "RealtimeFrameScheduler rational video slots do not accumulate rounding "
     "error") {
   auto config = Config();
-  config.standby_timeout = 60s;
+  config.standby_timeout_ms = 60s;
   RealtimeFrameScheduler scheduler(config);
   scheduler.Configure(Streams(false, 1, nullptr, {30000, 1001}));
   scheduler.Push({1, Video(0)}, false, Epoch());
   constexpr AVRational kFrameTimeBase{1001, 30000};
   constexpr AVRational kMicroseconds{1, 1000000};
   for (std::int64_t slot = 0; slot < 1000; ++slot) {
-    const auto due = Epoch() + config.max_frame_lateness +
+    const auto due = Epoch() + config.max_frame_lateness_ms +
                      std::chrono::microseconds(
                          av_rescale_q(slot, kFrameTimeBase, kMicroseconds));
     auto output = scheduler.TakeReady(due);
@@ -175,7 +175,7 @@ TEST_CASE(
     CHECK(output->frame->duration == 1);
     CHECK(output->frame->time_base.num == 1001);
     CHECK(output->frame->time_base.den == 30000);
-    const auto next = Epoch() + config.max_frame_lateness +
+    const auto next = Epoch() + config.max_frame_lateness_ms +
                       std::chrono::microseconds(av_rescale_q(
                           slot + 1, kFrameTimeBase, kMicroseconds));
     CHECK_FALSE(scheduler.TakeReady(due).has_value());
@@ -448,7 +448,7 @@ TEST_CASE(
 TEST_CASE("RealtimeFrameScheduler zero arrival budget retains immediate output",
           "[arrival_buffer]") {
   auto config = Config();
-  config.max_frame_lateness = 0ms;
+  config.max_frame_lateness_ms = 0ms;
   RealtimeFrameScheduler scheduler(config);
   scheduler.Configure(Streams(false));
   scheduler.Push({1, Video(0, 32)}, false, Epoch());

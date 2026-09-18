@@ -247,7 +247,7 @@ PTS/DTS 间隔，不进行逐轨归零或大间隔平滑。EOF 写完启动缓�
 也不向 DecoderSink 暴露执行器。四类输入通知同步入队，由队列线程有序处理。
 到期的 Packet 再进入各自的解码工作队列，每条实际存在的轨道使用一个 Worker；
 纯音频或纯视频输入只创建对应的解码线程；实时缓存调度线程独立存在。
-实时输入投递只保留数据并唤醒队列，`cache_duration = 0` 时也由队列线程直接转交。
+实时输入投递只保留数据并唤醒队列，`cache_duration_ms = 0` 时也由队列线程直接转交。
 离线输入绕过定时缓存，直接进入音频、视频的有界解码队列，不创建缓存调度线程。
 
 PacketQueue 直接借用消费 Packet 的 `Sink` 作为出队消费端，沿用其四类通知接口。
@@ -267,7 +267,7 @@ stream 中读取。`DecoderSinkConfig` 复用已有软解/CUDA 配置，不自�
 重置和结束等控制消息不占限额。实时输入队列满时，音频丢弃当前包；视频清除
 排队的 Packet，等待下一个关键帧并刷新解码器后恢复。生命周期控制消息不会随
 Packet 被删除。FileInput 的离线模式使用有界等待把反压传回文件读取线程，不主动
-丢弃音视频包，也不允许设置非零 `cache_duration`。
+丢弃音视频包，也不允许设置非零 `cache_duration_ms`。
 
 消费 Frame 的 Sink 通过 `OnAudioFrame()` 和 `OnVideoFrame()` 同步接收 `FrameReady`，
 同一轨道有序，音视频可以并发。实现若需异步保存帧，复制参数以保留引用，共享
@@ -413,14 +413,14 @@ DecoderSink。Sink 拥有队列和调度逻辑，一个独立线程执行调度�
 在此之前，缺少的输出格式无法生成备播，缓存仍然有界。视频使用
 `FrameStreamsReady` 中上游视频轨道的帧率，PTS 按累计帧数计算；缺少有效帧率时
 拒绝启动。音频按累计样本数计时，静音也占据真实的输出样本位置。
-固定单调时钟映射决定哪些源帧仍可使用；`max_frame_lateness` 默认 100 ms，
+固定单调时钟映射决定哪些源帧仍可使用；`max_frame_lateness_ms` 默认 100 ms，
 音视频共用这段固定播放缓冲，给帧到达留出余量，到释放期限才决定选帧或补帧。
 选帧始终按原槽位对应的源时间计算，输出 PTS 不偏移，等待也不逐帧累计。
 该配置同时限定候选源帧的最大过期时间，超过的帧被丢弃；设为 0 时不留播放缓冲。
 同一代次收到迟到帧不会重设时间映射，因此不会把积压画面重新当作直播播放。
 
 没有可用音频时输出静音；视频短暂缺帧时重复上一帧，持续缺帧超过
-`standby_timeout`（默认 500 ms）后输出备播图片。`standby_image_path` 为空时
+`standby_timeout_ms`（默认 500 ms）后输出备播图片。`standby_image_path` 为空时
 复用内置 loading 图片，指定路径时使用该图片；备播转换为原型的 CPU/CUDA 格式。
 备播切入及恢复真实视频时请求 I 帧。即使 Processor 没有新回调或输入尚未报告
 断线，调度线程也能继续输出。调度线程自身明显迟到时重新安排播放期限，避免
@@ -577,8 +577,11 @@ PlayerProxy，通用 Input 当前只公开 Start、Stop 与状态查询。
 完整模板见 [`template/pipeline.toml`](template/pipeline.toml)。它使用 `[input]`
 和 `[[sinks]]` 描述原始录像及解码、处理、同步、编码后的多目标输出。节点声明
 可以前向引用；媒体投递顺序取决于 `downstream` 数组，与声明顺序无关。
+全部字段、默认值和约束见
+[`docs/configuration.md`](docs/configuration.md)；可复制查阅的说明性 TOML 见
+[`template/configuration_reference.toml`](template/configuration_reference.toml)。
 可用节点类型为 `decoder`、`analysis_processor`、`transform_processor`、
-`synchronizer`、`encoder` 和 `remux`。Input 支持两种类型：
+`custom`、`synchronizer`、`encoder` 和 `remux`。Input 支持两种类型：
 
 - `type = "zlm"` 使用 `url`，接受 ZlmInput 支持的网络地址和实时文件播放。
 - `type = "file"` 使用 `path`，通过 FileInput 全速读取本地文件；不配置 player 或重连参数。

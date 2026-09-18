@@ -94,7 +94,7 @@ TEST_CASE("ZLM录像目标生成带相同开始时间的fMP4和HLS-fMP4") {
 
   RecordingConfig recording_config;
   recording_config.file_buffer_size = 4096;
-  recording_config.hls_segment_duration = std::chrono::seconds(4);
+  recording_config.hls_segment_duration_ms = std::chrono::seconds(4);
   const auto start_time = std::chrono::system_clock::now();
   Fmp4FileTarget fmp4(directory.path() / "camera.mp4", tracks, recording_config,
                       start_time);

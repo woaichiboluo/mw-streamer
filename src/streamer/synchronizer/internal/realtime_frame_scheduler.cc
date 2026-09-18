@@ -119,14 +119,14 @@ class RealtimeFrameScheduler::Impl final {
   explicit Impl(SynchronizerSinkConfig config)
       : config_(std::move(config)), standby_video_(config_.standby_image_path) {
     if (config_.frame_queue_capacity == 0 ||
-        config_.max_frame_lateness.count() < 0 ||
-        config_.standby_timeout.count() < 0) {
+        config_.max_frame_lateness_ms.count() < 0 ||
+        config_.standby_timeout_ms.count() < 0) {
       throw std::invalid_argument("实时同步队列或等待时长无效");
     }
-    lateness_us_ =
-        Rescale(config_.max_frame_lateness.count(), {1, 1000}, kMicroseconds);
+    lateness_us_ = Rescale(config_.max_frame_lateness_ms.count(), {1, 1000},
+                           kMicroseconds);
     standby_timeout_us_ =
-        Rescale(config_.standby_timeout.count(), {1, 1000}, kMicroseconds);
+        Rescale(config_.standby_timeout_ms.count(), {1, 1000}, kMicroseconds);
   }
 
   void Configure(const FrameStreamsReady& streams) {

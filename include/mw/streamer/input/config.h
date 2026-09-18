@@ -12,9 +12,9 @@ struct ReconnectPolicy {
   // Number of retries after the initial attempt. A negative value retries
   // indefinitely.
   int max_retries = -1;
-  std::chrono::milliseconds min_delay{2000};
-  std::chrono::milliseconds max_delay{60000};
-  std::chrono::milliseconds delay_step{3000};
+  std::chrono::milliseconds min_delay_ms{2000};
+  std::chrono::milliseconds max_delay_ms{60000};
+  std::chrono::milliseconds delay_step_ms{3000};
 };
 
 struct FileInputConfig {

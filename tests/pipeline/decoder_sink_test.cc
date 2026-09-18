@@ -64,7 +64,7 @@ std::string SamplePath() {
 
 DecoderSinkConfig SoftwareConfig(std::chrono::milliseconds cache = 0ms) {
   DecoderSinkConfig config;
-  config.cache_duration = cache;
+  config.cache_duration_ms = cache;
   config.video_decoder.backend = VideoDecoderBackend::kSoftware;
   return config;
 }
@@ -287,8 +287,8 @@ TEST_CASE(
   auto recording = std::make_shared<Recording>();
   recording->rendezvous = true;
   auto config = SoftwareConfig();
-  SECTION("zero cache") { config.cache_duration = 0ms; }
-  SECTION("one second cache") { config.cache_duration = 1s; }
+  SECTION("zero cache") { config.cache_duration_ms = 0ms; }
+  SECTION("one second cache") { config.cache_duration_ms = 1s; }
   auto decoder = std::make_unique<DecoderSink>("decoder", config);
   decoder->AddSink(std::make_unique<FrameRecorder>("recording", recording));
   auto* consumer = decoder.get();
@@ -343,7 +343,7 @@ TEST_CASE(
   }
   // Cached playback aligns at the first video DTS and removes the earlier
   // AAC preroll packet. Zero-cache delivery retains every input packet.
-  const bool cached = config.cache_duration > 0ms;
+  const bool cached = config.cache_duration_ms > 0ms;
   CHECK(samples == (cached ? 94 : 95) * 1024);
   CHECK(recording->audio.front().frame->pts == (cached ? 1008 : 0));
   CHECK(av_rescale_q(recording->video.front().frame->pts,
@@ -562,8 +562,8 @@ TEST_CASE("DecoderSink reconnect resets and serializes generation boundaries") {
   const auto sample = ReadSample();
   auto recording = std::make_shared<Recording>();
   auto config = SoftwareConfig();
-  SECTION("zero cache") { config.cache_duration = 0ms; }
-  SECTION("one second cache") { config.cache_duration = 1s; }
+  SECTION("zero cache") { config.cache_duration_ms = 0ms; }
+  SECTION("one second cache") { config.cache_duration_ms = 1s; }
   DecoderSink sink("sink", config);
   sink.AddSink(std::make_unique<FrameRecorder>("recording", recording));
   sink.OnStreamsReady({1, sample.streams});
@@ -612,8 +612,8 @@ TEST_CASE(
   auto recording = std::make_shared<Recording>();
   recording->block_video = true;
   auto config = SoftwareConfig();
-  SECTION("zero cache") { config.cache_duration = 0ms; }
-  SECTION("one second cache") { config.cache_duration = 1s; }
+  SECTION("zero cache") { config.cache_duration_ms = 0ms; }
+  SECTION("one second cache") { config.cache_duration_ms = 1s; }
   DecoderSink sink("sink", config);
   sink.AddSink(std::make_unique<FrameRecorder>("recording", recording));
   sink.OnStreamsReady({1, sample.streams});

@@ -95,11 +95,11 @@ void StopAndWait(const PlayerProxy::Ptr& proxy) {
 TEST_CASE("input player proxy rejects invalid ZLM timeouts") {
   auto proxy = std::make_shared<PlayerProxy>();
   PlayerConfig config;
-  config.connect_timeout = 0ms;
+  config.connect_timeout_ms = 0ms;
   CHECK_THROWS_AS(proxy->Start(SamplePath(), config), std::invalid_argument);
 
-  config.connect_timeout = 10s;
-  config.media_timeout = 0ms;
+  config.connect_timeout_ms = 10s;
+  config.media_timeout_ms = 0ms;
   CHECK_THROWS_AS(proxy->Start(SamplePath(), config), std::invalid_argument);
   CHECK(proxy->state() == PlayerState::kIdle);
 }
@@ -327,12 +327,12 @@ TEST_CASE(
     "budget") {
   ReconnectPolicy policy;
   policy.max_retries = 1;
-  policy.min_delay = 20ms;
-  policy.max_delay = 20ms;
-  policy.delay_step = 20ms;
+  policy.min_delay_ms = 20ms;
+  policy.max_delay_ms = 20ms;
+  policy.delay_step_ms = 20ms;
   auto proxy = std::make_shared<PlayerProxy>(nullptr, policy);
   PlayerConfig player_config;
-  player_config.connect_timeout = 200ms;
+  player_config.connect_timeout_ms = 200ms;
 
   std::mutex mutex;
   std::condition_variable condition;
@@ -364,9 +364,9 @@ TEST_CASE(
 TEST_CASE("stopping input player proxy cancels a pending reconnect") {
   ReconnectPolicy policy;
   policy.max_retries = -1;
-  policy.min_delay = 2s;
-  policy.max_delay = 2s;
-  policy.delay_step = 2s;
+  policy.min_delay_ms = 2s;
+  policy.max_delay_ms = 2s;
+  policy.delay_step_ms = 2s;
   auto proxy = std::make_shared<PlayerProxy>(nullptr, policy);
 
   std::mutex mutex;
@@ -421,9 +421,9 @@ TEST_CASE("stopping input player proxy on owner poller completes inline") {
 TEST_CASE("destroying input player proxy cleans up without user callbacks") {
   ReconnectPolicy policy;
   policy.max_retries = -1;
-  policy.min_delay = 2s;
-  policy.max_delay = 2s;
-  policy.delay_step = 2s;
+  policy.min_delay_ms = 2s;
+  policy.max_delay_ms = 2s;
+  policy.delay_step_ms = 2s;
   auto proxy = std::make_shared<PlayerProxy>(nullptr, policy);
 
   std::mutex mutex;

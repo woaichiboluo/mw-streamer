@@ -506,7 +506,7 @@ TEST_CASE("慢Processor期间同步独立备播并持续音频且恢复后两路
   auto processor = std::make_unique<TransformProcessorSink>(
       "processor", SlowProcessorCallbacks(slow_processor));
   auto sync_config = SynchronizerConfig();
-  sync_config.standby_timeout = 100ms;
+  sync_config.standby_timeout_ms = 100ms;
   auto synchronizer =
       std::make_unique<SynchronizerSink>("synchronizer", sync_config);
   const auto* synchronizing = synchronizer.get();

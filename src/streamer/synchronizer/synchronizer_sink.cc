@@ -23,8 +23,8 @@ class SynchronizerSink::Impl final {
         config_(std::move(config)),
         outputs_(owner.downstream()) {
     if (config_.frame_queue_capacity == 0 ||
-        config_.max_frame_lateness < std::chrono::milliseconds::zero() ||
-        config_.standby_timeout < std::chrono::milliseconds::zero()) {
+        config_.max_frame_lateness_ms < std::chrono::milliseconds::zero() ||
+        config_.standby_timeout_ms < std::chrono::milliseconds::zero()) {
       throw std::invalid_argument("SynchronizerSink容量或等待时间无效");
     }
     scheduler_ = std::make_unique<Scheduler>(config_);
