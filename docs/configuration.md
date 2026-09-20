@@ -24,11 +24,12 @@
 
 `[log]` 可省略。日志级别可取 `off`、`trace`、`debug`、`info`、
 `warning`、`error`、`critical`。
+模块级别先决定日志是否进入输出端，Console 和滚动文件随后按各自级别独立过滤，
+二者可以单独或同时启用。
 
 | TOML 字段 | C++ 字段 | 类型 | 默认值 | 约束与说明 |
 | --- | --- | --- | --- | --- |
-| `log.level` | `LogConfig::level` | string enum | `info` | 未单独覆盖模块的默认级别。 |
-| `log.modules.<module>` | `ModuleLogConfig` | string enum | 无条目 | `<module>` 是任意非空模块名，对该模块覆盖默认级别。 |
+| `log.modules.<module>` | `ModuleLogConfig` | string enum | `default` 模块为 `info`，其他模块为 `error` | `<module>` 是任意非空模块名；显式配置覆盖模块默认级别，设为 `off` 可关闭该模块。 |
 | `log.console.color` | `ConsoleSinkConfig::color` | bool | `true` | 是否启用彩色控制台输出。 |
 | `log.console.level` | `ConsoleSinkConfig::level` | string enum | `trace` | `off` 表示不创建控制台 Sink。 |
 | `log.rotating_file.path` | `RotatingFileSinkConfig::path` | string | `""` | 文件日志启用时必须非空。 |

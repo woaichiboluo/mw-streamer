@@ -230,9 +230,8 @@ void ReadLogLevel(const Table& table, std::string_view key,
 }
 
 void ReadLogConfig(const Table& table, LogConfig* config) {
-  WarnUnknownKeys(
-      table, {"level", "modules", "console", "rotating_file", "async"}, "log");
-  ReadLogLevel(table, "level", "log", &config->level);
+  WarnUnknownKeys(table, {"modules", "console", "rotating_file", "async"},
+                  "log");
   if (const auto* modules = OptionalTable(table, "modules", "log")) {
     constexpr std::string_view kPath = "log.modules";
     for (const auto& [key, value] : *modules) {

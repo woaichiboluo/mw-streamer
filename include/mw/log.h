@@ -40,7 +40,8 @@ typedef struct MwLogModuleConfig {
 
 typedef struct MwLogConfig {
   uint32_t struct_size;
-  MwLogLevel level;
+  // Explicit entries override the built-in info level for "default" and error
+  // level for every other module.
   const MwLogModuleConfig* modules;
   size_t module_count;
   MwLogLevel console_level;
@@ -120,7 +121,8 @@ struct AsyncConfig {
 };
 
 struct LogConfig {
-  LogLevel level = LogLevel::kInfo;
+  // Explicit entries override the built-in info level for "default" and error
+  // level for every other module.
   std::vector<ModuleLogConfig> modules;
   ConsoleSinkConfig console;
   RotatingFileSinkConfig rotating_file;

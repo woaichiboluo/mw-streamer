@@ -11,17 +11,13 @@
 # 进程级日志配置，可整体省略
 # 日志级别：off / trace / debug / info / warning / error / critical
 # =============================================================================
-[log]
-level = "info" # 未单独覆盖模块的默认级别
-
 [log.modules]
-# 键是任意模块名，值是该模块的日志级别。
+# 键是任意模块名，值是该模块的日志级别；显式配置覆盖默认值，off 可关闭模块。
+# 未配置的 default 模块默认为 info，其他未配置模块默认为 error。
 streamer = "info"
 processor = "info"
-zlm = "off"
-srt = "off"
-ffmpeg = "off"
 
+# Console 和滚动文件是独立的第二层过滤，可以单独或同时启用。
 [log.console]
 color = true
 level = "trace" # off 表示不创建控制台日志 Sink

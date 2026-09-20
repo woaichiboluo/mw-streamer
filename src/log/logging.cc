@@ -28,6 +28,10 @@ std::string_view NormalizeModule(std::string_view module) noexcept {
   return module.empty() ? kDefaultModule : module;
 }
 
+LogLevel BuiltInModuleLevel(std::string_view module) noexcept {
+  return module == kDefaultModule ? LogLevel::kInfo : LogLevel::kError;
+}
+
 std::string_view FileName(const char* file) noexcept {
   if (!file) return {};
   const std::string_view path(file);
@@ -89,8 +93,7 @@ bool FromCLevel(MwLogLevel input, LogLevel* output) noexcept {
 
 class LoggingImpl {
  public:
-  explicit LoggingImpl(const LogConfig& config, bool publish = true)
-      : default_level_(config.level) {
+  explicit LoggingImpl(const LogConfig& config, bool publish = true) {
     for (const auto& module : config.modules) {
       if (module.name.empty()) {
         throw std::invalid_argument("log module name cannot be empty");
@@ -120,8 +123,9 @@ class LoggingImpl {
     const auto iterator = std::find_if(
         module_levels_.begin(), module_levels_.end(),
         [normalized](const auto& entry) { return entry.first == normalized; });
-    const auto configured =
-        iterator == module_levels_.end() ? default_level_ : iterator->second;
+    const auto configured = iterator == module_levels_.end()
+                                ? BuiltInModuleLevel(normalized)
+                                : iterator->second;
     return configured != LogLevel::kOff &&
            LevelRank(level) >= LevelRank(configured);
   }
@@ -190,7 +194,6 @@ class LoggingImpl {
   void Publish();
   void Shutdown() noexcept;
 
-  LogLevel default_level_;
   std::vector<std::pair<std::string, LogLevel>> module_levels_;
   std::vector<spdlog::sink_ptr> sinks_;
   std::shared_ptr<spdlog::details::thread_pool> thread_pool_;
@@ -280,8 +283,7 @@ mw::log::LogConfig ToCppConfig(const MwLogConfig& input) {
   }
 
   mw::log::LogConfig output;
-  if (!mw::log::FromCLevel(input.level, &output.level) ||
-      !mw::log::FromCLevel(input.console_level, &output.console.level) ||
+  if (!mw::log::FromCLevel(input.console_level, &output.console.level) ||
       !mw::log::FromCLevel(input.file_level, &output.rotating_file.level)) {
     throw std::invalid_argument("invalid log level");
   }
@@ -327,7 +329,6 @@ void mw_log_default_config(MwLogConfig* config) {
   if (!config) return;
   *config = {};
   config->struct_size = sizeof(MwLogConfig);
-  config->level = kMwLogLevelInfo;
   config->console_level = kMwLogLevelTrace;
   config->console_color = 1;
   config->file_level = kMwLogLevelOff;

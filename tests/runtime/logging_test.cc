@@ -72,33 +72,57 @@ TEST_CASE("named module level filters before fmt formatting", "[logging]") {
   CHECK(content.find("[logging_test.cc:") != std::string::npos);
 }
 
+TEST_CASE("unconfigured named modules default to error", "[logging]") {
+  TemporaryLogFile file;
+  const auto config = MakeFileLogConfig(file.path());
+
+  {
+    mw::log::Logging logging(config);
+    MW_LOG_WARNING("streamer", "hidden streamer warning");
+    MW_LOG_ERROR("streamer", "visible streamer error");
+    MW_LOG_CRITICAL("streamer", "visible streamer critical");
+  }
+
+  const auto content = file.Read();
+  CHECK(content.find("hidden streamer warning") == std::string::npos);
+  CHECK(content.find("[streamer] visible streamer error") != std::string::npos);
+  CHECK(content.find("[streamer] visible streamer critical") !=
+        std::string::npos);
+}
+
 TEST_CASE("default macros use the default module", "[logging]") {
   TemporaryLogFile file;
   auto config = MakeFileLogConfig(file.path());
 
   {
     mw::log::Logging logging(config);
+    MW_LOG_DEBUG_DEFAULT("hidden default debug");
     MW_LOG_INFO_DEFAULT("default message {}", 7);
   }
 
-  CHECK(file.Read().find("[default] default message 7") != std::string::npos);
+  const auto content = file.Read();
+  CHECK(content.find("hidden default debug") == std::string::npos);
+  CHECK(content.find("[default] default message 7") != std::string::npos);
 }
 
-TEST_CASE("arbitrary modules use independent levels", "[logging]") {
+TEST_CASE("explicit module levels override built-in levels", "[logging]") {
   TemporaryLogFile file;
   auto config = MakeFileLogConfig(file.path());
-  config.level = mw::log::LogLevel::kOff;
+  config.modules.push_back({"default", mw::log::LogLevel::kOff});
+  config.modules.push_back({"streamer", mw::log::LogLevel::kOff});
   config.modules.push_back({"processor", mw::log::LogLevel::kWarning});
 
   {
     mw::log::Logging logging(config);
-    MW_LOG_ERROR("streamer", "hidden streamer error");
+    MW_LOG_CRITICAL_DEFAULT("hidden default critical");
+    MW_LOG_CRITICAL("streamer", "hidden streamer critical");
     MW_LOG_INFO("processor", "hidden processor info");
     MW_LOG_WARNING("processor", "visible processor warning");
   }
 
   const auto content = file.Read();
-  CHECK(content.find("hidden streamer error") == std::string::npos);
+  CHECK(content.find("hidden default critical") == std::string::npos);
+  CHECK(content.find("hidden streamer critical") == std::string::npos);
   CHECK(content.find("hidden processor info") == std::string::npos);
   CHECK(content.find("[processor] visible processor warning") !=
         std::string::npos);
@@ -123,9 +147,31 @@ TEST_CASE("third-party bridges preserve their module names",
   CHECK(content.find("[ffmpeg] ffmpeg bridge message") != std::string::npos);
 }
 
+TEST_CASE("unconfigured third-party modules default to error",
+          "[logging][bridge]") {
+  TemporaryLogFile file;
+  const auto config = MakeFileLogConfig(file.path());
+
+  {
+    mw::log::Logging logging(config);
+    mw::streamer::internal::ThirdPartyLogBridge bridge;
+    InfoL << "hidden zlm info";
+    ErrorL << "visible zlm error";
+    av_log(nullptr, AV_LOG_INFO, "hidden ffmpeg info\n");
+    av_log(nullptr, AV_LOG_ERROR, "visible ffmpeg error\n");
+  }
+
+  const auto content = file.Read();
+  CHECK(content.find("hidden zlm info") == std::string::npos);
+  CHECK(content.find("[zlm] visible zlm error") != std::string::npos);
+  CHECK(content.find("hidden ffmpeg info") == std::string::npos);
+  CHECK(content.find("[ffmpeg] visible ffmpeg error") != std::string::npos);
+}
+
 TEST_CASE("async logging drains on destruction", "[logging][async]") {
   TemporaryLogFile file;
   auto config = MakeFileLogConfig(file.path());
+  config.modules.push_back({"streamer", mw::log::LogLevel::kInfo});
   config.async.enabled = true;
   config.async.queue_size = 128;
   config.async.overflow = mw::log::OverflowPolicy::kBlock;
@@ -145,6 +191,7 @@ TEST_CASE("async logging drains on destruction", "[logging][async]") {
 TEST_CASE("C ABI writes text with source location", "[logging][c-api]") {
   TemporaryLogFile file;
   auto config = MakeFileLogConfig(file.path());
+  config.modules.push_back({"c-client", mw::log::LogLevel::kInfo});
 
   {
     mw::log::Logging logging(config);

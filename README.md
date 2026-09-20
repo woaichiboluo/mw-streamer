@@ -700,7 +700,8 @@ SavePipelineConfigToToml(restored, "pipeline.toml");
 文件名和行号。
 
 所有模块共享同一组输出端。Console 和滚动文件的级别为 `off` 时不创建对应 Sink，
-二者可以单独或同时输出；`[log].level` 是未单独配置模块的默认级别，
-`[log.modules]` 可以用任意字符串模块名覆盖。streamer 只负责接管 ZLMediaKit、
+二者可以单独或同时输出；`[log.modules]` 可以用任意字符串配置模块级别。未配置的
+`default` 模块默认为 `info`，其他未配置模块默认为 `error`；显式配置会覆盖默认值，
+也可以设为 `off` 关闭对应模块。streamer 只负责接管 ZLMediaKit、
 libsrt 和 FFmpeg 日志并转发给 `mw::log`。异步日志默认关闭，线程数为 0 时由
 ZLToolKit 按硬件并发数决定。
