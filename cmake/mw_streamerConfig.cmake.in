@@ -3,8 +3,20 @@
 include(CMakeFindDependencyMacro)
 
 set(_mw_package_is_shared @MW_STREAMER_PACKAGE_IS_SHARED@)
+set(_mw_package_has_adapter @MW_STREAMER_PACKAGE_HAS_ADAPTER@)
+set(_mw_package_prefix "${PACKAGE_PREFIX_DIR}")
 set(_mw_saved_module_path "${CMAKE_MODULE_PATH}")
-list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/modules")
+list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
+
+foreach(_mw_component IN LISTS mw_streamer_FIND_COMPONENTS)
+    if(NOT _mw_component STREQUAL "streamer" AND
+       NOT _mw_component STREQUAL "adapter")
+        set(mw_streamer_${_mw_component}_FOUND FALSE)
+        set(mw_streamer_NOT_FOUND_MESSAGE
+            "mw_streamer does not provide the ${_mw_component} component"
+        )
+    endif()
+endforeach()
 
 function(_mw_find_library output name directory)
     unset(${output} CACHE)
@@ -151,8 +163,64 @@ if(NOT _mw_package_is_shared)
     endif()
 endif()
 
+set(mw_streamer_streamer_FOUND TRUE)
+
+if("adapter" IN_LIST mw_streamer_FIND_COMPONENTS)
+    if(NOT _mw_package_has_adapter)
+        set(mw_streamer_adapter_FOUND FALSE)
+        set(mw_streamer_NOT_FOUND_MESSAGE
+            "mw_streamer was installed without the adapter component"
+        )
+    else()
+        set(_mw_adapter_dependencies_found TRUE)
+        find_package(OpenCV QUIET COMPONENTS core cudaarithm)
+        if(NOT OpenCV_FOUND)
+            set(_mw_adapter_dependencies_found FALSE)
+            set(mw_streamer_adapter_FOUND FALSE)
+            set(mw_streamer_NOT_FOUND_MESSAGE
+                "mw_streamer adapter requires OpenCV core and cudaarithm"
+            )
+        elseif(NOT _mw_package_is_shared)
+            find_package(CUDAToolkit QUIET)
+            if(NOT CUDAToolkit_FOUND)
+                set(_mw_adapter_dependencies_found FALSE)
+                set(mw_streamer_adapter_FOUND FALSE)
+                set(mw_streamer_NOT_FOUND_MESSAGE
+                    "Static mw_streamer adapter requires CUDAToolkit"
+                )
+            endif()
+        endif()
+
+        if(_mw_adapter_dependencies_found)
+            set(PACKAGE_PREFIX_DIR "${_mw_package_prefix}")
+            _mw_import_public(
+                mw::opencv_adapter
+                mw_opencv_adapter
+                MW_OPENCV_ADAPTER_STATIC_LIBRARY
+            )
+            set_property(TARGET mw::opencv_adapter APPEND PROPERTY
+                INTERFACE_INCLUDE_DIRECTORIES "${OpenCV_INCLUDE_DIRS}"
+            )
+            set_property(TARGET mw::opencv_adapter APPEND PROPERTY
+                INTERFACE_LINK_LIBRARIES "${OpenCV_LIBS}"
+            )
+
+            if(NOT _mw_package_is_shared)
+                set_property(TARGET mw::opencv_adapter APPEND PROPERTY
+                    INTERFACE_LINK_LIBRARIES
+                        "mw::log;CUDA::cuda_driver;CUDA::cudart;CUDA::nppc;CUDA::nppial;CUDA::nppicc;CUDA::nppidei;CUDA::nppig;CUDA::nppitc;FFmpeg::swscale;FFmpeg::avutil"
+                )
+            endif()
+            set(mw_streamer_adapter_FOUND TRUE)
+        endif()
+        unset(_mw_adapter_dependencies_found)
+    endif()
+endif()
+
 set(CMAKE_MODULE_PATH "${_mw_saved_module_path}")
 unset(_mw_saved_module_path)
+unset(_mw_package_prefix)
+unset(_mw_package_has_adapter)
 unset(_mw_package_is_shared)
 
 check_required_components(mw_streamer)

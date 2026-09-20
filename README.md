@@ -23,22 +23,25 @@ cmake --build build-static --parallel
 动态安装会提供对应 DLL 的导入目标：
 
 ```cmake
-find_package(mw_streamer 0.1 CONFIG REQUIRED)
+find_package(mw_streamer 0.1 CONFIG REQUIRED COMPONENTS streamer)
 
 target_link_libraries(app PRIVATE
     mw::log
     mw::streamer
 )
 
-# OpenCV adapter 是独立的 CMake 包，仅在需要时查找 OpenCV 和 CUDA。
-find_package(mw_opencv_adapter 0.1 CONFIG REQUIRED)
+# OpenCV adapter 是 mw_streamer 的可选组件，仅在请求时查找 OpenCV；
+# 静态安装还会查找 CUDA。
+find_package(mw_streamer 0.1 CONFIG REQUIRED
+    COMPONENTS streamer adapter
+)
 target_link_libraries(app PRIVATE mw::opencv_adapter)
 ```
 
-安装前缀不在 CMake 默认搜索路径时，可以设置 `mw_streamer_ROOT`；使用 Adapter 时
-设置 `mw_opencv_adapter_ROOT`。动态 `mw_streamer` 不查找 FFmpeg、SRT、OpenSSL、
-OpenCV 或 CUDA。静态包仍要求系统能够找到其链接依赖；项目自带的 fmt 及其他私有
-静态实现依赖会随包安装。
+未指定组件时默认加载 `streamer`。安装前缀不在 CMake 默认搜索路径时，可以设置
+`mw_streamer_ROOT`。动态 `streamer` 不查找 FFmpeg、SRT 或 OpenSSL；请求动态
+`adapter` 时只查找其公开 OpenCV 依赖。静态包仍要求系统能够找到其链接依赖；
+项目自带的 fmt 及其他私有静态实现依赖会随包安装。
 
 项目交付供 C++ 宿主使用的静态库，公开接口位于 `include/mw/`，按模块组织。
 Processor 的 callback、context 和 frame view 保留纯 C 兼容结构体与函数指针；
@@ -361,7 +364,7 @@ EOF 触发业务结束边界；Stop 等待在途回调并且只对成功启动�
 
 Pipeline 持有一个从池中提取的独占 Poller 和 `ID → Sink*` 索引，直接复用 Poller
 自带的线程安全任务队列。节点所有权仍保留在 unique_ptr 媒体树中。业务通过
-`Pipeline::SendMessage(target_sink_id, message)` 指定目标节点；Sink 只负责接收和
+`Pipeline::SubmitMessage(target_sink_id, message)` 指定目标节点；Sink 只负责接收和
 处理消息，自身没有消息队列和消息线程。
 
 发送和接收共用 `mw/streamer/sink/sink_message.h` 中的纯 C 结构体
@@ -378,21 +381,21 @@ message.payload_size = payload_size;
 宿主通过 C++ Pipeline 接口投递这个结构体，无需转换消息类型：
 
 ```cpp
-flow.SendMessage("processor", message);
+flow.SubmitMessage("processor", message);
 ```
 
 目标可以是媒体树中的任意 Sink，消息不需要预先绑定路由或声明发送来源。
 `AddSink()` 只建立媒体连接。业务回调也可通过自己的 `user_context` 使用 Pipeline
 发送消息。
 
-`SendMessage()` 返回 void，不提供投递或处理确认。Pipeline 的投递函数在返回前
+`SubmitMessage()` 返回 void，不提供投递或处理确认。Pipeline 的投递函数在返回前
 复制类型、二进制负载和可选时间戳，再唤醒消息 Poller。Pipeline
 未启动或正在停止、已停止时发送直接忽略；接收节点尚未就绪或已停止时也忽略。
 接受投递期间，未知目标 ID、空 type 或空指针与非零负载长度组合会抛参数错误，
 内存分配失败可抛异常。
 
 `type` 必须指向以空字符结尾的字符串。原始字符串和 payload 只需保持到
-`SendMessage()` 返回；内部副本由框架自动释放。payload 按字节复制，不复制其中
+`SubmitMessage()` 返回；内部副本由框架自动释放。payload 按字节复制，不复制其中
 指针指向的数据。接收回调只借用消息，不得释放内部数据，需要留到回调结束后使用
 时应自行复制。
 
@@ -411,7 +414,7 @@ flow.SendMessage("processor", message);
 Pipeline Stop 先关闭消息投递，让待处理任务跳过业务回调，再通过 `poller.sync()`
 等待已提交任务和在途消息回调结束；
 随后停止输入和全部 Sink。消息回调不能直接调用 Pipeline/Sink 的控制或析构方法；
-可调用 `Pipeline::SendMessage()` 提交新的异步消息。持有 Pipeline 的业务上下文
+可调用 `Pipeline::SubmitMessage()` 提交新的异步消息。持有 Pipeline 的业务上下文
 必须确保发送调用不会越过 Pipeline 的生命周期。具体 Sink 析构函数仍须在自身
 状态销毁前调用 Stop。
 

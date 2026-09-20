@@ -44,7 +44,7 @@ typedef struct MwStreamerFrameCustomSinkCallbacks {
   // Message callbacks are serialized on its message Poller and may overlap
   // audio/video callbacks, but not lifecycle boundaries. All message data is
   // borrowed for the callback. Stop waits for in-flight callbacks. A callback
-  // may call Pipeline::SendMessage, but must not stop or destroy the sink or
+  // may call Pipeline::SubmitMessage, but must not stop or destroy the sink or
   // Pipeline. If null, messages are ignored.
   MwStreamerProcessorMessageCallback on_message;
 } MwStreamerFrameCustomSinkCallbacks;

@@ -97,7 +97,7 @@ File Input 不接受 `url`、`player` 或 `reconnect_policy`。其 Decoder Sink 
 | `encoder` | Frame | Packet | 否 | 有 |
 | `remux` | Packet | 无 | 是 | 有 |
 
-“无”表示该节点不再向下游输出媒体。消息通过 `Pipeline::SendMessage()` 按目标
+“无”表示该节点不再向下游输出媒体。消息通过 `Pipeline::SubmitMessage()` 按目标
 Sink ID 投递，不需要在配置中声明连接。
 
 ### Sink 公共字段

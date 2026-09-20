@@ -85,8 +85,8 @@ class Pipeline::Impl final : public Input::Observer {
     sinks_.push_back(std::move(sink));
   }
 
-  void SendMessage(const std::string& target_sink_id,
-                   const MwStreamerMessage& message) {
+  void SubmitMessage(const std::string& target_sink_id,
+                     const MwStreamerMessage& message) {
     PostMessage(target_sink_id, message);
   }
 
@@ -392,9 +392,9 @@ void Pipeline::AddSink(std::unique_ptr<Sink> sink) {
   impl_->AddSink(std::move(sink));
 }
 
-void Pipeline::SendMessage(const std::string& target_sink_id,
-                           const MwStreamerMessage& message) {
-  impl_->SendMessage(target_sink_id, message);
+void Pipeline::SubmitMessage(const std::string& target_sink_id,
+                             const MwStreamerMessage& message) {
+  impl_->SubmitMessage(target_sink_id, message);
 }
 
 void Pipeline::SetProcessorConfig(std::string processor_id,

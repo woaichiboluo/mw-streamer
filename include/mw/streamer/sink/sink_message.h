@@ -12,7 +12,7 @@ extern "C" {
 
 // Zero-initialize before filling fields. type must be a non-null,
 // null-terminated string; payload may be null only when payload_size is zero.
-// Pipeline::SendMessage copies type and payload bytes before returning and
+// Pipeline::SubmitMessage copies type and payload bytes before returning and
 // releases its internal copy automatically. Pointers embedded in payload are
 // not followed or copied. The caller retains ownership of the original data.
 // Receivers borrow all fields for one callback and must not free them; copy

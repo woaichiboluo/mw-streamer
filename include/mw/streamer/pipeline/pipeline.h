@@ -25,7 +25,7 @@ enum class PipelineState {
 // exclusive Poller uses its task queue to dispatch messages; callbacks are
 // serialized across all sinks in this Pipeline. Start, Stop and destruction
 // must run outside the input's execution context. Sink callbacks must not call
-// pipeline control methods or destroy it; SendMessage is allowed.
+// pipeline control methods or destroy it; SubmitMessage is allowed.
 class Pipeline final {
  public:
   // Takes ownership of a non-null, not-yet-started input.
@@ -47,8 +47,8 @@ class Pipeline final {
   // payloads throw invalid_argument; allocation failures may throw. Destruction
   // must not race with callers. Message ordering is independent of media
   // delivery.
-  void SendMessage(const std::string& target_sink_id,
-                   const MwStreamerMessage& message);
+  void SubmitMessage(const std::string& target_sink_id,
+                     const MwStreamerMessage& message);
 
   // Stores opaque business configuration for a Processor Sink. Before that
   // Processor starts, its on_start callback receives the latest value; after

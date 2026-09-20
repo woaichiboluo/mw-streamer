@@ -198,7 +198,7 @@ class MessageSource final : public Sink {
         pipeline_(pipeline) {}
   void OnStreamsReady(const FrameStreamsReady&) override {
     StartMessages();
-    pipeline_.SendMessage("processor", {"ready"});
+    pipeline_.SubmitMessage("processor", {"ready"});
   }
   void OnAudioFrame(const FrameReady&) override {}
   void OnVideoFrame(const FrameReady&) override {}

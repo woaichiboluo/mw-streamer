@@ -95,7 +95,7 @@ class Sink {
   void StopDownstream() noexcept;
 
   // Optional receiver hook, serialized on the Pipeline message Poller. It may
-  // overlap media calls and may call Pipeline::SendMessage, but must not invoke
+  // overlap media calls and may call Pipeline::SubmitMessage, but must not invoke
   // lifecycle control methods. Default ignores.
   virtual void OnMessage(const MwStreamerMessage& message);
 

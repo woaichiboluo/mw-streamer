@@ -933,10 +933,10 @@ TEST_CASE("两种Processor通过通用消息入口回调并在Stop前等待消�
   Pipeline pipeline(std::make_unique<MessageInput>());
   pipeline.AddSink(std::move(bridge));
   const MwStreamerMessage message{"feedback", "data", 4, 0, {}};
-  pipeline.SendMessage("processor", message);
+  pipeline.SubmitMessage("processor", message);
   CHECK(entered.wait_for(0ms) == std::future_status::timeout);
   pipeline.Start();
-  pipeline.SendMessage("processor", message);
+  pipeline.SubmitMessage("processor", message);
   const auto entered_status = entered.wait_for(2s);
   auto stopping = std::async(std::launch::async, [&]() { pipeline.Stop(); });
   const auto stop_status = stopping.wait_for(20ms);
@@ -947,7 +947,7 @@ TEST_CASE("两种Processor通过通用消息入口回调并在Stop前等待消�
   CHECK(state.type == "feedback");
   CHECK(state.payload == "data");
   CHECK(state.stop_after_message.load());
-  pipeline.SendMessage("processor", message);
+  pipeline.SubmitMessage("processor", message);
 }
 
 TEST_CASE("Pipeline指定Processor后消息直接送达而不经过中间Processor") {
@@ -971,7 +971,7 @@ TEST_CASE("Pipeline指定Processor后消息直接送达而不经过中间Process
   Pipeline pipeline(std::make_unique<MessageInput>());
   pipeline.AddSink(std::move(bridge));
   pipeline.Start();
-  pipeline.SendMessage("processor", {"feedback"});
+  pipeline.SubmitMessage("processor", {"feedback"});
   const auto status = result.wait_for(2s);
   pipeline.Stop();
   REQUIRE(status == std::future_status::ready);
