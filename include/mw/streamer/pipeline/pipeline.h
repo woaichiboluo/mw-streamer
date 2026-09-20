@@ -25,7 +25,7 @@ enum class PipelineState {
 // exclusive Poller uses its task queue to dispatch messages; callbacks are
 // serialized across all sinks in this Pipeline. Start, Stop and destruction
 // must run outside the input's execution context. Sink callbacks must not call
-// pipeline control methods or destroy it.
+// pipeline control methods or destroy it; SendMessage is allowed.
 class Pipeline final {
  public:
   // Takes ownership of a non-null, not-yet-started input.
@@ -39,10 +39,16 @@ class Pipeline final {
   // A null sink throws invalid_argument; late registration throws logic_error.
   void AddSink(std::unique_ptr<Sink> sink);
 
-  // Setup only. Both IDs must belong to this Pipeline's sink tree; checked at
-  // Start, along with ID uniqueness. Repeated binding replaces the target.
-  // No automatic binding. Message routing is independent of media connections.
-  void SetMessageReceiver(std::string sender_id, std::string receiver_id);
+  // Asynchronously delivers to one sink in this Pipeline's tree. Copies all
+  // borrowed message data before returning; no delivery acknowledgment.
+  // Thread-safe with Start/Stop and callable from sink callbacks. Calls before
+  // Start or after shutdown begins are ignored; unready/stopped targets ignore
+  // delivery. While submission is open, unknown IDs, null types and invalid
+  // payloads throw invalid_argument; allocation failures may throw. Destruction
+  // must not race with callers. Message ordering is independent of media
+  // delivery.
+  void SendMessage(const std::string& target_sink_id,
+                   const MwStreamerMessage& message);
 
   // Stores opaque business configuration for a Processor Sink. Before that
   // Processor starts, its on_start callback receives the latest value; after
@@ -60,8 +66,7 @@ class Pipeline final {
   // waits for in-flight callbacks. Requests sinks to release blocked input
   // delivery, stops input, then stops each sink and waits
   // for its execution to finish. Queue cleanup policy belongs to each sink.
-  // Sinks remain owned. Destruction releases input, sinks, then the message
-  // facilities, keeping injected sender functions valid through sink teardown.
+  // Sinks remain owned until destruction.
   void Stop() noexcept;
 
   // A fatal report immediately sets kFailed; that does not mean shutdown has

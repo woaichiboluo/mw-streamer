@@ -192,11 +192,13 @@ class FrameCounter final : public Sink {
 
 class MessageSource final : public Sink {
  public:
-  explicit MessageSource(StopProbe& stop)
-      : Sink("message_source", SinkMediaType::kFrame), stop_(stop) {}
+  MessageSource(StopProbe& stop, Pipeline& pipeline)
+      : Sink("message_source", SinkMediaType::kFrame),
+        stop_(stop),
+        pipeline_(pipeline) {}
   void OnStreamsReady(const FrameStreamsReady&) override {
     StartMessages();
-    SendMessage({"analytics", "ready"});
+    pipeline_.SendMessage("processor", {"ready"});
   }
   void OnAudioFrame(const FrameReady&) override {}
   void OnVideoFrame(const FrameReady&) override {}
@@ -209,6 +211,7 @@ class MessageSource final : public Sink {
 
  private:
   StopProbe& stop_;
+  Pipeline& pipeline_;
 };
 
 }  // namespace
@@ -454,8 +457,7 @@ TEST_CASE("Processor异步消息fatal穿过Sink链路自动停止Pipeline") {
   };
   auto processor =
       std::make_unique<TransformProcessorSink>("processor", callbacks);
-  auto message_source = std::make_unique<MessageSource>(output_stop);
-  pipeline.SetMessageReceiver("message_source", "processor");
+  auto message_source = std::make_unique<MessageSource>(output_stop, pipeline);
   processor->AddSink(std::move(message_source));
   SECTION("直接接入Decoder") { decoder->AddSink(std::move(processor)); }
   SECTION("经过另一层Transform转交fatal") {

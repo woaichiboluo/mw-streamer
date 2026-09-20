@@ -26,15 +26,18 @@ namespace {
 std::atomic<std::uint64_t> next_performance_id{1};
 
 struct OwnedMessage {
-  std::string sink_id;
   std::string type;
   std::vector<std::uint8_t> payload;
   std::optional<MwStreamerMediaTimestamp> timestamp;
 
-  explicit OwnedMessage(const SinkMessage& message)
-      : sink_id(message.sink_id),
-        type(message.type),
-        timestamp(message.timestamp) {
+  explicit OwnedMessage(const MwStreamerMessage& message) {
+    if (!message.type) {
+      throw std::invalid_argument("消息type不能为空");
+    }
+    type = message.type;
+    if (message.has_timestamp) {
+      timestamp = message.timestamp;
+    }
     if (message.payload_size != 0) {
       if (!message.payload)
         throw std::invalid_argument("Sink消息payload不能为空");
@@ -42,8 +45,10 @@ struct OwnedMessage {
       std::memcpy(payload.data(), message.payload, message.payload_size);
     }
   }
-  SinkMessage view() const {
-    return {sink_id, type, payload.data(), payload.size(), timestamp};
+  MwStreamerMessage view() const {
+    return {type.c_str(), payload.data(), payload.size(),
+            static_cast<std::uint8_t>(timestamp.has_value()),
+            timestamp.value_or(MwStreamerMediaTimestamp{})};
   }
 };
 
@@ -61,8 +66,6 @@ class Pipeline::Impl final : public Input::Observer {
     Stop();
     // Release backend resources while every borrowed sink is still alive.
     input_.reset();
-    // Injected senders borrow this Impl; retain message facilities until every
-    // sink destructor has finished.
     sinks_.clear();
   }
 
@@ -82,16 +85,9 @@ class Pipeline::Impl final : public Input::Observer {
     sinks_.push_back(std::move(sink));
   }
 
-  void SetMessageReceiver(std::string sender_id, std::string receiver_id) {
-    std::lock_guard<std::mutex> lock(control_mutex_);
-    if (started_ || stopped_) {
-      throw std::logic_error("消息接收者只能在Pipeline启动或停止之前设置");
-    }
-    if (sender_id.empty() || receiver_id.empty()) {
-      throw std::invalid_argument("消息路由的Sink ID不能为空");
-    }
-    message_routes_.insert_or_assign(std::move(sender_id),
-                                     std::move(receiver_id));
+  void SendMessage(const std::string& target_sink_id,
+                   const MwStreamerMessage& message) {
+    PostMessage(target_sink_id, message);
   }
 
   void SetProcessorConfig(std::string processor_id, std::string config) {
@@ -218,27 +214,22 @@ class Pipeline::Impl final : public Input::Observer {
 
   void StartMessages() {
     for (const auto& sink : sinks_) IndexSink(*sink);
-    for (const auto& [sender, receiver] : message_routes_) {
-      if (!sinks_by_id_.count(sender) || !sinks_by_id_.count(receiver)) {
-        throw std::invalid_argument(fmt::format(
-            "消息路由引用不存在的Sink: {} -> {}", sender, receiver));
-      }
-      sinks_by_id_.at(sender)->SetMessageSender(
-          [this, target_id = receiver](const SinkMessage& message) {
-            PostMessage(target_id, message);
-          });
-    }
     for (const auto& [id, sink] : sinks_by_id_) sink->CloseRegistration();
     message_poller_ = toolkit::EventPollerPool::Instance().extractPoller();
     std::lock_guard<std::mutex> lock(message_submission_mutex_);
     messages_open_ = true;
   }
 
-  void PostMessage(const std::string& target_id, const SinkMessage& message) {
+  void PostMessage(const std::string& target_id,
+                   const MwStreamerMessage& message) {
     // Poller already serializes its task queue. This lock only orders task
     // submission before Stop's barrier, preventing a late captured Impl.
     std::lock_guard<std::mutex> lock(message_submission_mutex_);
     if (!messages_open_ || state() == PipelineState::kFailed) return;
+    if (!sinks_by_id_.count(target_id)) {
+      throw std::invalid_argument(
+          fmt::format("消息目标Sink不存在: {}", target_id));
+    }
     message_poller_->async(
         [this, target_id, copy = OwnedMessage(message)] {
           {
@@ -379,8 +370,7 @@ class Pipeline::Impl final : public Input::Observer {
   bool started_ = false;
   bool stopped_ = false;
   InputStateChanged input_status_{0, InputState::kIdle, {}, false};
-  // Setup-only routes and immutable runtime index; ownership stays in sinks_.
-  std::unordered_map<std::string, std::string> message_routes_;
+  // Immutable runtime index; ownership stays in sinks_.
   std::unordered_map<std::string, Sink*> sinks_by_id_;
   std::mutex message_submission_mutex_;
   toolkit::EventPoller::Ptr message_poller_;
@@ -402,9 +392,9 @@ void Pipeline::AddSink(std::unique_ptr<Sink> sink) {
   impl_->AddSink(std::move(sink));
 }
 
-void Pipeline::SetMessageReceiver(std::string sender_id,
-                                  std::string receiver_id) {
-  impl_->SetMessageReceiver(std::move(sender_id), std::move(receiver_id));
+void Pipeline::SendMessage(const std::string& target_sink_id,
+                           const MwStreamerMessage& message) {
+  impl_->SendMessage(target_sink_id, message);
 }
 
 void Pipeline::SetProcessorConfig(std::string processor_id,

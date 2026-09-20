@@ -144,7 +144,7 @@ class TransformProcessorSink::Impl final {
     }
   }
 
-  bool OnMessage(const SinkMessage& message) {
+  bool OnMessage(const MwStreamerMessage& message) {
     std::shared_lock<std::shared_mutex> lock(lifecycle_mutex_);
     if (stopping_.load() || !context_) {
       return true;
@@ -152,16 +152,7 @@ class TransformProcessorSink::Impl final {
     if (!callbacks_.on_message) {
       return false;
     }
-    const std::string sink_id(message.sink_id);
-    const std::string type(message.type);
-    const MwStreamerMessage view{
-        sink_id.c_str(),
-        type.c_str(),
-        message.payload,
-        message.payload_size,
-        static_cast<std::uint8_t>(message.timestamp.has_value()),
-        message.timestamp.value_or(MwStreamerMediaTimestamp{})};
-    callbacks_.on_message(&view, callbacks_.user_context);
+    callbacks_.on_message(&message, callbacks_.user_context);
     return true;
   }
 
@@ -335,7 +326,7 @@ void TransformProcessorSink::UpdateConfig(std::string config) {
   impl_->SetConfig(std::move(config));
 }
 
-void TransformProcessorSink::OnMessage(const SinkMessage& message) {
+void TransformProcessorSink::OnMessage(const MwStreamerMessage& message) {
   if (!impl_->OnMessage(message)) {
     Sink::OnMessage(message);
   }

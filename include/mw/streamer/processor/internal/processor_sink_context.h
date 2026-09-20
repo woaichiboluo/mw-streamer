@@ -59,6 +59,17 @@ class ProcessorSinkContext final : public ProcessorHandler {
     }
   }
 
+  void ValidatePacket(const PacketReady& packet) const {
+    RequireStarted("处理Packet");
+    if (pending_generation_ || ended_ || packet.generation != generation_) {
+      throw std::logic_error("Packet不属于当前就绪的输入代次");
+    }
+    if (!packet.packet.get() || packet.packet->size < 0 ||
+        (packet.packet->size != 0 && !packet.packet->data)) {
+      throw std::invalid_argument("Packet数据无效");
+    }
+  }
+
   void ValidateVideoDevice(const Frame& frame) const {
     if (hardware_context()) {
       if (!hardware_context()->IsCompatible(*frame.get())) {

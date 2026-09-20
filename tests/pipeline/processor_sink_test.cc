@@ -40,7 +40,6 @@ using mw::streamer::PerformanceType;
 using mw::streamer::PerformanceUnit;
 using mw::streamer::Sink;
 using mw::streamer::SinkMediaType;
-using mw::streamer::SinkMessage;
 using mw::streamer::StreamEnded;
 using mw::streamer::StreamEndReason;
 using mw::streamer::StreamInfo;
@@ -262,8 +261,6 @@ class Recorder final : public Sink {
  public:
   explicit Recorder(Recorded& recorded, std::string id = "recorder")
       : Sink(std::move(id), SinkMediaType::kFrame), recorded_(recorded) {}
-
-  void EmitMessage(const SinkMessage& message) { SendMessage(message); }
 
   NodeSnapshot GetOwnPerformance() const override {
     NodeSnapshot snapshot;
@@ -931,19 +928,15 @@ TEST_CASE("两种Processor通过通用消息入口回调并在Stop前等待消�
     transform->AddSink(std::make_unique<Recorder>(recorded));
     sink = std::move(transform);
   }
-  auto sender = std::make_unique<Recorder>(recorded, "sender");
-  auto* sender_ptr = sender.get();
   auto bridge = std::make_unique<FrameBridge>();
   bridge->AddSink(std::move(sink));
-  bridge->AddSink(std::move(sender));
   Pipeline pipeline(std::make_unique<MessageInput>());
   pipeline.AddSink(std::move(bridge));
-  pipeline.SetMessageReceiver("sender", "processor");
-  const SinkMessage message{"child", "feedback", "data", 4, std::nullopt};
-  sender_ptr->EmitMessage(message);
+  const MwStreamerMessage message{"feedback", "data", 4, 0, {}};
+  pipeline.SendMessage("processor", message);
   CHECK(entered.wait_for(0ms) == std::future_status::timeout);
   pipeline.Start();
-  sender_ptr->EmitMessage(message);
+  pipeline.SendMessage("processor", message);
   const auto entered_status = entered.wait_for(2s);
   auto stopping = std::async(std::launch::async, [&]() { pipeline.Stop(); });
   const auto stop_status = stopping.wait_for(20ms);
@@ -954,10 +947,10 @@ TEST_CASE("两种Processor通过通用消息入口回调并在Stop前等待消�
   CHECK(state.type == "feedback");
   CHECK(state.payload == "data");
   CHECK(state.stop_after_message.load());
-  sender_ptr->EmitMessage(message);
+  pipeline.SendMessage("processor", message);
 }
 
-TEST_CASE("下游显式绑定Processor后消息直接送达而不经过中间Processor") {
+TEST_CASE("Pipeline指定Processor后消息直接送达而不经过中间Processor") {
   using namespace std::chrono_literals;
   std::promise<std::string> received;
   auto result = received.get_future();
@@ -971,16 +964,14 @@ TEST_CASE("下游显式绑定Processor后消息直接送达而不经过中间Pro
   auto intermediate = std::make_unique<TransformProcessorSink>(
       "intermediate", MwStreamerTransformProcessorCallbacks{});
   auto sender = std::make_unique<Recorder>(recorded, "sender");
-  auto* sender_ptr = sender.get();
   intermediate->AddSink(std::move(sender));
   root->AddSink(std::move(intermediate));
   auto bridge = std::make_unique<FrameBridge>();
   bridge->AddSink(std::move(root));
   Pipeline pipeline(std::make_unique<MessageInput>());
   pipeline.AddSink(std::move(bridge));
-  pipeline.SetMessageReceiver("sender", "processor");
   pipeline.Start();
-  sender_ptr->EmitMessage({"child", "feedback", nullptr, 0, std::nullopt});
+  pipeline.SendMessage("processor", {"feedback"});
   const auto status = result.wait_for(2s);
   pipeline.Stop();
   REQUIRE(status == std::future_status::ready);

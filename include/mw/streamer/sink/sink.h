@@ -38,7 +38,6 @@ enum class PacketSinkState {
 // accessed by workers.
 class Sink {
  public:
-  using MessageSender = std::function<void(const SinkMessage&)>;
   using OnFatalError = std::function<void(const std::string&)>;
 
   explicit Sink(std::string id, SinkMediaType input_type,
@@ -54,13 +53,6 @@ class Sink {
   const std::string& id() const noexcept;
   SinkMediaType input_type() const noexcept;
   SinkMediaType output_type() const noexcept;
-
-  // Setup only. Pipeline binds the target ID and queue implementation into
-  // this function. It may run concurrently on media/message threads, must copy
-  // borrowed data before returning, and must enqueue without invoking receiver
-  // business inline. Captured resources must outlive this sink's Stop. Empty
-  // clears the sender; no implicit binding.
-  void SetMessageSender(MessageSender sender);
 
   // Setup-only fatal route. Must not throw, block, or invoke control methods.
   void SetOnFatalError(OnFatalError callback);
@@ -102,13 +94,10 @@ class Sink {
   void StopMessages() noexcept;
   void StopDownstream() noexcept;
 
-  // Calls the injected sender. Unbound/stopped sends are ignored. Pipeline
-  // copies and queues messages, ignoring them before Start/after Stop; invalid
-  // payloads and allocation failures may throw. No delivery acknowledgment.
-  void SendMessage(const SinkMessage& message) const;
   // Optional receiver hook, serialized on the Pipeline message Poller. It may
-  // overlap media calls and must not invoke control methods. Default ignores.
-  virtual void OnMessage(const SinkMessage& message);
+  // overlap media calls and may call Pipeline::SendMessage, but must not invoke
+  // lifecycle control methods. Default ignores.
+  virtual void OnMessage(const MwStreamerMessage& message);
 
   void SendStreamsReady(const StreamsReady& streams);
   void SendStreamsReady(const FrameStreamsReady& streams);
@@ -126,7 +115,7 @@ class Sink {
  private:
   friend class Pipeline;
   // Called only by the owning Pipeline message loop. Stops wait for this call.
-  void DispatchSinkMessage(const SinkMessage& message) noexcept;
+  void DispatchSinkMessage(const MwStreamerMessage& message) noexcept;
 
   class Impl;
   std::unique_ptr<Impl> impl_;

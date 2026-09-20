@@ -44,7 +44,7 @@ class TransformProcessorSink final : public Sink {
 
  protected:
   NodeSnapshot GetOwnPerformance() const override;
-  void OnMessage(const SinkMessage& message) override;
+  void OnMessage(const MwStreamerMessage& message) override;
 
  private:
   class Impl;

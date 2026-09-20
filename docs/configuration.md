@@ -90,12 +90,14 @@ File Input 不接受 `url`、`player` 或 `reconnect_policy`。其 Decoder Sink 
 | `decoder` | Packet | Frame | 否 | 有 |
 | `analysis_processor` | Frame | 无 | 是 | 无 |
 | `transform_processor` | Frame | Frame | 否 | 无 |
-| `custom` | Frame | 无 | 是 | 无 |
+| `frame_custom` | Frame | 无 | 是 | 无 |
+| `packet_custom` | Packet | 无 | 是 | 无 |
 | `synchronizer` | Frame | Frame | 否 | 有 |
 | `encoder` | Frame | Packet | 否 | 有 |
 | `remux` | Packet | 无 | 是 | 有 |
 
-“无”表示该节点不再向下游输出媒体。消息连接独立于媒体连接。
+“无”表示该节点不再向下游输出媒体。消息通过 `Pipeline::SendMessage()` 按目标
+Sink ID 投递，不需要在配置中声明连接。
 
 ### Sink 公共字段
 
@@ -104,9 +106,8 @@ File Input 不接受 `url`、`player` 或 `reconnect_policy`。其 Decoder Sink 
 | TOML 字段 | C++ 字段 | 类型 | 默认值 | 必填 | 约束与说明 |
 | --- | --- | --- | --- | --- | --- |
 | `id` | `SinkConfig::id` | string | 无 | 是 | 非空且在整个 Pipeline 内唯一。 |
-| `type` | 具体 `NodeConfig` 类型 | string enum | 无 | 是 | 必须是上表列出的七种类型之一。 |
+| `type` | 具体 `NodeConfig` 类型 | string enum | 无 | 是 | 必须是上表列出的八种类型之一。 |
 | `downstream` | `SinkConfig::downstream` | string array | `[]` | 否 | 非终端节点至少一个；终端节点必须为空。 |
-| `message_receiver` | `SinkConfig::message_receiver` | string | `""` | 否 | 非空时必须引用现有 Sink ID；不参与媒体拓扑。 |
 
 ## Decoder Sink
 
@@ -141,13 +142,27 @@ File Input 不接受 `url`、`player` 或 `reconnect_policy`。其 Decoder Sink 
 处理回调时使用既有透传语义。Processor 业务配置通过
 `Pipeline::SetProcessorConfig()` 设置。
 
-## Custom Sink
+## Frame Custom Sink 和 Packet Custom Sink
 
-`type = "custom"`，媒体契约为 Frame → 无，是终端 Sink，不能配置 `downstream`，
-没有专属 TOML 字段。
+`type = "frame_custom"` 的媒体契约为 Frame → 无；`type = "packet_custom"`
+的媒体契约为 Packet → 无。两者都是终端 Sink，不能配置 `downstream`，没有专属
+TOML 字段。旧的 `custom` 类型更名为 `frame_custom`。
 
-每个 Custom Sink 都必须通过 `ProcessorBindings::custom_sinks` 提供同 ID 的
-`MwStreamerCustomSinkCallbacks`，否则构建失败。回调绑定本身不写入 TOML。
+每个节点必须按 ID 提供对应类型的回调绑定，否则构建失败：
+
+- Frame：`ProcessorBindings::frame_custom_sinks`，使用
+  `MwStreamerFrameCustomSinkCallbacks`。
+- Packet：`ProcessorBindings::packet_custom_sinks`，使用
+  `MwStreamerPacketCustomSinkCallbacks`。
+
+回调绑定不写入 TOML。两者提供可选的 `on_start`、`on_stop`、`on_message` 和
+`on_boundary`。`on_start` 返回启动结果，成功启动后实际停止时调用一次 `on_stop`。
+EOF 只通知 `on_boundary`，不会自动停止。媒体回调同步执行，不增加缓存或线程。
+
+Frame 使用 `on_frame`、`on_audio`；Packet 使用 `on_video_packet`、
+`on_audio_packet`。Packet 回调的 `const void*` 实际指向 `const AVPacket`，
+仅在回调期间有效，不得修改或释放。业务需要异步使用时应自行在回调中取得引用，
+例如调用 `av_packet_clone()`，并在使用结束后释放；公共回调头文件不依赖 FFmpeg。
 
 ## Synchronizer Sink
 
@@ -195,7 +210,7 @@ Encoder 不负责音视频同步、节奏控制、备播、像素格式转换或
 | `zlm.pusher.local_bind_ip` | `PusherConfig::local_bind_ip` | string | `""` | 否 | 推流连接使用的本地绑定 IP；空表示不指定。 |
 | `zlm.muxer.paced_sender_interval_ms` | `MuxerConfig::paced_sender_interval_ms` | integer | `0` | 否 | 0～`UINT32_MAX`；0 禁用 ZLM paced sending。 |
 | `zlm.recording.file_buffer_size` | `RecordingConfig::file_buffer_size` | integer | `65536` | 否 | 1～`UINT32_MAX` 字节。 |
-| `zlm.recording.hls_segment_duration_ms` | `RecordingConfig::hls_segment_duration_ms` | integer | `2000` | 否 | 1～`UINT32_MAX`。 |
+| `zlm.recording.hls_segment_duration_ms` | `RecordingConfig::hls_segment_duration_ms` | integer | `10000` | 否 | 1～`UINT32_MAX`。 |
 
 `.mp4` 输出为 fragmented MP4，`.m3u8` 输出为 HLS-fMP4。文件扩展名按当前实现
 区分大小写。
@@ -207,8 +222,7 @@ Encoder 不负责音视频同步、节奏控制、备播、像素格式转换或
 - 媒体边两端的 Packet/Frame 类型必须一致。
 - 每个 Sink 只能有一个媒体上游；一个节点可以 fan-out 到多个下游，但不能汇聚。
 - 所有 Sink 必须从 Input 可达，媒体拓扑不能存在环路。
-- `downstream` 和 `message_receiver` 引用的 Sink ID 必须存在。
-- `message_receiver` 是独立消息边，不参与媒体单上游和媒体类型校验。
+- `downstream` 引用的 Sink ID 必须存在。
 - 静态校验不检查实际轨道集合、媒体格式和编解码器可用性，这些条件在运行组件
   打开输入或编解码器时检查。
 

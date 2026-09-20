@@ -13,7 +13,6 @@ namespace {
 using mw::streamer::NodeSnapshot;
 using mw::streamer::Sink;
 using mw::streamer::SinkMediaType;
-using mw::streamer::SinkMessage;
 
 class TopologySink final : public Sink {
  public:
@@ -28,8 +27,6 @@ class TopologySink final : public Sink {
       ++*destructions_;
     }
   }
-
-  void Emit(const SinkMessage& message) { SendMessage(message); }
 
   void Activate() {
     CloseRegistration();
@@ -53,27 +50,6 @@ TEST_CASE("Sink构造必须提供非空且稳定的ID") {
                   std::invalid_argument);
   TopologySink sink("processor", SinkMediaType::kFrame, SinkMediaType::kNone);
   CHECK(sink.id() == "processor");
-}
-
-TEST_CASE("Sink只通过注入的void函数发送消息") {
-  TopologySink sink("sender", SinkMediaType::kFrame, SinkMediaType::kNone);
-  int calls = 0;
-  std::string type;
-  sink.SetMessageSender([&](const SinkMessage& message) {
-    ++calls;
-    type = message.type;
-  });
-  sink.Emit({"sender", "before"});
-  CHECK(calls == 1);
-  CHECK(type == "before");
-  sink.Activate();
-  sink.Emit({"sender", "running"});
-  CHECK(calls == 2);
-  CHECK(type == "running");
-  CHECK_THROWS(sink.SetMessageSender({}));
-  sink.Stop();
-  sink.Emit({"sender", "after"});
-  CHECK(calls == 2);
 }
 
 TEST_CASE("Sink统一AddSink校验媒体连接并拒绝空节点") {

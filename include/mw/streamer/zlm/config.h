@@ -35,7 +35,7 @@ struct MuxerConfig {
 
 struct RecordingConfig {
   std::size_t file_buffer_size = 64 * 1024;
-  std::chrono::milliseconds hls_segment_duration_ms{2000};
+  std::chrono::milliseconds hls_segment_duration_ms{10000};
 };
 
 struct OutputConfig {

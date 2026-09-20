@@ -60,17 +60,34 @@ int main(void) {
 
   create_info.analysis_processors = NULL;
   create_info.analysis_processor_count = 0;
-  create_info.custom_sink_count = 1;
+  create_info.frame_custom_sink_count = 1;
   if (Check(mw_pipeline_create_from_toml(&create_info, &pipeline) ==
             kMwResultInvalidArgument)) {
     return 1;
   }
-  const MwCustomSinkBinding duplicate_sinks[] = {
+  const MwFrameCustomSinkBinding duplicate_sinks[] = {
       {.sink_id = "business"},
       {.sink_id = "business"},
   };
-  create_info.custom_sinks = duplicate_sinks;
-  create_info.custom_sink_count = 2;
+  create_info.frame_custom_sinks = duplicate_sinks;
+  create_info.frame_custom_sink_count = 2;
+  if (Check(mw_pipeline_create_from_toml(&create_info, &pipeline) ==
+            kMwResultInvalidArgument)) {
+    return 1;
+  }
+  create_info.frame_custom_sinks = NULL;
+  create_info.frame_custom_sink_count = 0;
+  create_info.packet_custom_sink_count = 1;
+  if (Check(mw_pipeline_create_from_toml(&create_info, &pipeline) ==
+            kMwResultInvalidArgument)) {
+    return 1;
+  }
+  const MwPacketCustomSinkBinding duplicate_packet_sinks[] = {
+      {.sink_id = "packets"},
+      {.sink_id = "packets"},
+  };
+  create_info.packet_custom_sinks = duplicate_packet_sinks;
+  create_info.packet_custom_sink_count = 2;
   if (Check(mw_pipeline_create_from_toml(&create_info, &pipeline) ==
             kMwResultInvalidArgument)) {
     return 1;

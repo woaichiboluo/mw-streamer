@@ -40,7 +40,6 @@ delay_step_ms = 70
 id = "encode"
 type = "encoder"
 downstream = ["publish", "record"]
-message_receiver = "transform"
 frame_queue_capacity = 21
 startup_packet_capacity = 22
 [sinks.audio_encoder]
@@ -72,7 +71,6 @@ device_index = 2
 [[sinks]]
 id = "analysis"
 type = "analysis_processor"
-message_receiver = "transform"
 
 [[sinks]]
 id = "transform"
@@ -195,7 +193,6 @@ TEST_CASE("统一配置完整参数双向转换并保持节点与连接顺序") 
   CHECK(decoder.type() == SinkType::kDecoder);
   CHECK(decoder.downstream ==
         std::vector<std::string>{"analysis", "transform"});
-  CHECK(decoder.message_receiver.empty());
   CHECK(decoder.options.cache_duration_ms == 1500ms);
   CHECK(decoder.options.audio_decode_queue_capacity == 31);
   CHECK(decoder.options.video_decode_queue_capacity == 32);
@@ -208,7 +205,6 @@ TEST_CASE("统一配置完整参数双向转换并保持节点与连接顺序") 
   const auto& analysis =
       FindNode<AnalysisProcessorNodeConfig>(config, "analysis");
   CHECK(analysis.type() == SinkType::kAnalysisProcessor);
-  CHECK(analysis.message_receiver == "transform");
   const auto& transform =
       FindNode<TransformProcessorNodeConfig>(config, "transform");
   CHECK(transform.type() == SinkType::kTransformProcessor);
@@ -219,7 +215,6 @@ TEST_CASE("统一配置完整参数双向转换并保持节点与连接顺序") 
   CHECK(sync.standby_timeout_ms == 430ms);
   CHECK(sync.standby_image_path == "./images/standby.png");
   const auto& encoder = FindNode<EncoderNodeConfig>(config, "encode");
-  CHECK(encoder.message_receiver == "transform");
   CHECK(encoder.downstream == std::vector<std::string>{"publish", "record"});
   CHECK(encoder.options.frame_queue_capacity == 21);
   CHECK(encoder.options.startup_packet_capacity == 22);
@@ -242,7 +237,7 @@ TEST_CASE("统一配置完整参数双向转换并保持节点与连接顺序") 
   CHECK(remux.zlm.recording.hls_segment_duration_ms == 1400ms);
 }
 
-TEST_CASE("统一配置省略参数保持默认值且没有隐式消息连接") {
+TEST_CASE("统一配置省略参数保持默认值") {
   auto config = ParsePipelineConfigFromToml(R"(
 [input]
 type = "zlm"
@@ -266,10 +261,12 @@ type = "analysis_processor"
   CHECK(config.input.options.reconnect_policy.max_retries == -1);
   const auto serialized = SerializePipelineConfigToToml(config);
   auto again = ParsePipelineConfigFromToml(serialized);
-  for (const auto& node : again.sinks) CHECK(node->message_receiver.empty());
+  CHECK(FindNode<DecoderNodeConfig>(again, "decode")
+            .options.video_decoder.backend ==
+        mw::streamer::VideoDecoderBackend::kCuda);
 }
 
-TEST_CASE("统一配置支持Custom终端并按ID绑定回调") {
+TEST_CASE("统一配置支持FrameCustom终端并按ID绑定回调") {
   auto config = ParsePipelineConfigFromToml(R"(
 [input]
 type = "zlm"
@@ -281,28 +278,26 @@ type = "decoder"
 downstream = ["business"]
 [[sinks]]
 id = "business"
-type = "custom"
-message_receiver = "decode"
+type = "frame_custom"
 )");
-  const auto& custom = FindNode<CustomNodeConfig>(config, "business");
-  CHECK(custom.type() == SinkType::kCustom);
+  const auto& custom = FindNode<FrameCustomNodeConfig>(config, "business");
+  CHECK(custom.type() == SinkType::kFrameCustom);
   CHECK(custom.downstream.empty());
-  CHECK(custom.message_receiver == "decode");
 
   const auto text = SerializePipelineConfigToToml(config);
   auto parsed = ParsePipelineConfigFromToml(text);
-  CHECK(FindNode<CustomNodeConfig>(parsed, "business").type() ==
-        SinkType::kCustom);
+  CHECK(FindNode<FrameCustomNodeConfig>(parsed, "business").type() ==
+        SinkType::kFrameCustom);
 
   CHECK_THROWS_AS(BuildPipeline(parsed), std::invalid_argument);
   ProcessorBindings bindings;
-  bindings.custom_sinks["business"] = {};
+  bindings.frame_custom_sinks["business"] = {};
   CHECK_NOTHROW(BuildPipeline(parsed, bindings));
-  bindings.custom_sinks["missing"] = {};
+  bindings.frame_custom_sinks["missing"] = {};
   CHECK_THROWS_AS(BuildPipeline(parsed, bindings), std::invalid_argument);
 }
 
-TEST_CASE("Custom终端拒绝媒体下游") {
+TEST_CASE("FrameCustom终端拒绝媒体下游") {
   CHECK_THROWS_AS(ParsePipelineConfigFromToml(R"(
 [input]
 type = "zlm"
@@ -314,11 +309,79 @@ type = "decoder"
 downstream = ["business"]
 [[sinks]]
 id = "business"
-type = "custom"
+type = "frame_custom"
 downstream = ["analysis"]
 [[sinks]]
 id = "analysis"
 type = "analysis_processor"
+)"),
+                  std::invalid_argument);
+}
+
+TEST_CASE("统一配置支持PacketCustom终端并校验绑定类型") {
+  auto config = ParsePipelineConfigFromToml(R"(
+[input]
+type = "zlm"
+url = "rtsp://127.0.0.1/live/camera"
+downstream = ["packets"]
+[[sinks]]
+id = "packets"
+type = "packet_custom"
+)");
+  CHECK(FindNode<PacketCustomNodeConfig>(config, "packets").type() ==
+        SinkType::kPacketCustom);
+  auto parsed =
+      ParsePipelineConfigFromToml(SerializePipelineConfigToToml(config));
+  CHECK(FindNode<PacketCustomNodeConfig>(parsed, "packets").downstream.empty());
+  CHECK_THROWS_AS(BuildPipeline(parsed), std::invalid_argument);
+  ProcessorBindings bindings;
+  bindings.frame_custom_sinks["packets"] = {};
+  CHECK_THROWS_AS(BuildPipeline(parsed, bindings), std::invalid_argument);
+  bindings.frame_custom_sinks.clear();
+  bindings.packet_custom_sinks["packets"] = {};
+  CHECK_NOTHROW(BuildPipeline(parsed, bindings));
+  bindings.packet_custom_sinks["missing"] = {};
+  CHECK_THROWS_AS(BuildPipeline(parsed, bindings), std::invalid_argument);
+}
+
+TEST_CASE("Custom终端拒绝错误媒体类型和Packet媒体下游") {
+  CHECK_THROWS_AS(ParsePipelineConfigFromToml(R"(
+[input]
+type = "zlm"
+url = "rtsp://127.0.0.1/live/camera"
+downstream = ["frames"]
+[[sinks]]
+id = "frames"
+type = "frame_custom"
+)"),
+                  std::invalid_argument);
+  CHECK_THROWS_AS(ParsePipelineConfigFromToml(R"(
+[input]
+type = "zlm"
+url = "rtsp://127.0.0.1/live/camera"
+downstream = ["decode"]
+[[sinks]]
+id = "decode"
+type = "decoder"
+downstream = ["packets"]
+[[sinks]]
+id = "packets"
+type = "packet_custom"
+)"),
+                  std::invalid_argument);
+  CHECK_THROWS_AS(ParsePipelineConfigFromToml(R"(
+[input]
+type = "zlm"
+url = "rtsp://127.0.0.1/live/camera"
+downstream = ["packets"]
+[[sinks]]
+id = "packets"
+type = "packet_custom"
+downstream = ["remux"]
+[[sinks]]
+id = "remux"
+type = "remux"
+target = "out.mp4"
 )"),
                   std::invalid_argument);
 }
@@ -334,8 +397,6 @@ TEST_CASE("统一配置严格拒绝错误TOML结构") {
       "[input]\ntype='zlm'\nurl='x'\ndownstream=[1]",
       "[input]\ntype='zlm'\nurl='x'\ndownstream=['r']\n"
       "[[sinks]]\nid='r'\ntype='other'\ntarget='a.mp4'",
-      "[input]\ntype='zlm'\nurl='x'\ndownstream=['r']\n"
-      "[[sinks]]\nid='r'\ntype='remux'\ntarget='a.mp4'\nmessage_receiver=['r']",
   };
   for (const auto& text : invalid) {
     CAPTURE(text);
@@ -382,7 +443,7 @@ unused = true
         "./record.mp4");
 }
 
-TEST_CASE("统一配置校验媒体树与消息引用") {
+TEST_CASE("统一配置校验媒体树引用") {
   auto config = ParsePipelineConfigFromToml(kCompleteToml);
   SECTION("重复ID") { config.sinks.back()->id = "raw"; }
   SECTION("空ID") { config.sinks.back()->id.clear(); }
@@ -390,7 +451,6 @@ TEST_CASE("统一配置校验媒体树与消息引用") {
   SECTION("缺失输入") { config.input.options.url.clear(); }
   SECTION("输入无下游") { config.input.downstream.clear(); }
   SECTION("缺失媒体节点") { config.input.downstream[0] = "missing"; }
-  SECTION("缺失消息节点") { config.sinks[0]->message_receiver = "missing"; }
   SECTION("媒体类型不匹配") { config.input.downstream[0] = "analysis"; }
   SECTION("重复媒体连接") { config.input.downstream.push_back("raw"); }
   SECTION("多个媒体上游") {
@@ -472,7 +532,6 @@ TEST_CASE("程序配置无需TOML即可构建且生命周期不借用配置") {
   std::unique_ptr<Pipeline> pipeline;
   {
     auto config = MakeRecordingPipelineConfig();
-    config.sinks[0]->message_receiver = "record";
     pipeline = BuildPipeline(config);
   }
   REQUIRE(pipeline);

@@ -64,6 +64,7 @@ std::string ReadFile(const std::filesystem::path& path) {
 
 TEST_CASE("Output配置复用统一录像配置校验") {
   RecordingConfig recording;
+  CHECK(recording.hls_segment_duration_ms == std::chrono::seconds(10));
   CHECK_NOTHROW(ValidateRecordingConfig(recording));
 
   recording.file_buffer_size = 0;

@@ -6,7 +6,8 @@
 
 #include "mw/export.h"
 #include "mw/streamer/processor/processor.h"
-#include "mw/streamer/sink/custom_sink.h"
+#include "mw/streamer/sink/frame_custom_sink.h"
+#include "mw/streamer/sink/packet_custom_sink.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -71,11 +72,17 @@ typedef struct MwTransformProcessorBinding {
   MwStreamerTransformProcessorCallbacks callbacks;
 } MwTransformProcessorBinding;
 
-typedef struct MwCustomSinkBinding {
-  // TOML Custom Sink node ID. Borrowed only during Pipeline creation.
+typedef struct MwFrameCustomSinkBinding {
+  // TOML Frame Custom Sink node ID. Borrowed only during Pipeline creation.
   const char* sink_id;
-  MwStreamerCustomSinkCallbacks callbacks;
-} MwCustomSinkBinding;
+  MwStreamerFrameCustomSinkCallbacks callbacks;
+} MwFrameCustomSinkBinding;
+
+typedef struct MwPacketCustomSinkBinding {
+  // TOML Packet Custom Sink node ID. Borrowed only during Pipeline creation.
+  const char* sink_id;
+  MwStreamerPacketCustomSinkCallbacks callbacks;
+} MwPacketCustomSinkBinding;
 
 typedef struct MwPipelineCreateInfo {
   // Path and binding arrays are borrowed only for the duration of creation.
@@ -84,8 +91,10 @@ typedef struct MwPipelineCreateInfo {
   size_t analysis_processor_count;
   const MwTransformProcessorBinding* transform_processors;
   size_t transform_processor_count;
-  const MwCustomSinkBinding* custom_sinks;
-  size_t custom_sink_count;
+  const MwFrameCustomSinkBinding* frame_custom_sinks;
+  size_t frame_custom_sink_count;
+  const MwPacketCustomSinkBinding* packet_custom_sinks;
+  size_t packet_custom_sink_count;
 } MwPipelineCreateInfo;
 
 typedef enum MwPerformanceType {

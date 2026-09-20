@@ -2,6 +2,8 @@
 #include <string.h>
 
 #include "mw/streamer/processor/processor.h"
+#include "mw/streamer/sink/frame_custom_sink.h"
+#include "mw/streamer/sink/packet_custom_sink.h"
 
 typedef struct TestProcessor {
   uint32_t start_calls;
@@ -107,6 +109,21 @@ static void ProcessFileAudio(const MwStreamerAudioFrameView* input,
                              void* user_context) {
   if (input->sample_rate == 48000) {
     ++((TestProcessor*)user_context)->audio_calls;
+  }
+}
+
+static MwStreamerProcessorStartResult OnCustomStart(
+    const MwStreamerProcessorSourceInfo* source, void* user_context) {
+  if (!source->has_video || !source->has_audio) {
+    return kMwStreamerProcessorStartFailed;
+  }
+  ++((TestProcessor*)user_context)->start_calls;
+  return kMwStreamerProcessorStartSuccess;
+}
+
+static void OnCustomPacket(const void* packet, void* user_context) {
+  if (packet != NULL) {
+    ++((TestProcessor*)user_context)->video_calls;
   }
 }
 
@@ -305,6 +322,42 @@ int main(void) {
       analysis_processor.boundary_calls != 1 ||
       analysis_processor.update_calls != 1 ||
       analysis_processor.stop_calls != 1) {
+    return 1;
+  }
+  TestProcessor custom = {0};
+  const MwStreamerFrameCustomSinkCallbacks frame_callbacks = {
+      .user_context = &custom,
+      .on_start = OnCustomStart,
+      .on_frame = ProcessFileVideo,
+      .on_audio = ProcessFileAudio,
+      .on_boundary = OnBoundary,
+      .on_stop = OnStop,
+  };
+  const MwStreamerPacketCustomSinkCallbacks packet_callbacks = {
+      .user_context = &custom,
+      .on_start = OnCustomStart,
+      .on_video_packet = OnCustomPacket,
+      .on_audio_packet = OnCustomPacket,
+      .on_boundary = OnBoundary,
+      .on_stop = OnStop,
+  };
+  if (frame_callbacks.on_start(&source_info, &custom) !=
+          kMwStreamerProcessorStartSuccess ||
+      packet_callbacks.on_start(&source_info, &custom) !=
+          kMwStreamerProcessorStartSuccess) {
+    return 1;
+  }
+  frame_callbacks.on_frame(&video_input, &custom);
+  frame_callbacks.on_audio(&audio_input, &custom);
+  frame_callbacks.on_boundary(kMwStreamerProcessorEndOfInput, &custom);
+  frame_callbacks.on_stop(&custom);
+  packet_callbacks.on_video_packet(&source_info, &custom);
+  packet_callbacks.on_audio_packet(&source_info, &custom);
+  packet_callbacks.on_boundary(kMwStreamerProcessorEndOfInput, &custom);
+  packet_callbacks.on_stop(&custom);
+  if (custom.start_calls != 2 || custom.video_calls != 3 ||
+      custom.audio_calls != 1 || custom.boundary_calls != 2 ||
+      custom.stop_calls != 2) {
     return 1;
   }
   return 0;

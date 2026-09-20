@@ -32,7 +32,6 @@ using mw::streamer::FrameReady;
 using mw::streamer::FrameStreamsReady;
 using mw::streamer::Sink;
 using mw::streamer::SinkMediaType;
-using mw::streamer::SinkMessage;
 using mw::streamer::StreamEnded;
 using mw::streamer::StreamEndReason;
 using mw::streamer::StreamInfo;
@@ -217,7 +216,6 @@ class Recorder final : public Sink {
     Leave();
   }
   void Fatal(const std::string& message) { ReportFatalError(message); }
-  void Message(const SinkMessage& message) { SendMessage(message); }
 
  private:
   void Enter() {
@@ -308,10 +306,7 @@ class StopReporter final : public Sink {
   void OnTimelineReset(const TimelineReset&) override {}
   void OnInputEnded(const StreamEnded&) override {}
   void Stop() noexcept override {
-    std::thread worker([this] {
-      SendMessage({"worker", "stopping", nullptr, 0, std::nullopt});
-      ReportFatalError("fatal while stopping");
-    });
+    std::thread worker([this] { ReportFatalError("fatal while stopping"); });
     worker.join();
     Sink::Stop();
   }
@@ -677,22 +672,17 @@ TEST_CASE(
   CHECK(sink.queue_depth() == 0);
 }
 
-TEST_CASE(
-    "SynchronizerSink connects media without implicitly routing messages") {
+TEST_CASE("SynchronizerSink forwards child fatal once") {
   Recorded recorded;
   SynchronizerSink sink("synchronizer", Config());
   auto& child = AddRecorder(sink, recorded);
   int fatals = 0;
-  int messages = 0;
-  sink.SetMessageSender([&](const SinkMessage&) { ++messages; });
   sink.SetOnFatalError([&](const std::string& error) {
     ++fatals;
     CHECK(error == "child fatal");
   });
   sink.OnStreamsReady(Streams());
   REQUIRE(recorded.Wait([&] { return !recorded.streams.empty(); }));
-  child.Message({"child", "unbound", nullptr, 0, std::nullopt});
-  CHECK(messages == 0);
   child.Fatal("child fatal");
   child.Fatal("duplicate");
   sink.Stop();
@@ -700,38 +690,16 @@ TEST_CASE(
   CHECK(recorded.stops == 1);
 }
 
-TEST_CASE("SynchronizerSink child uses its explicitly injected sender") {
-  Recorded recorded;
-  SynchronizerSink sink("synchronizer", Config());
-  auto& child = AddRecorder(sink, recorded);
-  std::string message_type;
-  child.SetMessageSender(
-      [&](const SinkMessage& message) { message_type = message.type; });
-  sink.OnStreamsReady(Streams());
-  REQUIRE(recorded.Wait([&] { return !recorded.streams.empty(); }));
-  child.Message({"child", "control", nullptr, 0, std::nullopt});
-  CHECK(message_type == "control");
-  sink.Stop();
-}
-
-TEST_CASE(
-    "SynchronizerSink preserves child fatal and injected sender during Stop") {
-  std::promise<std::string> received;
-  auto message = received.get_future();
+TEST_CASE("SynchronizerSink preserves child fatal during Stop") {
   SynchronizerSink sink("synchronizer", Config());
   auto reporter = std::make_unique<StopReporter>();
   auto ready = reporter->ready.get_future();
-  reporter->SetMessageSender([&](const SinkMessage& message) {
-    received.set_value(std::string(message.type));
-  });
   sink.AddSink(std::move(reporter));
   std::atomic<int> fatals{0};
   sink.SetOnFatalError([&](const std::string&) { fatals.fetch_add(1); });
   sink.OnStreamsReady(Streams());
   REQUIRE(ready.wait_for(3s) == std::future_status::ready);
   sink.Stop();
-  REQUIRE(message.wait_for(3s) == std::future_status::ready);
-  CHECK(message.get() == "stopping");
   CHECK(fatals.load() == 1);
 }
 

@@ -25,7 +25,6 @@ class Sink::Impl final {
   const SinkMediaType input_;
   const SinkMediaType output_;
   std::vector<std::unique_ptr<Sink>> children_;
-  MessageSender sender_;
   OnFatalError fatal_handler_;
   std::atomic<bool> registration_closed_{false};
   std::atomic<bool> fatal_reported_{false};
@@ -59,16 +58,7 @@ const std::string& Sink::id() const noexcept { return impl_->id_; }
 SinkMediaType Sink::input_type() const noexcept { return impl_->input_; }
 SinkMediaType Sink::output_type() const noexcept { return impl_->output_; }
 
-void Sink::SetMessageSender(MessageSender sender) {
-  impl_->RequireSetup();
-  impl_->sender_ = std::move(sender);
-}
-
-void Sink::SendMessage(const SinkMessage& message) const {
-  if (!impl_->stopping_.load() && impl_->sender_) impl_->sender_(message);
-}
-
-void Sink::DispatchSinkMessage(const SinkMessage& message) noexcept {
+void Sink::DispatchSinkMessage(const MwStreamerMessage& message) noexcept {
   try {
     std::lock_guard<std::mutex> lock(impl_->message_dispatch_mutex_);
     if (impl_->ready_.load() && !impl_->stopping_.load()) OnMessage(message);
@@ -111,7 +101,7 @@ void Sink::OnVideoFrame(const FrameReady&) {
 }
 void Sink::OnTimelineReset(const TimelineReset&) {}
 void Sink::OnInputEnded(const StreamEnded&) {}
-void Sink::OnMessage(const SinkMessage&) {}
+void Sink::OnMessage(const MwStreamerMessage&) {}
 
 void Sink::RequestStop() noexcept {
   for (const auto& child : downstream()) {

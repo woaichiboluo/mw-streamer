@@ -26,7 +26,11 @@ extern "C" {
 #include "mw/streamer/processor/analysis_processor_sink.h"
 #include "mw/streamer/processor/transform_processor_sink.h"
 #include "mw/streamer/sink/fatal_error.h"
+#include "mw/streamer/sink/frame_custom_sink_node.h"
+#include "mw/streamer/sink/packet_custom_sink_node.h"
 #include "mw/streamer/sink/sink.h"
+
+extern "C" MwStreamerMessage MakeCMessage(uint8_t has_timestamp);
 
 namespace {
 
@@ -40,7 +44,6 @@ using mw::streamer::InputState;
 using mw::streamer::PacketReady;
 using mw::streamer::Sink;
 using mw::streamer::SinkMediaType;
-using mw::streamer::SinkMessage;
 using mw::streamer::StreamsReady;
 using mw::streamer::TransformProcessorSink;
 using namespace mw::streamer;
@@ -78,22 +81,22 @@ Frame Video() {
 }
 
 struct RecordedMessage {
-  std::string sink_id;
   std::string type;
   std::string payload;
   std::optional<MwStreamerMediaTimestamp> timestamp;
   std::thread::id thread;
 };
 
-RecordedMessage CopyMessage(const SinkMessage& message) {
+RecordedMessage CopyMessage(const MwStreamerMessage& message) {
   RecordedMessage owned;
-  owned.sink_id = message.sink_id;
   owned.type = message.type;
   if (message.payload_size != 0) {
     owned.payload.assign(static_cast<const char*>(message.payload),
                          message.payload_size);
   }
-  owned.timestamp = message.timestamp;
+  if (message.has_timestamp) {
+    owned.timestamp = message.timestamp;
+  }
   owned.thread = std::this_thread::get_id();
   return owned;
 }
@@ -118,10 +121,11 @@ struct MessageState {
                             [&]() { return messages.size() >= count; });
   }
 
-  void Receive(const SinkMessage& message) {
-    const bool block = message.type == "block";
-    const bool fail = message.type == "throw";
-    const bool fatal = message.type == "fatal";
+  void Receive(const MwStreamerMessage& message) {
+    const std::string_view type(message.type);
+    const bool block = type == "block";
+    const bool fail = type == "throw";
+    const bool fatal = type == "fatal";
     std::unique_lock<std::mutex> lock(mutex);
     active = true;
     changed.notify_all();
@@ -176,11 +180,7 @@ struct ReleaseBeforeJoin {
 };
 
 void ReceiveMessage(const MwStreamerMessage* message, void* context) {
-  static_cast<MessageState*>(context)->Receive(
-      {message->sink_id, message->type, message->payload, message->payload_size,
-       message->has_timestamp
-           ? std::optional<MwStreamerMediaTimestamp>(message->timestamp)
-           : std::nullopt});
+  static_cast<MessageState*>(context)->Receive(*message);
 }
 
 MwStreamerTransformProcessorCallbacks Callbacks(MessageState& state) {
@@ -202,7 +202,6 @@ class MessageSink final : public Sink {
         state_(state) {}
   ~MessageSink() override { Stop(); }
 
-  void Emit(const SinkMessage& message) { SendMessage(message); }
   void OnStreamsReady(const FrameStreamsReady& streams) override {
     CloseRegistration();
     StartMessages();
@@ -211,14 +210,14 @@ class MessageSink final : public Sink {
   void OnAudioFrame(const FrameReady&) override {}
   void OnVideoFrame(const FrameReady&) override {
     if (send_on_video) {
-      Emit({"media", "frame"});
+      pipeline->SendMessage("processor", {"frame"});
     }
   }
   void Stop() noexcept override {
     StopMessages();
     if (!stopped_.exchange(true)) {
       if (send_on_stop) {
-        Emit({"child", "during-stop"});
+        pipeline->SendMessage("processor", {"during-stop"});
       }
       StopDownstream();
       if (state_) {
@@ -228,11 +227,12 @@ class MessageSink final : public Sink {
   }
 
   MessageState* observed_default = nullptr;
+  Pipeline* pipeline = nullptr;
   bool send_on_video = false;
   bool send_on_stop = false;
 
  protected:
-  void OnMessage(const SinkMessage& message) override {
+  void OnMessage(const MwStreamerMessage& message) override {
     if (state_) {
       state_->Receive(message);
     } else {
@@ -288,9 +288,6 @@ class MessageGraph {
     return result;
   }
   void Add(std::unique_ptr<Sink> sink) { root_->AddSink(std::move(sink)); }
-  void Bind(const std::string& sender, const std::string& receiver) {
-    pipeline.SetMessageReceiver(sender, receiver);
-  }
 
   Pipeline pipeline;
 
@@ -307,94 +304,124 @@ TEST_CASE("Pipeline按目标ID绕过中间媒体节点直达Processor") {
       std::make_unique<TransformProcessorSink>("processor", Callbacks(state));
   auto middle = std::make_unique<MessageSink>("middle");
   auto leaf = std::make_unique<MessageSink>("leaf");
-  auto* sender = leaf.get();
   middle->AddSink(std::move(leaf));
   processor->AddSink(std::move(middle));
   graph.Add(std::move(processor));
-  graph.Bind("leaf", "processor");
   graph.pipeline.Start();
-  sender->Emit({"leaf", "mark"});
+  graph.pipeline.SendMessage("processor", {"mark"});
   const bool delivered = state.WaitMessages(1);
   graph.pipeline.Stop();
   REQUIRE(delivered);
   REQUIRE(state.messages.size() == 1);
-  CHECK(state.messages[0].sink_id == "leaf");
   CHECK(state.messages[0].type == "mark");
 }
 
-TEST_CASE("Pipeline跨分支绑定且默认OnMessage不自动转发") {
+TEST_CASE("Pipeline只投递指定目标且默认OnMessage不自动转发") {
   MessageState destination_state;
   MessageState observed;
   MessageGraph graph;
   graph.Add("destination", &destination_state);
   auto& receiver = graph.Add("receiver");
   receiver.observed_default = &observed;
-  auto& sender = graph.Add("sender");
-  graph.Bind("receiver", "destination");
-  graph.Bind("sender", "receiver");
+  receiver.AddSink(std::make_unique<MessageSink>("child", &destination_state));
   graph.pipeline.Start();
-  sender.Emit({"sender", "ignored"});
+  graph.pipeline.SendMessage("receiver", {"ignored"});
   const bool handled = observed.WaitMessages(1);
   graph.pipeline.Stop();
   REQUIRE(handled);
   CHECK(destination_state.messages.empty());
 }
 
-TEST_CASE("媒体连接不隐式绑定消息接收者且生命周期外发送静默忽略") {
+TEST_CASE("Pipeline生命周期外发送静默忽略") {
   MessageState state;
   MessageGraph graph;
-  auto& receiver = graph.Add("receiver", &state);
-  auto& unbound = graph.Add("unbound");
-  auto& sender = graph.Add("sender");
-  graph.Bind("sender", "receiver");
-  sender.Emit({"sender", "before"});
+  graph.Add("receiver", &state);
+  graph.pipeline.SendMessage("receiver", {"before"});
   graph.pipeline.Start();
-  unbound.Emit({"unbound", "unbound"});
-  receiver.Emit({"receiver", "unbound"});
-  sender.Emit({"sender", "running"});
+  graph.pipeline.SendMessage("receiver", {"running"});
   const bool handled = state.WaitMessages(1);
   graph.pipeline.Stop();
-  sender.Emit({"sender", "after"});
+  graph.pipeline.SendMessage("receiver", {"after"});
   REQUIRE(handled);
   REQUIRE(state.messages.size() == 1);
   CHECK(state.messages[0].type == "running");
 }
 
-TEST_CASE("Pipeline启动验证消息目标发送方和重复ID") {
+TEST_CASE("Pipeline运行时拒绝不存在的消息目标") {
   MessageGraph graph;
   graph.Add("receiver");
-  graph.Add("sender");
-  SECTION("不存在的接收者") { graph.Bind("sender", "missing"); }
-  SECTION("不存在的发送者") { graph.Bind("missing", "receiver"); }
-  SECTION("重复节点ID") { graph.Add("receiver"); }
+  graph.pipeline.Start();
+  CHECK_THROWS_AS(graph.pipeline.SendMessage("missing", {"message"}),
+                  std::invalid_argument);
+  graph.pipeline.Stop();
+}
+
+TEST_CASE("Pipeline启动拒绝重复节点ID") {
+  MessageGraph graph;
+  graph.Add("receiver");
+  graph.Add("receiver");
   CHECK_THROWS_AS(graph.pipeline.Start(), std::invalid_argument);
 }
 
-TEST_CASE("Pipeline消息深拷贝并保持多发送者的入队顺序") {
+TEST_CASE("Pipeline接收C代码构造的消息") {
+  MessageState state;
+  MessageGraph graph;
+  graph.Add("receiver", &state);
+  graph.pipeline.Start();
+  graph.pipeline.SendMessage("receiver", MakeCMessage(0));
+  graph.pipeline.SendMessage("receiver", MakeCMessage(1));
+  const bool delivered = state.WaitMessages(2);
+  graph.pipeline.Stop();
+  REQUIRE(delivered);
+  REQUIRE(state.messages.size() == 2);
+  for (const auto& message : state.messages) {
+    CHECK(message.type == "c-message");
+    CHECK(message.payload == std::string("c\0x", 3));
+  }
+  CHECK_FALSE(state.messages[0].timestamp.has_value());
+  REQUIRE(state.messages[1].timestamp.has_value());
+  CHECK(state.messages[1].timestamp->pts == 123);
+  CHECK(state.messages[1].timestamp->duration == 7);
+  CHECK(state.messages[1].timestamp->time_base.num == 1);
+  CHECK(state.messages[1].timestamp->time_base.den == 90000);
+}
+
+TEST_CASE("Pipeline拒绝空消息类型指针") {
+  MessageState state;
+  MessageGraph graph;
+  graph.Add("receiver", &state);
+  graph.pipeline.Start();
+  CHECK_THROWS_AS(graph.pipeline.SendMessage("receiver", {}),
+                  std::invalid_argument);
+  graph.pipeline.SendMessage("receiver", {"valid"});
+  const bool delivered = state.WaitMessages(1);
+  graph.pipeline.Stop();
+  REQUIRE(delivered);
+  REQUIRE(state.messages.size() == 1);
+  CHECK(state.messages[0].type == "valid");
+}
+
+TEST_CASE("Pipeline消息深拷贝并保持入队顺序") {
   MessageState state;
   MessageGraph graph;
   ReleaseGuard release(state);
   graph.Add("receiver", &state);
-  auto& first = graph.Add("first");
-  auto& second = graph.Add("second");
-  graph.Bind("first", "receiver");
-  graph.Bind("second", "receiver");
   graph.pipeline.Start();
   const auto producer = std::this_thread::get_id();
-  first.Emit({"first", "block"});
+  graph.pipeline.SendMessage("receiver", {"block"});
   const bool entered = state.WaitActive();
-  std::string id = "local-source";
   std::string type = "local-type";
   std::string payload("a\0b", 3);
   MwStreamerMediaTimestamp timestamp{123, 7, {1, 90000}};
-  first.Emit({id, type, payload.data(), payload.size(), timestamp});
-  id.assign("changed");
+  graph.pipeline.SendMessage(
+      "receiver", {type.c_str(), payload.data(), payload.size(), 1, timestamp});
   type.assign("changed");
   payload.assign("xxx");
   timestamp.pts = 0;
-  second.Emit({"second", "next"});
-  CHECK_THROWS_AS(first.Emit({"first", "invalid", nullptr, 1}),
-                  std::invalid_argument);
+  graph.pipeline.SendMessage("receiver", {"next"});
+  CHECK_THROWS_AS(
+      graph.pipeline.SendMessage("receiver", {"invalid", nullptr, 1}),
+      std::invalid_argument);
   release.Release();
   const bool delivered = state.WaitMessages(3);
   graph.pipeline.Stop();
@@ -403,7 +430,6 @@ TEST_CASE("Pipeline消息深拷贝并保持多发送者的入队顺序") {
   REQUIRE(state.messages.size() == 3);
   CHECK(state.messages[0].type == "block");
   const auto& message = state.messages[1];
-  CHECK(message.sink_id == "local-source");
   CHECK(message.type == "local-type");
   CHECK(message.payload == std::string("a\0b", 3));
   REQUIRE(message.timestamp.has_value());
@@ -411,7 +437,7 @@ TEST_CASE("Pipeline消息深拷贝并保持多发送者的入队顺序") {
   CHECK(message.timestamp->duration == 7);
   CHECK(message.timestamp->time_base.num == 1);
   CHECK(message.timestamp->time_base.den == 90000);
-  CHECK(state.messages[2].sink_id == "second");
+  CHECK(state.messages[2].type == "next");
   CHECK_FALSE(state.messages[2].timestamp.has_value());
   for (const auto& event : state.messages) {
     CHECK(event.thread != producer);
@@ -426,14 +452,10 @@ TEST_CASE("Pipeline所有接收者共用同一Poller并串行处理消息") {
   ReleaseGuard release(first_state);
   graph.Add("first-receiver", &first_state);
   graph.Add("second-receiver", &second_state);
-  auto& first = graph.Add("first-sender");
-  auto& second = graph.Add("second-sender");
-  graph.Bind("first-sender", "first-receiver");
-  graph.Bind("second-sender", "second-receiver");
   graph.pipeline.Start();
-  first.Emit({"first", "block"});
+  graph.pipeline.SendMessage("first-receiver", {"block"});
   const bool entered = first_state.WaitActive();
-  second.Emit({"second", "next"});
+  graph.pipeline.SendMessage("second-receiver", {"next"});
   {
     std::unique_lock<std::mutex> lock(second_state.mutex);
     CHECK_FALSE(second_state.changed.wait_for(
@@ -452,7 +474,7 @@ TEST_CASE("Pipeline所有接收者共用同一Poller并串行处理消息") {
 
 TEST_CASE("消息回调内再次发送仍异步执行且不会重入接收者") {
   struct State {
-    MessageSink* sender = nullptr;
+    Pipeline* pipeline = nullptr;
     std::vector<std::string> order;
     std::promise<void> done;
   } state;
@@ -464,7 +486,7 @@ TEST_CASE("消息回调内再次发送仍异步执行且不会重入接收者") 
     auto& state = *static_cast<State*>(context);
     if (std::string_view(message->type) == "first") {
       state.order.push_back("enter");
-      state.sender->Emit({"sender", "second"});
+      state.pipeline->SendMessage("processor", {"second"});
       state.order.push_back("leave");
       return;
     }
@@ -473,13 +495,11 @@ TEST_CASE("消息回调内再次发送仍异步执行且不会重入接收者") 
   };
   auto processor =
       std::make_unique<TransformProcessorSink>("processor", callbacks);
-  auto sender = std::make_unique<MessageSink>("sender");
-  state.sender = sender.get();
-  processor->AddSink(std::move(sender));
+  state.pipeline = &graph.pipeline;
+  processor->AddSink(std::make_unique<MessageSink>("output"));
   graph.Add(std::move(processor));
-  graph.Bind("sender", "processor");
   graph.pipeline.Start();
-  state.sender->Emit({"sender", "first"});
+  graph.pipeline.SendMessage("processor", {"first"});
   const auto delivered = done.wait_for(2s);
   graph.pipeline.Stop();
   REQUIRE(delivered == std::future_status::ready);
@@ -491,14 +511,13 @@ TEST_CASE("Pipeline消息投递不受旧256条容量限制") {
   MessageGraph graph;
   ReleaseGuard release(state);
   graph.Add("receiver", &state);
-  auto& sender = graph.Add("sender");
-  graph.Bind("sender", "receiver");
   graph.pipeline.Start();
-  sender.Emit({"test", "block"});
+  graph.pipeline.SendMessage("receiver", {"block"});
   const bool entered = state.WaitActive();
   for (int index = 0; index < 1024; ++index) {
     const std::string payload = std::to_string(index);
-    sender.Emit({"test", "queued", payload.data(), payload.size()});
+    graph.pipeline.SendMessage("receiver",
+                               {"queued", payload.data(), payload.size()});
   }
   release.Release();
   const bool delivered = state.WaitMessages(1025);
@@ -515,8 +534,6 @@ TEST_CASE("Pipeline支持并发发送且保持各发送线程的消息顺序") {
   MessageState state;
   MessageGraph graph;
   graph.Add("receiver", &state);
-  auto& sender = graph.Add("sender");
-  graph.Bind("sender", "receiver");
   graph.pipeline.Start();
   std::vector<std::future<void>> producers;
   for (int producer = 0; producer < 4; ++producer) {
@@ -524,7 +541,8 @@ TEST_CASE("Pipeline支持并发发送且保持各发送线程的消息顺序") {
       const std::string id = std::to_string(producer);
       for (int index = 0; index < 64; ++index) {
         const std::string payload = std::to_string(index);
-        sender.Emit({id, "concurrent", payload.data(), payload.size()});
+        graph.pipeline.SendMessage(
+            "receiver", {id.c_str(), payload.data(), payload.size()});
       }
     }));
   }
@@ -537,7 +555,7 @@ TEST_CASE("Pipeline支持并发发送且保持各发送线程的消息顺序") {
   REQUIRE(state.messages.size() == 256);
   int next[4] = {};
   for (const auto& message : state.messages) {
-    const int producer = std::stoi(message.sink_id);
+    const int producer = std::stoi(message.type);
     REQUIRE(producer >= 0);
     REQUIRE(producer < 4);
     CHECK(message.payload == std::to_string(next[producer]++));
@@ -556,13 +574,12 @@ TEST_CASE("Processor消息回调与媒体并发且媒体发送不等待消息处
   auto* processor_sink = processor.get();
   auto child = std::make_unique<MessageSink>("sender");
   child->send_on_video = true;
-  auto* sender = child.get();
+  child->pipeline = &graph.pipeline;
   processor->AddSink(std::move(child));
   graph.Add(std::move(processor));
-  graph.Bind("sender", "processor");
   graph.pipeline.Start();
   auto video = Video();
-  sender->Emit({"test", "block"});
+  graph.pipeline.SendMessage("processor", {"block"});
   const bool entered = state.WaitActive();
   auto delivery = std::async(std::launch::async, [&]() {
     processor_sink->OnVideoFrame({1, video});
@@ -585,11 +602,9 @@ TEST_CASE("Pipeline隔离普通消息异常并继续处理后续消息") {
   MessageState state;
   MessageGraph graph;
   graph.Add("receiver", &state);
-  auto& sender = graph.Add("sender");
-  graph.Bind("sender", "receiver");
   graph.pipeline.Start();
-  sender.Emit({"test", "throw"});
-  sender.Emit({"test", "next"});
+  graph.pipeline.SendMessage("receiver", {"throw"});
+  graph.pipeline.SendMessage("receiver", {"next"});
   const bool delivered = state.WaitMessages(2);
   CHECK(graph.pipeline.state() == PipelineState::kRunning);
   graph.pipeline.Stop();
@@ -607,10 +622,8 @@ TEST_CASE("Pipeline消息Fatal沿接收方媒体树停止整条链路") {
   processor->AddSink(std::make_unique<MessageSink>("output"));
   middle->AddSink(std::move(processor));
   graph.Add(std::move(middle));
-  auto& sender = graph.Add("sender");
-  graph.Bind("sender", "processor");
   graph.pipeline.Start();
-  sender.Emit({"external", "fatal"});
+  graph.pipeline.SendMessage("processor", {"fatal"});
   const bool delivered = state.WaitMessages(1);
   bool stopped;
   {
@@ -636,11 +649,11 @@ TEST_CASE("Pipeline停止丢弃积压并等待消息回调后才停止Processor"
   graph.Add(std::move(processor));
   auto& sender = graph.Add("sender");
   sender.send_on_stop = true;
-  graph.Bind("sender", "processor");
+  sender.pipeline = &graph.pipeline;
   graph.pipeline.Start();
-  sender.Emit({"test", "block"});
+  graph.pipeline.SendMessage("processor", {"block"});
   const bool entered = state.WaitActive();
-  sender.Emit({"test", "discard"});
+  graph.pipeline.SendMessage("processor", {"discard"});
   std::promise<void> stop_entered;
   auto stop_entered_future = stop_entered.get_future();
   auto stop = std::async(std::launch::async, [&]() {
@@ -650,7 +663,7 @@ TEST_CASE("Pipeline停止丢弃积压并等待消息回调后才停止Processor"
   ReleaseBeforeJoin release_before_join{release};
   const auto stop_started = stop_entered_future.wait_for(2s);
   const auto while_blocked = stop.wait_for(50ms);
-  sender.Emit({"test", "late"});
+  graph.pipeline.SendMessage("processor", {"late"});
   release.Release();
   const auto finished = stop.wait_for(2s);
   REQUIRE(entered);
@@ -658,7 +671,7 @@ TEST_CASE("Pipeline停止丢弃积压并等待消息回调后才停止Processor"
   CHECK(while_blocked == std::future_status::timeout);
   REQUIRE(finished == std::future_status::ready);
   CHECK_NOTHROW(stop.get());
-  sender.Emit({"test", "closed"});
+  graph.pipeline.SendMessage("processor", {"closed"});
   REQUIRE(state.messages.size() == 1);
   CHECK(state.messages[0].type == "block");
   CHECK_FALSE(state.stop_overlap);
@@ -681,16 +694,173 @@ TEST_CASE("AnalysisProcessor通过Pipeline公共消息循环接收回调") {
   auto processor =
       std::make_unique<AnalysisProcessorSink>("analysis", callbacks);
   graph.Add(std::move(processor));
-  auto& sender = graph.Add("sender");
-  graph.Bind("sender", "analysis");
-  sender.Emit({"external", "before"});
+  graph.pipeline.SendMessage("analysis", {"before"});
   graph.pipeline.Start();
-  sender.Emit({"external", "analysis"});
+  graph.pipeline.SendMessage("analysis", {"analysis"});
   const bool delivered = state.WaitMessages(1);
   graph.pipeline.Stop();
-  sender.Emit({"external", "after"});
+  graph.pipeline.SendMessage("analysis", {"after"});
   REQUIRE(delivered);
   REQUIRE(state.messages.size() == 1);
   CHECK(state.messages[0].type == "analysis");
   CHECK(state.stops == 1);
+}
+
+TEST_CASE("FrameCustomSink通过Pipeline异步接收复制后的C消息") {
+  MessageState state;
+  MessageGraph graph;
+  ReleaseGuard release(state);
+  MwStreamerFrameCustomSinkCallbacks callbacks{};
+  callbacks.user_context = &state;
+  callbacks.on_message = ReceiveMessage;
+  graph.Add(std::make_unique<FrameCustomSink>("custom", callbacks));
+  graph.pipeline.Start();
+  graph.pipeline.SendMessage("custom", {"block"});
+  const bool entered = state.WaitActive();
+  std::string type = "custom-message";
+  std::string payload("a\0b", 3);
+  graph.pipeline.SendMessage(
+      "custom",
+      {type.c_str(), payload.data(), payload.size(), 1, {123, 7, {1, 90000}}});
+  type.assign("changed");
+  payload.assign("xxx");
+  release.Release();
+  const bool delivered = state.WaitMessages(2);
+  graph.pipeline.Stop();
+  REQUIRE(entered);
+  REQUIRE(delivered);
+  REQUIRE(state.messages.size() == 2);
+  const auto& message = state.messages[1];
+  CHECK(message.type == "custom-message");
+  CHECK(message.payload == std::string("a\0b", 3));
+  REQUIRE(message.timestamp.has_value());
+  CHECK(message.timestamp->pts == 123);
+  CHECK(message.timestamp->duration == 7);
+  CHECK(message.timestamp->time_base.num == 1);
+  CHECK(message.timestamp->time_base.den == 90000);
+  CHECK(message.thread != std::this_thread::get_id());
+  CHECK(message.thread == state.messages[0].thread);
+}
+
+TEST_CASE("FrameCustomSink未设置消息回调时忽略消息且不影响后续投递") {
+  MessageState state;
+  MessageGraph graph;
+  graph.Add(std::make_unique<FrameCustomSink>(
+      "custom", MwStreamerFrameCustomSinkCallbacks{}));
+  graph.Add("receiver", &state);
+  graph.pipeline.Start();
+  graph.pipeline.SendMessage("custom", {"ignored"});
+  graph.pipeline.SendMessage("receiver", {"next"});
+  const bool delivered = state.WaitMessages(1);
+  CHECK(graph.pipeline.state() == PipelineState::kRunning);
+  graph.pipeline.Stop();
+  REQUIRE(delivered);
+  REQUIRE(state.messages.size() == 1);
+  CHECK(state.messages[0].type == "next");
+}
+
+TEST_CASE("FrameCustomSink停止等待在途消息并拒绝停止后的投递") {
+  bool stop_pipeline = false;
+  SECTION("停止Pipeline") { stop_pipeline = true; }
+  SECTION("直接停止FrameCustomSink") {}
+
+  MessageState state;
+  MessageState observed;
+  MessageGraph graph;
+  ReleaseGuard release(state);
+  MwStreamerFrameCustomSinkCallbacks callbacks{};
+  callbacks.user_context = &state;
+  callbacks.on_message = ReceiveMessage;
+  callbacks.on_stop = [](void* context) {
+    static_cast<MessageState*>(context)->Stopped();
+  };
+  auto custom = std::make_unique<FrameCustomSink>("custom", callbacks);
+  auto* custom_sink = custom.get();
+  graph.Add(std::move(custom));
+  graph.Add("receiver", &observed);
+  graph.pipeline.Start();
+  graph.pipeline.SendMessage("custom", {"block"});
+  const bool entered = state.WaitActive();
+  graph.pipeline.SendMessage("custom", {"discard"});
+  std::promise<void> stop_entered;
+  auto stop_entered_future = stop_entered.get_future();
+  auto stop = std::async(std::launch::async, [&]() {
+    stop_entered.set_value();
+    if (stop_pipeline) {
+      graph.pipeline.Stop();
+    } else {
+      custom_sink->Stop();
+    }
+  });
+  ReleaseBeforeJoin release_before_join{release};
+  const auto stop_started = stop_entered_future.wait_for(2s);
+  const auto while_blocked = stop.wait_for(50ms);
+  release.Release();
+  const auto finished = stop.wait_for(2s);
+  REQUIRE(entered);
+  REQUIRE(stop_started == std::future_status::ready);
+  CHECK(while_blocked == std::future_status::timeout);
+  REQUIRE(finished == std::future_status::ready);
+  CHECK_NOTHROW(stop.get());
+  graph.pipeline.SendMessage("custom", {"closed"});
+  if (!stop_pipeline) {
+    // The shared message loop has passed the stopped sink's pending messages.
+    graph.pipeline.SendMessage("receiver", {"barrier"});
+    CHECK(observed.WaitMessages(1));
+  }
+  graph.pipeline.Stop();
+  REQUIRE(state.messages.size() == 1);
+  CHECK(state.messages[0].type == "block");
+  CHECK(state.stops == 1);
+  CHECK_FALSE(state.stop_overlap);
+}
+
+TEST_CASE("PacketCustomSink异步消息与停止回调互斥并拒绝停止后投递") {
+  bool stop_pipeline = false;
+  SECTION("停止Pipeline") { stop_pipeline = true; }
+  SECTION("直接停止PacketCustomSink") {}
+
+  MessageState state;
+  Pipeline pipeline(std::make_unique<TestInput>());
+  MwStreamerPacketCustomSinkCallbacks callbacks{};
+  callbacks.user_context = &state;
+  callbacks.on_message = ReceiveMessage;
+  callbacks.on_stop = [](void* context) {
+    static_cast<MessageState*>(context)->Stopped();
+  };
+  auto sink = std::make_unique<PacketCustomSink>("packets", callbacks);
+  auto* target = sink.get();
+  pipeline.AddSink(std::move(sink));
+  ReleaseGuard release(state);
+  pipeline.Start();
+  pipeline.SendMessage("packets", {"block"});
+  const bool entered = state.WaitActive();
+  pipeline.SendMessage("packets", {"discard"});
+  std::promise<void> stop_entered;
+  auto stop_entered_future = stop_entered.get_future();
+  auto stop = std::async(std::launch::async, [&]() {
+    stop_entered.set_value();
+    if (stop_pipeline) {
+      pipeline.Stop();
+    } else {
+      target->Stop();
+    }
+  });
+  ReleaseBeforeJoin release_before_join{release};
+  const auto stop_started = stop_entered_future.wait_for(2s);
+  const auto while_blocked = stop.wait_for(50ms);
+  release.Release();
+  const auto finished = stop.wait_for(2s);
+  REQUIRE(entered);
+  REQUIRE(stop_started == std::future_status::ready);
+  CHECK(while_blocked == std::future_status::timeout);
+  REQUIRE(finished == std::future_status::ready);
+  CHECK_NOTHROW(stop.get());
+  pipeline.SendMessage("packets", {"closed"});
+  pipeline.Stop();
+  REQUIRE(state.messages.size() == 1);
+  CHECK(state.messages[0].type == "block");
+  CHECK(state.messages[0].thread != std::this_thread::get_id());
+  CHECK(state.stops == 1);
+  CHECK_FALSE(state.stop_overlap);
 }

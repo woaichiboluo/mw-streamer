@@ -84,9 +84,9 @@ SRT 每次新建或重连发布会丢弃关键帧之前的残缺历史数据，�
 
 | 模块及命名空间 | 公开头文件位置 | 职责 |
 |---|---|---|
-| `pipeline` | `mw/streamer/pipeline/` | Pipeline、Builder 和图配置；组装节点、路由消息并协调生命周期 |
+| `pipeline` | `mw/streamer/pipeline/` | Pipeline、Builder 和图配置；组装节点、投递消息并协调生命周期 |
 | `input` | `mw/streamer/input/` | Input、FileInput、ZlmInput、输入状态及 PlayerProxy；获取源数据 |
-| `sink` | `mw/streamer/sink/` | 统一 Sink、SinkMessage、FatalError 和节点媒体类型、消费状态 |
+| `sink` | `mw/streamer/sink/` | 统一 Sink、纯 C MwStreamerMessage、FatalError 和节点媒体类型、消费状态 |
 | `media` | `mw/streamer/media/` | Packet、Frame 的投递参数、轨道就绪与时间线事件；纯 C 媒体类型 |
 | `cache` | `mw/streamer/cache/` | PacketQueue 的压缩包缓存和调度 |
 | `decoder` | `mw/streamer/decoder/` | DecoderSink、音视频解码器；输出 Frame |
@@ -96,13 +96,13 @@ SRT 每次新建或重连发布会丢弃关键帧之前的残缺历史数据，�
 | `output` | `mw/streamer/output/` | RemuxSink、单目标转封装、推流和录像 |
 
 各节点的参数结构放在所属模块的 `config.h`；`mw/streamer/pipeline/pipeline_config.h` 只描述
-Input、节点 ID、媒体连接和消息路由，并复用这些参数。`ffmpeg`、`common`、
+Input、节点 ID 和媒体连接，并复用这些参数。`ffmpeg`、`common`、
 `performance` 分别提供媒体资源封装、线程容器工具和性能统计。
 
 依赖由组装层指向组件：Pipeline 依赖 Input 和 Sink，Builder 负责选择具体实现；
 Input 和 Sink 共享 `media` 的投递契约，具体处理节点依赖 Sink 及自身媒体能力。
 PacketQueue 依赖 Sink 作为消费者。组件不依赖 Pipeline 的实现，Fatal 通过注入
-的回调上报；消息投递同样由 Pipeline 注入。同步调度器和备播实现属于
+的回调上报；消息由 Pipeline 按目标 Sink ID 投递。同步调度器和备播实现属于
 `synchronizer/internal`，Processor 的共享回调上下文属于 `processor/internal`。
 
 下面说明各接口的运行契约：
@@ -112,7 +112,7 @@ PacketQueue 依赖 Sink 作为消费者。组件不依赖 Pipeline 的实现，F
   或无输出。媒体与边界使用明确的虚函数，不使用 variant。基类独占持有下游，
   `AddSink()` 校验媒体类型；具体 Sink 自己负责媒体队列、调度和错误处理。
   每个 Sink 构造时必须传入非空 ID，通过 `id()` 读取，构造后不可更改。Pipeline
-  启动前校验整棵树的 ID 唯一性，包括未配置消息路由的节点。
+  启动前校验整棵树的 ID 唯一性。
 - `ZlmInput` 是基于 `PlayerProxy` 的输入实现，内部独占 PlayerProxy，将其媒体和
   控制回调转换为通用事件；每路输入使用独占的 Poller，重连复用同一实例。
   通用 `Input` 不依赖 ZLM 类型。
@@ -357,28 +357,44 @@ EOF 触发业务结束边界；Stop 等待在途回调并且只对成功启动�
 `UpdateConfig()` 更新业务配置字符串，可与媒体处理并发，Stop 会等待更新完成。
 所有视图仅在回调期间有效；控制方法不能从本 Sink 或下游的回调中重入。
 
-### Sink 消息通信
+### Pipeline 消息投递
 
 Pipeline 持有一个从池中提取的独占 Poller 和 `ID → Sink*` 索引，直接复用 Poller
-自带的线程安全任务队列。节点所有权仍保留在 unique_ptr 媒体树中。Sink 只持有
-`std::function<void(const SinkMessage&)>`，自身没有消息队列和消息线程。
+自带的线程安全任务队列。节点所有权仍保留在 unique_ptr 媒体树中。业务通过
+`Pipeline::SendMessage(target_sink_id, message)` 指定目标节点；Sink 只负责接收和
+处理消息，自身没有消息队列和消息线程。
 
-```cpp
-// 所有节点构造时传入 ID；组装好媒体链路后，在 Start 前按 ID 绑定。
-flow.SetMessageReceiver("encoder", "processor");
-flow.Start();
-// encoder 内部调用 SendMessage(message)，由绑定函数投递到 Poller 任务队列。
+发送和接收共用 `mw/streamer/sink/sink_message.h` 中的纯 C 结构体
+`MwStreamerMessage`，可直接在 C 中构造：
+
+```c
+MwStreamerMessage message = {0};
+message.type = "control";
+message.payload = payload;
+message.payload_size = payload_size;
+// 可选时间戳：设置 has_timestamp = 1，再填写 timestamp。
 ```
 
-`SetMessageReceiver()` 每个发送者只绑定一个接收者，重复设置会替换。未配置时
-不绑定；目标可以是上游，也可以是其他分支。Pipeline 在输入启动前检查消息路由
-两端的 ID 均存在，然后通过 `SetMessageSender()` 将目标 ID 和投递实现注入 Sink。
-`AddSink()` 只建立媒体连接，不自动绑定消息接收者。
+宿主通过 C++ Pipeline 接口投递这个结构体，无需转换消息类型：
+
+```cpp
+flow.SendMessage("processor", message);
+```
+
+目标可以是媒体树中的任意 Sink，消息不需要预先绑定路由或声明发送来源。
+`AddSink()` 只建立媒体连接。业务回调也可通过自己的 `user_context` 使用 Pipeline
+发送消息。
 
 `SendMessage()` 返回 void，不提供投递或处理确认。Pipeline 的投递函数在返回前
-复制来源、类型、二进制负载和可选时间戳，再唤醒消息 Poller。未绑定、Pipeline
-未启动或已停止时发送直接忽略；接收节点尚未就绪或已停止时也忽略。有效投递中的
-空指针与非零负载长度组合会抛参数错误，内存分配失败可抛异常。
+复制类型、二进制负载和可选时间戳，再唤醒消息 Poller。Pipeline
+未启动或正在停止、已停止时发送直接忽略；接收节点尚未就绪或已停止时也忽略。
+接受投递期间，未知目标 ID、空 type 或空指针与非零负载长度组合会抛参数错误，
+内存分配失败可抛异常。
+
+`type` 必须指向以空字符结尾的字符串。原始字符串和 payload 只需保持到
+`SendMessage()` 返回；内部副本由框架自动释放。payload 按字节复制，不复制其中
+指针指向的数据。接收回调只借用消息，不得释放内部数据，需要留到回调结束后使用
+时应自行复制。
 
 每条消息通过 `poller.async(task, false)` 异步投递，任务持有消息副本，按目标 ID
 调用 `OnMessage()`。不额外维护消息队列或分批调度逻辑。所有节点的消息回调在
@@ -386,16 +402,18 @@ flow.Start();
 默认 `OnMessage()` 忽略消息，不逐级转发；自定义 Sink 在业务初始化完成后调用
 `StartMessages()` 启用接收，该方法只设置就绪状态。
 
-两种 Processor 的 C 回调均提供可选 `on_message`。消息可与音视频处理及配置更新
-并发，与 Processor 生命周期边界互斥，不与媒体建立全局时序。普通回调异常记录
+两种 Processor、FrameCustomSink 和 PacketCustomSink 的 C 回调均提供可选
+`on_message`，未设置时忽略消息。
+消息可与音视频处理并发，Processor 消息也可与配置更新并发；消息与接收节点的
+生命周期边界互斥，不与媒体建立全局时序。普通回调异常记录
 后继续处理；`FatalError` 沿接收者所属的媒体树请求 Pipeline 停机。
 
 Pipeline Stop 先关闭消息投递，让待处理任务跳过业务回调，再通过 `poller.sync()`
 等待已提交任务和在途消息回调结束；
-随后停止输入和全部 Sink。析构时保留消息设施直到所有 Sink 销毁，保证注入函数
-的借用有效。消息回调不能直接调用 Pipeline/Sink 的控制或析构方法。
-独立使用 Sink 时可自行注入发送函数，组合方负责它所借用资源的生命周期；
-具体 Sink 析构函数仍须在自身状态销毁前调用 Stop。
+随后停止输入和全部 Sink。消息回调不能直接调用 Pipeline/Sink 的控制或析构方法；
+可调用 `Pipeline::SendMessage()` 提交新的异步消息。持有 Pipeline 的业务上下文
+必须确保发送调用不会越过 Pipeline 的生命周期。具体 Sink 析构函数仍须在自身
+状态销毁前调用 Stop。
 
 ### SynchronizerSink：实时同步与备播
 
@@ -435,7 +453,7 @@ DecoderSink。Sink 拥有队列和调度逻辑，一个独立线程执行调度�
 
 `state()` 区分运行、备播、排空、结束和失败，`error()` 保存异步故障。基础参数和
 输入顺序错误同步抛出；调度线程及下游异常记录为失败，显式 `FatalError` 或下游
-fatal 报告沿既有通道请求停止整个 Pipeline。消息可以显式绑定接收者后直接投递给 Processor。
+fatal 报告沿既有通道请求停止整个 Pipeline。业务可以通过 Pipeline 按 ID 向 Processor 投递消息。
 这里的实时丢帧发生在处理支路，直接连接 Input 的原始 Packet 录像仍遵守 RemuxSink
 契约；交给 Remux 即完成交付，不等待网络发送结果。
 
@@ -570,7 +588,7 @@ PlayerProxy，通用 Input 当前只公开 Start、Stop 与状态查询。
 
 链路使用 `PipelineConfig`，不按实时、文件或转封装划分配置类型。
 `mw/streamer/pipeline/pipeline_config.h` 定义一个 Input 和平铺的节点列表；每个节点保留
-`id`、`downstream`、可选的 `message_receiver`，并通过具体 NodeConfig 的
+`id`、`downstream`，并通过具体 NodeConfig 的
 `options` 成员复用已有参数结构。配置对象独占持有节点描述，只能移动，不包含
 运行中的 Sink、线程或业务回调。
 
@@ -581,7 +599,13 @@ PlayerProxy，通用 Input 当前只公开 Start、Stop 与状态查询。
 [`docs/configuration.md`](docs/configuration.md)；可复制查阅的说明性 TOML 见
 [`template/configuration_reference.toml`](template/configuration_reference.toml)。
 可用节点类型为 `decoder`、`analysis_processor`、`transform_processor`、
-`custom`、`synchronizer`、`encoder` 和 `remux`。Input 支持两种类型：
+`frame_custom`、`packet_custom`、`synchronizer`、`encoder` 和 `remux`。
+FrameCustomSink 接收解码帧；PacketCustomSink 通过 `on_video_packet` 和
+`on_audio_packet` 接收压缩包，参数 `const void*` 实际是仅在回调期间有效的
+`const AVPacket*`。两者提供 `on_start`、`on_stop`、`on_message`、`on_boundary`，
+EOF 只通知边界，实际停止时才调用 `on_stop`。配置和回调绑定方式见
+[`Custom Sink 配置`](docs/configuration.md#frame-custom-sink-和-packet-custom-sink)。
+Input 支持两种类型：
 
 - `type = "zlm"` 使用 `url`，接受 ZlmInput 支持的网络地址和实时文件播放。
 - `type = "file"` 使用 `path`，通过 FileInput 全速读取本地文件；不配置 player 或重连参数。
@@ -617,7 +641,7 @@ type = "analysis_processor"
 - `SavePipelineConfigToToml(config, path)`：保存到文件，写入前先序列化并校验。
 - `BuildPipelineFromToml(path, bindings)`：读取同一文件中的 `[log]`、`[zlm]` 和媒体拓扑并构建 Pipeline。
 
-双向转换保留节点参数、声明及下游顺序、消息接收者和编码属性的语义，不保留注释、
+双向转换保留节点参数、声明及下游顺序和编码属性的语义，不保留注释、
 空白、引号样式或字段排版。序列化显式写出默认参数。Processor 的业务配置不属于
 streamer TOML，宿主通过 `Pipeline::SetProcessorConfig(id, config)` 提供：启动前的
 最新值传给 `on_start`，启动后的每次设置传给 `on_config_update`；未设置时 `on_start`
@@ -631,7 +655,7 @@ streamer TOML，宿主通过 `Pipeline::SetProcessorConfig(id, config)` 提供�
 
 解析、序列化和构建都校验空/重复 ID、未知引用、媒体类型不匹配、多个媒体上游、
 不可达节点、环路和可静态检查的参数。未知 TOML 字段会被忽略并记录警告，错误类型和整数越界仍直接报错。
-每个 Sink 只有一个媒体上游，消息连接独立；实际轨道、尺寸兼容与编解码器可用性
+每个 Sink 只有一个媒体上游；实际轨道、尺寸兼容与编解码器可用性
 仍由运行组件检查。
 
 `mw/streamer/pipeline/pipeline_builder.h` 的 `BuildPipeline()` 同时服务 TOML 与 C++ 调用方：
@@ -654,7 +678,7 @@ auto restored = ParsePipelineConfigFromToml(text);
 SavePipelineConfigToToml(restored, "pipeline.toml");
 ```
 
-构建器复制节点参数并组装 unique_ptr 媒体树及消息路由，不启动输入，也不借用
+构建器复制节点参数并组装 unique_ptr 媒体树，不启动输入，也不借用
 配置对象。宿主通过可选 `ProcessorBindings` 的 `analysis` / `transform` 字典，
 按 Sink ID 提供对应的纯 C 回调；这些绑定不会写入 TOML。缺省回调仍遵守现有的
 忽略/透传语义，回调的 user_context 由宿主保留到 Pipeline 停止。原有手工

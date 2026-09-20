@@ -19,7 +19,8 @@ enum class SinkType {
   kDecoder,
   kAnalysisProcessor,
   kTransformProcessor,
-  kCustom,
+  kFrameCustom,
+  kPacketCustom,
   kSynchronizer,
   kEncoder,
   kRemux,
@@ -41,8 +42,6 @@ struct SinkConfig {
 
   std::string id;
   std::vector<std::string> downstream;
-  // Empty means unbound. Message edges do not participate in media ownership.
-  std::string message_receiver;
 };
 
 struct DecoderNodeConfig final : SinkConfig {
@@ -65,9 +64,14 @@ struct TransformProcessorNodeConfig final : SinkConfig {
   }
 };
 
-struct CustomNodeConfig final : SinkConfig {
+struct FrameCustomNodeConfig final : SinkConfig {
   using SinkConfig::SinkConfig;
-  SinkType type() const noexcept override { return SinkType::kCustom; }
+  SinkType type() const noexcept override { return SinkType::kFrameCustom; }
+};
+
+struct PacketCustomNodeConfig final : SinkConfig {
+  using SinkConfig::SinkConfig;
+  SinkType type() const noexcept override { return SinkType::kPacketCustom; }
 };
 
 struct SynchronizerNodeConfig final : SinkConfig {

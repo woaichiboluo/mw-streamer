@@ -18,7 +18,8 @@
 #include "mw/streamer/pipeline/internal/pipeline_builder.h"
 #include "mw/streamer/processor/analysis_processor_sink.h"
 #include "mw/streamer/processor/transform_processor_sink.h"
-#include "mw/streamer/sink/custom_sink_node.h"
+#include "mw/streamer/sink/frame_custom_sink_node.h"
+#include "mw/streamer/sink/packet_custom_sink_node.h"
 #include "mw/streamer/synchronizer/synchronizer_sink.h"
 #include "mw/streamer/zlm/internal/config_validator.h"
 
@@ -72,8 +73,10 @@ MediaContract ValidateNode(const SinkConfig& config) {
       return {SinkMediaType::kFrame, SinkMediaType::kNone};
     case SinkType::kTransformProcessor:
       return {SinkMediaType::kFrame, SinkMediaType::kFrame};
-    case SinkType::kCustom:
+    case SinkType::kFrameCustom:
       return {SinkMediaType::kFrame, SinkMediaType::kNone};
+    case SinkType::kPacketCustom:
+      return {SinkMediaType::kPacket, SinkMediaType::kNone};
     case SinkType::kSynchronizer: {
       const auto& options = Options<SynchronizerNodeConfig>(config);
       Require(options.frame_queue_capacity > 0 &&
@@ -131,13 +134,12 @@ void ValidateBindings(const std::map<std::string, Callbacks>& bindings,
   }
 }
 
-void ValidateCustomBindings(
-    const std::map<std::string, MwStreamerCustomSinkCallbacks>& bindings,
-    const NodeIndex& index) {
-  ValidateBindings(bindings, SinkType::kCustom, index);
+template <typename Callbacks>
+void ValidateCustomBindings(const std::map<std::string, Callbacks>& bindings,
+                            SinkType expected, const NodeIndex& index) {
+  ValidateBindings(bindings, expected, index);
   for (const auto& entry : index) {
-    if (entry.second->type() == SinkType::kCustom &&
-        !bindings.count(entry.first)) {
+    if (entry.second->type() == expected && !bindings.count(entry.first)) {
       throw std::invalid_argument(
           fmt::format("Custom Sink缺少回调绑定: {}", entry.first));
     }
@@ -163,14 +165,12 @@ std::unique_ptr<Sink> CreateSink(const SinkConfig& config,
     case SinkType::kTransformProcessor:
       return std::make_unique<TransformProcessorSink>(
           config.id, FindCallbacks(bindings.transform, config.id));
-    case SinkType::kCustom: {
-      const auto found = bindings.custom_sinks.find(config.id);
-      if (found == bindings.custom_sinks.end()) {
-        throw std::invalid_argument(
-            fmt::format("Custom Sink缺少回调绑定: {}", config.id));
-      }
-      return std::make_unique<CustomSink>(config.id, found->second);
-    }
+    case SinkType::kFrameCustom:
+      return std::make_unique<FrameCustomSink>(
+          config.id, bindings.frame_custom_sinks.at(config.id));
+    case SinkType::kPacketCustom:
+      return std::make_unique<PacketCustomSink>(
+          config.id, bindings.packet_custom_sinks.at(config.id));
     case SinkType::kSynchronizer:
       return std::make_unique<SynchronizerSink>(
           config.id, Options<SynchronizerNodeConfig>(config));
@@ -280,12 +280,6 @@ void ValidatePipelineConfig(const PipelineConfig& config) {
         throw std::invalid_argument("离线文件解码不能配置延迟缓存");
       }
     }
-    if (!node->message_receiver.empty() &&
-        !index.count(node->message_receiver)) {
-      throw std::invalid_argument(
-          fmt::format("Sink {}引用不存在的消息接收者: {}", node->id,
-                      node->message_receiver));
-    }
   }
   std::unordered_set<std::string> parented;
   ValidateEdges(config.input.downstream, SinkMediaType::kPacket, "input", media,
@@ -312,7 +306,10 @@ std::unique_ptr<Pipeline> BuildPipelineWithRuntime(
   const auto index = IndexNodes(config);
   ValidateBindings(bindings.analysis, SinkType::kAnalysisProcessor, index);
   ValidateBindings(bindings.transform, SinkType::kTransformProcessor, index);
-  ValidateCustomBindings(bindings.custom_sinks, index);
+  ValidateCustomBindings(bindings.frame_custom_sinks, SinkType::kFrameCustom,
+                         index);
+  ValidateCustomBindings(bindings.packet_custom_sinks, SinkType::kPacketCustom,
+                         index);
   std::unique_ptr<Input> input;
   if (config.input.type == InputType::kFile) {
     input = std::make_unique<FileInput>(config.input.file);
@@ -322,11 +319,6 @@ std::unique_ptr<Pipeline> BuildPipelineWithRuntime(
   auto pipeline = std::make_unique<Pipeline>(std::move(input));
   for (const auto& id : config.input.downstream) {
     pipeline->AddSink(BuildSink(*index.at(id), index, bindings));
-  }
-  for (const auto& node : config.sinks) {
-    if (!node->message_receiver.empty()) {
-      pipeline->SetMessageReceiver(node->id, node->message_receiver);
-    }
   }
   return pipeline;
 }

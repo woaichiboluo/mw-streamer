@@ -48,7 +48,8 @@ set(MW_STREAMER_CORE_SOURCES
     processor/transform_processor_sink.cc
     resampler/audio_resampler.cc
     sink/sink.cc
-    sink/custom_sink.cc
+    sink/frame_custom_sink.cc
+    sink/packet_custom_sink.cc
     synchronizer/internal/realtime_frame_scheduler.cc
     synchronizer/internal/standby_video_frame.cc
     synchronizer/synchronizer_sink.cc

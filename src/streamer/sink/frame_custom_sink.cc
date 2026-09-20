@@ -9,23 +9,20 @@
 #include "mw/streamer/performance/operation_recorder.h"
 #include "mw/streamer/processor/internal/frame_adapter.h"
 #include "mw/streamer/processor/internal/processor_sink_context.h"
-#include "mw/streamer/sink/custom_sink_node.h"
+#include "mw/streamer/sink/frame_custom_sink_node.h"
 
 namespace mw::streamer {
 
-class CustomSink::Impl final {
+class FrameCustomSink::Impl final {
  public:
-  Impl(CustomSink& owner, MwStreamerCustomSinkCallbacks callbacks)
-      : owner_(owner), callbacks_(callbacks) {
-    message_sender_.context = &owner_;
-    message_sender_.send = &CustomSink::SendFromCallback;
-  }
+  Impl(FrameCustomSink& owner, MwStreamerFrameCustomSinkCallbacks callbacks)
+      : owner_(owner), callbacks_(callbacks) {}
 
   ~Impl() { Stop(); }
 
   NodeSnapshot GetPerformance() const {
     NodeSnapshot snapshot;
-    snapshot.name = "CustomSink";
+    snapshot.name = "FrameCustomSink";
     snapshot.operations = {audio_performance_.GetSnapshot(),
                            video_performance_.GetSnapshot()};
     return snapshot;
@@ -37,7 +34,7 @@ class CustomSink::Impl final {
       std::unique_lock<std::shared_mutex> lock(lifecycle_mutex_);
       try {
         if (stopped_ || stopping_.load()) {
-          throw std::logic_error("CustomSink已停止");
+          throw std::logic_error("FrameCustomSink已停止");
         }
         if (!context_) {
           Start(streams);
@@ -90,6 +87,14 @@ class CustomSink::Impl final {
     Context().End(end);
   }
 
+  void OnMessage(const MwStreamerMessage& message) {
+    std::shared_lock<std::shared_mutex> lock(lifecycle_mutex_);
+    if (stopping_.load() || !context_ || !callbacks_.on_message) {
+      return;
+    }
+    callbacks_.on_message(&message, callbacks_.user_context);
+  }
+
   void Stop() noexcept {
     stopping_.store(true);
     std::unique_lock<std::shared_mutex> lock(lifecycle_mutex_);
@@ -106,21 +111,21 @@ class CustomSink::Impl final {
  private:
   void Start(const FrameStreamsReady& streams) {
     auto context = std::make_unique<internal::ProcessorSinkContext>(streams);
-    const auto result =
-        callbacks_.on_start
-            ? callbacks_.on_start(&context->source_info(), &message_sender_,
-                                  callbacks_.user_context)
-            : kMwStreamerProcessorStartSuccess;
+    const auto result = callbacks_.on_start
+                            ? callbacks_.on_start(&context->source_info(),
+                                                  callbacks_.user_context)
+                            : kMwStreamerProcessorStartSuccess;
     if (result != kMwStreamerProcessorStartSuccess) {
-      throw std::runtime_error("CustomSink拒绝启动");
+      throw std::runtime_error("FrameCustomSink拒绝启动");
     }
-    context->MarkStarted(callbacks_.user_context, nullptr, nullptr, nullptr);
+    context->MarkStarted(callbacks_.user_context, callbacks_.on_boundary,
+                         nullptr, callbacks_.on_stop);
     context_ = std::move(context);
   }
 
   internal::ProcessorSinkContext& Context() const {
     if (stopped_ || stopping_.load() || !context_) {
-      throw std::logic_error("CustomSink尚未启动或已停止");
+      throw std::logic_error("FrameCustomSink尚未启动或已停止");
     }
     return *context_;
   }
@@ -131,76 +136,57 @@ class CustomSink::Impl final {
   OperationRecorder video_performance_{PerformanceType::kVideoProcessor,
                                        PerformanceUnit::kFrame,
                                        PerformanceUnit::kNone};
-  CustomSink& owner_;
-  const MwStreamerCustomSinkCallbacks callbacks_;
-  MwStreamerMessageSender message_sender_{};
+  FrameCustomSink& owner_;
+  const MwStreamerFrameCustomSinkCallbacks callbacks_;
   std::shared_mutex lifecycle_mutex_;
   std::unique_ptr<internal::ProcessorSinkContext> context_;
   std::atomic<bool> stopping_{false};
   bool stopped_ = false;
 };
 
-CustomSink::CustomSink(std::string id, MwStreamerCustomSinkCallbacks callbacks)
+FrameCustomSink::FrameCustomSink(std::string id,
+                                 MwStreamerFrameCustomSinkCallbacks callbacks)
     : Sink(std::move(id), SinkMediaType::kFrame),
       impl_(std::make_unique<Impl>(*this, callbacks)) {}
 
-CustomSink::~CustomSink() { Stop(); }
+FrameCustomSink::~FrameCustomSink() { Stop(); }
 
-void CustomSink::OnStreamsReady(const FrameStreamsReady& streams) {
+void FrameCustomSink::OnStreamsReady(const FrameStreamsReady& streams) {
   CloseRegistration();
   impl_->OnStreamsReady(streams);
 }
 
-void CustomSink::OnAudioFrame(const FrameReady& frame) {
+void FrameCustomSink::OnAudioFrame(const FrameReady& frame) {
   CloseRegistration();
   impl_->OnAudioFrame(frame);
 }
 
-void CustomSink::OnVideoFrame(const FrameReady& frame) {
+void FrameCustomSink::OnVideoFrame(const FrameReady& frame) {
   CloseRegistration();
   impl_->OnVideoFrame(frame);
 }
 
-void CustomSink::OnTimelineReset(const TimelineReset& reset) {
+void FrameCustomSink::OnTimelineReset(const TimelineReset& reset) {
   CloseRegistration();
   impl_->OnTimelineReset(reset);
 }
 
-void CustomSink::OnInputEnded(const StreamEnded& end) {
+void FrameCustomSink::OnInputEnded(const StreamEnded& end) {
   CloseRegistration();
   impl_->OnInputEnded(end);
 }
 
-void CustomSink::Stop() noexcept {
+void FrameCustomSink::Stop() noexcept {
   StopMessages();
   impl_->Stop();
 }
 
-NodeSnapshot CustomSink::GetOwnPerformance() const {
-  return impl_->GetPerformance();
+void FrameCustomSink::OnMessage(const MwStreamerMessage& message) {
+  impl_->OnMessage(message);
 }
 
-void CustomSink::SendFromCallback(
-    void* context, const char* type, const void* payload, size_t payload_size,
-    const MwStreamerMediaTimestamp* timestamp) noexcept {
-  auto* sink = static_cast<CustomSink*>(context);
-  if (!sink) {
-    return;
-  }
-  try {
-    if (!type || (payload_size != 0 && !payload)) {
-      throw std::invalid_argument("CustomSink消息类型或负载无效");
-    }
-    SinkMessage message{sink->id(), type, payload, payload_size, std::nullopt};
-    if (timestamp) {
-      message.timestamp = *timestamp;
-    }
-    sink->SendMessage(message);
-  } catch (const std::exception& error) {
-    sink->ReportFatalError(error.what());
-  } catch (...) {
-    sink->ReportFatalError("CustomSink发送消息时发生未知错误");
-  }
+NodeSnapshot FrameCustomSink::GetOwnPerformance() const {
+  return impl_->GetPerformance();
 }
 
 }  // namespace mw::streamer

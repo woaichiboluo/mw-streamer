@@ -150,18 +150,23 @@ target_link_libraries(mw_processor_sink_tests
 
 add_test(NAME mw_processor_sink_tests COMMAND mw_processor_sink_tests)
 
-add_executable(mw_custom_sink_tests custom_sink_test.cc)
-target_link_libraries(mw_custom_sink_tests
+add_executable(mw_frame_custom_sink_tests frame_custom_sink_test.cc)
+target_link_libraries(mw_frame_custom_sink_tests
     PRIVATE
         Catch2::Catch2WithMain
         FFmpeg::avcodec
         FFmpeg::avutil
         mw::streamer_test
 )
-add_test(NAME mw_custom_sink_tests COMMAND mw_custom_sink_tests)
+add_test(NAME mw_frame_custom_sink_tests COMMAND mw_frame_custom_sink_tests)
+
+add_executable(mw_packet_custom_sink_tests packet_custom_sink_test.cc)
+target_link_libraries(mw_packet_custom_sink_tests PRIVATE
+    Catch2::Catch2WithMain FFmpeg::avcodec FFmpeg::avutil mw::streamer_test)
+add_test(NAME mw_packet_custom_sink_tests COMMAND mw_packet_custom_sink_tests)
 
 add_executable(mw_sink_message_tests sink_message_test.cc)
-target_sources(mw_sink_message_tests PRIVATE sink_test.cc)
+target_sources(mw_sink_message_tests PRIVATE sink_test.cc sink_message_fixture.c)
 
 target_link_libraries(mw_sink_message_tests
     PRIVATE

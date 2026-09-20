@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "mw/streamer/media/types.h"
+#include "mw/streamer/sink/sink_message.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -309,18 +310,6 @@ typedef void (*MwStreamerProcessorUpdateConfigCallback)(const char* config,
                                                         void* user_context);
 
 typedef void (*MwStreamerProcessorStopCallback)(void* user_context);
-
-// A message produced by a Sink. All fields are borrowed for the callback.
-// timestamp describes observed media; it is informational and does not impose
-// ordering with media frame callbacks.
-typedef struct MwStreamerMessage {
-  const char* sink_id;
-  const char* type;
-  const void* payload;
-  size_t payload_size;
-  uint8_t has_timestamp;
-  MwStreamerMediaTimestamp timestamp;
-} MwStreamerMessage;
 
 typedef void (*MwStreamerProcessorMessageCallback)(
     const MwStreamerMessage* message, void* user_context);

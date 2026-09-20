@@ -79,9 +79,9 @@ delay_step_ms = 3000 # 必须大于 0
 # 所有 [[sinks]] 的公共字段
 #
 # id               必填、非空、全局唯一。
-# type             必填；见下面七种 Sink。
+# type             必填；见下面八种 Sink。
 # downstream       可选，默认 []。非终端 Sink 至少一个，终端 Sink 必须为空。
-# message_receiver 可选，默认 ""。非空时必须引用现有 Sink ID；只建立消息边。
+# 消息通过 Pipeline::SendMessage() 按目标 Sink ID 投递，无需配置消息连接。
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -91,7 +91,6 @@ delay_step_ms = 3000 # 必须大于 0
 id = "decoder"
 type = "decoder"
 downstream = ["<frame-sink-id>"]
-message_receiver = ""
 cache_duration_ms = 0 # 只能为 0 或 1000..30000；File Input 下必须为 0
 audio_decode_queue_capacity = 256 # 必须大于 0
 video_decode_queue_capacity = 128 # 必须大于 0
@@ -112,7 +111,6 @@ device_index = 0 # CUDA 后端下必须非负
 id = "analysis"
 type = "analysis_processor"
 downstream = []
-message_receiver = ""
 
 # -----------------------------------------------------------------------------
 # Transform Processor Sink：Frame -> Frame，必须有媒体下游，无专属 TOML 字段
@@ -122,17 +120,25 @@ message_receiver = ""
 id = "transform"
 type = "transform_processor"
 downstream = ["<frame-sink-id>"]
-message_receiver = ""
 
 # -----------------------------------------------------------------------------
-# Custom Sink：Frame -> 无，终端 Sink，无专属 TOML 字段
-# 必须通过 ProcessorBindings::custom_sinks 提供同 ID 的回调绑定。
+# Frame Custom Sink：Frame -> 无，终端 Sink，无专属 TOML 字段
+# 必须通过 ProcessorBindings::frame_custom_sinks 提供同 ID 的回调绑定。
 # -----------------------------------------------------------------------------
 [[sinks]]
-id = "custom"
-type = "custom"
+id = "frame_custom"
+type = "frame_custom"
 downstream = []
-message_receiver = ""
+
+# -----------------------------------------------------------------------------
+# Packet Custom Sink：Packet -> 无，终端 Sink，无缓存线程
+# 必须通过 ProcessorBindings::packet_custom_sinks 提供同 ID 的回调绑定。
+# on_video_packet/on_audio_packet 借用 const AVPacket*，仅在回调期间有效。
+# -----------------------------------------------------------------------------
+[[sinks]]
+id = "packet_custom"
+type = "packet_custom"
+downstream = []
 
 # -----------------------------------------------------------------------------
 # Synchronizer Sink：Frame -> Frame，必须有媒体下游
@@ -141,7 +147,6 @@ message_receiver = ""
 id = "synchronizer"
 type = "synchronizer"
 downstream = ["<frame-sink-id>"]
-message_receiver = ""
 frame_queue_capacity = 128 # 必须大于 0
 max_frame_lateness_ms = 100 # 必须非负；增加固定墙钟播放延迟
 standby_timeout_ms = 500 # 必须非负；无视频后切换备播图的等待时间
@@ -154,7 +159,6 @@ standby_image_path = "" # 空表示使用内置 loading 图
 id = "encoder"
 type = "encoder"
 downstream = ["<packet-sink-id>"]
-message_receiver = ""
 frame_queue_capacity = 256 # 必须大于 0
 startup_packet_capacity = 256 # 必须大于 0
 
@@ -185,7 +189,6 @@ preset = "p4"
 id = "remux"
 type = "remux"
 downstream = []
-message_receiver = ""
 # 必填：rtmp://、rtsp://、srt://，或 .mp4 / .m3u8 文件路径。
 target = "./output.mp4"
 packet_queue_capacity = 384 # 必须大于 0
@@ -199,7 +202,7 @@ paced_sender_interval_ms = 0 # 范围：0..UINT32_MAX；0 表示禁用
 
 [sinks.zlm.recording]
 file_buffer_size = 65536 # 字节；范围：1..UINT32_MAX
-hls_segment_duration_ms = 2000 # 范围：1..UINT32_MAX
+hls_segment_duration_ms = 10000 # 范围：1..UINT32_MAX
 
 # =============================================================================
 # 静态拓扑规则摘要
@@ -207,6 +210,5 @@ hls_segment_duration_ms = 2000 # 范围：1..UINT32_MAX
 # - 媒体边两端的 Packet/Frame 类型必须一致。
 # - 每个 Sink 只能有一个媒体上游；允许 fan-out，不允许汇聚。
 # - 所有 Sink 必须从 Input 可达，媒体拓扑不能有环。
-# - downstream 和 message_receiver 引用的 Sink ID 必须存在。
-# - message_receiver 不参与媒体类型和单上游校验。
+# - downstream 引用的 Sink ID 必须存在。
 # =============================================================================

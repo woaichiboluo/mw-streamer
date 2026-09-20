@@ -82,8 +82,6 @@ standby_image_path = ""
 id = "encoder"
 type = "encoder"
 downstream = ["publish", "processed_recording"]
-# 单个接收者；省略则不绑定，不会自动产生或转发消息。
-message_receiver = "processor"
 frame_queue_capacity = 256
 startup_packet_capacity = 256
 

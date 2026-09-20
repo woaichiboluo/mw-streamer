@@ -1,6 +1,5 @@
 #include <cstdint>
-#include <cstring>
-#include <string>
+#include <vector>
 
 extern "C" {
 #include <libavutil/channel_layout.h>
@@ -12,7 +11,7 @@ extern "C" {
 #include <catch2/catch_test_macros.hpp>
 
 #include "mw/streamer/ffmpeg/frame.h"
-#include "mw/streamer/sink/custom_sink_node.h"
+#include "mw/streamer/sink/frame_custom_sink_node.h"
 
 namespace {
 
@@ -70,20 +69,19 @@ struct CallbackState {
   int starts = 0;
   int videos = 0;
   int audios = 0;
+  int stops = 0;
+  std::vector<MwStreamerProcessorBoundaryReason> boundaries;
   MwStreamerProcessorSourceInfo source{};
-  MwStreamerMessageSender sender{};
 };
 
-MwStreamerCustomSinkCallbacks Callbacks(CallbackState& state) {
-  MwStreamerCustomSinkCallbacks callbacks{};
+MwStreamerFrameCustomSinkCallbacks Callbacks(CallbackState& state) {
+  MwStreamerFrameCustomSinkCallbacks callbacks{};
   callbacks.user_context = &state;
   callbacks.on_start = [](const MwStreamerProcessorSourceInfo* source,
-                          const MwStreamerMessageSender* sender,
                           void* context) {
     auto& state = *static_cast<CallbackState*>(context);
     ++state.starts;
     state.source = *source;
-    state.sender = *sender;
     return kMwStreamerProcessorStartSuccess;
   };
   callbacks.on_frame = [](const MwStreamerVideoFrameView* frame,
@@ -96,20 +94,19 @@ MwStreamerCustomSinkCallbacks Callbacks(CallbackState& state) {
     REQUIRE(frame->sample_rate == 48000);
     ++static_cast<CallbackState*>(context)->audios;
   };
+  callbacks.on_boundary = [](MwStreamerProcessorBoundaryReason reason,
+                             void* context) {
+    static_cast<CallbackState*>(context)->boundaries.push_back(reason);
+  };
+  callbacks.on_stop = [](void* context) {
+    ++static_cast<CallbackState*>(context)->stops;
+  };
   return callbacks;
 }
 
-TEST_CASE("Custom Sink exposes source, frames and message sender",
-          "[custom-sink]") {
+TEST_CASE("Custom Sink exposes source and frames", "[custom-sink]") {
   CallbackState state;
-  CustomSink sink("custom", Callbacks(state));
-  std::string received_type;
-  std::string received_payload;
-  sink.SetMessageSender([&](const SinkMessage& message) {
-    received_type = message.type;
-    received_payload.assign(static_cast<const char*>(message.payload),
-                            message.payload_size);
-  });
+  FrameCustomSink sink("custom", Callbacks(state));
 
   sink.OnStreamsReady(Streams());
   sink.OnVideoFrame({1, Video()});
@@ -123,30 +120,60 @@ TEST_CASE("Custom Sink exposes source, frames and message sender",
   CHECK(state.videos == 1);
   CHECK(state.audios == 1);
 
-  const char payload[] = "control";
-  state.sender.send(state.sender.context, "seek", payload, std::strlen(payload),
-                    nullptr);
-  CHECK(received_type == "seek");
-  CHECK(received_payload == "control");
   sink.Stop();
+  sink.Stop();
+  CHECK(state.stops == 1);
 }
 
 TEST_CASE("Custom Sink starts once across stable generations",
           "[custom-sink]") {
   CallbackState state;
-  CustomSink sink("custom", Callbacks(state));
+  FrameCustomSink sink("custom", Callbacks(state));
   sink.OnStreamsReady(Streams(1));
+  sink.OnTimelineReset({2, TimelineResetReason::kReconnect});
   sink.OnTimelineReset({2, TimelineResetReason::kReconnect});
   sink.OnStreamsReady(Streams(2));
   CHECK(state.starts == 1);
   sink.OnVideoFrame({2, Video()});
   CHECK(state.videos == 1);
+  CHECK(state.boundaries == std::vector<MwStreamerProcessorBoundaryReason>{
+                                kMwStreamerProcessorTimelineReset});
   sink.Stop();
+}
+
+TEST_CASE("FrameCustomSink EOF只通知一次边界且Stop调用一次", "[custom-sink]") {
+  CallbackState state;
+  {
+    FrameCustomSink sink("custom", Callbacks(state));
+    sink.OnStreamsReady(Streams());
+    sink.OnInputEnded({1, StreamEndReason::kEof});
+    sink.OnInputEnded({1, StreamEndReason::kEof});
+    CHECK(state.boundaries == std::vector<MwStreamerProcessorBoundaryReason>{
+                                  kMwStreamerProcessorEndOfInput});
+    CHECK(state.stops == 0);
+    sink.Stop();
+    sink.Stop();
+  }
+  CHECK(state.stops == 1);
+}
+
+TEST_CASE("FrameCustomSink启动失败不调用停止回调", "[custom-sink]") {
+  CallbackState state;
+  auto callbacks = Callbacks(state);
+  callbacks.on_start = [](const MwStreamerProcessorSourceInfo*, void*) {
+    return kMwStreamerProcessorStartFailed;
+  };
+  {
+    FrameCustomSink sink("custom", callbacks);
+    CHECK_THROWS(sink.OnStreamsReady(Streams()));
+    sink.Stop();
+  }
+  CHECK(state.stops == 0);
 }
 
 TEST_CASE("Custom Sink rejects changed source information", "[custom-sink]") {
   CallbackState state;
-  CustomSink sink("custom", Callbacks(state));
+  FrameCustomSink sink("custom", Callbacks(state));
   sink.OnStreamsReady(Streams(1));
   sink.OnTimelineReset({2, TimelineResetReason::kReconnect});
   CHECK_THROWS_AS(sink.OnStreamsReady(Streams(2, 128)), std::invalid_argument);

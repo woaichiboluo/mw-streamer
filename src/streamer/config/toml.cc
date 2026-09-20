@@ -442,12 +442,11 @@ InputConfig ReadInput(const Table& root) {
 
 std::unique_ptr<SinkConfig> ReadDecoderNode(const Table& table, std::string id,
                                             std::string_view path) {
-  WarnUnknownKeys(
-      table,
-      {"id", "type", "downstream", "message_receiver", "cache_duration_ms",
-       "audio_decode_queue_capacity", "video_decode_queue_capacity",
-       "audio_decoder", "video_decoder"},
-      path);
+  WarnUnknownKeys(table,
+                  {"id", "type", "downstream", "cache_duration_ms",
+                   "audio_decode_queue_capacity", "video_decode_queue_capacity",
+                   "audio_decoder", "video_decoder"},
+                  path);
   auto node = std::make_unique<DecoderNodeConfig>(std::move(id));
   auto& config = node->options;
   ReadMilliseconds(table, "cache_duration_ms", path, &config.cache_duration_ms);
@@ -470,20 +469,21 @@ std::unique_ptr<SinkConfig> ReadProcessorNode(const Table& table,
                                               std::string id, SinkType type,
                                               std::string_view path) {
   if (type == SinkType::kAnalysisProcessor) {
-    WarnUnknownKeys(table, {"id", "type", "downstream", "message_receiver"},
-                    path);
+    WarnUnknownKeys(table, {"id", "type", "downstream"}, path);
     return std::make_unique<AnalysisProcessorNodeConfig>(std::move(id));
   }
-  WarnUnknownKeys(table, {"id", "type", "downstream", "message_receiver"},
-                  path);
+  WarnUnknownKeys(table, {"id", "type", "downstream"}, path);
   return std::make_unique<TransformProcessorNodeConfig>(std::move(id));
 }
 
 std::unique_ptr<SinkConfig> ReadCustomNode(const Table& table, std::string id,
+                                           SinkType type,
                                            std::string_view path) {
-  WarnUnknownKeys(table, {"id", "type", "downstream", "message_receiver"},
-                  path);
-  return std::make_unique<CustomNodeConfig>(std::move(id));
+  WarnUnknownKeys(table, {"id", "type", "downstream"}, path);
+  if (type == SinkType::kFrameCustom) {
+    return std::make_unique<FrameCustomNodeConfig>(std::move(id));
+  }
+  return std::make_unique<PacketCustomNodeConfig>(std::move(id));
 }
 
 std::unique_ptr<SinkConfig> ReadSynchronizerNode(const Table& table,
@@ -491,7 +491,7 @@ std::unique_ptr<SinkConfig> ReadSynchronizerNode(const Table& table,
                                                  std::string_view path) {
   WarnUnknownKeys(
       table,
-      {"id", "type", "downstream", "message_receiver", "frame_queue_capacity",
+      {"id", "type", "downstream", "frame_queue_capacity",
        "max_frame_lateness_ms", "standby_timeout_ms", "standby_image_path"},
       path);
   auto node = std::make_unique<SynchronizerNodeConfig>(std::move(id));
@@ -508,11 +508,10 @@ std::unique_ptr<SinkConfig> ReadSynchronizerNode(const Table& table,
 
 std::unique_ptr<SinkConfig> ReadEncoderNode(const Table& table, std::string id,
                                             std::string_view path) {
-  WarnUnknownKeys(
-      table,
-      {"id", "type", "downstream", "message_receiver", "frame_queue_capacity",
-       "startup_packet_capacity", "audio_encoder", "video_encoder"},
-      path);
+  WarnUnknownKeys(table,
+                  {"id", "type", "downstream", "frame_queue_capacity",
+                   "startup_packet_capacity", "audio_encoder", "video_encoder"},
+                  path);
   auto node = std::make_unique<EncoderNodeConfig>(std::move(id));
   auto& config = node->options;
   ReadInteger(table, "frame_queue_capacity", path,
@@ -532,10 +531,10 @@ std::unique_ptr<SinkConfig> ReadEncoderNode(const Table& table, std::string id,
 
 std::unique_ptr<SinkConfig> ReadRemuxNode(const Table& table, std::string id,
                                           std::string_view path) {
-  WarnUnknownKeys(table,
-                  {"id", "type", "downstream", "message_receiver", "target",
-                   "packet_queue_capacity", "zlm"},
-                  path);
+  WarnUnknownKeys(
+      table,
+      {"id", "type", "downstream", "target", "packet_queue_capacity", "zlm"},
+      path);
   RequireField(table, "target", path);
   auto node = std::make_unique<RemuxNodeConfig>(std::move(id));
   ReadString(table, "target", path, &node->options.target);
@@ -558,7 +557,8 @@ std::unique_ptr<SinkConfig> ReadSinkNode(const Table& table,
            {{"decoder", SinkType::kDecoder},
             {"analysis_processor", SinkType::kAnalysisProcessor},
             {"transform_processor", SinkType::kTransformProcessor},
-            {"custom", SinkType::kCustom},
+            {"frame_custom", SinkType::kFrameCustom},
+            {"packet_custom", SinkType::kPacketCustom},
             {"synchronizer", SinkType::kSynchronizer},
             {"encoder", SinkType::kEncoder},
             {"remux", SinkType::kRemux}},
@@ -572,8 +572,9 @@ std::unique_ptr<SinkConfig> ReadSinkNode(const Table& table,
     case SinkType::kTransformProcessor:
       result = ReadProcessorNode(table, std::move(id), type, path);
       break;
-    case SinkType::kCustom:
-      result = ReadCustomNode(table, std::move(id), path);
+    case SinkType::kFrameCustom:
+    case SinkType::kPacketCustom:
+      result = ReadCustomNode(table, std::move(id), type, path);
       break;
     case SinkType::kSynchronizer:
       result = ReadSynchronizerNode(table, std::move(id), path);
@@ -586,7 +587,6 @@ std::unique_ptr<SinkConfig> ReadSinkNode(const Table& table,
       break;
   }
   ReadStringArray(table, "downstream", path, &result->downstream);
-  ReadString(table, "message_receiver", path, &result->message_receiver);
   return result;
 }
 
@@ -732,9 +732,6 @@ void WriteRemuxNode(Table& table, const RemuxSinkConfig& config) {
 Table WriteSinkNode(const SinkConfig& node) {
   Table result{{"id", node.id},
                {"downstream", WriteStringArray(node.downstream)}};
-  if (!node.message_receiver.empty()) {
-    result.insert("message_receiver", node.message_receiver);
-  }
   switch (node.type()) {
     case SinkType::kDecoder:
       result.insert("type", "decoder");
@@ -747,8 +744,11 @@ Table WriteSinkNode(const SinkConfig& node) {
     case SinkType::kTransformProcessor:
       result.insert("type", "transform_processor");
       break;
-    case SinkType::kCustom:
-      result.insert("type", "custom");
+    case SinkType::kFrameCustom:
+      result.insert("type", "frame_custom");
+      break;
+    case SinkType::kPacketCustom:
+      result.insert("type", "packet_custom");
       break;
     case SinkType::kSynchronizer:
       result.insert("type", "synchronizer");
