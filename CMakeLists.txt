@@ -72,12 +72,28 @@ install(TARGETS mw_log mw_streamer
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
+if(MSVC AND BUILD_SHARED)
+    install(FILES
+        "$<TARGET_PDB_FILE:mw_log>"
+        "$<TARGET_PDB_FILE:mw_streamer>"
+        DESTINATION ${CMAKE_INSTALL_BINDIR}
+        OPTIONAL
+    )
+endif()
+
 if(TARGET mw_opencv_adapter)
     install(TARGETS mw_opencv_adapter
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     )
+
+    if(MSVC AND BUILD_SHARED)
+        install(FILES "$<TARGET_PDB_FILE:mw_opencv_adapter>"
+            DESTINATION ${CMAKE_INSTALL_BINDIR}
+            OPTIONAL
+        )
+    endif()
 endif()
 
 # fmt is part of the public C++ logging interface. Keep it private to the
