@@ -219,12 +219,13 @@ void ValidateInput(const InputConfig& input) {
 void ValidateEdges(const std::vector<std::string>& downstream,
                    SinkMediaType output, const std::string& parent,
                    const std::unordered_map<std::string, MediaContract>& media,
-                   std::unordered_set<std::string>& parented) {
+                   std::unordered_set<std::string>& parented,
+                   bool allow_empty = false) {
   if (output == SinkMediaType::kNone && !downstream.empty()) {
     throw std::invalid_argument(
         fmt::format("终端Sink不能配置媒体下游: {}", parent));
   }
-  if (output != SinkMediaType::kNone && downstream.empty()) {
+  if (output != SinkMediaType::kNone && downstream.empty() && !allow_empty) {
     throw std::invalid_argument(
         fmt::format("节点至少需要一个媒体下游: {}", parent));
   }
@@ -286,7 +287,7 @@ void ValidatePipelineConfig(const PipelineConfig& config) {
                 parented);
   for (const auto& node : config.sinks) {
     ValidateEdges(node->downstream, media.at(node->id).output, node->id, media,
-                  parented);
+                  parented, node->type() == SinkType::kEncoder);
   }
   ValidateReachability(config, index);
 }

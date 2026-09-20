@@ -394,6 +394,78 @@ TEST_CASE("encoder sink drains a partial AAC FIFO for audio-only input") {
   CheckOrdered(recording);
 }
 
+TEST_CASE("encoder sink encodes and drains without downstream consumers") {
+  bool video_only = false;
+  SECTION("delayed software video") { video_only = true; }
+  SECTION("partial AAC audio") {}
+
+  EncoderSink sink("sink", SoftwareConfig(true));
+  sink.OnStreamsReady(Streams(video_only, !video_only));
+  if (video_only) {
+    for (int index = 0; index < 12; ++index) {
+      sink.OnVideoFrame({1, Video(index)});
+    }
+  } else {
+    sink.OnAudioFrame({1, Audio(0, 512)});
+  }
+  sink.OnInputEnded({1, StreamEndReason::kEof});
+  const bool ended = WaitState(sink, EncoderSinkState::kEnded);
+  sink.Stop();
+  sink.Stop();
+  INFO(sink.error());
+  REQUIRE(ended);
+  CHECK(sink.error().empty());
+  CHECK(sink.state() == EncoderSinkState::kStopped);
+  const auto snapshot = sink.GetPerformance();
+  CHECK(snapshot.downstream.empty());
+  const auto& encoded = snapshot.operations.at(video_only ? 1 : 0);
+  CHECK(encoded.input_count == (video_only ? 12 : 512));
+  CHECK(encoded.output_count > 0);
+  CHECK(encoded.output_bytes > 0);
+  CHECK(encoded.completed_calls == (video_only ? 13 : 2));
+  CHECK(encoded.failed_calls == 0);
+  CHECK(encoded.in_flight == 0);
+  if (video_only) {
+    CHECK(encoded.output_count == 12);
+  }
+}
+
+TEST_CASE(
+    "encoder sink without consumers discards packets before other track "
+    "opens") {
+  auto config = SoftwareConfig();
+  config.startup_packet_capacity = 1;
+  EncoderSink sink("sink", config);
+  sink.OnStreamsReady(Streams(true, true));
+  for (int index = 0; index < 5; ++index) {
+    sink.OnVideoFrame({1, Video(index)});
+  }
+  const auto deadline = std::chrono::steady_clock::now() + 10s;
+  while (sink.GetPerformance().operations.at(1).completed_calls < 5 &&
+         sink.state() != EncoderSinkState::kFailed &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  INFO(sink.error());
+  REQUIRE(sink.state() == EncoderSinkState::kRunning);
+  const auto before_reset = sink.GetPerformance();
+  CHECK(before_reset.operations.at(0).input_count == 0);
+  REQUIRE(before_reset.operations.at(1).completed_calls == 5);
+  CHECK(before_reset.operations.at(1).output_count == 5);
+  CHECK(before_reset.operations.at(1).failed_calls == 0);
+
+  sink.OnTimelineReset({2, TimelineResetReason::kReconnect, std::nullopt});
+  sink.OnStreamsReady(Streams(true, false, 2));
+  sink.OnVideoFrame({2, Video(0)});
+  sink.OnInputEnded({2, StreamEndReason::kEof});
+  const bool ended = WaitState(sink, EncoderSinkState::kEnded);
+  sink.Stop();
+  INFO(sink.error());
+  REQUIRE(ended);
+  CHECK(sink.error().empty());
+  CHECK(sink.GetPerformance().operations.at(1).output_count == 6);
+}
+
 TEST_CASE("encoder sink serializes concurrent audio and video producers") {
   Recording recording;
   EncoderSink sink("sink", SoftwareConfig());
@@ -628,13 +700,15 @@ TEST_CASE(
   CHECK(recording.ends.empty());
 }
 
-TEST_CASE("encoder sink refuses input without a packet consumer") {
+TEST_CASE("encoder sink accepts input without a packet consumer") {
   EncoderSink sink("sink", SoftwareConfig());
   sink.OnStreamsReady(Streams(true, false));
-  const bool failed = WaitState(sink, EncoderSinkState::kFailed);
+  sink.OnVideoFrame({1, Video(0)});
+  sink.OnInputEnded({1, StreamEndReason::kEof});
+  const bool ended = WaitState(sink, EncoderSinkState::kEnded);
   sink.Stop();
-  REQUIRE(failed);
-  CHECK_FALSE(sink.error().empty());
+  REQUIRE(ended);
+  CHECK(sink.error().empty());
 }
 
 TEST_CASE(

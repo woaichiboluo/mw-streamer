@@ -443,6 +443,30 @@ unused = true
         "./record.mp4");
 }
 
+TEST_CASE("Encoder允许没有媒体下游且配置可以往返构建") {
+  auto config = ParsePipelineConfigFromToml(R"(
+[input]
+type = "file"
+path = "input.mp4"
+downstream = ["decode"]
+[[sinks]]
+id = "decode"
+type = "decoder"
+downstream = ["encode"]
+[[sinks]]
+id = "encode"
+type = "encoder"
+)");
+  CHECK(FindNode<EncoderNodeConfig>(config, "encode").downstream.empty());
+  auto restored =
+      ParsePipelineConfigFromToml(SerializePipelineConfigToToml(config));
+  CHECK_NOTHROW(BuildPipeline(restored));
+  // Other producing nodes still require their own media consumers.
+  config.sinks.pop_back();
+  config.sinks.front()->downstream.clear();
+  CHECK_THROWS_AS(ValidatePipelineConfig(config), std::invalid_argument);
+}
+
 TEST_CASE("统一配置校验媒体树引用") {
   auto config = ParsePipelineConfigFromToml(kCompleteToml);
   SECTION("重复ID") { config.sinks.back()->id = "raw"; }

@@ -107,7 +107,7 @@ Sink ID 投递，不需要在配置中声明连接。
 | --- | --- | --- | --- | --- | --- |
 | `id` | `SinkConfig::id` | string | 无 | 是 | 非空且在整个 Pipeline 内唯一。 |
 | `type` | 具体 `NodeConfig` 类型 | string enum | 无 | 是 | 必须是上表列出的八种类型之一。 |
-| `downstream` | `SinkConfig::downstream` | string array | `[]` | 否 | 非终端节点至少一个；终端节点必须为空。 |
+| `downstream` | `SinkConfig::downstream` | string array | `[]` | 否 | Encoder 可为空；其他非终端节点至少一个；终端节点必须为空。 |
 
 ## Decoder Sink
 
@@ -180,7 +180,8 @@ Frame 使用 `on_frame`、`on_audio`；Packet 使用 `on_video_packet`、
 
 ## Encoder Sink
 
-`type = "encoder"`，媒体契约为 Frame → Packet，必须配置媒体下游。
+`type = "encoder"`，媒体契约为 Frame → Packet，媒体下游可以为空。
+没有下游时仍正常编码和统计，编码包立即释放，不等待消费者或保留启动包缓存。
 
 | TOML 字段 | C++ 字段 | 类型 | 默认值 | 约束与说明 |
 | --- | --- | --- | --- | --- |
@@ -218,7 +219,7 @@ Encoder 不负责音视频同步、节奏控制、备播、像素格式转换或
 ## Pipeline 静态拓扑规则
 
 - Input 至少连接一个 Sink，且固定输出 Packet。
-- 非终端 Sink 至少连接一个媒体下游；终端 Sink 不能配置媒体下游。
+- Encoder 可以没有媒体下游；其他非终端 Sink 至少连接一个；终端 Sink 不能配置媒体下游。
 - 媒体边两端的 Packet/Frame 类型必须一致。
 - 每个 Sink 只能有一个媒体上游；一个节点可以 fan-out 到多个下游，但不能汇聚。
 - 所有 Sink 必须从 Input 可达，媒体拓扑不能存在环路。

@@ -186,7 +186,9 @@ install(FILES
 )
 
 install(FILES
-    include/mw/streamer/sink/custom_sink.h
+    include/mw/streamer/sink/frame_custom_sink.h
+    include/mw/streamer/sink/packet_custom_sink.h
+    include/mw/streamer/sink/sink_message.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mw/streamer/sink
 )
 

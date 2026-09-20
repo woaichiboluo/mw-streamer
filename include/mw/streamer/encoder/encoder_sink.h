@@ -23,6 +23,8 @@ enum class EncoderSinkState {
 // submission retains read-only buffer references; encoding never runs on the
 // upstream thread. All downstream Sink calls are serialized in worker
 // order and fan out shared packet buffers to exclusively owned consumers.
+// Downstream consumers are optional; with none, encoding and statistics run
+// normally and encoded packets are released immediately.
 // Source metadata declares at most one audio and one video track; actual
 // encoding parameters come from the first frame for each track. Audio uses
 // the existing 48 kHz interleaved float32 contract. Video supports CPU/CUDA

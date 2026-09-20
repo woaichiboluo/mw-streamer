@@ -142,9 +142,6 @@ class EncoderSink::Impl final {
       if (!CanProcess() || queue_.closed()) {
         return;
       }
-      if (outputs_.empty()) {
-        throw std::logic_error("EncoderSink至少需要一个下游Sink");
-      }
       if (!worker_) {
         worker_ = std::make_unique<Thread>("mw-encoder", [this]() { Run(); });
       }
@@ -336,7 +333,9 @@ class EncoderSink::Impl final {
   }
 
   void HandlePacket(const Packet& packet) {
-    if (!CanProcess()) {
+    // Encoding and output statistics still run without consumers. There is no
+    // need to retain packets while waiting for other tracks to open.
+    if (!CanProcess() || outputs_.empty()) {
       return;
     }
     if (output_ready_) {
