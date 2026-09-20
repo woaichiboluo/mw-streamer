@@ -11,7 +11,19 @@ struct RuntimeConfig {
   ZlmConfig zlm;
 };
 
-// Initializes process-global logging and ZLToolKit resources once. This is an
+// Pipeline is the sole runtime owner: all network inputs and outputs belong
+// to its task graph. It owns the runtime until its tasks and resources are gone.
+// Builders also hold a temporary lease so failed construction is cleaned up.
+// Acquire/release must run outside the runtime's worker threads.
+class RuntimeLease final {
+ public:
+  explicit RuntimeLease(const RuntimeConfig& config = {});
+  ~RuntimeLease();
+  RuntimeLease(const RuntimeLease&) = delete;
+  RuntimeLease& operator=(const RuntimeLease&) = delete;
+};
+
+// Initializes logging and ZLToolKit resources for the current runtime. This is an
 // implementation detail used by media entry points, never a host operation.
 void EnsureInitialized(const RuntimeConfig& config = {});
 

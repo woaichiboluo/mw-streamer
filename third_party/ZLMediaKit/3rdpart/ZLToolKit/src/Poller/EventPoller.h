@@ -61,6 +61,11 @@ public:
 
     ~EventPoller();
 
+    // Stop and join permanently. The exclusive owner must call from outside
+    // this poller after closing task submission. Repeated calls wait for the
+    // same shutdown; the loop cannot be restarted afterwards.
+    void shutdown();
+
     /**
      * 获取EventPollerPool单例中的第一个EventPoller实例，
      * 保留该接口是为了兼容老代码
@@ -241,15 +246,6 @@ private:
     Task::Ptr async_l(TaskIn task, bool may_sync = true, bool first = false);
 
     /**
-     * 结束事件轮询
-     * 需要指出的是，一旦结束就不能再次恢复轮询线程
-     * End event polling
-     * Note that once ended, the polling thread cannot be resumed
-     * [AUTO-TRANSLATED:4f232154]
-     */
-    void shutdown();
-
-    /**
      * 刷新延时任务
      * Refresh delayed tasks
      * [AUTO-TRANSLATED:88104b90]
@@ -292,6 +288,7 @@ private:
     // 执行事件循环的线程
     // Thread that executes the event loop
     std::thread *_loop_thread = nullptr;
+    std::once_flag _shutdown_once;
     // 通知事件循环的线程已启动  [AUTO-TRANSLATED:61f478cf]
     // 通知事件循环的线程已启动
     // Notify the event loop thread that it has started
@@ -353,6 +350,12 @@ public:
      * [AUTO-TRANSLATED:1cb32aa7]
      */
     static EventPollerPool &Instance();
+
+    // Call only after all users have released their pollers, from a non-pool
+    // thread. The runtime owner must serialize destruction with new users.
+    // Does not create a pool; Instance() may create a fresh pool afterwards.
+    static void destroyIfCreated();
+    static bool isCreated();
 
     /**
      * 设置EventPoller个数，在EventPollerPool单例创建前有效

@@ -30,6 +30,10 @@ public:
      */
     static WorkThreadPool &Instance();
 
+    // Same lifetime requirements as EventPollerPool::destroyIfCreated().
+    static void destroyIfCreated();
+    static bool isCreated();
+
     /**
      * 设置EventPoller个数，在WorkThreadPool单例创建前有效
      * 在不调用此方法的情况下，默认创建thread::hardware_concurrency()个EventPoller实例

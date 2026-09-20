@@ -25,6 +25,12 @@ namespace mediakit {
 namespace {
 
 std::atomic<SrtEpollReactor *> g_reactor_instance { nullptr };
+std::mutex g_reactor_mutex;
+
+std::shared_ptr<SrtEpollReactor> &reactorInstance() {
+    static std::shared_ptr<SrtEpollReactor> instance;
+    return instance;
+}
 
 } // namespace
 
@@ -243,8 +249,13 @@ private:
 constexpr SrtEpollReactor::RegistrationToken SrtEpollReactor::kInvalidRegistrationToken;
 
 SrtEpollReactor &SrtEpollReactor::Instance() {
-    static SrtEpollReactor instance;
-    return instance;
+    std::lock_guard<std::mutex> lock(g_reactor_mutex);
+    auto &instance = reactorInstance();
+    if (!instance) {
+        instance = std::shared_ptr<SrtEpollReactor>(new SrtEpollReactor(),
+            [](SrtEpollReactor *reactor) { delete reactor; });
+    }
+    return *instance;
 }
 
 bool SrtEpollReactor::isCreated() noexcept {
@@ -253,6 +264,17 @@ bool SrtEpollReactor::isCreated() noexcept {
 
 void SrtEpollReactor::shutdownIfCreated() {
     auto *instance = g_reactor_instance.load(std::memory_order_acquire);
+    if (instance) {
+        instance->shutdown();
+    }
+}
+
+void SrtEpollReactor::destroyIfCreated() {
+    std::shared_ptr<SrtEpollReactor> instance;
+    {
+        std::lock_guard<std::mutex> lock(g_reactor_mutex);
+        instance.swap(reactorInstance());
+    }
     if (instance) {
         instance->shutdown();
     }
