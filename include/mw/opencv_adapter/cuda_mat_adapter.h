@@ -16,7 +16,9 @@ class MW_OPENCV_ADAPTER_API CudaMatAdapter final {
   static cv::cuda::GpuMat ToBgr(const MwStreamerVideoFrameView& source);
 
   // Converts a CUDA BGR image to a CUDA frame whose raw format and metadata
-  // are copied from prototype. The conversion is complete on return.
+  // are copied from prototype. A source from another CUDA context is copied
+  // into the context current on the calling thread. All producer streams in
+  // the source context are synchronized, and conversion is complete on return.
   static CudaFrame FromBgr(const cv::cuda::GpuMat& source,
                            const MwStreamerVideoFrameView& prototype);
 

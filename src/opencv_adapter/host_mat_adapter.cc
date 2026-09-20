@@ -1,6 +1,7 @@
 #include "mw/opencv_adapter/host_mat_adapter.h"
 
 extern "C" {
+#include <libavutil/frame.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
@@ -9,8 +10,10 @@ extern "C" {
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
+#include <new>
 #include <stdexcept>
 #include <string>
 
@@ -25,6 +28,72 @@ struct PixelFormatInfo {
 };
 
 using SwsContextPtr = std::unique_ptr<SwsContext, decltype(&sws_freeContext)>;
+
+struct AvFrameDeleter {
+  void operator()(AVFrame* frame) const noexcept { av_frame_free(&frame); }
+};
+
+using AvFramePtr = std::unique_ptr<AVFrame, AvFrameDeleter>;
+
+AvFramePtr AllocateFrame(AVPixelFormat format, int width, int height) {
+  AvFramePtr frame(av_frame_alloc());
+  if (!frame) {
+    throw std::bad_alloc();
+  }
+  frame->format = format;
+  frame->width = width;
+  frame->height = height;
+  // swscale may read beyond a plane's logical end. Keep all data passed to it
+  // in FFmpeg-owned storage and let FFmpeg choose the current CPU's SIMD
+  // alignment and padding requirements.
+  if (av_frame_get_buffer(frame.get(), 0) < 0) {
+    throw std::runtime_error("分配FFmpeg视频帧失败");
+  }
+  return frame;
+}
+
+void CopyViewToFrame(const MwStreamerVideoFrameView& source,
+                     AVFrame& destination) {
+  const auto& linear = source.buffer.storage.linear;
+  for (std::uint32_t index = 0; index < linear.plane_count; ++index) {
+    const auto& plane = linear.planes[index];
+    const auto* source_base =
+        reinterpret_cast<const std::uint8_t*>(plane.address);
+    for (std::uint32_t row = 0; row < plane.row_count; ++row) {
+      std::memcpy(destination.data[index] +
+                      static_cast<std::ptrdiff_t>(row) *
+                          destination.linesize[index],
+                  source_base + static_cast<std::ptrdiff_t>(row) *
+                                    plane.stride_bytes,
+                  plane.row_bytes);
+    }
+  }
+}
+
+void CopyMatToFrame(const cv::Mat& source, AVFrame& destination) {
+  const auto row_bytes = static_cast<std::size_t>(source.cols) * source.elemSize();
+  for (int row = 0; row < source.rows; ++row) {
+    std::memcpy(destination.data[0] +
+                    static_cast<std::ptrdiff_t>(row) * destination.linesize[0],
+                source.ptr(row), row_bytes);
+  }
+}
+
+void CopyFrameToView(const AVFrame& source,
+                     const MwStreamerVideoFrameView& destination) {
+  const auto& linear = destination.buffer.storage.linear;
+  for (std::uint32_t index = 0; index < linear.plane_count; ++index) {
+    const auto& plane = linear.planes[index];
+    auto* destination_base = reinterpret_cast<std::uint8_t*>(plane.address);
+    for (std::uint32_t row = 0; row < plane.row_count; ++row) {
+      std::memcpy(destination_base + static_cast<std::ptrdiff_t>(row) *
+                                         plane.stride_bytes,
+                  source.data[index] + static_cast<std::ptrdiff_t>(row) *
+                                           source.linesize[index],
+                  plane.row_bytes);
+    }
+  }
+}
 
 PixelFormatInfo GetPixelFormatInfo(MwStreamerVideoPixelFormat pixel_format) {
   switch (pixel_format) {
@@ -186,39 +255,33 @@ void CheckConvertedRows(int converted_rows, std::uint32_t height) {
 
 cv::Mat HostMatAdapter::ToBgr(const MwStreamerVideoFrameView& source) {
   const auto format = ValidatePrototype(source);
+  std::unique_ptr<HostFrame> host_source;
+  const MwStreamerVideoFrameView* source_view = &source;
   if (source.buffer.memory_type == kMwStreamerMemoryCuda) {
-    const auto host_source = HostFrame::CopyFrom(source);
-    return ToBgr(host_source.view());
+    host_source =
+        std::make_unique<HostFrame>(HostFrame::CopyFrom(source));
+    source_view = &host_source->view();
   }
 
   const int width = static_cast<int>(source.buffer.width);
   const int height = static_cast<int>(source.buffer.height);
-  cv::Mat destination(height, width, format.mat_type);
-  if (destination.empty() ||
-      destination.step >
-          static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-    throw std::runtime_error("分配OpenCV BGR Mat失败");
-  }
-
-  const auto& linear = source.buffer.storage.linear;
+  auto source_frame = AllocateFrame(format.yuv_format, width, height);
+  auto destination_frame = AllocateFrame(format.bgr_format, width, height);
+  CopyViewToFrame(*source_view, *source_frame);
   std::array<const std::uint8_t*, 4> source_data{};
-  std::array<int, 4> source_stride{};
-  for (std::uint32_t index = 0; index < linear.plane_count; ++index) {
-    source_data[index] =
-        reinterpret_cast<const std::uint8_t*>(linear.planes[index].address);
-    source_stride[index] = linear.planes[index].stride_bytes;
+  for (std::size_t index = 0; index < source_data.size(); ++index) {
+    source_data[index] = source_frame->data[index];
   }
-  std::array<std::uint8_t*, 4> destination_data = {destination.data, nullptr,
-                                                   nullptr, nullptr};
-  const std::array<int, 4> destination_stride = {
-      static_cast<int>(destination.step), 0, 0, 0};
   auto context = MakeContext(source, format.yuv_format, format.bgr_format,
                              GetRange(source.color.range), 1);
   CheckConvertedRows(
-      sws_scale(context.get(), source_data.data(), source_stride.data(), 0,
-                height, destination_data.data(), destination_stride.data()),
+      sws_scale(context.get(), source_data.data(), source_frame->linesize, 0,
+                height, destination_frame->data,
+                destination_frame->linesize),
       source.buffer.height);
-  return destination;
+  return cv::Mat(height, width, format.mat_type, destination_frame->data[0],
+                 static_cast<std::size_t>(destination_frame->linesize[0]))
+      .clone();
 }
 
 HostFrame HostMatAdapter::FromBgr(const cv::Mat& source,
@@ -233,27 +296,24 @@ HostFrame HostMatAdapter::FromBgr(const cv::Mat& source,
     throw std::invalid_argument("OpenCV BGR Mat与视频原型不匹配");
   }
 
-  auto destination = HostFrame::AllocateLike(prototype);
-  auto& destination_view = destination.mutable_view();
-  auto& linear = destination_view.buffer.storage.linear;
-  const std::array<const std::uint8_t*, 4> source_data = {source.data, nullptr,
-                                                          nullptr, nullptr};
-  const std::array<int, 4> source_stride = {static_cast<int>(source.step), 0, 0,
-                                            0};
-  std::array<std::uint8_t*, 4> destination_data{};
-  std::array<int, 4> destination_stride{};
-  for (std::uint32_t index = 0; index < linear.plane_count; ++index) {
-    destination_data[index] =
-        reinterpret_cast<std::uint8_t*>(linear.planes[index].address);
-    destination_stride[index] = linear.planes[index].stride_bytes;
+  const int width = static_cast<int>(prototype.buffer.width);
+  const int height = static_cast<int>(prototype.buffer.height);
+  auto source_frame = AllocateFrame(format.bgr_format, width, height);
+  auto destination_frame = AllocateFrame(format.yuv_format, width, height);
+  CopyMatToFrame(source, *source_frame);
+  std::array<const std::uint8_t*, 4> source_data{};
+  for (std::size_t index = 0; index < source_data.size(); ++index) {
+    source_data[index] = source_frame->data[index];
   }
   auto context = MakeContext(prototype, format.bgr_format, format.yuv_format, 1,
                              GetRange(prototype.color.range));
   CheckConvertedRows(
-      sws_scale(context.get(), source_data.data(), source_stride.data(), 0,
-                source.rows, destination_data.data(),
-                destination_stride.data()),
+      sws_scale(context.get(), source_data.data(), source_frame->linesize, 0,
+                source.rows, destination_frame->data,
+                destination_frame->linesize),
       prototype.buffer.height);
+  auto destination = HostFrame::AllocateLike(prototype);
+  CopyFrameToView(*destination_frame, destination.view());
   return destination;
 }
 

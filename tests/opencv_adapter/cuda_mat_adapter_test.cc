@@ -4,12 +4,15 @@
 #include <cuda_runtime_api.h>
 
 #include <array>
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <opencv2/core/cuda.hpp>
 #include <opencv2/core/mat.hpp>
+#include <thread>
 #include <vector>
 
 #include "mw/opencv_adapter/cuda_frame.h"
@@ -229,6 +232,32 @@ TEST_CASE("CudaMatAdapter拒绝HDR和不匹配的GpuMat") {
                   std::invalid_argument);
 }
 
+TEST_CASE("CudaMatAdapter等待非阻塞生产流写入GpuMat") {
+  REQUIRE(cudaSetDevice(0) == cudaSuccess);
+  const TestFrame prototype(kMwStreamerVideoPixelFormatNv12);
+  cv::cuda::GpuMat source(kHeight, kWidth, CV_8UC3);
+  cudaStream_t producer = nullptr;
+  REQUIRE(cudaStreamCreateWithFlags(&producer, cudaStreamNonBlocking) ==
+          cudaSuccess);
+
+  std::atomic<bool> producer_finished = false;
+  REQUIRE(cudaLaunchHostFunc(
+              producer,
+              [](void* state) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                static_cast<std::atomic<bool>*>(state)->store(true);
+              },
+              &producer_finished) == cudaSuccess);
+  REQUIRE(cudaMemset2DAsync(source.data, source.step, 128,
+                            static_cast<std::size_t>(kWidth) * 3, kHeight,
+                            producer) == cudaSuccess);
+
+  const auto converted = CudaMatAdapter::FromBgr(source, prototype.view());
+  CHECK(producer_finished.load());
+  CHECK(converted.view().buffer.memory_type == kMwStreamerMemoryCuda);
+  CHECK(cudaStreamDestroy(producer) == cudaSuccess);
+}
+
 TEST_CASE("CudaMatAdapter将FFmpeg CUDA View转换到调用方当前context") {
   constexpr int kContextWidth = 64;
   constexpr int kContextHeight = 64;
@@ -291,6 +320,28 @@ TEST_CASE("CudaMatAdapter将FFmpeg CUDA View转换到调用方当前context") {
                                 reinterpret_cast<CUdeviceptr>(bgr.data)) ==
           CUDA_SUCCESS);
   CHECK(bgr_context == caller_context);
+
+  REQUIRE(cuCtxPushCurrent(source_context) == CUDA_SUCCESS);
+  const auto cross_context_converted =
+      CudaMatAdapter::FromBgr(bgr, adapter.view());
+  CUcontext cross_context_result = nullptr;
+  REQUIRE(cuPointerGetAttribute(
+              &cross_context_result, CU_POINTER_ATTRIBUTE_CONTEXT,
+              static_cast<CUdeviceptr>(cross_context_converted.view()
+                                           .buffer.storage.linear.planes[0]
+                                           .address)) == CUDA_SUCCESS);
+  CHECK(cross_context_result == source_context);
+  const auto cross_context_host = cross_context_converted.ToHost();
+  CHECK(cross_context_host.view().buffer.pixel_format ==
+        kMwStreamerVideoPixelFormatNv12);
+  CUcontext popped_context = nullptr;
+  REQUIRE(cuCtxPopCurrent(&popped_context) == CUDA_SUCCESS);
+  REQUIRE(popped_context == source_context);
+  cv::Mat expected_bgr;
+  bgr.download(expected_bgr);
+  const cv::Mat cross_context_bgr =
+      HostMatAdapter::ToBgr(cross_context_host.view());
+  CheckMatsNear(expected_bgr, cross_context_bgr, 4);
 
   const auto converted = CudaMatAdapter::FromBgr(bgr, adapter.view());
   CUcontext converted_context = nullptr;

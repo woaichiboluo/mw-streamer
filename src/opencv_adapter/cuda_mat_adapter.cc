@@ -1,5 +1,6 @@
 #include "mw/opencv_adapter/cuda_mat_adapter.h"
 
+#include <cuda.h>
 #include <cuda_runtime_api.h>
 #include <nppcore.h>
 #include <nppi_arithmetic_and_logical_operations.h>
@@ -13,6 +14,8 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+
+#include "mw/opencv_adapter/internal/cuda_driver.h"
 
 namespace mw::opencv_adapter {
 namespace {
@@ -51,6 +54,16 @@ void ThrowIfCudaError(cudaError_t result, const char* operation) {
   }
   throw std::runtime_error(std::string(operation) +
                            "失败: " + cudaGetErrorName(result));
+}
+
+void ThrowIfCudaDriverError(CUresult result, const char* operation) {
+  if (result == CUDA_SUCCESS) {
+    return;
+  }
+  const char* error_name = nullptr;
+  cuGetErrorName(result, &error_name);
+  throw std::runtime_error(std::string(operation) + "失败: " +
+                           (error_name ? error_name : "CUDA_ERROR_UNKNOWN"));
 }
 
 void ThrowIfNppError(NppStatus status, const char* operation) {
@@ -146,6 +159,11 @@ PixelFormatInfo ValidatePrototype(const MwStreamerVideoFrameView& prototype) {
       buffer.height >
           static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
     throw std::invalid_argument("CudaMatAdapter要求有效的视频宽高");
+  }
+  if (format.layout == PixelLayout::kPlanar422 &&
+      buffer.height >
+          static_cast<std::uint32_t>(std::numeric_limits<int>::max() / 3)) {
+    throw std::invalid_argument("CudaMatAdapter视频高度超过NPP限制");
   }
   if ((IsSemiPlanar(format) || IsSubsampledHorizontally(format)) &&
       buffer.width % 2 != 0) {
@@ -288,6 +306,72 @@ void ValidateGpuMat(const cv::cuda::GpuMat& source,
       source.step > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     throw std::invalid_argument("OpenCV CUDA BGR GpuMat与视频原型不匹配");
   }
+}
+
+class ScopedCudaContext final {
+ public:
+  explicit ScopedCudaContext(CUcontext context) {
+    ThrowIfCudaDriverError(cuCtxPushCurrent(context), "设置CUDA context");
+  }
+
+  ~ScopedCudaContext() {
+    CUcontext popped_context = nullptr;
+    cuCtxPopCurrent(&popped_context);
+  }
+
+  ScopedCudaContext(const ScopedCudaContext&) = delete;
+  ScopedCudaContext& operator=(const ScopedCudaContext&) = delete;
+};
+
+CUcontext GetPointerContext(const void* address) {
+  EnsureCudaDriverInitialized();
+  CUcontext context = nullptr;
+  ThrowIfCudaDriverError(
+      cuPointerGetAttribute(&context, CU_POINTER_ATTRIBUTE_CONTEXT,
+                            reinterpret_cast<CUdeviceptr>(address)),
+      "查询CUDA指针context");
+  if (!context) {
+    throw std::runtime_error("CUDA指针没有有效context");
+  }
+  return context;
+}
+
+cv::cuda::GpuMat PrepareGpuMat(const cv::cuda::GpuMat& source,
+                               CUcontext destination_context) {
+  const CUcontext source_context = GetPointerContext(source.data);
+  // The API has no producer stream parameter. Synchronize the owning context
+  // before copying or reading from a non-default/non-blocking stream.
+  {
+    ScopedCudaContext context(source_context);
+    ThrowIfCudaDriverError(cuCtxSynchronize(),
+                           "等待OpenCV CUDA BGR GpuMat写入完成");
+  }
+  if (source_context == destination_context) {
+    return source;
+  }
+
+  cv::cuda::GpuMat staged(source.rows, source.cols, source.type());
+  if (staged.empty() ||
+      staged.step > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::runtime_error("分配跨context OpenCV CUDA BGR GpuMat失败");
+  }
+  CUDA_MEMCPY3D_PEER copy{};
+  copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+  copy.srcDevice = reinterpret_cast<CUdeviceptr>(source.data);
+  copy.srcContext = source_context;
+  copy.srcPitch = source.step;
+  copy.srcHeight = static_cast<std::size_t>(source.rows);
+  copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+  copy.dstDevice = reinterpret_cast<CUdeviceptr>(staged.data);
+  copy.dstContext = destination_context;
+  copy.dstPitch = staged.step;
+  copy.dstHeight = static_cast<std::size_t>(staged.rows);
+  copy.WidthInBytes = static_cast<std::size_t>(source.cols) * source.elemSize();
+  copy.Height = static_cast<std::size_t>(source.rows);
+  copy.Depth = 1;
+  ThrowIfCudaDriverError(cuMemcpy3DPeer(&copy),
+                         "跨context复制OpenCV CUDA BGR GpuMat");
+  return staged;
 }
 
 template <typename Sample>
@@ -680,21 +764,27 @@ CudaFrame CudaMatAdapter::FromBgr(const cv::cuda::GpuMat& source,
   ValidateGpuMat(source, prototype, format);
   auto destination = CudaFrame::AllocateLike(prototype);
   auto& destination_view = destination.mutable_view();
+  const CUcontext destination_context = GetPointerContext(
+      reinterpret_cast<const void*>(
+          destination_view.buffer.storage.linear.planes[0].address));
+  ScopedCudaContext context(destination_context);
+  const cv::cuda::GpuMat prepared_source =
+      PrepareGpuMat(source, destination_context);
   const auto stream_context = MakeNppStreamContext();
   if (IsSemiPlanar(format)) {
     if (format.bytes_per_sample == 1) {
-      ConvertBgrToSemiPlanar<Npp8u>(source, &destination_view, format,
+      ConvertBgrToSemiPlanar<Npp8u>(prepared_source, &destination_view, format,
                                     stream_context);
     } else {
-      ConvertBgrToSemiPlanar<Npp16u>(source, &destination_view, format,
+      ConvertBgrToSemiPlanar<Npp16u>(prepared_source, &destination_view, format,
                                      stream_context);
     }
   } else if (format.layout == PixelLayout::kPlanar444) {
     if (format.bytes_per_sample == 1) {
-      ConvertBgrToPlanar444<Npp8u>(source, &destination_view, format,
+      ConvertBgrToPlanar444<Npp8u>(prepared_source, &destination_view, format,
                                    stream_context);
     } else {
-      ConvertBgrToPlanar444<Npp16u>(source, &destination_view, format,
+      ConvertBgrToPlanar444<Npp16u>(prepared_source, &destination_view, format,
                                     stream_context);
       if (format.value_bits == 10) {
         ClampPlanar10(&destination_view, format, stream_context);
@@ -702,17 +792,17 @@ CudaFrame CudaMatAdapter::FromBgr(const cv::cuda::GpuMat& source,
     }
   } else if (format.layout == PixelLayout::kPlanar420) {
     if (format.bytes_per_sample == 1) {
-      ConvertBgrToPlanar420<Npp8u>(source, &destination_view, format,
+      ConvertBgrToPlanar420<Npp8u>(prepared_source, &destination_view, format,
                                    stream_context);
     } else {
-      ConvertBgrToPlanar420<Npp16u>(source, &destination_view, format,
+      ConvertBgrToPlanar420<Npp16u>(prepared_source, &destination_view, format,
                                     stream_context);
     }
   } else if (format.bytes_per_sample == 1) {
-    ConvertBgrToPlanar422<Npp8u>(source, &destination_view, format,
+    ConvertBgrToPlanar422<Npp8u>(prepared_source, &destination_view, format,
                                  stream_context);
   } else {
-    ConvertBgrToPlanar422<Npp16u>(source, &destination_view, format,
+    ConvertBgrToPlanar422<Npp16u>(prepared_source, &destination_view, format,
                                   stream_context);
   }
   ThrowIfCudaError(cudaDeviceSynchronize(), "等待CUDA YUV转换完成");
