@@ -180,12 +180,6 @@ MW_STREAMER_API const char* mw_last_error(void);
 MW_STREAMER_API MwResult mw_pipeline_create_from_toml(
     const MwPipelineCreateInfo* create_info, MwPipeline** output);
 
-// Before Start, replaces the initial Processor config. While running, invokes
-// its update callback and may run concurrently with media callbacks. Strings
-// are borrowed only for this call.
-MW_STREAMER_API MwResult mw_pipeline_set_processor_config(
-    MwPipeline* pipeline, const char* processor_id, const char* config);
-
 // A Pipeline permits one start attempt. Synchronous failures are returned;
 // later failures are reported by state and error queries.
 MW_STREAMER_API MwResult mw_pipeline_start(MwPipeline* pipeline);

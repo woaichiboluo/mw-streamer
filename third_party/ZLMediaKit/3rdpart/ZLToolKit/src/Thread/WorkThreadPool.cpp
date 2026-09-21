@@ -15,38 +15,7 @@ namespace toolkit {
 static size_t s_pool_size = 0;
 static bool s_enable_cpu_affinity = true;
 
-static std::mutex s_pool_mutex;
-static WorkThreadPool::Ptr &poolInstance() {
-    static WorkThreadPool::Ptr instance;
-    return instance;
-}
-
-WorkThreadPool &WorkThreadPool::Instance() {
-    std::lock_guard<std::mutex> lock(s_pool_mutex);
-    auto &instance = poolInstance();
-    if (!instance) {
-        instance.reset(new WorkThreadPool());
-    }
-    return *instance;
-}
-
-void WorkThreadPool::destroyIfCreated() {
-    Ptr instance;
-    {
-        std::lock_guard<std::mutex> lock(s_pool_mutex);
-        instance.swap(poolInstance());
-    }
-    if (instance) {
-        instance->for_each([](const TaskExecutor::Ptr &executor) {
-            std::static_pointer_cast<EventPoller>(executor)->shutdown();
-        });
-    }
-}
-
-bool WorkThreadPool::isCreated() {
-    std::lock_guard<std::mutex> lock(s_pool_mutex);
-    return static_cast<bool>(poolInstance());
-}
+INSTANCE_IMP(WorkThreadPool)
 
 EventPoller::Ptr WorkThreadPool::getFirstPoller() {
     return std::static_pointer_cast<EventPoller>(getFirstExecutor());
@@ -71,3 +40,4 @@ void WorkThreadPool::enableCpuAffinity(bool enable) {
 }
 
 } /* namespace toolkit */
+

@@ -135,15 +135,6 @@ class TransformProcessorSink::Impl final {
     }
   }
 
-  void SetConfig(std::string config) {
-    std::shared_lock<std::shared_mutex> lifecycle_lock(lifecycle_mutex_);
-    std::lock_guard<std::mutex> update_lock(update_mutex_);
-    processor_config_ = std::move(config);
-    if (context_) {
-      Context().UpdateConfig(processor_config_);
-    }
-  }
-
   bool OnMessage(const MwStreamerMessage& message) {
     std::shared_lock<std::shared_mutex> lock(lifecycle_mutex_);
     if (stopping_.load() || !context_) {
@@ -173,11 +164,10 @@ class TransformProcessorSink::Impl final {
       throw std::logic_error("TransformProcessorSink启动前至少需要一个下游");
     }
     auto context = std::make_unique<internal::ProcessorSinkContext>(streams);
-    const MwStreamerTransformProcessorConfig config{processor_config_.c_str()};
     MwStreamerVideoOutputSize video_output_size{video_output_width_,
                                                 video_output_height_};
     const MwStreamerTransformProcessorStartRequest request{
-        &context->source_info(), &config, &context->execution(),
+        &context->source_info(), &context->execution(),
         context->source_info().has_video ? &video_output_size : nullptr};
     const auto result =
         callbacks_.on_start
@@ -188,7 +178,7 @@ class TransformProcessorSink::Impl final {
     }
     PrepareAllocators(context->source_info(), video_output_size);
     context->MarkStarted(callbacks_.user_context, callbacks_.on_boundary,
-                         callbacks_.on_config_update, callbacks_.on_stop);
+                         callbacks_.on_stop);
     context_ = std::move(context);
   }
 
@@ -271,10 +261,8 @@ class TransformProcessorSink::Impl final {
                                        PerformanceUnit::kFrame,
                                        PerformanceUnit::kFrame};
   TransformProcessorSink& owner_;
-  std::string processor_config_;
   const MwStreamerTransformProcessorCallbacks callbacks_;
   std::shared_mutex lifecycle_mutex_;
-  std::mutex update_mutex_;
   std::mutex stop_mutex_;
   std::unique_ptr<internal::ProcessorSinkContext> context_;
   std::optional<internal::AudioFrameAllocator> audio_allocator_;
@@ -320,10 +308,6 @@ void TransformProcessorSink::OnTimelineReset(const TimelineReset& reset) {
 void TransformProcessorSink::OnInputEnded(const StreamEnded& end) {
   CloseRegistration();
   impl_->OnInputEnded(end);
-}
-
-void TransformProcessorSink::UpdateConfig(std::string config) {
-  impl_->SetConfig(std::move(config));
 }
 
 void TransformProcessorSink::OnMessage(const MwStreamerMessage& message) {

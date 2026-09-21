@@ -18,7 +18,6 @@
 - 当前解析器会记录并忽略未知字段；类型错误、未知枚举、整数越界和静态配置错误
   会抛出异常。
 - `[log]` 和根级 `[zlm]` 是进程级配置，仅由 `BuildPipelineFromToml()` 应用；
-  每轮共享运行时采用第一个 Pipeline 的配置，最后一个 Pipeline 销毁后释放。
   `ParsePipelineConfigFromToml()` 返回的 `PipelineConfig` 只包含 Input 和 Sink。
 
 ## 日志 `[log]`
@@ -43,12 +42,7 @@
 
 ## ZLToolKit 运行时 `[zlm]`
 
-根级 `[zlm]` 可省略，在每轮共享运行时由第一个 Pipeline 创建时生效；同时存活的 Pipeline 共用该配置。
-
-Pipeline 是运行时的唯一所有者，所有网络 Input/Output 都是挂载在 Pipeline 上的任务。
-销毁 Pipeline 会先停止并释放自身任务；最后一个 Pipeline 销毁时自动关闭共享线程池和 SRT reactor，
-无需宿主主动初始化或关闭运行时。随后创建新的 Pipeline 会重新初始化，并使用新一轮的配置。
-宿主应在退出进程或卸载库之前销毁所有 Pipeline，不能从 Pipeline 的任务回调中销毁它。
+根级 `[zlm]` 可省略，并且只在进程首次初始化时生效。
 
 | TOML 字段 | C++ 字段 | 类型 | 默认值 | 约束与说明 |
 | --- | --- | --- | --- | --- |
@@ -138,7 +132,7 @@ Sink ID 投递，不需要在配置中声明连接。
 `downstream`，没有专属 TOML 字段。
 
 业务回调通过 `ProcessorBindings::analysis` 按 Sink ID 注入，可以省略。Processor
-业务配置不属于 TOML，由 `Pipeline::SetProcessorConfig()` 设置。
+业务配置不属于 TOML，由 Processor 自身维护。
 
 ## Transform Processor Sink
 
@@ -146,8 +140,7 @@ Sink ID 投递，不需要在配置中声明连接。
 没有专属 TOML 字段。
 
 业务回调通过 `ProcessorBindings::transform` 按 Sink ID 注入，可以省略。未提供某类
-处理回调时使用既有透传语义。Processor 业务配置通过
-`Pipeline::SetProcessorConfig()` 设置。
+处理回调时使用既有透传语义。Processor 业务配置由其自身维护。
 
 ## Frame Custom Sink 和 Packet Custom Sink
 

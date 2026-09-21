@@ -2,7 +2,6 @@
 #define MW_STREAMER_PROCESSOR_PROCESSOR_HANDLER_H_
 
 #include <memory>
-#include <string>
 
 #include "mw/streamer/ffmpeg/frame.h"
 #include "mw/streamer/processor/processor.h"
@@ -21,7 +20,6 @@ class ProcessorHandler {
   ProcessorHandler& operator=(const ProcessorHandler&) = delete;
 
   void NotifyBoundary(MwStreamerProcessorBoundaryReason reason);
-  void UpdateConfig(std::string config);
   void Stop() noexcept;
 
  protected:
@@ -31,7 +29,6 @@ class ProcessorHandler {
   void RequireStarted(const char* operation) const;
   void MarkStarted(void* user_context,
                    MwStreamerProcessorBoundaryCallback on_boundary,
-                   MwStreamerProcessorUpdateConfigCallback update_config,
                    MwStreamerProcessorStopCallback on_stop);
   void ValidateVideoInput(const AVFrame& input,
                           const MwStreamerVideoFrameView& view) const;

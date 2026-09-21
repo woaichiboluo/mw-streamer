@@ -61,7 +61,7 @@ id = "processor"
 type = "transform_processor"
 downstream = ["synchronizer"]
 
-# Processor 业务配置由宿主通过 Pipeline::SetProcessorConfig() 按 ID 提供。
+# Processor 业务配置由其自身维护。
 
 [[sinks]]
 id = "synchronizer"

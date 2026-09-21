@@ -72,10 +72,6 @@ class ZlmInput::Impl final {
       // PlayerProxy disposes its sinks asynchronously. Keep this bridge's
       // owner alive until that task has released all references to it.
       poller->sync([] {});
-      // A sync barrier can wake us before the current task batch drops its
-      // captured PlayerProxy references. Join this exclusive loop while we
-      // still hold it, before Pipeline releases the shared runtime.
-      poller->shutdown();
     }
   }
 

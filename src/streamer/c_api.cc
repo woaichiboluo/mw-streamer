@@ -312,17 +312,6 @@ MwResult mw_pipeline_create_from_toml(const MwPipelineCreateInfo* create_info,
   }
 }
 
-MwResult mw_pipeline_set_processor_config(MwPipeline* pipeline,
-                                          const char* processor_id,
-                                          const char* config) {
-  return Guard([&] {
-    if (pipeline == nullptr || processor_id == nullptr || config == nullptr) {
-      throw std::invalid_argument("Pipeline和Processor配置参数不能为空");
-    }
-    pipeline->pipeline->SetProcessorConfig(processor_id, config);
-  });
-}
-
 MwResult mw_pipeline_start(MwPipeline* pipeline) {
   return Guard([&] {
     if (pipeline == nullptr) throw std::invalid_argument("Pipeline不能为空");

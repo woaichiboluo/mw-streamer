@@ -147,8 +147,6 @@ struct CallbackState {
   bool fail_start = false;
   bool independent_video = true;
   bool independent_audio = true;
-  std::string initial_config;
-  std::string updated_config;
   MwStreamerProcessorSourceInfo source{};
   MwStreamerVideoOutputSize video_output_size{64, 32};
 };
@@ -160,10 +158,6 @@ void Boundary(MwStreamerProcessorBoundaryReason reason, void* context) {
   } else if (reason == kMwStreamerProcessorEndOfInput) {
     ++state.ends;
   }
-}
-
-void Update(const char* config, void* context) {
-  static_cast<CallbackState*>(context)->updated_config = config;
 }
 
 void StopCallback(void* context) {
@@ -178,7 +172,6 @@ MwStreamerAnalysisProcessorCallbacks AnalysisCallbacks(CallbackState& state) {
          void* context) {
         auto& state = *static_cast<CallbackState*>(context);
         ++state.starts;
-        state.initial_config = request->config->config;
         state.source = *request->source_info;
         return state.fail_start ? kMwStreamerProcessorStartFailed
                                 : kMwStreamerProcessorStartSuccess;
@@ -190,7 +183,6 @@ MwStreamerAnalysisProcessorCallbacks AnalysisCallbacks(CallbackState& state) {
     ++static_cast<CallbackState*>(context)->audios;
   };
   callbacks.on_boundary = Boundary;
-  callbacks.on_config_update = Update;
   callbacks.on_stop = StopCallback;
   return callbacks;
 }
@@ -203,7 +195,6 @@ MwStreamerTransformProcessorCallbacks TransformCallbacks(CallbackState& state) {
          void* context) {
         auto& state = *static_cast<CallbackState*>(context);
         ++state.starts;
-        state.initial_config = request->config->config;
         state.source = *request->source_info;
         if (request->video_output_size) {
           *request->video_output_size = state.video_output_size;
@@ -242,7 +233,6 @@ MwStreamerTransformProcessorCallbacks TransformCallbacks(CallbackState& state) {
         }
       };
   callbacks.on_boundary = Boundary;
-  callbacks.on_config_update = Update;
   callbacks.on_stop = StopCallback;
   return callbacks;
 }
@@ -325,13 +315,11 @@ TEST_CASE("AnalysisProcessorSink只消费输入并保留跨代处理上下文") 
   CallbackState state;
   {
     AnalysisProcessorSink sink("processor", AnalysisCallbacks(state));
-    sink.UpdateConfig("initial");
     sink.OnStreamsReady(Streams());
     auto video = Video();
     auto audio = Audio();
     sink.OnVideoFrame({1, video});
     sink.OnAudioFrame({1, audio});
-    sink.UpdateConfig("updated");
     sink.OnInputEnded({1, StreamEndReason::kInterrupted});
     CHECK(state.ends == 0);
     sink.OnTimelineReset({2, TimelineResetReason::kReconnect, std::nullopt});
@@ -349,8 +337,6 @@ TEST_CASE("AnalysisProcessorSink只消费输入并保留跨代处理上下文") 
   CHECK(state.resets == 1);
   CHECK(state.ends == 1);
   CHECK(state.stops == 1);
-  CHECK(state.initial_config == "initial");
-  CHECK(state.updated_config == "updated");
   CHECK(state.source.video.width == 64);
   CHECK(state.source.audio.sample_rate == 44100);
 }
@@ -468,13 +454,11 @@ TEST_CASE("TransformProcessorSink回调使用独立输出并向多个下游保�
   {
     state.video_output_size = {32, 16};
     TransformProcessorSink sink("processor", TransformCallbacks(state));
-    sink.UpdateConfig("initial");
     sink.AddSink(std::make_unique<Recorder>(first));
     sink.AddSink(std::make_unique<Recorder>(second, "second"));
     sink.OnStreamsReady(Streams());
     sink.OnVideoFrame({1, video});
     sink.OnAudioFrame({1, audio});
-    sink.UpdateConfig("updated");
     sink.OnTimelineReset(
         {2, TimelineResetReason::kSeek, std::chrono::milliseconds(0)});
     sink.OnStreamsReady(Streams(2));
@@ -490,7 +474,6 @@ TEST_CASE("TransformProcessorSink回调使用独立输出并向多个下游保�
   CHECK(state.stops == 1);
   CHECK(state.resets == 1);
   CHECK(state.ends == 1);
-  CHECK(state.updated_config == "updated");
   CHECK(video->data[0][0] == 0x21);
   CHECK(reinterpret_cast<float*>(audio->data[0])[0] == 1.0F);
   for (const auto* output : {&first, &second}) {
@@ -570,107 +553,6 @@ TEST_CASE("TransformProcessorSink限制下游注册并传播下游异常") {
     sink.Stop();
     CHECK(recorded.stops == 1);
   }
-}
-
-TEST_CASE("TransformProcessorSink允许配置与媒体并发且Stop等待两者") {
-  using namespace std::chrono_literals;
-  struct BlockingState {
-    std::promise<void> video_entered;
-    std::promise<void> update_entered;
-    std::shared_future<void> release_video;
-    std::shared_future<void> release_update;
-    std::atomic<bool> video_active = false;
-    std::atomic<bool> update_active = false;
-    std::atomic<bool> concurrent_update = false;
-    std::atomic<bool> stop_overlapped = false;
-    std::atomic<int> stop_calls = 0;
-  } state;
-  std::promise<void> release_video;
-  std::promise<void> release_update;
-  state.release_video = release_video.get_future().share();
-  state.release_update = release_update.get_future().share();
-  auto video_entered = state.video_entered.get_future();
-  auto update_entered = state.update_entered.get_future();
-
-  MwStreamerTransformProcessorCallbacks callbacks{};
-  callbacks.user_context = &state;
-  callbacks.on_start = [](const MwStreamerTransformProcessorStartRequest*,
-                          void*) { return kMwStreamerProcessorStartSuccess; };
-  callbacks.process_video =
-      [](const MwStreamerTransformVideoProcessRequest* request, void* context) {
-        auto& state = *static_cast<BlockingState*>(context);
-        state.video_active.store(true);
-        state.video_entered.set_value();
-        state.release_video.wait();
-        for (std::uint32_t plane = 0;
-             plane < request->output->storage.linear.plane_count; ++plane) {
-          const auto& view = request->output->storage.linear.planes[plane];
-          auto* data = reinterpret_cast<std::uint8_t*>(view.address);
-          for (std::uint32_t row = 0; row < view.row_count; ++row) {
-            std::memset(data + row * view.stride_bytes, 0x55, view.row_bytes);
-          }
-        }
-        state.video_active.store(false);
-      };
-  callbacks.on_config_update = [](const char*, void* context) {
-    auto& state = *static_cast<BlockingState*>(context);
-    state.update_active.store(true);
-    state.concurrent_update.store(state.video_active.load());
-    state.update_entered.set_value();
-    state.release_update.wait();
-    state.update_active.store(false);
-  };
-  callbacks.on_stop = [](void* context) {
-    auto& state = *static_cast<BlockingState*>(context);
-    state.stop_overlapped.store(state.video_active.load() ||
-                                state.update_active.load());
-    state.stop_calls.fetch_add(1);
-  };
-
-  Recorded recorded;
-  TransformProcessorSink sink("processor", callbacks);
-  sink.AddSink(std::make_unique<Recorder>(recorded));
-  sink.OnStreamsReady(Streams());
-  auto frame = Video();
-  auto video = std::async(std::launch::async, [&]() {
-    sink.OnVideoFrame({1, frame});
-  });
-  const auto video_started = video_entered.wait_for(2s);
-  auto update = std::async(std::launch::async,
-                           [&]() { sink.UpdateConfig("concurrent"); });
-  const auto update_started = update_entered.wait_for(2s);
-  std::promise<void> stop_entered;
-  auto stop_entered_future = stop_entered.get_future();
-  auto stop = std::async(std::launch::async, [&]() {
-    stop_entered.set_value();
-    sink.Stop();
-  });
-  const auto stop_started = stop_entered_future.wait_for(2s);
-  const auto stop_before_release = stop.wait_for(20ms);
-  release_video.set_value();
-  const auto video_finished = video.wait_for(2s);
-  const auto stop_while_updating = stop.wait_for(20ms);
-  release_update.set_value();
-  const auto update_finished = update.wait_for(2s);
-  const auto stop_finished = stop.wait_for(2s);
-
-  // Release both callbacks before assertions so a failed concurrency check
-  // cannot leave async future destruction waiting on this test's own gate.
-  REQUIRE(video_started == std::future_status::ready);
-  REQUIRE(update_started == std::future_status::ready);
-  REQUIRE(stop_started == std::future_status::ready);
-  CHECK(stop_before_release == std::future_status::timeout);
-  CHECK(stop_while_updating == std::future_status::timeout);
-  REQUIRE(video_finished == std::future_status::ready);
-  REQUIRE(update_finished == std::future_status::ready);
-  REQUIRE(stop_finished == std::future_status::ready);
-  CHECK_NOTHROW(video.get());
-  CHECK_NOTHROW(update.get());
-  CHECK_NOTHROW(stop.get());
-  CHECK(state.concurrent_update.load());
-  CHECK_FALSE(state.stop_overlapped.load());
-  CHECK(state.stop_calls.load() == 1);
-  CHECK(recorded.stops == 1);
 }
 
 TEST_CASE("AnalysisProcessorSink按音视频分别累计且读取不会清零") {

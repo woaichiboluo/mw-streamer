@@ -222,20 +222,10 @@ typedef struct MwStreamerProcessorSourceInfo {
   MwStreamerAudioSourceInfo audio;
 } MwStreamerProcessorSourceInfo;
 
-// config is a null-terminated opaque user string supplied by the host through
-// Pipeline::SetProcessorConfig.
-typedef struct MwStreamerTransformProcessorConfig {
-  const char* config;
-} MwStreamerTransformProcessorConfig;
-
 typedef struct MwStreamerVideoOutputSize {
   uint32_t width;
   uint32_t height;
 } MwStreamerVideoOutputSize;
-
-typedef struct MwStreamerAnalysisProcessorConfig {
-  const char* config;
-} MwStreamerAnalysisProcessorConfig;
 
 typedef struct MwStreamerTransformVideoProcessRequest {
   const MwStreamerVideoFrameView* input;
@@ -251,7 +241,6 @@ typedef struct MwStreamerTransformAudioProcessRequest {
 
 typedef struct MwStreamerTransformProcessorStartRequest {
   const MwStreamerProcessorSourceInfo* source_info;
-  const MwStreamerTransformProcessorConfig* config;
   const MwStreamerExecutionContext* execution;
   // Non-null only when source_info->has_video is true. The framework
   // initializes it to 1920x1080 before on_start. The callback may overwrite
@@ -262,7 +251,6 @@ typedef struct MwStreamerTransformProcessorStartRequest {
 
 typedef struct MwStreamerAnalysisProcessorStartRequest {
   const MwStreamerProcessorSourceInfo* source_info;
-  const MwStreamerAnalysisProcessorConfig* config;
   const MwStreamerExecutionContext* execution;
 } MwStreamerAnalysisProcessorStartRequest;
 
@@ -306,9 +294,6 @@ typedef void (*MwStreamerAnalysisProcessAudioCallback)(
 typedef void (*MwStreamerProcessorBoundaryCallback)(
     MwStreamerProcessorBoundaryReason reason, void* user_context);
 
-typedef void (*MwStreamerProcessorUpdateConfigCallback)(const char* config,
-                                                        void* user_context);
-
 typedef void (*MwStreamerProcessorStopCallback)(void* user_context);
 
 typedef void (*MwStreamerProcessorMessageCallback)(
@@ -319,8 +304,8 @@ typedef struct MwStreamerTransformProcessorCallbacks {
   // never reads or releases it.
   void* user_context;
 
-  // on_start receives source information, execution context, initial config,
-  // and a writable default video output size before the first process callback.
+  // on_start receives source information, execution context, and a writable
+  // default video output size before the first process callback.
   // User code that needs the backend stream must copy it into user_context
   // here. All request views are borrowed for the callback.
   MwStreamerTransformProcessorStartCallback on_start;
@@ -330,12 +315,6 @@ typedef struct MwStreamerTransformProcessorCallbacks {
   // Optional. A boundary is emitted once for the whole Processor, not once per
   // audio or video stream.
   MwStreamerProcessorBoundaryCallback on_boundary;
-
-  // Runtime updates originate from the Pipeline control thread and may run
-  // concurrently with audio and video processing. The null-terminated string
-  // is borrowed for the callback; user code must copy data it needs after
-  // returning and synchronize access to its own runtime state.
-  MwStreamerProcessorUpdateConfigCallback on_config_update;
 
   // Called once after a successful on_start, after all process callbacks and
   // their submitted output work have completed. Exceptions are logged and
@@ -360,10 +339,6 @@ typedef struct MwStreamerAnalysisProcessorCallbacks {
   // Optional. A boundary is emitted once for the whole Processor, not once per
   // audio or video stream.
   MwStreamerProcessorBoundaryCallback on_boundary;
-
-  // Runtime updates may run concurrently with audio and video processing. The
-  // null-terminated string is borrowed for the callback.
-  MwStreamerProcessorUpdateConfigCallback on_config_update;
 
   // Called once after a successful on_start and all processing has completed.
   MwStreamerProcessorStopCallback on_stop;

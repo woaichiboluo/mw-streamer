@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <atomic>
 #include <exception>
-#include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
 #include <utility>
@@ -89,15 +88,6 @@ class AnalysisProcessorSink::Impl final {
     Context().End(end);
   }
 
-  void SetConfig(std::string config) {
-    std::shared_lock<std::shared_mutex> lifecycle_lock(lifecycle_mutex_);
-    std::lock_guard<std::mutex> update_lock(update_mutex_);
-    processor_config_ = std::move(config);
-    if (context_) {
-      Context().UpdateConfig(processor_config_);
-    }
-  }
-
   bool OnMessage(const MwStreamerMessage& message) {
     std::shared_lock<std::shared_mutex> lock(lifecycle_mutex_);
     if (stopping_.load() || !context_) {
@@ -119,9 +109,8 @@ class AnalysisProcessorSink::Impl final {
  private:
   void Start(const FrameStreamsReady& streams) {
     auto context = std::make_unique<internal::ProcessorSinkContext>(streams);
-    const MwStreamerAnalysisProcessorConfig config{processor_config_.c_str()};
     const MwStreamerAnalysisProcessorStartRequest request{
-        &context->source_info(), &config, &context->execution()};
+        &context->source_info(), &context->execution()};
     const auto result =
         callbacks_.on_start
             ? callbacks_.on_start(&request, callbacks_.user_context)
@@ -130,7 +119,7 @@ class AnalysisProcessorSink::Impl final {
       throw std::runtime_error("AnalysisProcessorSink拒绝启动");
     }
     context->MarkStarted(callbacks_.user_context, callbacks_.on_boundary,
-                         callbacks_.on_config_update, callbacks_.on_stop);
+                         callbacks_.on_stop);
     context_ = std::move(context);
   }
 
@@ -159,10 +148,8 @@ class AnalysisProcessorSink::Impl final {
                                        PerformanceUnit::kFrame,
                                        PerformanceUnit::kNone};
   AnalysisProcessorSink& owner_;
-  std::string processor_config_;
   const MwStreamerAnalysisProcessorCallbacks callbacks_;
   std::shared_mutex lifecycle_mutex_;
-  std::mutex update_mutex_;
   std::unique_ptr<internal::ProcessorSinkContext> context_;
   std::atomic<bool> stopping_{false};
   bool stopped_ = false;
@@ -202,10 +189,6 @@ void AnalysisProcessorSink::OnTimelineReset(const TimelineReset& reset) {
 void AnalysisProcessorSink::OnInputEnded(const StreamEnded& end) {
   CloseRegistration();
   impl_->OnInputEnded(end);
-}
-
-void AnalysisProcessorSink::UpdateConfig(std::string config) {
-  impl_->SetConfig(std::move(config));
 }
 
 void AnalysisProcessorSink::OnMessage(const MwStreamerMessage& message) {

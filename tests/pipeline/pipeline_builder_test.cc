@@ -71,7 +71,6 @@ struct AnalysisState {
   int videos_at_end = 0;
   bool has_audio = false;
   bool has_video = false;
-  std::string initial_config;
 };
 
 MwStreamerAnalysisProcessorCallbacks AnalysisCallbacks(AnalysisState& state) {
@@ -84,7 +83,6 @@ MwStreamerAnalysisProcessorCallbacks AnalysisCallbacks(AnalysisState& state) {
         ++state.starts;
         state.has_audio = request->source_info->has_audio;
         state.has_video = request->source_info->has_video;
-        state.initial_config = request->config->config;
         return kMwStreamerProcessorStartSuccess;
       };
   callbacks.process_audio = [](const MwStreamerAudioFrameView* frame,
@@ -167,8 +165,6 @@ TEST_CASE("Pipeline builder owns typed configuration and binds analysis by ID",
     bindings.analysis.emplace("analysis", AnalysisCallbacks(state));
     return BuildPipeline(config, bindings);
   }();
-  pipeline->SetProcessorConfig("analysis", "mode = 'integration'");
-
   // Both configuration and binding containers have been destroyed.
   pipeline->Start();
   const bool finished = WaitUntil([&] {
@@ -184,7 +180,6 @@ TEST_CASE("Pipeline builder owns typed configuration and binds analysis by ID",
   CHECK(state.stops.load() == 1);
   CHECK(state.has_audio);
   CHECK(state.has_video);
-  CHECK(state.initial_config == "mode = 'integration'");
   CHECK(state.valid_frames.load());
   CHECK(state.audios.load() > 0);
   CHECK(state.videos.load() > 0);

@@ -30,9 +30,6 @@ class AnalysisProcessorSink final : public Sink {
   void OnTimelineReset(const TimelineReset& reset) override;
   void OnInputEnded(const StreamEnded& end) override;
 
-  // Before startup, stores the value for on_start. Afterwards, updates
-  // serialize with each other and invoke on_config_update.
-  void UpdateConfig(std::string config);
   // Waits for callbacks; pairs on_stop only with successful startup.
   // Idempotent.
   void Stop() noexcept override;

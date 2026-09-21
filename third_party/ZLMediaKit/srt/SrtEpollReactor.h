@@ -35,10 +35,6 @@ public:
     static SrtEpollReactor &Instance();
     static bool isCreated() noexcept;
     static void shutdownIfCreated();
-    // After all socket owners are gone, stop and release the reactor from a
-    // non-reactor thread. The runtime owner serializes this with new users.
-    // Unlike shutdownIfCreated(), Instance() can create a fresh reactor later.
-    static void destroyIfCreated();
 
     /**
      * Register a socket and its interested epoll events.

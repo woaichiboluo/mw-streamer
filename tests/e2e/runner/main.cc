@@ -474,7 +474,7 @@ MwStreamerProcessorStartResult OnAnalysisProcessorStart(
     void* user_context) {
   auto* observer = static_cast<AnalysisProcessorObserver*>(user_context);
   if (!observer || !observer->events || !request || !request->source_info ||
-      !request->config || !request->execution) {
+      !request->execution) {
     return kMwStreamerProcessorStartFailed;
   }
   observer->has_audio.store(request->source_info->has_audio);
@@ -544,7 +544,7 @@ MwStreamerProcessorStartResult OnProcessorStart(
     void* user_context) {
   auto* observer = static_cast<ProcessorObserver*>(user_context);
   if (!observer || !observer->events || !request || !request->source_info ||
-      !request->config || !request->execution) {
+      !request->execution) {
     return kMwStreamerProcessorStartFailed;
   }
   if (request->source_info->has_video && !request->video_output_size) {
@@ -965,11 +965,9 @@ MwStreamerProcessorStartResult OnAnalysisStart(
     const MwStreamerAnalysisProcessorStartRequest* request,
     void* user_context) {
   if (!request) return kMwStreamerProcessorStartFailed;
-  MwStreamerTransformProcessorConfig config{};
-  config.config = request->config->config;
   MwStreamerVideoOutputSize video_output_size{};
   const MwStreamerTransformProcessorStartRequest adapted{
-      request->source_info, &config, request->execution, &video_output_size};
+      request->source_info, request->execution, &video_output_size};
   return OnProcessorStart(&adapted, user_context);
 }
 

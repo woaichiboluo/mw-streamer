@@ -10,7 +10,6 @@ typedef struct TestProcessor {
   uint32_t video_calls;
   uint32_t audio_calls;
   uint32_t boundary_calls;
-  uint32_t update_calls;
   uint32_t stop_calls;
   MwStreamerExecutionContext execution;
 } TestProcessor;
@@ -25,7 +24,6 @@ static MwStreamerProcessorStartResult OnStart(
       !request->video_output_size ||
       request->video_output_size->width != 1920 ||
       request->video_output_size->height != 1080 ||
-      strcmp(request->config->config, "initial") != 0 ||
       request->execution->type != kMwStreamerExecutionCuda) {
     return kMwStreamerProcessorStartFailed;
   }
@@ -73,13 +71,6 @@ static void OnBoundary(MwStreamerProcessorBoundaryReason reason,
   }
 }
 
-static void UpdateConfig(const char* config, void* user_context) {
-  TestProcessor* processor = user_context;
-  if (strcmp(config, "updated") == 0) {
-    ++processor->update_calls;
-  }
-}
-
 static void OnStop(void* user_context) {
   TestProcessor* processor = user_context;
   ++processor->stop_calls;
@@ -90,7 +81,6 @@ static MwStreamerProcessorStartResult OnFileStart(
     void* user_context) {
   TestProcessor* processor = user_context;
   if (!request->source_info->has_video || !request->source_info->has_audio ||
-      strcmp(request->config->config, "file") != 0 ||
       request->execution->type != kMwStreamerExecutionCuda) {
     return kMwStreamerProcessorStartFailed;
   }
@@ -135,11 +125,7 @@ int main(void) {
       .process_video = ProcessVideo,
       .process_audio = ProcessAudio,
       .on_boundary = OnBoundary,
-      .on_config_update = UpdateConfig,
       .on_stop = OnStop,
-  };
-  const MwStreamerTransformProcessorConfig config = {
-      .config = "initial",
   };
   const MwStreamerProcessorSourceInfo source_info = {
       .has_video = 1,
@@ -212,7 +198,6 @@ int main(void) {
   MwStreamerVideoOutputSize video_output_size = {.width = 1920, .height = 1080};
   const MwStreamerTransformProcessorStartRequest start_request = {
       .source_info = &source_info,
-      .config = &config,
       .execution = &execution,
       .video_output_size = &video_output_size,
   };
@@ -271,12 +256,11 @@ int main(void) {
   callbacks.process_audio(&audio_request, callbacks.user_context);
 
   callbacks.on_boundary(kMwStreamerProcessorEndOfInput, callbacks.user_context);
-  callbacks.on_config_update("updated", callbacks.user_context);
   callbacks.on_stop(callbacks.user_context);
 
   if (processor.start_calls != 1 || processor.video_calls != 1 ||
       processor.audio_calls != 1 || processor.boundary_calls != 1 ||
-      processor.update_calls != 1 || processor.stop_calls != 1) {
+      processor.stop_calls != 1) {
     return 1;
   }
   if (memcmp(audio_input_data, audio_output_data, sizeof(audio_input_data)) !=
@@ -291,15 +275,10 @@ int main(void) {
       .process_video = ProcessFileVideo,
       .process_audio = ProcessFileAudio,
       .on_boundary = OnBoundary,
-      .on_config_update = UpdateConfig,
       .on_stop = OnStop,
-  };
-  const MwStreamerAnalysisProcessorConfig analysis_config = {
-      .config = "file",
   };
   const MwStreamerAnalysisProcessorStartRequest analysis_start_request = {
       .source_info = &source_info,
-      .config = &analysis_config,
       .execution = &execution,
   };
   if (analysis_callbacks.on_start(&analysis_start_request,
@@ -313,14 +292,11 @@ int main(void) {
                                    analysis_callbacks.user_context);
   analysis_callbacks.on_boundary(kMwStreamerProcessorEndOfInput,
                                  analysis_callbacks.user_context);
-  analysis_callbacks.on_config_update("updated",
-                                      analysis_callbacks.user_context);
   analysis_callbacks.on_stop(analysis_callbacks.user_context);
   if (analysis_processor.start_calls != 1 ||
       analysis_processor.video_calls != 1 ||
       analysis_processor.audio_calls != 1 ||
       analysis_processor.boundary_calls != 1 ||
-      analysis_processor.update_calls != 1 ||
       analysis_processor.stop_calls != 1) {
     return 1;
   }

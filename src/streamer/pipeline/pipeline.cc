@@ -17,8 +17,6 @@
 #include "mw/log.h"
 #include "mw/streamer/common/thread.h"
 #include "mw/streamer/init/internal/runtime.h"
-#include "mw/streamer/processor/analysis_processor_sink.h"
-#include "mw/streamer/processor/transform_processor_sink.h"
 
 namespace mw::streamer {
 namespace {
@@ -88,31 +86,6 @@ class Pipeline::Impl final : public Input::Observer {
   void SubmitMessage(const std::string& target_sink_id,
                      const MwStreamerMessage& message) {
     PostMessage(target_sink_id, message);
-  }
-
-  void SetProcessorConfig(std::string processor_id, std::string config) {
-    if (processor_id.empty()) {
-      throw std::invalid_argument("Processor ID不能为空");
-    }
-    std::lock_guard<std::mutex> lock(control_mutex_);
-    if (stopped_) {
-      throw std::logic_error("Pipeline停止后不能更新Processor配置");
-    }
-    Sink* target = FindSink(processor_id);
-    if (!target) {
-      throw std::invalid_argument(
-          fmt::format("Processor不存在: {}", processor_id));
-    }
-    if (auto* analysis = dynamic_cast<AnalysisProcessorSink*>(target)) {
-      analysis->UpdateConfig(std::move(config));
-      return;
-    }
-    if (auto* transform = dynamic_cast<TransformProcessorSink*>(target)) {
-      transform->UpdateConfig(std::move(config));
-      return;
-    }
-    throw std::invalid_argument(
-        fmt::format("Sink不是Processor: {}", processor_id));
   }
 
   void Start() {
@@ -356,9 +329,6 @@ class Pipeline::Impl final : public Input::Observer {
     input_status_ = state;
   }
 
-  // Declared first, released last: all inputs, sinks and private Pollers must
-  // be destroyed before the final Pipeline can close the shared runtime.
-  internal::RuntimeLease runtime_;
   std::mutex control_mutex_;
   const std::uint64_t performance_id_ =
       next_performance_id.fetch_add(1, std::memory_order_relaxed);
@@ -384,7 +354,10 @@ class Pipeline::Impl final : public Input::Observer {
 };
 
 Pipeline::Pipeline(std::unique_ptr<Input> input)
-    : impl_(std::make_unique<Impl>(std::move(input))) {}
+    : impl_([&input] {
+        internal::EnsureInitialized();
+        return std::make_unique<Impl>(std::move(input));
+      }()) {}
 
 Pipeline::~Pipeline() = default;
 
@@ -395,11 +368,6 @@ void Pipeline::AddSink(std::unique_ptr<Sink> sink) {
 void Pipeline::SubmitMessage(const std::string& target_sink_id,
                              const MwStreamerMessage& message) {
   impl_->SubmitMessage(target_sink_id, message);
-}
-
-void Pipeline::SetProcessorConfig(std::string processor_id,
-                                  std::string config) {
-  impl_->SetProcessorConfig(std::move(processor_id), std::move(config));
 }
 
 void Pipeline::Start() { impl_->Start(); }

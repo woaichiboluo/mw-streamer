@@ -86,19 +86,17 @@ EventPoller::EventPoller(std::string name) {
 }
 
 void EventPoller::shutdown() {
-    std::call_once(_shutdown_once, [this]() {
-        async_l([]() {
-            throw ExitException();
-        }, false, true);
+    async_l([]() {
+        throw ExitException();
+    }, false, true);
 
-        if (_loop_thread) {
-            //防止作为子进程时崩溃  [AUTO-TRANSLATED:68727e34]
-            //Prevent crash when running as a child process
-            try { _loop_thread->join(); } catch (...) { _loop_thread->detach(); }
-            delete _loop_thread;
-            _loop_thread = nullptr;
-        }
-    });
+    if (_loop_thread) {
+        //防止作为子进程时崩溃  [AUTO-TRANSLATED:68727e34]
+        //Prevent crash when running as a child process
+        try { _loop_thread->join(); } catch (...) { _loop_thread->detach(); }
+        delete _loop_thread;
+        _loop_thread = nullptr;
+    }
 }
 
 EventPoller::~EventPoller() {
@@ -525,38 +523,7 @@ EventPoller::DelayTask::Ptr EventPoller::doDelayTask(uint64_t delay_ms, function
 static size_t s_pool_size = 0;
 static atomic<bool> s_enable_cpu_affinity { true };
 
-static std::mutex s_pool_mutex;
-static EventPollerPool::Ptr &poolInstance() {
-    static EventPollerPool::Ptr instance;
-    return instance;
-}
-
-EventPollerPool &EventPollerPool::Instance() {
-    std::lock_guard<std::mutex> lock(s_pool_mutex);
-    auto &instance = poolInstance();
-    if (!instance) {
-        instance.reset(new EventPollerPool());
-    }
-    return *instance;
-}
-
-void EventPollerPool::destroyIfCreated() {
-    Ptr instance;
-    {
-        std::lock_guard<std::mutex> lock(s_pool_mutex);
-        instance.swap(poolInstance());
-    }
-    if (instance) {
-        instance->for_each([](const TaskExecutor::Ptr &executor) {
-            std::static_pointer_cast<EventPoller>(executor)->shutdown();
-        });
-    }
-}
-
-bool EventPollerPool::isCreated() {
-    std::lock_guard<std::mutex> lock(s_pool_mutex);
-    return static_cast<bool>(poolInstance());
-}
+INSTANCE_IMP(EventPollerPool)
 
 EventPoller::Ptr EventPollerPool::getFirstPoller() {
     return static_pointer_cast<EventPoller>(getFirstExecutor());

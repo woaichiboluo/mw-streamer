@@ -50,7 +50,7 @@ class PacketCustomSink::Impl final {
           throw std::runtime_error("PacketCustomSink拒绝启动");
         }
         context->MarkStarted(callbacks_.user_context, callbacks_.on_boundary,
-                             nullptr, callbacks_.on_stop);
+                             callbacks_.on_stop);
         context_ = std::move(context);
       }
       if (context_->Open(source)) {

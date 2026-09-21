@@ -357,7 +357,6 @@ Transform 未注册音频或视频回调时，直接透传对应原帧引用，�
 两个 Sink 不增加媒体线程或媒体队列。音视频回调可以并发，同一轨道保持有序。
 首次轨道就绪时启动业务，时间线重置通知业务清理时序状态，重连不会重复启动。
 EOF 触发业务结束边界；Stop 等待在途回调并且只对成功启动的业务调用一次停止回调。
-`UpdateConfig()` 更新业务配置字符串，可与媒体处理并发，Stop 会等待更新完成。
 所有视图仅在回调期间有效；控制方法不能从本 Sink 或下游的回调中重入。
 
 ### Pipeline 消息投递
@@ -407,7 +406,7 @@ flow.SubmitMessage("processor", message);
 
 两种 Processor、FrameCustomSink 和 PacketCustomSink 的 C 回调均提供可选
 `on_message`，未设置时忽略消息。
-消息可与音视频处理并发，Processor 消息也可与配置更新并发；消息与接收节点的
+消息可与音视频处理并发；消息与接收节点的
 生命周期边界互斥，不与媒体建立全局时序。普通回调异常记录
 后继续处理；`FatalError` 沿接收者所属的媒体树请求 Pipeline 停机。
 
@@ -646,9 +645,7 @@ type = "analysis_processor"
 
 双向转换保留节点参数、声明及下游顺序和编码属性的语义，不保留注释、
 空白、引号样式或字段排版。序列化显式写出默认参数。Processor 的业务配置不属于
-streamer TOML，宿主通过 `Pipeline::SetProcessorConfig(id, config)` 提供：启动前的
-最新值传给 `on_start`，启动后的每次设置传给 `on_config_update`；未设置时 `on_start`
-收到空字符串。
+streamer TOML，由 Processor 自身维护。
 
 字符串解析保留路径原文；文件加载把本地输入、Remux 录像目标和备播图片的相对
 路径解析为相对于 TOML 所在目录的绝对路径，URL 与可选空路径保持不变。加载后

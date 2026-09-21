@@ -12,8 +12,7 @@
 namespace mw::streamer {
 
 // Unified Pipeline format. Both directions validate configuration. Formatting
-// and comments are not preserved. Processor business configuration is supplied
-// separately through Pipeline::SetProcessorConfig.
+// and comments are not preserved.
 // String parsing preserves paths. File loading resolves local paths against
 // the source file's directory; URLs and empty optional paths stay unchanged.
 PipelineConfig ParsePipelineConfigFromToml(std::string_view text);

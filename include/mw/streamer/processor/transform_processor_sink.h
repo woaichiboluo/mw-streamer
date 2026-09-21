@@ -35,9 +35,6 @@ class TransformProcessorSink final : public Sink {
   void OnTimelineReset(const TimelineReset& reset) override;
   void OnInputEnded(const StreamEnded& end) override;
 
-  // Before startup, stores the value for on_start. Afterwards, updates
-  // serialize with each other and invoke on_config_update.
-  void UpdateConfig(std::string config);
   // Disables message callbacks and waits for in-flight calls before stopping
   // children and invoking C on_stop. Idempotent.
   void Stop() noexcept override;

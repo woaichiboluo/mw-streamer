@@ -52,12 +52,10 @@ class ProcessorHandler::Impl final {
 
   void MarkStarted(void* user_context,
                    MwStreamerProcessorBoundaryCallback on_boundary,
-                   MwStreamerProcessorUpdateConfigCallback on_config_update,
                    MwStreamerProcessorStopCallback on_stop) {
     RequireReady("完成Processor启动");
     user_context_ = user_context;
     on_boundary_ = on_boundary;
-    on_config_update_ = on_config_update;
     on_stop_ = on_stop;
     state_ = HandlerState::kStarted;
   }
@@ -69,15 +67,6 @@ class ProcessorHandler::Impl final {
     }
     MW_LOG_DEBUG("processor", "Processor处理输入边界：reason={}",
                  internal::ToName(reason));
-  }
-
-  void UpdateConfig(std::string config) {
-    RequireStarted("更新Processor配置");
-    if (on_config_update_) {
-      on_config_update_(config.c_str(), user_context_);
-    }
-    MW_LOG_DEBUG("processor", "Processor运行配置更新完成：bytes={}",
-                 config.size());
   }
 
   void Stop() noexcept {
@@ -130,7 +119,6 @@ class ProcessorHandler::Impl final {
   HandlerState state_ = HandlerState::kReady;
   void* user_context_ = nullptr;
   MwStreamerProcessorBoundaryCallback on_boundary_ = nullptr;
-  MwStreamerProcessorUpdateConfigCallback on_config_update_ = nullptr;
   MwStreamerProcessorStopCallback on_stop_ = nullptr;
 };
 
@@ -146,10 +134,6 @@ void ProcessorHandler::NotifyBoundary(
   impl_->NotifyBoundary(reason);
 }
 
-void ProcessorHandler::UpdateConfig(std::string config) {
-  impl_->UpdateConfig(std::move(config));
-}
-
 void ProcessorHandler::Stop() noexcept { impl_->Stop(); }
 
 void ProcessorHandler::RequireStarted(const char* operation) const {
@@ -158,9 +142,8 @@ void ProcessorHandler::RequireStarted(const char* operation) const {
 
 void ProcessorHandler::MarkStarted(
     void* user_context, MwStreamerProcessorBoundaryCallback on_boundary,
-    MwStreamerProcessorUpdateConfigCallback on_config_update,
     MwStreamerProcessorStopCallback on_stop) {
-  impl_->MarkStarted(user_context, on_boundary, on_config_update, on_stop);
+  impl_->MarkStarted(user_context, on_boundary, on_stop);
 }
 
 void ProcessorHandler::ValidateVideoInput(

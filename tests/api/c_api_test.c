@@ -95,8 +95,6 @@ int main(void) {
 
   if (Check(mw_pipeline_start(NULL) == kMwResultInvalidArgument) ||
       Check(mw_pipeline_get_state(NULL, NULL) == kMwResultInvalidArgument) ||
-      Check(mw_pipeline_set_processor_config(NULL, "id", "config") ==
-            kMwResultInvalidArgument) ||
       Check(mw_pipeline_get_performance(NULL, NULL) ==
             kMwResultInvalidArgument)) {
     return 1;

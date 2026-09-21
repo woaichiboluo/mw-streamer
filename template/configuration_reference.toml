@@ -101,7 +101,7 @@ device_index = 0 # CUDA 后端下必须非负
 
 # -----------------------------------------------------------------------------
 # Analysis Processor Sink：Frame -> 无，终端 Sink，无专属 TOML 字段
-# 回调通过 ProcessorBindings::analysis 按 ID 注入；业务配置不写入 TOML。
+# 回调通过 ProcessorBindings::analysis 按 ID 注入；业务配置由 Processor 自身维护。
 # -----------------------------------------------------------------------------
 [[sinks]]
 id = "analysis"
@@ -110,7 +110,7 @@ downstream = []
 
 # -----------------------------------------------------------------------------
 # Transform Processor Sink：Frame -> Frame，必须有媒体下游，无专属 TOML 字段
-# 回调通过 ProcessorBindings::transform 按 ID 注入；业务配置不写入 TOML。
+# 回调通过 ProcessorBindings::transform 按 ID 注入；业务配置由 Processor 自身维护。
 # -----------------------------------------------------------------------------
 [[sinks]]
 id = "transform"
