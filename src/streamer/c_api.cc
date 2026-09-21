@@ -10,6 +10,7 @@
 #include "mw/streamer/api.h"
 #include "mw/streamer/config/toml.h"
 #include "mw/streamer/input/input_state.h"
+#include "mw/streamer/init/internal/runtime.h"
 #include "mw/streamer/performance/pipeline_snapshot.h"
 #include "mw/streamer/pipeline/pipeline.h"
 #include "mw/streamer/pipeline/pipeline_builder.h"
@@ -274,6 +275,10 @@ extern "C" {
 
 const char* mw_last_error(void) { return last_error.c_str(); }
 
+MwResult mw_streamer_shutdown(void) {
+  return Guard([] { mw::streamer::internal::ShutdownRuntime(); });
+}
+
 MwResult mw_pipeline_create_from_toml(const MwPipelineCreateInfo* create_info,
                                       MwPipeline** output) {
   if (output != nullptr) *output = nullptr;
@@ -304,6 +309,8 @@ MwResult mw_pipeline_create_from_toml(const MwPipelineCreateInfo* create_info,
     return kMwResultSuccess;
   } catch (const std::bad_alloc& error) {
     return Fail(kMwResultOutOfMemory, error.what());
+  } catch (const mw::streamer::internal::RuntimeStateError& error) {
+    return Fail(kMwResultInvalidState, error.what());
   } catch (const std::exception& error) {
     return Fail(building ? kMwResultConfigError : kMwResultInvalidArgument,
                 error.what());

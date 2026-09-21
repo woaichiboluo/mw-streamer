@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "mw/streamer/input/zlm_input.h"
+#include "mw/streamer/api.h"
 #include "mw/streamer/output/remux_sink.h"
 #include "mw/streamer/pipeline/pipeline.h"
 
@@ -101,6 +102,11 @@ int main(int argc, char* argv[]) {
     result = Run(argc, argv);
   } catch (const std::exception& error) {
     fmt::print(stderr, "运行失败：{}\n", error.what());
+  }
+  // Run's Pipeline has been destroyed, including on the exception path.
+  if (mw_streamer_shutdown() != kMwResultSuccess) {
+    fmt::print(stderr, "运行时关闭失败：{}\n", mw_last_error());
+    result = 1;
   }
   return result;
 }

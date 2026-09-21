@@ -174,6 +174,14 @@ typedef struct MwPerformanceSnapshot {
 // library owns the string until the next C API call on the same thread.
 MW_STREAMER_API const char* mw_last_error(void);
 
+// Permanently shuts down this library runtime. Call on the application's
+// control thread before returning from main or unloading the library, after
+// destroying every Pipeline. Never call from a media callback or DllMain.
+// Returns kMwResultInvalidState if a Pipeline exists or is being constructed;
+// that rejection leaves the runtime usable. Successful shutdown is idempotent
+// and forbids subsequent Pipeline creation, even if never initialized before.
+MW_STREAMER_API MwResult mw_streamer_shutdown(void);
+
 // Loads TOML, copies callback tables into the corresponding node maps and
 // constructs an idle Pipeline. On failure, *output is set to NULL. Each
 // callback user_context remains caller-owned and must outlive Stop.

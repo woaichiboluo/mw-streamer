@@ -53,7 +53,7 @@ struct ThreadExitSignal {
 
 // A thread-local destructor proves the actual loop thread exited; an expired
 // weak_ptr alone only proves the strong reference count reached zero.
-void CheckReleaseOnLoop(Poller::Ptr poller) {
+std::future<void> CheckReleaseOnLoop(Poller::Ptr poller) {
   auto exited = std::make_shared<std::promise<void>>();
   auto future = exited->get_future();
   std::weak_ptr<Poller> weak = poller;
@@ -65,8 +65,10 @@ void CheckReleaseOnLoop(Poller::Ptr poller) {
         owner.reset();
       },
       false);
-  REQUIRE(future.wait_for(5s) == std::future_status::ready);
-  CHECK(weak.expired());
+  raw->sync([] {});
+  CHECK_FALSE(weak.expired());
+  CHECK(future.wait_for(0s) == std::future_status::timeout);
+  return future;
 }
 
 }  // namespace
@@ -211,7 +213,11 @@ TEST_CASE("Poller提取保持独占并保留可用的共享池") {
   CHECK(pool.getExecutorSize() == shared_count);
 
   // Exercise both a removed pool member (size 3) and newly allocated members.
-  CheckReleaseOnLoop(std::move(first));
-  CheckReleaseOnLoop(std::move(second));
-  CheckReleaseOnLoop(pool.extractPoller());
+  auto first_exited = CheckReleaseOnLoop(std::move(first));
+  auto second_exited = CheckReleaseOnLoop(std::move(second));
+  auto extra_exited = CheckReleaseOnLoop(pool.extractPoller());
+  pool.shutdown();
+  CHECK(first_exited.wait_for(0s) == std::future_status::ready);
+  CHECK(second_exited.wait_for(0s) == std::future_status::ready);
+  CHECK(extra_exited.wait_for(0s) == std::future_status::ready);
 }

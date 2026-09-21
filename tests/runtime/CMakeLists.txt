@@ -42,6 +42,25 @@ add_test(NAME mw_performance_tests COMMAND mw_performance_tests)
 
 include(Catch)
 
+# Use the public shared library and a separate process so this regression test
+# also covers Pipeline destruction and DLL/process-exit teardown on Windows.
+add_executable(mw_pipeline_destroy_tests pipeline_destroy_test.cc)
+target_link_libraries(mw_pipeline_destroy_tests PRIVATE mw::streamer)
+target_compile_definitions(mw_pipeline_destroy_tests PRIVATE
+    MW_RUNTIME_TEST_DATA_DIR="${MW_STREAMER_TEST_DATA_DIR}")
+add_test(NAME mw_pipeline_create_destroy COMMAND mw_pipeline_destroy_tests)
+set_tests_properties(mw_pipeline_create_destroy PROPERTIES TIMEOUT 30)
+foreach(mode IN ITEMS cold start network srt race failed_build)
+    add_test(NAME mw_runtime_shutdown_${mode}
+        COMMAND mw_pipeline_destroy_tests ${mode})
+    set_tests_properties(mw_runtime_shutdown_${mode} PROPERTIES TIMEOUT 30)
+endforeach()
+
+add_executable(mw_poller_shutdown_tests poller_shutdown_test.cc)
+target_link_libraries(mw_poller_shutdown_tests PRIVATE ZLMediaKit::ToolKit)
+add_test(NAME mw_poller_shutdown_tests COMMAND mw_poller_shutdown_tests)
+set_tests_properties(mw_poller_shutdown_tests PROPERTIES TIMEOUT 30)
+
 add_executable(mw_startup_ring_tests startup_ring_test.cc)
 target_link_libraries(mw_startup_ring_tests PRIVATE
     Catch2::Catch2WithMain ZLMediaKit::ToolKit)

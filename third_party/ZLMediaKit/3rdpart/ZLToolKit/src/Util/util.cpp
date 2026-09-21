@@ -386,9 +386,52 @@ static atomic<uint64_t> s_currentMillisecond(0);
 static atomic<uint64_t> s_currentMicrosecond_system(getCurrentMicrosecondOrigin());
 static atomic<uint64_t> s_currentMillisecond_system(getCurrentMicrosecondOrigin() / 1000);
 
+struct MillisecondThreadState {
+    mutex init_mutex;
+    mutex shutdown_mutex;
+    atomic<bool> running { false };
+    bool stop_requested = false;
+    unique_ptr<thread> worker;
+
+    void shutdown() {
+        lock_guard<mutex> shutdown_lock(shutdown_mutex);
+        unique_ptr<thread> joining;
+        {
+            lock_guard<mutex> lock(init_mutex);
+            if (stop_requested) {
+                return;
+            }
+            stop_requested = true;
+            running.store(false, memory_order_release);
+            joining = std::move(worker);
+        }
+        // The worker can still log and read a clock while finishing. Never
+        // hold its initialization mutex while waiting for it.
+        if (joining && joining->joinable()) {
+            joining->join();
+        }
+    }
+
+    ~MillisecondThreadState() { shutdown(); }
+};
+
+static MillisecondThreadState &millisecondThreadState() {
+    static MillisecondThreadState state;
+    return state;
+}
+
+void shutdownMillisecondThreadIfCreated() {
+    millisecondThreadState().shutdown();
+}
+
 static inline bool initMillisecondThread() {
-    auto running = std::make_shared<bool>(true);
-    auto lam = [running]() {
+    auto &state = millisecondThreadState();
+    lock_guard<mutex> lock(state.init_mutex);
+    if (state.stop_requested || state.worker) {
+        return true;
+    }
+    state.running.store(true, memory_order_release);
+    auto lam = [&state]() {
         // 确该保线程退出前日志打印可用
         auto logger = Logger::Instance().shared_from_this();
         setThreadName("stamp thread");
@@ -396,7 +439,7 @@ static inline bool initMillisecondThread() {
         uint64_t last = getCurrentMicrosecondOrigin();
         uint64_t now;
         uint64_t microsecond = 0;
-        while (*running) {
+        while (state.running.load(memory_order_acquire)) {
             now = getCurrentMicrosecondOrigin();
             //记录系统时间戳，可回退  [AUTO-TRANSLATED:495a0114]
             //Record system timestamp, can be rolled back
@@ -421,11 +464,7 @@ static inline bool initMillisecondThread() {
             usleep(500);
         }
     };
-    static std::shared_ptr<std::thread> s_thread(new std::thread(lam), [running](std::thread *t) {
-        *running = false;
-        t->join();
-        delete t;
-    });
+    state.worker.reset(new thread(std::move(lam)));
     return true;
 }
 

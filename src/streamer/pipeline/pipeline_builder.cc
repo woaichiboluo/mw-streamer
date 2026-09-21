@@ -302,7 +302,7 @@ namespace internal {
 std::unique_ptr<Pipeline> BuildPipelineWithRuntime(
     const PipelineConfig& config, const ProcessorBindings& bindings,
     const RuntimeConfig& runtime) {
-  EnsureInitialized(runtime);
+  RuntimeUse construction_use(runtime);
   ValidatePipelineConfig(config);
   const auto index = IndexNodes(config);
   ValidateBindings(bindings.analysis, SinkType::kAnalysisProcessor, index);

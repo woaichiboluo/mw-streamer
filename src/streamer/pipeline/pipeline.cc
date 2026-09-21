@@ -329,6 +329,8 @@ class Pipeline::Impl final : public Input::Observer {
     input_status_ = state;
   }
 
+  // Declared first so the runtime use is released after every backend member.
+  internal::RuntimeUse runtime_use_;
   std::mutex control_mutex_;
   const std::uint64_t performance_id_ =
       next_performance_id.fetch_add(1, std::memory_order_relaxed);
@@ -354,10 +356,7 @@ class Pipeline::Impl final : public Input::Observer {
 };
 
 Pipeline::Pipeline(std::unique_ptr<Input> input)
-    : impl_([&input] {
-        internal::EnsureInitialized();
-        return std::make_unique<Impl>(std::move(input));
-      }()) {}
+    : impl_(std::make_unique<Impl>(std::move(input))) {}
 
 Pipeline::~Pipeline() = default;
 

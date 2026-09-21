@@ -76,8 +76,21 @@ ctest --test-dir build --output-on-failure
 `BUILD_TESTS` 在项目作为顶层工程时默认开启，作为子工程时默认关闭；
 `BUILD_EXAMPLES` 默认关闭。
 
-SRT reactor 是进程级资源。宿主退出前应先停止创建和重连 SRT 会话，并在各会话所属
-`EventPoller` 上完成 `teardown()` 和队列屏障。
+## 运行时关闭
+
+第一次创建 Pipeline 时自动初始化，无需单独调用 init。应用退出前应停止创建新
+Pipeline，销毁全部 Pipeline，再在应用控制线程调用 `mw_streamer_shutdown()`
+（声明位于 `mw/streamer/api.h`）。必须在 `main` 返回或卸载库之前执行，不能放到
+`DllMain`、静态析构或媒体回调中。
+
+仍有 Pipeline 存活或正在构造时，关闭返回 `kMwResultInvalidState`，运行时仍可使用。
+成功关闭会等待后台线程退出，重复关闭安全；此后同进程不再支持创建 Pipeline。
+从未初始化就关闭也会永久禁止初始化。普通 Pipeline 的反复创建、启动、停止、销毁
+不触发全局运行时关闭。
+
+共享池抽取的 Poller 转入池持有的独占集合，不再参与共享调度，也不复用。
+Pipeline 销毁后，这些独占线程保留到全局 shutdown 统一停止和释放；因此同一
+运行时反复创建 Pipeline 会增加保留的线程数量，这是当前明确采用的生命周期约定。
 
 SRT 每次新建或重连发布会丢弃关键帧之前的残缺历史数据，并从包含 PAT、PMT 和随机访问点的完整 TS 关键帧批次开始发送，避免高码率流从 GOP 中段接入时无法完成接收端初始化。
 

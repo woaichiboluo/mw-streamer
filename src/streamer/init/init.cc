@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <condition_variable>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -28,6 +29,54 @@ class Initializer final {
 
   void EnsureInitialized(const RuntimeConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
+    EnsureInitializedLocked(config);
+  }
+
+  void Acquire(const RuntimeConfig& config) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    EnsureInitializedLocked(config);
+    ++users_;
+  }
+
+  void Release() noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    --users_;
+  }
+
+  void Shutdown() {
+    if (toolkit::EventPoller::getCurrentPoller()) {
+      throw RuntimeStateError("runtime shutdown must run on the host control thread");
+    }
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      shutdown_done_.wait(lock, [this] { return state_ != State::kClosing; });
+      if (state_ == State::kClosed) return;
+      if (state_ == State::kFailed) {
+        throw RuntimeStateError("runtime shutdown previously failed");
+      }
+      if (users_ != 0) {
+        throw RuntimeStateError("destroy all Pipelines before runtime shutdown");
+      }
+      state_ = State::kClosing;
+    }
+    try {
+      ShutdownBackends();
+      log_bridge_.reset();
+      logging_.reset();
+    } catch (...) {
+      FinishShutdown(State::kFailed);
+      throw;
+    }
+    FinishShutdown(State::kClosed);
+  }
+
+ private:
+  enum class State { kOpen, kClosing, kClosed, kFailed };
+
+  void EnsureInitializedLocked(const RuntimeConfig& config) {
+    if (state_ != State::kOpen) {
+      throw RuntimeStateError("mw-streamer runtime is shut down or shutting down");
+    }
     if (logging_) {
       return;
     }
@@ -54,7 +103,24 @@ class Initializer final {
     }
   }
 
- private:
+  void FinishShutdown(State state) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    state_ = state;
+    shutdown_done_.notify_all();
+  }
+
+  static void ShutdownBackends() {
+    auto* events = toolkit::EventPollerPool::getInstanceIfCreated();
+    // The event pool retains both shared and exclusive loops while the
+    // producer pool delivers its final completion callbacks.
+    mediakit::SrtEpollReactor::shutdownIfCreated();
+    if (auto* work = toolkit::WorkThreadPool::getInstanceIfCreated()) {
+      work->shutdown();
+    }
+    if (events) events->shutdown();
+    toolkit::shutdownMillisecondThreadIfCreated();
+  }
+
   Initializer() = default;
 
   static void ShutdownAtExit() noexcept {
@@ -70,6 +136,9 @@ class Initializer final {
   }
 
   std::mutex mutex_;
+  std::condition_variable shutdown_done_;
+  State state_ = State::kOpen;
+  std::size_t users_ = 0;
   std::once_flag init_once_;
   std::optional<mw::log::Logging> logging_;
   std::optional<ThirdPartyLogBridge> log_bridge_;
@@ -80,5 +149,13 @@ class Initializer final {
 void EnsureInitialized(const RuntimeConfig& config) {
   Initializer::Instance().EnsureInitialized(config);
 }
+
+RuntimeUse::RuntimeUse(const RuntimeConfig& config) {
+  Initializer::Instance().Acquire(config);
+}
+
+RuntimeUse::~RuntimeUse() { Initializer::Instance().Release(); }
+
+void ShutdownRuntime() { Initializer::Instance().Shutdown(); }
 
 }  // namespace mw::streamer::internal

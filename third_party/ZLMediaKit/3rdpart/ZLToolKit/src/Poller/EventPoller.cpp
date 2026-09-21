@@ -86,9 +86,33 @@ EventPoller::EventPoller(std::string name) {
 }
 
 void EventPoller::shutdown() {
-    async_l([]() {
+    lock_guard<mutex> lock(_shutdown_mutex);
+    if (_shutdown_complete) {
+        return;
+    }
+    async_l([this]() {
+        // Owners have stopped producing work. Queued teardown can enqueue
+        // more teardown; finish it on this loop before releasing its thread.
+        for (;;) {
+            // Timers/events can capture this poller strongly. Break those
+            // cycles while the pool still owns it, on the owner thread.
+            // Swap first: destroying a callback can reenter delEvent().
+            decltype(_delay_task_map) delays;
+            decltype(_event_map) events;
+            delays.swap(_delay_task_map);
+            events.swap(_event_map);
+            delays.clear();
+            events.clear();
+            {
+                lock_guard<mutex> lock(_mtx_task);
+                if (_list_task.empty()) {
+                    break;
+                }
+            }
+            onPipeEvent(true);
+        }
         throw ExitException();
-    }, false, true);
+    }, false, false);
 
     if (_loop_thread) {
         //防止作为子进程时崩溃  [AUTO-TRANSLATED:68727e34]
@@ -97,6 +121,7 @@ void EventPoller::shutdown() {
         delete _loop_thread;
         _loop_thread = nullptr;
     }
+    _shutdown_complete = true;
 }
 
 EventPoller::~EventPoller() {
@@ -523,7 +548,17 @@ EventPoller::DelayTask::Ptr EventPoller::doDelayTask(uint64_t delay_ms, function
 static size_t s_pool_size = 0;
 static atomic<bool> s_enable_cpu_affinity { true };
 
-INSTANCE_IMP(EventPollerPool)
+static atomic<EventPollerPool *> s_event_pool { nullptr };
+
+EventPollerPool &EventPollerPool::Instance() {
+    static shared_ptr<EventPollerPool> instance(new EventPollerPool);
+    s_event_pool.store(instance.get(), memory_order_release);
+    return *instance;
+}
+
+EventPollerPool *EventPollerPool::getInstanceIfCreated() noexcept {
+    return s_event_pool.load(memory_order_acquire);
+}
 
 EventPoller::Ptr EventPollerPool::getFirstPoller() {
     return static_pointer_cast<EventPoller>(getFirstExecutor());
@@ -546,7 +581,7 @@ EventPoller::Ptr EventPollerPool::extractPoller() {
     static atomic<size_t> next_id { 0 };
     auto id = next_id.fetch_add(1);
     auto cpus = max<size_t>(1, thread::hardware_concurrency());
-    return static_pointer_cast<EventPoller>(createPoller("exclusive poller " + to_string(id), ThreadPool::PRIORITY_HIGHEST, true, s_enable_cpu_affinity.load(), id % cpus));
+    return static_pointer_cast<EventPoller>(createExclusivePoller("exclusive poller " + to_string(id), ThreadPool::PRIORITY_HIGHEST, true, s_enable_cpu_affinity.load(), id % cpus));
 }
 
 void EventPollerPool::preferCurrentThread(bool flag) {
