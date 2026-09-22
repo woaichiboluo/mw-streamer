@@ -11,7 +11,7 @@
 #include <assert.h>
 #include <limits>
 #include "BufferSock.h"
-#include "Util/logger.h"
+#include "mw/log.h"
 #include "Util/uv_errno.h"
 
 #if defined(__linux__) || defined(__linux)
@@ -630,8 +630,7 @@ SocketRecvBuffer::Ptr SocketRecvBuffer::create(bool is_udp, size_t packet_count,
     }
 
     if (use_default) {
-        WarnL << "Invalid recv buffer config, fallback to defaults: packet_count="
-              << packet_count << ", buffer_capacity=" << buffer_capacity;
+        MW_LOG_WARNING("zlm", "Invalid recv buffer config, fallback to defaults: packet_count={}, buffer_capacity={}", packet_count, buffer_capacity);
         packet_count = kPacketCount;
         buffer_capacity = kBufferCapacity;
     }

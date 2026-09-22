@@ -11,6 +11,7 @@
 #ifndef ZLMEDIAKIT_TSMEDIASOURCE_H
 #define ZLMEDIAKIT_TSMEDIASOURCE_H
 
+#include "mw/log.h"
 #include "Common/MediaSource.h"
 #include "Common/PacketCache.h"
 #include "Util/RingBuffer.h"
@@ -53,7 +54,7 @@ public:
         try {
             flush();
         } catch (std::exception &ex) {
-            WarnL << ex.what();
+            MW_LOG_WARNING("zlm", "{}", ex.what());
         }
     }
 

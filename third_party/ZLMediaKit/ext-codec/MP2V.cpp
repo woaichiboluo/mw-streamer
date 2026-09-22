@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "MP2V.h"
 #include "MP2VRtp.h"
 #include "Extension/Factory.h"
@@ -89,12 +90,12 @@ RtpCodec::Ptr getRtpDecoderByCodecId() {
 }
 
 RtmpCodec::Ptr getRtmpEncoderByTrack(const Track::Ptr &track) {
-    WarnL << "Unsupported MP2V rtmp encoder";
+    MW_LOG_WARNING("zlm", "Unsupported MP2V rtmp encoder");
     return nullptr;
 }
 
 RtmpCodec::Ptr getRtmpDecoderByTrack(const Track::Ptr &track) {
-    WarnL << "Unsupported MP2V rtmp decoder";
+    MW_LOG_WARNING("zlm", "Unsupported MP2V rtmp decoder");
     return nullptr;
 }
 

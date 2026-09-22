@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "FlvPlayer.h"
 
 using namespace std;
@@ -20,7 +21,7 @@ FlvPlayer::FlvPlayer(const EventPoller::Ptr &poller) {
 }
 
 void FlvPlayer::play(const string &url) {
-    TraceL << "play http-flv: " << url;
+    MW_LOG_TRACE("zlm", "play http-flv: {}", url);
     _play_result = false;
     setProxyUrl((*this)[Client::kProxyUrl]);
     setHeaderTimeout((*this)[Client::kTimeoutMS].as<int>());

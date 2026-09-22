@@ -11,6 +11,7 @@
 #ifndef ZLMEDIAKIT_RTCPFCI_H
 #define ZLMEDIAKIT_RTCPFCI_H
 
+#include <map>
 #include "Rtcp.h"
 
 namespace mediakit {

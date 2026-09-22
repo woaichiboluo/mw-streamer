@@ -7,6 +7,7 @@
  * LICENSE file in the root of the source tree. All contributing project authors
  * may be found in the AUTHORS file in the root of the source tree.
  */
+#include "mw/log.h"
 #include "FlvSplitter.h"
 #include "utils.h"
 
@@ -76,7 +77,7 @@ void FlvSplitter::onRecvContent(const char *data, size_t len) {
     len -= 4;
     auto previous_tag_size = load_be32(data + len);
     if (len != previous_tag_size - sizeof(RtmpTagHeader)) {
-        WarnL << "flv previous tag size 字段非法:" << len << " != " << previous_tag_size - sizeof(RtmpTagHeader);
+        MW_LOG_WARNING("zlm", "flv previous tag size 字段非法:{} != {}", len, previous_tag_size - sizeof(RtmpTagHeader));
     }
     RtmpPacket::Ptr packet;
     switch (_type) {
@@ -106,15 +107,15 @@ void FlvSplitter::onRecvContent(const char *data, size_t len) {
                     if (type == "onMetaData") {
                         flag = onRecvMetadata(dec.load<AMFValue>());
                     } else {
-                        WarnL << "unknown type:" << type;
+                        MW_LOG_WARNING("zlm", "unknown type:{}", type);
                     }
                 } else if (type == "onMetaData") {
                     flag = onRecvMetadata(dec.load<AMFValue>());
                 } else {
-                    WarnL << "unknown notify:" << type;
+                    MW_LOG_WARNING("zlm", "unknown notify:{}", type);
                 }
             } else {
-                WarnL << "Parse flv script data failed, invalid amf value: " << first.to_string();
+                MW_LOG_WARNING("zlm", "Parse flv script data failed, invalid amf value: {}", first.to_string());
             }
             if (!flag) {
                 throw std::invalid_argument("check rtmp metadata failed");
@@ -122,7 +123,7 @@ void FlvSplitter::onRecvContent(const char *data, size_t len) {
             return;
         }
 
-        default: WarnL << "不识别的flv msg type:" << (int) _type; return;
+        default: MW_LOG_WARNING("zlm", "不识别的flv msg type:{}", (int) _type); return;
     }
 
     packet->time_stamp = _time_stamp;

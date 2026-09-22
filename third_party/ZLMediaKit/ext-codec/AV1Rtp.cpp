@@ -7,6 +7,7 @@
  * LICENSE file in the root of the source tree. All contributing project authors
  * may be found in the AUTHORS file in the root of the source tree.
  */
+#include "mw/log.h"
 #include "AV1.h"
 #include "AV1Rtp.h"
 #include <algorithm>
@@ -73,7 +74,7 @@ static bool readLeb128(const uint8_t*& data, size_t& remaining, uint64_t& value)
     // 兼容性处理：如果到达数据末尾但最后一个字节的MSB仍为1，
     // 假设这是leb128编码的结尾
     if (remaining == 0 && shift > 0) {
-        WarnL << "Tolerating non-standard LEB128 encoding (missing termination bit)";
+        MW_LOG_WARNING("zlm", "Tolerating non-standard LEB128 encoding (missing termination bit)");
         return true;
     }
 
@@ -118,7 +119,7 @@ std::vector<AV1RtpEncoder::ObuInfo> AV1RtpEncoder::parseObus(const uint8_t* data
 
     while (remaining > 0) {
         if (remaining < 1) {
-            WarnL << "Malformed AV1 input: expected OBU header";
+            MW_LOG_WARNING("zlm", "Malformed AV1 input: expected OBU header");
             return {};
         }
 
@@ -130,7 +131,7 @@ std::vector<AV1RtpEncoder::ObuInfo> AV1RtpEncoder::parseObus(const uint8_t* data
 
         if (obu.has_extension) {
             if (remaining < 1) {
-                WarnL << "Malformed AV1 input: expected extension header";
+                MW_LOG_WARNING("zlm", "Malformed AV1 input: expected extension header");
                 return {};
             }
             obu.extension_header = *ptr++;
@@ -140,11 +141,11 @@ std::vector<AV1RtpEncoder::ObuInfo> AV1RtpEncoder::parseObus(const uint8_t* data
         uint64_t payload_size = 0;
         if (obu.has_size_field) {
             if (!readLeb128(ptr, remaining, payload_size)) {
-                WarnL << "Malformed AV1 input: failed to read OBU size";
+                MW_LOG_WARNING("zlm", "Malformed AV1 input: failed to read OBU size");
                 return {};
             }
             if (payload_size > remaining) {
-                WarnL << "Malformed AV1 input: OBU size exceeds remaining data";
+                MW_LOG_WARNING("zlm", "Malformed AV1 input: OBU size exceeds remaining data");
                 return {};
             }
         } else {
@@ -239,13 +240,13 @@ bool AV1RtpEncoder::inputFrame(const Frame::Ptr &frame) {
 
     // 如果还没有收到过关键帧，且当前帧不是关键帧，则丢弃
     if (!_got_key_frame && !has_sequence_header) {
-        DebugL << "Dropping AV1 frame before first keyframe";
+        MW_LOG_DEBUG("zlm", "Dropping AV1 frame before first keyframe");
         return false;
     }
 
     size_t max_payload_size = getRtpInfo().getMaxSize() - kAggregationHeaderSize;
     if (max_payload_size == 0) {
-        WarnL << "Invalid RTP max payload size for AV1";
+        MW_LOG_WARNING("zlm", "Invalid RTP max payload size for AV1");
         return false;
     }
 
@@ -344,7 +345,6 @@ bool AV1RtpDecoder::inputRtp(const RtpPacket::Ptr &rtp, bool key_pos) {
     const uint8_t* data = payload + kAggregationHeaderSize;
     size_t remaining = payload_size - kAggregationHeaderSize;
 
-    // InfoL << "RTP seq=" << seq << ", Z=" << agg_header.first_obu_is_fragment
     //       << ", Y=" << agg_header.last_obu_is_fragment
     //       << ", W=" << agg_header.num_obu_elements
     //       << ", N=" << agg_header.starts_new_coded_video_sequence
@@ -355,12 +355,11 @@ bool AV1RtpDecoder::inputRtp(const RtpPacket::Ptr &rtp, bool key_pos) {
     //     for (size_t i = 0; i < std::min(remaining, size_t(16)); ++i) {
     //         hex_stream << std::hex << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
     //     }
-    //     InfoL << "RTP payload hex: " << hex_stream.str();
     // }
 
     // 如果开始新的编码视频序列，清理之前的状态
     if (agg_header.starts_new_coded_video_sequence) {
-        InfoL << "Starting new coded video sequence";
+        MW_LOG_INFO("zlm", "Starting new coded video sequence");
         resetState();
         obtainFrame();
     }
@@ -368,8 +367,7 @@ bool AV1RtpDecoder::inputRtp(const RtpPacket::Ptr &rtp, bool key_pos) {
     if (_has_last_seq) {
         uint16_t expected = _last_seq + 1;
         if (seq != expected && _assembling_fragment) {
-            WarnL << "RTP seq gap while assembling fragment, expected=" << expected
-                  << " got=" << seq << ", dropping incomplete OBU";
+            MW_LOG_WARNING("zlm", "RTP seq gap while assembling fragment, expected={} got={}, dropping incomplete OBU", expected, seq);
             _fragment_buffer.clear();
             _assembling_fragment = false;
         }
@@ -386,13 +384,13 @@ bool AV1RtpDecoder::inputRtp(const RtpPacket::Ptr &rtp, bool key_pos) {
     bool marker = rtp->getHeader()->mark;
     if (marker) {
         if (_assembling_fragment) {
-            WarnL << "Marker bit set while awaiting fragment continuation";
+            MW_LOG_WARNING("zlm", "Marker bit set while awaiting fragment continuation");
             _fragment_buffer.clear();
             _assembling_fragment = false;
         }
         _last_dts = stamp;
         if (!_received_keyframe) {
-            WarnL << "AV1 RTP packet before keyframe, dropping";
+            MW_LOG_WARNING("zlm", "AV1 RTP packet before keyframe, dropping");
             _frame->_buffer.clear();
             obtainFrame();
             return false;
@@ -416,12 +414,11 @@ bool AV1RtpDecoder::processPayload(const AggregationHeader& agg_header,
         bool has_size = (expected_elements == 0) || (static_cast<int>(element_index) < expected_elements - 1);
         if (has_size) {
             if (!readLeb128(data, remaining, element_size)) {
-                WarnL << "Failed to read OBU element size, trying fallback parsing";
+                MW_LOG_WARNING("zlm", "Failed to read OBU element size, trying fallback parsing");
                 // 兼容性回退：如果leb128解析失败，尝试直接使用剩余字节数
                 element_size = remaining;
             } else if (element_size > remaining) {
-                WarnL << "OBU element size (" << element_size << ") exceeds remaining payload ("
-                      << remaining << "), using remaining size";
+                MW_LOG_WARNING("zlm", "OBU element size ({}) exceeds remaining payload ({}), using remaining size", element_size, remaining);
                 element_size = remaining;
             }
         } else {
@@ -441,13 +438,13 @@ bool AV1RtpDecoder::processPayload(const AggregationHeader& agg_header,
 
         if (is_first && agg_header.first_obu_is_fragment) {
             if (_fragment_buffer.empty()) {
-                WarnL << "Unexpected fragment continuation in AV1 RTP packet";
+                MW_LOG_WARNING("zlm", "Unexpected fragment continuation in AV1 RTP packet");
                 return false;
             }
             _fragment_buffer.insert(_fragment_buffer.end(), element_bytes.begin(), element_bytes.end());
         } else {
             if (_assembling_fragment && !_fragment_buffer.empty()) {
-                WarnL << "Previous fragment never completed, discarding";
+                MW_LOG_WARNING("zlm", "Previous fragment never completed, discarding");
                 return false;
             }
             _fragment_buffer = std::move(element_bytes);
@@ -468,9 +465,7 @@ bool AV1RtpDecoder::processPayload(const AggregationHeader& agg_header,
     }
 
     if (expected_elements > 0 && static_cast<int>(element_index) != expected_elements) {
-        WarnL << "Mismatch between W field (" << expected_elements
-              << ") and parsed OBU elements (" << element_index
-              << "), tolerating for compatibility";
+        MW_LOG_WARNING("zlm", "Mismatch between W field ({}) and parsed OBU elements ({}), tolerating for compatibility", expected_elements, element_index);
         // 不返回false，继续处理以提高兼容性
     }
 
@@ -483,7 +478,7 @@ bool AV1RtpDecoder::emitObu(const uint8_t* data, size_t size) {
     }
 
     if (size < 1) {
-        WarnL << "Empty OBU fragment";
+        MW_LOG_WARNING("zlm", "Empty OBU fragment");
         return false;
     }
 
@@ -495,12 +490,11 @@ bool AV1RtpDecoder::emitObu(const uint8_t* data, size_t size) {
 
     // 如果RTP包中的OBU已经包含size字段，需要特殊处理
     if (already_has_size) {
-        //WarnL << "RTP OBU contains size field";
 
         // 跳过extension header处理
         if (obuHasExtension(obu_header)) {
             if (size < 2) {
-                WarnL << "OBU with extension flag but insufficient data";
+                MW_LOG_WARNING("zlm", "OBU with extension flag but insufficient data");
                 return false;
             }
             header_size = 2;
@@ -512,13 +506,12 @@ bool AV1RtpDecoder::emitObu(const uint8_t* data, size_t size) {
         uint64_t original_size = 0;
 
         if (!readLeb128(ptr, remaining, original_size)) {
-            WarnL << "Failed to read original OBU size field";
+            MW_LOG_WARNING("zlm", "Failed to read original OBU size field");
             return false;
         }
 
         if (original_size != remaining) {
-            WarnL << "OBU size mismatch in RTP packet, original_size=" << original_size
-                  << " remaining=" << remaining;
+            MW_LOG_WARNING("zlm", "OBU size mismatch in RTP packet, original_size={} remaining={}", original_size, remaining);
         }
 
         // 直接拷贝完整的OBU（包括已有的size字段）
@@ -531,7 +524,7 @@ bool AV1RtpDecoder::emitObu(const uint8_t* data, size_t size) {
 
         if (obuHasExtension(obu_header)) {
             if (size < 2) {
-                WarnL << "OBU with extension flag but insufficient data";
+                MW_LOG_WARNING("zlm", "OBU with extension flag but insufficient data");
                 return false;
             }
             _frame->_buffer.push_back(data[1]);
@@ -539,7 +532,7 @@ bool AV1RtpDecoder::emitObu(const uint8_t* data, size_t size) {
         }
 
         if (size < header_size) {
-            WarnL << "Invalid OBU size";
+            MW_LOG_WARNING("zlm", "Invalid OBU size");
             return false;
         }
 

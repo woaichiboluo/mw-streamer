@@ -9,7 +9,7 @@
  */
 
 #include "HttpRequestSplitter.h"
-#include "Util/logger.h"
+#include "mw/log.h"
 #include "Util/util.h"
 using namespace toolkit;
 using namespace std;

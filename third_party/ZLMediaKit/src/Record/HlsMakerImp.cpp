@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include <ctime>
 #include <iomanip> 
 #include <sys/stat.h>
@@ -51,7 +52,7 @@ HlsMakerImp::~HlsMakerImp() {
         // Possible exception thrown during hls registration
         clearCache(false, true);
     } catch (std::exception &ex) {
-        WarnL << ex.what();
+        MW_LOG_WARNING("zlm", "{}", ex.what());
     }
 
     if (!isLive() || isKeep()) {
@@ -178,7 +179,7 @@ string HlsMakerImp::onOpenSegment(uint64_t index) {
     _info.url = _info.app + "/" + _info.stream + "/" + segment_name;
 
     if (!_file) {
-        WarnL << "Create file failed," << segment_path << " " << get_uv_errmsg();
+        MW_LOG_WARNING("zlm", "Create file failed,{} {}", segment_path, get_uv_errmsg());
     }
     if (_params.empty()) {
         return segment_name;
@@ -205,7 +206,7 @@ void HlsMakerImp::onWriteInitSegment(const char *data, size_t len) {
         fwrite(data, len, 1, file.get());
         _path_init = std::move(init_seg_path);
     } else {
-        WarnL << "Create file failed," << init_seg_path << " " << get_uv_errmsg();
+        MW_LOG_WARNING("zlm", "Create file failed,{} {}", init_seg_path, get_uv_errmsg());
     }
 }
 
@@ -228,7 +229,7 @@ void HlsMakerImp::onWriteHls(const std::string &data, bool include_delay) {
             _media_src->setIndexFile(data);
         }
     } else {
-        WarnL << "Create hls file failed," << path << " " << get_uv_errmsg();
+        MW_LOG_WARNING("zlm", "Create hls file failed,{} {}", path, get_uv_errmsg());
     }
 }
 

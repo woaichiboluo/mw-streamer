@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "VP9Rtp.h"
 #include "Extension/Frame.h"
 #include "Common/config.h"
@@ -180,7 +181,6 @@ int RTPPayloadVP9::parse(unsigned char *data, int dataLength) {
         dataPtr += 2;
         int height = (dataPtr[0] << 8) + dataPtr[1];
         dataPtr += 2;
-        // InfoL << "got vp9 " << width << "x" << height;
         this->resolutions.push_back({ width, height });
       }
     }
@@ -221,7 +221,7 @@ bool VP9RtpDecoder::inputRtp(const RtpPacket::Ptr &rtp, bool key_pos) {
     bool is_gop = decodeRtp(rtp);
     if (!_gop_dropped && seq != (uint16_t)(_last_seq + 1) && _last_seq) {
         _gop_dropped = true;
-        WarnL << "start drop VP9 gop, last seq:" << _last_seq << ", rtp:\r\n" << rtp->dumpString();
+        MW_LOG_WARNING("zlm", "start drop VP9 gop, last seq:{}, rtp:\r\n{}", _last_seq, rtp->dumpString());
     }
     _last_seq = seq;
     return is_gop;
@@ -240,10 +240,9 @@ bool VP9RtpDecoder::decodeRtp(const RtpPacket::Ptr &rtp) {
     RTPPayloadVP9 info;
     int offset = info.parse(payload, payload_size);
     if (offset < 0) {
-        WarnL << "VP9 RTP payload parse failed, seq:" << seq;
+        MW_LOG_WARNING("zlm", "VP9 RTP payload parse failed, seq:{}", seq);
         return false;
     }
-    // InfoL << rtp->dumpString() << "\n" << info.dump();
     bool start = info.beginningOfLayerFrame;
     if (start) {
         _frame->_pts = stamp;
@@ -286,10 +285,9 @@ void VP9RtpDecoder::outputFrame(const RtpPacket::Ptr &rtp) {
 
     if (_frame->keyFrame() && _gop_dropped) {
         _gop_dropped = false;
-        InfoL << "new gop received, rtp:\r\n" << rtp->dumpString();
+        MW_LOG_INFO("zlm", "new gop received, rtp:\r\n{}", rtp->dumpString());
     }
     if (!_gop_dropped || _frame->configFrame()) {
-        // InfoL << _frame->pts() << " size=" << _frame->size();
         RtpCodec::inputFrame(_frame);
     }
     obtainFrame();

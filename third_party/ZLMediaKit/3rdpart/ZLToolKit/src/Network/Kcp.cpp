@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "Kcp.h"
 #include "Util/Byte.hpp"
 
@@ -39,7 +40,7 @@ uint32_t getCurrent() {
 
 bool KcpHeader::loadHeaderFromData(const char *data, size_t len) {
     if (HEADER_SIZE > len) {
-        WarnL << "data len: " << len << " too small";
+        MW_LOG_WARNING("zlm", "data len: {} too small", len);
         return false;
     }
 
@@ -65,7 +66,7 @@ bool KcpHeader::loadHeaderFromData(const char *data, size_t len) {
 
 bool KcpHeader::storeHeaderToData(char *buf, size_t size) {
     if (HEADER_SIZE > size) {
-        ErrorL << "size too smalle " << size;
+        MW_LOG_ERROR("zlm", "size too smalle {}", size);
         return false;
     }
     char *ptr = buf;
@@ -110,7 +111,7 @@ bool KcpPacket::loadFromData(const char *data, size_t len) {
 
     auto packetSize = getPacketSize();
     if (len < packetSize) {
-        WarnL << "data len: " << len << " is smaller than packet len: " << packetSize;
+        MW_LOG_WARNING("zlm", "data len: {} is smaller than packet len: {}", len, packetSize);
         return false;
     }
 
@@ -149,7 +150,7 @@ ssize_t KcpTransport::send(const Buffer::Ptr& buf, bool flush) {
     }
 
     if (!_conv_init) {
-        WarnL << "conv should set before send";
+        MW_LOG_WARNING("zlm", "conv should set before send");
         return -1;
     }
 
@@ -159,7 +160,7 @@ ssize_t KcpTransport::send(const Buffer::Ptr& buf, bool flush) {
     }
 
     if (size >= _mss * IKCP_WND_RCV) {
-        WarnL << "size : "<< size << "over size, send fail";
+        MW_LOG_WARNING("zlm", "size : {}over size, send fail", size);
         //分片过大,拒绝发送
         return -1;
     }
@@ -205,7 +206,6 @@ void KcpTransport::input(const Buffer::Ptr& buf) {
     cache->assign(buf->data(), buf->size());
 
     _poller->async([=] {
-        // DebugL << hexdump(cache->data(), cache->size());
 
         auto data = cache->data();
         auto size = cache->size();
@@ -219,7 +219,7 @@ void KcpTransport::input(const Buffer::Ptr& buf) {
         while (size) {
             auto packet = KcpPacket::parse(data, size);
             if (!packet) {
-                WarnL << "parse kcp packet fail";
+                MW_LOG_WARNING("zlm", "parse kcp packet fail");
                 break;
             }
             data += packet->size();
@@ -229,7 +229,7 @@ void KcpTransport::input(const Buffer::Ptr& buf) {
                 _conv_init = true;
             } else {
                 if (_conv != packet->getConv()) {
-                    WarnL << "_conv check fail, skip this packet";
+                    MW_LOG_WARNING("zlm", "_conv check fail, skip this packet");
                     continue;
                 }
             }
@@ -237,7 +237,7 @@ void KcpTransport::input(const Buffer::Ptr& buf) {
             auto cmd = packet->getCmd();
             if (cmd != KcpHeader::Cmd::CMD_PUSH && cmd != KcpHeader::Cmd::CMD_ACK &&
                 cmd != KcpHeader::Cmd::CMD_WASK && cmd != KcpHeader::Cmd::CMD_WINS) {
-                WarnL << "unknow cmd: " << (uint8_t)cmd;
+                MW_LOG_WARNING("zlm", "unknow cmd: {}", (uint8_t)cmd);
                 continue;
             }
 
@@ -273,7 +273,7 @@ void KcpTransport::input(const Buffer::Ptr& buf) {
                 case KcpHeader::Cmd::CMD_WINS:
                     break;
                 default:
-                    WarnL << "unknow cmd: " << (uint32_t)cmd;
+                    MW_LOG_WARNING("zlm", "unknow cmd: {}", (uint32_t)cmd);
                     break;
             }
         }
@@ -411,7 +411,6 @@ void KcpTransport::sortSendQueue() {
 
     while (!_snd_queue.empty()) {
         if (_snd_nxt >= _snd_una + cwnd) {
-            // WarnL << "snd cwnd over size";
             break;
         }
 
@@ -493,7 +492,6 @@ void KcpTransport::updateRtt(int32_t rtt) {
 }
 
 void KcpTransport::dropCacheByUna(uint32_t una) {
-    // TraceL << "recv una: " << una;
     if (una <= _snd_una) {
         return;
     }
@@ -510,7 +508,6 @@ void KcpTransport::dropCacheByUna(uint32_t una) {
 }
 
 void KcpTransport::dropCacheByAck(uint32_t sn) {
-    // TraceL << "recv ack sn: " << sn;
     if (sn < _snd_una) {
         return;
     }
@@ -595,24 +592,20 @@ void KcpTransport::handleCmdAck(KcpPacket::Ptr packet, uint32_t current) {
 void KcpTransport::handleCmdPush(KcpPacket::Ptr packet) {
     auto sn = packet->getSn();
     auto ts = packet->getTs();
-    // TraceL << "recv packet sn: " << sn << ", frg: " << (uint32_t)packet->getFrg();
 
     if (sn >= _rcv_nxt + _rcv_wnd) {
-        // TraceL << "sn: " << sn << " is over wnd, _rcv_nxt: " << _rcv_nxt << ":, skip";
         //超出接受窗口数据
         return;
     }
 
     _acklist.push_back(std::make_pair(sn, ts));
     if (sn < _rcv_nxt) {
-        // TraceL << "sn: " << sn << " is smaller than _rcv_nxt: " << _rcv_nxt << ":, skip";
         return;
     }
 
     for (auto it = _rcv_buf.begin(); it != _rcv_buf.end(); it++) {
         auto old = *it;
         if (old->getSn() == sn) {
-            // TraceL << "sn: " << sn << " is repeat skip";
             return;
         }
 
@@ -664,14 +657,12 @@ void KcpTransport::sendSendQueue() {
         auto xmit = packet->getXmit();
         //没重传过,第一次发送数据包
         if (xmit == 0) {
-            // TraceL << "normal send sn: " << packet->getSn();
             needsend = true;
             packet->setXmit(xmit + 1);
             packet->setRto(_rx_rto);
             packet->setResendts(current + _rx_rto + rtomin);
         } else if (current >= packet->getResendts()) {
             //普通重传
-            // TraceL << "resend sn: " << packet->getSn() << ", xmit: " << packet->getXmit();
             needsend = true;
             packet->setXmit(xmit + 1);
             _xmit++;
@@ -687,7 +678,6 @@ void KcpTransport::sendSendQueue() {
         } else if (packet->getFastack() >= resent) {
             //快速重传
             if ((int)xmit <= _fastlimit || _fastlimit <= 0) {
-                // TraceL << "fast resend sn: " << packet->getSn() << ", xmit: " << packet->getXmit();
                 auto rto = packet->getRto();
                 needsend = true;
                 packet->setXmit(xmit + 1);
@@ -728,7 +718,6 @@ void KcpTransport::sendAckList() {
         packet->setSn(front.first);
         packet->setTs(front.second);
         sendPacket(packet);
-        // TraceL << "send ack sn: " << packet->getSn() << ", una: " << _rcv_nxt;
     }
     return;
 }

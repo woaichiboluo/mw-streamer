@@ -19,7 +19,7 @@
 #endif
 
 #include "Util/File.h"
-#include "Util/logger.h"
+#include "mw/log.h"
 #include "Util/onceToken.h"
 #include "Util/util.h"
 #include "Util/uv_errno.h"
@@ -123,13 +123,13 @@ static std::shared_ptr<char> getSharedMmap(const string &file_path, int64_t &fil
 #endif
 
     if (fd < 0) {
-        WarnL << "fileno failed:" << get_uv_errmsg(false);
+        MW_LOG_WARNING("zlm", "fileno failed:{}", get_uv_errmsg(false));
         return nullptr;
     }
 #ifndef _WIN32
     auto ptr = (char *)mmap(NULL, file_size, PROT_READ, MAP_SHARED, fd, 0);
     if (ptr == MAP_FAILED) {
-        WarnL << "mmap " << file_path << " failed:" << get_uv_errmsg(false);
+        MW_LOG_WARNING("zlm", "mmap {} failed:{}", file_path, get_uv_errmsg(false));
         return nullptr;
     }
 
@@ -143,7 +143,7 @@ static std::shared_ptr<char> getSharedMmap(const string &file_path, int64_t &fil
     auto hfile = ::CreateFileA(file_path.data(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 
     if (hfile == INVALID_HANDLE_VALUE) {
-        WarnL << "CreateFileA() " << file_path << " failed:";
+        MW_LOG_WARNING("zlm", "CreateFileA() {} failed:", file_path);
         return nullptr;
     }
 
@@ -155,7 +155,7 @@ static std::shared_ptr<char> getSharedMmap(const string &file_path, int64_t &fil
 
     if (hmapping == NULL) {
         mmap_close(hfile, NULL, NULL);
-        WarnL << "CreateFileMapping() " << file_path << " failed:";
+        MW_LOG_WARNING("zlm", "CreateFileMapping() {} failed:", file_path);
         return nullptr;
     }
 
@@ -163,7 +163,7 @@ static std::shared_ptr<char> getSharedMmap(const string &file_path, int64_t &fil
 
     if (addr_ == nullptr) {
         mmap_close(hfile, hmapping, addr_);
-        WarnL << "MapViewOfFile() " << file_path << " failed:";
+        MW_LOG_WARNING("zlm", "MapViewOfFile() {} failed:", file_path);
         return nullptr;
     }
 
@@ -301,7 +301,7 @@ Buffer::Ptr HttpFileBody::readData(size_t size) {
         // 读取文件异常，文件真实长度小于声明长度  [AUTO-TRANSLATED:89d09f9b]
         // File reading exception, the actual length of the file is less than the declared length
         _file_offset = _read_to;
-        WarnL << "read file err:" << get_uv_errmsg();
+        MW_LOG_WARNING("zlm", "read file err:{}", get_uv_errmsg());
         return nullptr;
     }
 

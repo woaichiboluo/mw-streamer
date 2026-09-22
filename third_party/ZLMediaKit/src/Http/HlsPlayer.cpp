@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "HlsPlayer.h"
 #include "Common/config.h"
 using namespace std;
@@ -60,7 +61,7 @@ void HlsPlayer::teardown_l(const SockException &ex) {
             } else {
                 _try_fetch_index_times += 1;
                 shutdown(ex);
-                WarnL << "Attempt to pull the m3u8 file again[" << _try_fetch_index_times << "]:" << _play_url;
+                MW_LOG_WARNING("zlm", "Attempt to pull the m3u8 file again[{}]:{}", _try_fetch_index_times, _play_url);
                 // 当网络波动时有可能拉取m3u8文件失败, 因此快速重试拉取m3u8文件, 而不是直接关闭播放器  [AUTO-TRANSLATED:0cb45f5f]
                 // When the network fluctuates, it is possible that the m3u8 file will fail to be pulled, so quickly retry pulling the m3u8 file instead of directly closing the player
                 // 这里增加一个延时是为了防止_http_ts_player的socket还保持alive状态，就多次拉取m3u8文件了  [AUTO-TRANSLATED:f779e7e9]
@@ -153,7 +154,7 @@ void HlsPlayer::fetchSegment() {
             return;
         }
         if (err) {
-            WarnL << "Download ts segment " << url << " failed:" << err;
+            MW_LOG_WARNING("zlm", "Download ts segment {} failed:{}", url, fmt::streamed(err));
             if (err.getErrCode() == Err_timeout) {
                 strong_self->_timeout_multiple = MAX(strong_self->_timeout_multiple + 1, MAX_TIMEOUT_MULTIPLE);
             } else {
@@ -161,7 +162,7 @@ void HlsPlayer::fetchSegment() {
             }
             strong_self->_ts_download_failed_count++;
             if (strong_self->_ts_download_failed_count > MAX_TS_DOWNLOAD_FAILED_COUNT) {
-                WarnL << "ts segment " << url << " download failed count is " << strong_self->_ts_download_failed_count << ", teardown player";
+                MW_LOG_WARNING("zlm", "ts segment {} download failed count is {}, teardown player", url, strong_self->_ts_download_failed_count);
                 strong_self->teardown_l(SockException(Err_shutdown, "ts segment download failed"));
                 return;
             }
@@ -238,7 +239,7 @@ bool HlsPlayer::onParsed(bool is_m3u8_inner, int64_t sequence, const map<int, ts
             if (_last_sequence > 0 && _ts_list.empty() && HlsParser::isLive()
                 && _wait_index_update_ticker.elapsedTime() > (uint64_t)HlsParser::getTargetDur() * 1000 * 5) {
                 _wait_index_update_ticker.resetTime();
-                WarnL << "Fetch new ts list from m3u8 timeout";
+                MW_LOG_WARNING("zlm", "Fetch new ts list from m3u8 timeout");
                 return false;
             }
             return true;
@@ -282,7 +283,7 @@ void HlsPlayer::onResponseHeader(const string &status, const HttpClient::HttpHea
     }
     auto content_type = strToLower(const_cast<HttpClient::HttpHeader &>(headers)["Content-Type"]);
     if (content_type.find("application/vnd.apple.mpegurl") != 0 && content_type.find("/x-mpegurl") == _StrPrinter::npos) {
-        WarnL << "May not a hls video: " << content_type << ", url: " << getUrl();
+        MW_LOG_WARNING("zlm", "May not a hls video: {}, url: {}", content_type, getUrl());
     }
     _m3u8.clear();
 }

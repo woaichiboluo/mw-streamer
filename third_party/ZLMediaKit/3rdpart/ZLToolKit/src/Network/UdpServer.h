@@ -12,6 +12,7 @@
 #define TOOLKIT_NETWORK_UDPSERVER_H
 
 #if __cplusplus >= 201703L
+#include "mw/log.h"
 #include <array>
 #include <string_view>
 #endif
@@ -65,13 +66,13 @@ public:
         //Session creator, creates different types of servers through it
         _session_alloc = [cb](const UdpServer::Ptr &server, const Socket::Ptr &sock) {
             auto session = std::shared_ptr<SessionType>(new SessionType(sock), [](SessionType * ptr) {
-                TraceP(static_cast<Session *>(ptr)) << "~" << cls_name;
+                MW_LOG_TRACE("zlm", "{}({}:{}) ~{}", (static_cast<Session *>(ptr))->getIdentifier(), (static_cast<Session *>(ptr))->get_peer_ip(), (static_cast<Session *>(ptr))->get_peer_port(), cls_name);
                 delete ptr;
             });
             if (cb) {
                 cb(session);
             }
-            TraceP(static_cast<Session *>(session.get())) << cls_name;
+            MW_LOG_TRACE("zlm", "{}({}:{}) {}", (static_cast<Session *>(session.get()))->getIdentifier(), (static_cast<Session *>(session.get()))->get_peer_ip(), (static_cast<Session *>(session.get()))->get_peer_port(), cls_name);
             auto sock_creator = server->_on_create_socket;
             session->setOnCreateSocket([sock_creator](const EventPoller::Ptr &poller) {
                 return sock_creator(poller, nullptr, nullptr, 0);

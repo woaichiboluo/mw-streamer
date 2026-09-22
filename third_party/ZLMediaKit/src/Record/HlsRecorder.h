@@ -11,6 +11,7 @@
 #ifndef HLSRECORDER_H
 #define HLSRECORDER_H
 
+#include "mw/log.h"
 #include "HlsMakerImp.h"
 #include "MPEG.h"
 #include "MP4Muxer.h"
@@ -98,7 +99,7 @@ public:
         try {
             this->flush();
         } catch (std::exception &ex) {
-            WarnL << ex.what();
+            MW_LOG_WARNING("zlm", "{}", ex.what());
         }
     }
 
@@ -122,7 +123,7 @@ public:
         try {
             this->flush();
         } catch (std::exception &ex) {
-            WarnL << ex.what();
+            MW_LOG_WARNING("zlm", "{}", ex.what());
         }
     }
 

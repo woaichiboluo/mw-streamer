@@ -13,7 +13,7 @@
 #include <algorithm>
 #include "MP4Demuxer.h"
 #include "Util/File.h"
-#include "Util/logger.h"
+#include "mw/log.h"
 #include "Extension/Factory.h"
 
 using namespace std;
@@ -140,7 +140,7 @@ Frame::Ptr MP4Demuxer::readFrame(bool &keyFrame, bool &eof, int *error) {
             if (error) {
                 *error = ret;
             }
-            WarnL << "读取mp4文件数据失败:" << ret;
+            MW_LOG_WARNING("zlm", "读取mp4文件数据失败:{}", ret);
             return nullptr;
         }
     }
@@ -229,7 +229,7 @@ void MultiMP4Demuxer::openMP4(const string &files_string) {
         auto clone_track(track->clone());
         clone_track->setIndex(clone_track->getTrackType());
         _tracks.emplace(clone_track->getIndex(), clone_track);
-        DebugL << "track index: " << track->getIndex() << " -> " << clone_track->getIndex();
+        MW_LOG_DEBUG("zlm", "track index: {} -> {}", track->getIndex(), clone_track->getIndex());
     }
 }
 

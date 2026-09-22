@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "HlsMediaSource.h"
 #include "Common/config.h"
 
@@ -75,8 +76,7 @@ void HlsCookieData::addReaderCount() {
 HlsCookieData::~HlsCookieData() {
     if (*_added) {
         uint64_t duration = (_ticker.createdTime() - _ticker.elapsedTime()) / 1000;
-        WarnL << _sock_info->getIdentifier() << "(" << _sock_info->get_peer_ip() << ":" << _sock_info->get_peer_port()
-              << ") " << "HLS播放器(" << _info.shortUrl() << ")断开,耗时(s):" << duration;
+        MW_LOG_WARNING("zlm", "{}({}:{}) HLS播放器({})断开,耗时(s):{}", _sock_info->getIdentifier(), _sock_info->get_peer_ip(), _sock_info->get_peer_port(), _info.shortUrl(), duration);
 
         GET_CONFIG(uint32_t, iFlowThreshold, General::kFlowThreshold);
         uint64_t bytes = _bytes.load();
@@ -84,7 +84,7 @@ HlsCookieData::~HlsCookieData() {
             try {
                 NOTICE_EMIT(BroadcastFlowReportArgs, Broadcast::kBroadcastFlowReport, _info, bytes, duration, true, *_sock_info);
             } catch (std::exception &ex) {
-                WarnL << "Exception occurred: " << ex.what();
+                MW_LOG_WARNING("zlm", "Exception occurred: {}", ex.what());
             }
         }
     }

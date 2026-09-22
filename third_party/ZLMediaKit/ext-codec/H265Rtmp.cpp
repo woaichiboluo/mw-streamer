@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "H265Rtmp.h"
 #include "Rtmp/utils.h"
 #include "Common/config.h"
@@ -58,7 +59,7 @@ void H265RtmpDecoder::inputRtmp(const RtmpPacket::Ptr &pkt) {
                 splitFrame(data, size, pkt->time_stamp, pts);
                 break;
             }
-            default: WarnL << "Unknown pkt_type: " << (int)_info.video.pkt_type; break;
+            default: MW_LOG_WARNING("zlm", "Unknown pkt_type: {}", (int)_info.video.pkt_type); break;
         }
         return;
     }

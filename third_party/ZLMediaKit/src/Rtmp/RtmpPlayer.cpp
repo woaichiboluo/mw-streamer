@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "RtmpPlayer.h"
 #include "Rtmp/utils.h"
 #include "Util/util.h"
@@ -27,7 +28,7 @@ namespace mediakit {
 RtmpPlayer::RtmpPlayer(const EventPoller::Ptr &poller) : TcpClient(poller) {}
 
 RtmpPlayer::~RtmpPlayer() {
-    DebugL;
+    MW_LOG_DEBUG("zlm", "{}", __FUNCTION__);
 }
 
 void RtmpPlayer::teardown() {
@@ -68,7 +69,7 @@ void RtmpPlayer::play(const string &url)  {
         onPlayResult_l(SockException(Err_other, "rtmp url非法"), false);
         return;
     }
-    DebugL << host_url << " " << _app << " " << _stream_id;
+    MW_LOG_DEBUG("zlm", "{} {} {}", host_url, _app, _stream_id);
 
     uint16_t port = start_with(url, "rtmps") ? 443 : 1935;
     splitUrl(host_url, host_url, port);
@@ -105,7 +106,7 @@ void RtmpPlayer::onPlayResult_l(const SockException &ex, bool handshake_done) {
         return;
     }
 
-    WarnL << ex.getErrCode() << " " << ex;
+    MW_LOG_WARNING("zlm", "{} {}", static_cast<int>(ex.getErrCode()), fmt::streamed(ex));
     if (!handshake_done) {
         // 开始播放阶段  [AUTO-TRANSLATED:a246c5ee]
         // Start playback stage
@@ -218,7 +219,6 @@ void RtmpPlayer::send_connect() {
 
     sendInvoke("connect", obj);
     addOnResultCB([this](AMFDecoder &dec) {
-        //TraceL << "connect result";
         dec.load<AMFValue>();
         auto val = dec.load<AMFValue>();
         auto level = val["level"].as_string();
@@ -234,7 +234,6 @@ void RtmpPlayer::send_createStream() {
     AMFValue obj(AMF_NULL);
     sendInvoke("createStream", obj);
     addOnResultCB([this](AMFDecoder &dec) {
-        //TraceL << "createStream result";
         dec.load<AMFValue>();
         _stream_index = dec.load<int>();
         send_play();
@@ -246,7 +245,6 @@ void RtmpPlayer::send_play() {
     enc << "play" << ++_send_req_id << nullptr << _stream_id << -2000;
     sendRequest(MSG_CMD, enc.data());
     auto fun = [](AMFValue &val) {
-        //TraceL << "play onStatus";
         auto level = val["level"].as_string();
         auto code = val["code"].as_string();
         if (level != "status") {
@@ -262,7 +260,6 @@ void RtmpPlayer::send_pause(bool pause) {
     enc << "pause" << ++_send_req_id << nullptr << pause;
     sendRequest(MSG_CMD, enc.data());
     auto fun = [this, pause](AMFValue &val) {
-        //TraceL << "pause onStatus";
         auto level = val["level"].as_string();
         auto code = val["code"].as_string();
         if (level != "status") {
@@ -304,7 +301,7 @@ void RtmpPlayer::onCmd_result(AMFDecoder &dec){
         it->second(dec);
         _map_on_result.erase(it);
     } else {
-        WarnL << "unhandled _result";
+        MW_LOG_WARNING("zlm", "unhandled _result");
     }
 }
 
@@ -333,12 +330,10 @@ void RtmpPlayer::onCmd_onStatus(AMFDecoder &dec) {
                 throw std::runtime_error(StrPrinter << "onStatus 失败:" << level.as_string() << " " << code << endl);
             }
         }
-        //WarnL << "unhandled onStatus:" << code;
     }
 }
 
 void RtmpPlayer::onCmd_onMetaData(AMFDecoder &dec) {
-    //TraceL;
     auto val = dec.load<AMFValue>();
     if (!onMetadata(val)) {
         throw std::runtime_error("onMetadata failed");
@@ -347,7 +342,6 @@ void RtmpPlayer::onCmd_onMetaData(AMFDecoder &dec) {
 }
 
 void RtmpPlayer::onStreamDry(uint32_t stream_index) {
-    //TraceL << stream_index;
     onPlayResult_l(SockException(Err_other, "rtmp stream dry"), true);
 }
 
@@ -397,7 +391,7 @@ void RtmpPlayer::onRtmpChunk(RtmpPacket::Ptr packet) {
                 auto fun = it->second;
                 (this->*fun)(dec);
             } else {
-                WarnL << "can not support cmd:" << type;
+                MW_LOG_WARNING("zlm", "can not support cmd:{}", type);
             }
             break;
         }
@@ -440,7 +434,6 @@ void RtmpPlayer::seekToMilliSecond(uint32_t seekMS){
     enc << "seek" << ++_send_req_id << nullptr << seekMS * 1.0;
     sendRequest(MSG_CMD, enc.data());
     addOnStatusCB([this, seekMS](AMFValue &val) {
-        //TraceL << "seek result";
         _now_stamp_ticker[0].resetTime();
         _now_stamp_ticker[1].resetTime();
         int iTimeInc = seekMS - getProgressMilliSecond();

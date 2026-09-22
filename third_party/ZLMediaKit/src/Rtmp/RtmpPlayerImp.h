@@ -11,6 +11,7 @@
 #ifndef SRC_RTMP_RTMPPLAYERIMP_H_
 #define SRC_RTMP_RTMPPLAYERIMP_H_
 
+#include "mw/log.h"
 #include <memory>
 #include <functional>
 #include "Common/config.h"
@@ -31,7 +32,7 @@ public:
     FlvPlayerBase(const toolkit::EventPoller::Ptr &poller) : Super(poller) {};
 
     ~FlvPlayerBase() override {
-        DebugL << std::endl;
+        MW_LOG_DEBUG("zlm", "\n");
     }
 
     float getDuration() const override {
@@ -93,7 +94,6 @@ private:
         GET_CONFIG(bool, add_mute_audio, Protocol::kAddMuteAudio);
         auto &add_mute_audio_option = this->Super::operator[](Protocol::kAddMuteAudio);
         _demuxer->enableMuteAudio(add_mute_audio_option.empty() ? add_mute_audio : add_mute_audio_option.template as<bool>());
-        //TraceL<<" _wait_track_ready "<<_wait_track_ready;
         _demuxer->setTrackListener(this, _wait_track_ready);
         _demuxer->loadMetaData(val);
     }
@@ -112,7 +112,7 @@ public:
     RtmpPlayerImp(const toolkit::EventPoller::Ptr &poller) : Super(poller) {};
 
     ~RtmpPlayerImp() override {
-        DebugL;
+        MW_LOG_DEBUG("zlm", "{}", __FUNCTION__);
     }
 
     float getProgress() const override {

@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "Util/MD5.h"
 #include "Util/base64.h"
 #include "RtspPusher.h"
@@ -25,7 +26,7 @@ RtspPusher::RtspPusher(const EventPoller::Ptr &poller, const RtspMediaSource::Pt
 
 RtspPusher::~RtspPusher() {
     teardown();
-    DebugL;
+    MW_LOG_DEBUG("zlm", "{}", __FUNCTION__);
 }
 
 void RtspPusher::sendTeardown(){
@@ -76,8 +77,10 @@ void RtspPusher::publish(const string &url_str) {
 
     _url = url_str;
     _rtp_type = (Rtsp::eRtpType) (int) (*this)[Client::kRtpType];
-    DebugL << url._url << " " << (url._user.size() ? url._user : "null") << " "
-           << (url._passwd.size() ? url._passwd : "null") << " " << _rtp_type;
+    MW_LOG_DEBUG("zlm", "{} {} {} {}", url._url,
+                 (url._user.size() ? url._user : "null"),
+                 (url._passwd.size() ? url._passwd : "null"),
+                 static_cast<int>(_rtp_type));
 
     weak_ptr<RtspPusher> weak_self = static_pointer_cast<RtspPusher>(shared_from_this());
     float publish_timeout_sec = (*this)[Client::kTimeoutMS].as<int>() / 1000.0f;
@@ -98,7 +101,7 @@ void RtspPusher::publish(const string &url_str) {
 }
 
 void RtspPusher::onPublishResult_l(const SockException &ex, bool handshake_done) {
-    DebugL << ex.what();
+    MW_LOG_DEBUG("zlm", "{}", ex.what());
     if (ex.getErrCode() == Err_shutdown) {
         // 主动shutdown的，不触发回调  [AUTO-TRANSLATED:bd97b1c1]
         // Actively shutdown, do not trigger callback
@@ -340,7 +343,7 @@ void RtspPusher::handleResSetup(const Parser &parser, unsigned int track_idx) {
                     return;
                 }
                 if (SockUtil::inet_ntoa(addr) != peer_ip) {
-                    WarnL << "收到其他地址的rtcp数据:" << SockUtil::inet_ntoa(addr);
+                    MW_LOG_WARNING("zlm", "收到其他地址的rtcp数据:{}", SockUtil::inet_ntoa(addr));
                     return;
                 }
                 strongSelf->onRtcpPacket(track_idx, strongSelf->_track_vec[track_idx], (uint8_t *) buf->data(), buf->size());

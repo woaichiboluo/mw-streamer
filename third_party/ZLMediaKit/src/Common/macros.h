@@ -13,8 +13,8 @@
 
 #include <sstream>
 #include <iostream>
+#include "mw/log.h"
 #include "Util/util.h"
-#include "Util/logger.h"
 #if defined(__linux__)
 #include <arpa/inet.h>
 #include <endian.h>
@@ -36,7 +36,7 @@
     try {                                                                      \
         CHECK(__VA_ARGS__);                                                    \
     } catch (toolkit::AssertFailedException & ex) {                                     \
-        WarnL << ex.what();                                                    \
+        MW_LOG_WARNING("zlm", "{}", ex.what());                              \
         return;                                                                \
     }
 #endif
@@ -75,7 +75,7 @@ template <typename... ARGS>
 void Assert_ThrowCpp(int failed, const char *exp, const char *func, const char *file, int line, ARGS &&...args) {
     if (failed) {
         std::stringstream ss;
-        toolkit::LoggerWrapper::appendLog(ss, std::forward<ARGS>(args)...);
+        ((ss << std::forward<ARGS>(args)), ...);
         Assert_Throw(failed, exp, func, file, line, ss.str().data());
     }
 }

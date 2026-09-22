@@ -8,16 +8,29 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
-#include "Rtcp.h"
-#include "RtcpFCI.h"
-#include "Util/logger.h"
 #include <assert.h>
 #include <stddef.h>
+#include <stdio.h>
+
+#include <map>
+
+#include "Rtcp.h"
+#include "RtcpFCI.h"
+#include "Util/util.h"
+#include "mw/log.h"
 
 using namespace std;
 using namespace toolkit;
 
 namespace mediakit {
+
+static string formatTime(const timeval &tv) {
+    auto tm = getLocalTime(tv.tv_sec);
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%d-%02d-%02d %02d:%02d:%02d.%03d", 1900 + tm.tm_year, 1 + tm.tm_mon,
+             tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(tv.tv_usec / 1000));
+    return buf;
+}
 
 const char *rtcpTypeToStr(RtcpType type) {
     switch (type) {
@@ -204,16 +217,16 @@ void RtcpHeader::net2Host(size_t len) {
             RtcpXRRRTR *xr = (RtcpXRRRTR *)this;
             if (xr->bt == 4) {
                 xr->net2Host(len);
-                // TraceL<<xr->dumpString();
+                // MW_LOG_TRACE("zlm", "{}", xr->dumpString());
             } else if (xr->bt == 5) {
                 RtcpXRDLRR *dlrr = (RtcpXRDLRR *)this;
                 dlrr->net2Host(len);
-                TraceL << dlrr->dumpString();
+                MW_LOG_TRACE("zlm", "{}", dlrr->dumpString());
             } else if (xr->bt == 42){
                 //当有浏览器将屏幕推流到服务器时会发生这个, 暂时没发现什么作用，先解析出来，不做处理
                 RtcpXRTargetBitrate* tb = (RtcpXRTargetBitrate *)this;
                 tb->net2Host(len);
-                //TraceL << tb->dumpString();
+                // MW_LOG_TRACE("zlm", "{}", tb->dumpString());
             } else {
                 throw std::runtime_error(StrPrinter << "rtcp xr bt " << (int)xr->bt << " not support");
             }
@@ -231,7 +244,7 @@ vector<RtcpHeader *> RtcpHeader::loadFromBytes(char *data, size_t len) {
         RtcpHeader *rtcp = (RtcpHeader *)ptr;
         auto rtcp_len = rtcp->getSize();
         if (remain < (ssize_t)rtcp_len) {
-            WarnL << "非法的rtcp包,声明的长度超过实际数据长度";
+            MW_LOG_WARNING("zlm", "非法的rtcp包,声明的长度超过实际数据长度");
             break;
         }
         try {
@@ -240,7 +253,7 @@ vector<RtcpHeader *> RtcpHeader::loadFromBytes(char *data, size_t len) {
         } catch (std::exception &ex) {
             // 不能处理的rtcp包，或者无法解析的rtcp包，忽略掉  [AUTO-TRANSLATED:752ec400]
             // Ignore unprocessable rtcp packets or rtcp packets that cannot be parsed
-            WarnL << ex.what() << ",长度为:" << rtcp_len;
+            MW_LOG_WARNING("zlm", "{},长度为:{}", ex.what(), rtcp_len);
         }
         ptr += rtcp_len;
         remain -= rtcp_len;
@@ -277,7 +290,7 @@ string RtcpSR::getNtpStamp() const {
     struct timeval tv;
     tv.tv_sec = ntpmsw - 0x83AA7E80;
     tv.tv_usec = (decltype(tv.tv_usec))(ntplsw / ((double)(((uint64_t)1) << 32) * 1.0e-6));
-    return LogChannel::printTime(tv);
+    return formatTime(tv);
 }
 
 uint64_t RtcpSR::getNtpUnixStampMS() const {
@@ -337,8 +350,8 @@ string RtcpSR::dumpString() const {
      * [AUTO-TRANSLATED:852bd70e]
      */                                                                \
     if (report_count != item_count) {                                                                                  \
-        WarnL << rtcpTypeToStr((RtcpType)pt) << " report_count 字段不正确,已修正为:" << (int)report_count << " -> "    \
-              << item_count;                                                                                           \
+        MW_LOG_WARNING("zlm", "{} report_count 字段不正确,已修正为:{} -> {}", rtcpTypeToStr((RtcpType)pt),          \
+                       (int)report_count, item_count);                                                                  \
         report_count = item_count;                                                                                     \
     }
 
@@ -703,7 +716,7 @@ void RtcpBye::net2Host(size_t size) {
     if (offset < size) {
         uint8_t *reason_len_ptr = &reason_len + sizeof(ssrc) * (report_count - 1);
         if (reason_len_ptr + 1 + *reason_len_ptr > (uint8_t *)this + size) {
-            WarnL << "invalid rtcp bye reason length";
+            MW_LOG_WARNING("zlm", "invalid rtcp bye reason length");
             // 修正reason_len长度  [AUTO-TRANSLATED:1c0c9645]
             // Correct the length of reason_len
             *reason_len_ptr = ((uint8_t *)this + size - reason_len_ptr - 1) & 0xFF;

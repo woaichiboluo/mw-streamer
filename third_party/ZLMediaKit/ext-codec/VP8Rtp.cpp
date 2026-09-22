@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "VP8Rtp.h"
 #include "Extension/Frame.h"
 #include "Common/config.h"
@@ -243,7 +244,7 @@ bool VP8RtpDecoder::inputRtp(const RtpPacket::Ptr &rtp, bool key_pos) {
     bool ret = decodeRtp(rtp);
     if (!_gop_dropped && seq != (uint16_t)(_last_seq + 1) && _last_seq) {
         _gop_dropped = true;
-        WarnL << "start drop vp8 gop, last seq:" << _last_seq << ", rtp:\r\n" << rtp->dumpString();
+        MW_LOG_WARNING("zlm", "start drop vp8 gop, last seq:{}, rtp:\r\n{}", _last_seq, rtp->dumpString());
     }
     _last_seq = seq;
     return ret;
@@ -310,7 +311,7 @@ void VP8RtpDecoder::outputFrame(const RtpPacket::Ptr &rtp) {
 
     if (_frame->keyFrame() && _gop_dropped) {
         _gop_dropped = false;
-        InfoL << "new gop received, rtp:\r\n" << rtp->dumpString();
+        MW_LOG_INFO("zlm", "new gop received, rtp:\r\n{}", rtp->dumpString());
     }
     if (!_gop_dropped || _frame->configFrame()) {
         RtpCodec::inputFrame(_frame);

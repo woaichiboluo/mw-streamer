@@ -13,6 +13,7 @@
 #ifndef TOOLKIT_NETWORK_KCP_H
 #define TOOLKIT_NETWORK_KCP_H
 
+#include "mw/log.h"
 #include "Network/Buffer.h"
 #include "Network/sockutil.h"
 #include "Poller/EventPoller.h"
@@ -253,7 +254,7 @@ protected:
     }
 
     void onErr(const SockException &err) {
-        DebugL;
+        MW_LOG_DEBUG("zlm", "{}", __FUNCTION__);
         if (_on_err) {
             _on_err(err);
         }

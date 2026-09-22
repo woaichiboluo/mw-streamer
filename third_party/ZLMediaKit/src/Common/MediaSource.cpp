@@ -7,6 +7,7 @@
  * LICENSE file in the root of the source tree. All contributing project authors
  * may be found in the AUTHORS file in the root of the source tree.
  */
+#include "mw/log.h"
 #include <mutex>
 #include "Util/util.h"
 #include "Util/NoticeCenter.h"
@@ -89,7 +90,7 @@ MediaSource::~MediaSource() {
     try {
         unregist();
     } catch (std::exception &ex) {
-        WarnL << "Exception occurred: " << ex.what();
+        MW_LOG_WARNING("zlm", "Exception occurred: {}", ex.what());
     }
 }
 
@@ -265,7 +266,7 @@ void MediaSource::onReaderChanged(int size) {
     } catch (MediaSourceEvent::NotImplemented &ex) {
         // 未实现接口，应该打印异常  [AUTO-TRANSLATED:84f28c9d]
         // The interface is not implemented, an exception should be printed
-        WarnL << ex.what();
+        MW_LOG_WARNING("zlm", "{}", ex.what());
     } catch (...) {
         // getOwnerPoller()接口抛异常机制应该只对外不对内  [AUTO-TRANSLATED:ee2e2923]
         // The getOwnerPoller() interface should only throw exceptions externally, not internally
@@ -277,7 +278,7 @@ void MediaSource::onReaderChanged(int size) {
 bool MediaSource::setupRecord(Recorder::type type, bool start, const string &custom_path, size_t max_second){
     auto listener = _listener.lock();
     if (!listener) {
-        WarnL << "未设置MediaSource的事件监听者，setupRecord失败:" << getUrl();
+        MW_LOG_WARNING("zlm", "未设置MediaSource的事件监听者，setupRecord失败:{}", getUrl());
         return false;
     }
     return listener->getMuxer(const_cast<MediaSource &>(*this))->setupRecord(*this, type, start, custom_path, max_second);
@@ -438,7 +439,7 @@ static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &s
             if (auto strong_session = weak_session.lock()) {
                 // 播发器请求的流终于注册上了，切换到自己的线程再回复  [AUTO-TRANSLATED:7b79ad9b]
                 // The stream requested by the player is finally registered, switch to its own thread and reply
-                DebugL << "收到媒体注册事件,回复播放器:" << info.getUrl();
+                MW_LOG_DEBUG("zlm", "收到媒体注册事件,回复播放器:{}", info.getUrl());
                 // 再找一遍媒体源，一般能找到  [AUTO-TRANSLATED:069de7f6]
                 // Find the media source again, usually it can be found
                 findAsync_l(info, strong_session, false, cb_once);
@@ -505,7 +506,7 @@ void MediaSource::emitEvent(bool regist){
     // 触发广播  [AUTO-TRANSLATED:a5b415a4]
     // Trigger broadcast
     NOTICE_EMIT(BroadcastMediaChangedArgs, Broadcast::kBroadcastMediaChanged, regist, *this);
-    InfoL << (regist ? "媒体注册:" : "媒体注销:") << getUrl();
+    MW_LOG_INFO("zlm", "{}{}", (regist ? "媒体注册:" : "媒体注销:"), getUrl());
 }
 
 void MediaSource::regist() {
@@ -639,11 +640,11 @@ MediaSource::Ptr MediaSource::createFromMP4(const string &schema, const string &
         reader->startReadMP4();
         return MediaSource::find(schema, vhost, app, stream);
     } catch (std::exception &ex) {
-        WarnL << ex.what();
+        MW_LOG_WARNING("zlm", "{}", ex.what());
         return nullptr;
     }
 #else
-    WarnL << "创建MP4点播失败，请编译时打开\"ENABLE_MP4\"选项";
+    MW_LOG_WARNING("zlm", "创建MP4点播失败，请编译时打开\"ENABLE_MP4\"选项");
     return nullptr;
 #endif //ENABLE_MP4
 }
@@ -676,7 +677,6 @@ void MediaSourceEvent::onReaderChanged(MediaSource &sender, int size){
     }
     catch (std::exception &ex) {
         // 尝试获取 OwnerPoller，没有实现则使用默认 nullptr
-        // WarnL << ex.what();
     }
     _async_close_timer = std::make_shared<Timer>(stream_none_reader_delay / 1000.0f, [weak_sender, is_mp4_vod]() {
         auto strong_sender = weak_sender.lock();
@@ -700,13 +700,13 @@ void MediaSourceEvent::onReaderChanged(MediaSource &sender, int size){
             if (muxer && muxer->getOption().auto_close) {
                 // 此流被标记为无人观看自动关闭流  [AUTO-TRANSLATED:64a0dac3]
                 // This stream is marked as an automatically closed stream with no viewers.
-                WarnL << "Auto close stream when none reader: " << strong_sender->getUrl();
+                MW_LOG_WARNING("zlm", "Auto close stream when none reader: {}", strong_sender->getUrl());
                 strong_sender->getOwnerPoller()->async([strong_sender]() { strong_sender->close(false); });
             }
         } else {
             // 这个是mp4点播，我们自动关闭  [AUTO-TRANSLATED:8a7b9a90]
             // This is an mp4 on-demand, we automatically close it.
-            WarnL << "MP4点播无人观看,自动关闭:" << strong_sender->getUrl();
+            MW_LOG_WARNING("zlm", "MP4点播无人观看,自动关闭:{}", strong_sender->getUrl());
             strong_sender->getOwnerPoller()->async([strong_sender]() { strong_sender->close(false); });
         }
         return false;

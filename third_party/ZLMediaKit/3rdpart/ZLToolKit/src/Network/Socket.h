@@ -290,12 +290,6 @@ public:
     virtual std::string getIdentifier() const { return ""; }
 };
 
-#define TraceP(ptr) TraceL << ptr->getIdentifier() << "(" << ptr->get_peer_ip() << ":" << ptr->get_peer_port() << ") "
-#define DebugP(ptr) DebugL << ptr->getIdentifier() << "(" << ptr->get_peer_ip() << ":" << ptr->get_peer_port() << ") "
-#define InfoP(ptr) InfoL << ptr->getIdentifier() << "(" << ptr->get_peer_ip() << ":" << ptr->get_peer_port() << ") "
-#define WarnP(ptr) WarnL << ptr->getIdentifier() << "(" << ptr->get_peer_ip() << ":" << ptr->get_peer_port() << ") "
-#define ErrorP(ptr) ErrorL << ptr->getIdentifier() << "(" << ptr->get_peer_ip() << ":" << ptr->get_peer_port() << ") "
-
 //异步IO Socket对象，包括tcp客户端、服务器和udp套接字  [AUTO-TRANSLATED:8d4fc5c2]
 //Asynchronous IO Socket object, including TCP client, server, and UDP socket
 class Socket : public std::enable_shared_from_this<Socket>, public noncopyable, public SockInfo {

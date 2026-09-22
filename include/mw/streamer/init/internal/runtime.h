@@ -3,30 +3,25 @@
 
 #include <stdexcept>
 
-#include "mw/log.h"
-#include "mw/streamer/zlm/config.h"
+#include "mw/streamer/api.h"
 
 namespace mw::streamer::internal {
-
-struct RuntimeConfig {
-  mw::log::LogConfig log;
-  ZlmConfig zlm;
-};
-
-// Initializes process-global logging and ZLToolKit resources once. This is an
-// implementation detail used by media entry points, never a host operation.
-void EnsureInitialized(const RuntimeConfig& config = {});
 
 class RuntimeStateError : public std::logic_error {
  public:
   using std::logic_error::logic_error;
 };
 
-// Prevents terminal shutdown during construction and throughout Pipeline
-// ownership. Releasing the last use never shuts down the runtime implicitly.
+void InitializeRuntime(const MwLogConfig* log_config,
+                       const MwZlmConfig* zlm_config);
+bool IsRuntimeInitialized() noexcept;
+
+// Prevents terminal shutdown during construction and throughout ownership.
+// Construction requires an explicitly initialized runtime. Releasing the last
+// use never shuts down the runtime implicitly.
 class RuntimeUse final {
  public:
-  explicit RuntimeUse(const RuntimeConfig& config = {});
+  RuntimeUse();
   ~RuntimeUse();
   RuntimeUse(const RuntimeUse&) = delete;
   RuntimeUse& operator=(const RuntimeUse&) = delete;

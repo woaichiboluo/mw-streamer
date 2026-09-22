@@ -32,25 +32,20 @@ typedef enum MwLogResult {
   kMwLogInternalError,
 } MwLogResult;
 
-typedef struct MwLogModuleConfig {
-  const char* name;
-  size_t name_size;
-  MwLogLevel level;
-} MwLogModuleConfig;
-
 typedef struct MwLogConfig {
-  uint32_t struct_size;
-  // Explicit entries override the built-in info level for "default" and error
-  // level for every other module.
-  const MwLogModuleConfig* modules;
-  size_t module_count;
-  MwLogLevel console_level;
+  // Semicolon-separated module names with optional levels, for example
+  // "streamer;processor:debug;zlm:warn". A bare name uses info. Explicit
+  // entries override the built-in info level for "default" and error level for
+  // every other module.
+  const char* modules;
+  size_t modules_size;
+  int console_enabled;
   int console_color;
-  MwLogLevel file_level;
-  const char* file_path;
-  size_t file_path_size;
-  size_t max_file_size;
-  size_t max_files;
+  int rotating_file_enabled;
+  const char* rotating_file_path;
+  size_t rotating_file_path_size;
+  size_t rotating_file_max_size;
+  size_t rotating_file_max_files;
   int async_enabled;
   size_t async_queue_size;
   MwLogOverflowPolicy async_overflow;
@@ -71,6 +66,7 @@ MW_LOG_API void mw_log_write(MwLogLevel level, const char* module,
 }
 
 #include <fmt/format.h>
+#include <fmt/ostream.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -78,7 +74,6 @@ MW_LOG_API void mw_log_write(MwLogLevel level, const char* module,
 #include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 namespace mw::log {
 
@@ -92,60 +87,27 @@ enum class LogLevel : std::uint8_t {
   kOff,
 };
 
-enum class OverflowPolicy : std::uint8_t {
-  kBlock,
-  kOverrunOldest,
-};
-
-struct ModuleLogConfig {
-  std::string name;
-  LogLevel level = LogLevel::kInfo;
-};
-
-struct ConsoleSinkConfig {
-  bool color = true;
-  LogLevel level = LogLevel::kTrace;
-};
-
-struct RotatingFileSinkConfig {
-  std::string path;
-  LogLevel level = LogLevel::kOff;
-  std::size_t max_file_size = 10 * 1024 * 1024;
-  std::size_t max_files = 5;
-};
-
-struct AsyncConfig {
-  bool enabled = false;
-  std::size_t queue_size = 8192;
-  OverflowPolicy overflow = OverflowPolicy::kOverrunOldest;
-};
-
-struct LogConfig {
-  // Explicit entries override the built-in info level for "default" and error
-  // level for every other module.
-  std::vector<ModuleLogConfig> modules;
-  ConsoleSinkConfig console;
-  RotatingFileSinkConfig rotating_file;
-  AsyncConfig async;
-};
-
 class LoggingImpl;
 
 MW_LOG_API bool ShouldLog(std::string_view module, LogLevel level) noexcept;
 MW_LOG_API void Write(std::string_view module, LogLevel level, const char* file,
-                      std::uint32_t line, std::string_view message);
+                      std::uint32_t line, std::string_view message) noexcept;
+MW_LOG_API void WriteFormattedArgs(std::string_view module, LogLevel level,
+                                   const char* file, std::uint32_t line,
+                                   fmt::string_view format,
+                                   fmt::format_args args) noexcept;
 
 template <typename... Args>
 void WriteFormatted(std::string_view module, LogLevel level, const char* file,
                     std::uint32_t line, fmt::format_string<Args...> format,
-                    Args&&... args) {
-  Write(module, level, file, line,
-        fmt::format(format, std::forward<Args>(args)...));
+                    Args&&... args) noexcept {
+  WriteFormattedArgs(module, level, file, line, format.get(),
+                     fmt::make_format_args(args...));
 }
 
 class MW_LOG_API Logging {
  public:
-  explicit Logging(const LogConfig& config);
+  explicit Logging(const MwLogConfig& config);
   ~Logging();
 
   Logging(const Logging&) = delete;
@@ -159,14 +121,12 @@ class MW_LOG_API Logging {
 
 }  // namespace mw::log
 
-#define MW_LOG_DETAIL(level, module, ...)                             \
-  do {                                                                \
-    const std::string_view mw_log_module_{module};                    \
-    if (::mw::log::ShouldLog(mw_log_module_, level)) {                \
-      ::mw::log::WriteFormatted(mw_log_module_, level, __FILE__,      \
-                                static_cast<std::uint32_t>(__LINE__), \
-                                __VA_ARGS__);                         \
-    }                                                                 \
+#define MW_LOG_DETAIL(level, module, ...)                           \
+  do {                                                              \
+    const std::string_view mw_log_module_{module};                  \
+    ::mw::log::WriteFormatted(mw_log_module_, level, __FILE__,      \
+                              static_cast<std::uint32_t>(__LINE__), \
+                              __VA_ARGS__);                         \
   } while (false)
 
 #define MW_LOG_TRACE(module, ...) \

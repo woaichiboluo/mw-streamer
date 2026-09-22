@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "SrtCaller.h"
 
 #include <algorithm>
@@ -586,7 +587,7 @@ void SrtCaller::drainReceiveQueue(uint64_t generation) {
 
 void SrtCaller::onSRTData(const Buffer::Ptr &) {
     if (!isPlayer()) {
-        WarnL << "ignore received SRT data on pusher";
+        MW_LOG_WARNING("zlm", "ignore received SRT data on pusher");
     }
 }
 

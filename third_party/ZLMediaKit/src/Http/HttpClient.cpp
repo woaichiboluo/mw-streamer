@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include <cstdlib>
 #include "Util/base64.h"
 #include "HttpClient.h"
@@ -230,7 +231,7 @@ void HttpClient::onError(const SockException &ex) {
         // The connection was reset, possibly because the server actively disconnected the connection,
         // or the persistent connection idle time of the server kernel parameters or firewall timed out or inconsistent.
         // If it is a persistent connection, then we can solve this problem by reconnecting
-        WarnL << "http persistent connect reset, try reconnect";
+        MW_LOG_WARNING("zlm", "http persistent connect reset, try reconnect");
         _http_persistent = false;
         sendRequest(_url);
         return;
@@ -550,8 +551,7 @@ bool HttpClient::checkProxyConnected(const char *data, size_t len) {
     _proxy_connected = false;
     // CONNECT failed, which usually means the proxy rejected the tunnel request,
     // does not support CONNECT for this target, or the proxy authentication is invalid.
-    WarnL << "proxy CONNECT failed, status line: "
-          << response.substr(0, response.find("\r\n"));
+    MW_LOG_WARNING("zlm", "proxy CONNECT failed, status line: {}", response.substr(0, response.find("\r\n")));
     return false;
 }
 

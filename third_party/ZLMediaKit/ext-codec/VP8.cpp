@@ -16,7 +16,6 @@ bool VP8Track::inputFrame(const Frame::Ptr &frame) {
         _width = ((dataPtr[7] << 8) + dataPtr[6]) & 0x3FFF;
         _height = ((dataPtr[9] << 8) + dataPtr[8]) & 0x3FFF;
         webm_vpx_codec_configuration_record_from_vp8(&_vpx, &_width, &_height, dataPtr, frame->size() - frame->prefixSize());
-        // InfoL << _width << "x" << _height;
     }
     return VideoTrackImp::inputFrame(frame);
 }

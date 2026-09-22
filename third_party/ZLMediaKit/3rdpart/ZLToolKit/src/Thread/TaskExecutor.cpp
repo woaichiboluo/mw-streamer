@@ -21,44 +21,6 @@ using namespace std;
 
 namespace toolkit {
 
-TaskExecutorGetterImp::~TaskExecutorGetterImp() {
-    shutdown();
-}
-
-void TaskExecutorGetterImp::shutdown() {
-    lock_guard<mutex> shutdown_lock(_shutdown_mutex);
-    vector<TaskExecutor::Ptr> pollers;
-    {
-        lock_guard<mutex> lock(_executor_mutex);
-        if (_pollers_stopped) {
-            return;
-        }
-        pollers = _threads;
-        pollers.insert(pollers.end(), _exclusive_threads.begin(), _exclusive_threads.end());
-        for (auto &executor : pollers) {
-            if (static_pointer_cast<EventPoller>(executor)->isCurrentThread()) {
-                throw logic_error("Cannot shut down a poller pool from its worker");
-            }
-        }
-        _pollers_stopped = true;
-    }
-    // Producers must already be stopped. Execute their final queued work on
-    // the owner threads before any loop is joined.
-    for (auto &executor : pollers) {
-        executor->sync([]() {});
-    }
-    for (auto &executor : pollers) {
-        static_pointer_cast<EventPoller>(executor)->shutdown();
-    }
-    {
-        lock_guard<mutex> lock(_executor_mutex);
-        // The local snapshot keeps destruction outside the pool lock.
-        _threads.clear();
-        _exclusive_threads.clear();
-        _issued_executors.clear();
-    }
-}
-
 ThreadLoadCounter::ThreadLoadCounter(uint64_t max_size, uint64_t max_usec) {
     _last_sleep_time = _last_wake_time = getCurrentMicrosecond();
     _max_size = max_size;
@@ -296,16 +258,12 @@ vector<TaskExecutor::Ptr> TaskExecutorGetterImp::snapshotExecutors() {
 
 TaskExecutor::Ptr TaskExecutorGetterImp::extractUnusedExecutor() {
     lock_guard<mutex> lock(_executor_mutex);
-    if (_pollers_stopped) {
-        throw logic_error("Poller pool has been shut down");
-    }
     if (_threads.size() <= 1) {
         return nullptr;
     }
     for (auto it = _threads.begin(); it != _threads.end(); ++it) {
         if (_issued_executors.count(it->get()) == 0) {
-            auto executor = *it;
-            _exclusive_threads.emplace_back(executor);
+            auto executor = std::move(*it);
             _threads.erase(it);
             _thread_pos = 0;
             return executor;
@@ -315,7 +273,15 @@ TaskExecutor::Ptr TaskExecutorGetterImp::extractUnusedExecutor() {
 }
 
 TaskExecutor::Ptr TaskExecutorGetterImp::createPoller(const string &name, int priority, bool register_thread, bool enable_cpu_affinity, size_t cpu_index) {
-    EventPoller::Ptr poller(new EventPoller(name));
+    EventPoller::Ptr poller(new EventPoller(name), [](EventPoller *poller) {
+        // runLoop borrows this. A last reference released by its own callback
+        // must be reclaimed elsewhere, after shutdown has joined the loop.
+        if (poller->isCurrentThread()) {
+            thread([poller]() { delete poller; }).detach();
+        } else {
+            delete poller;
+        }
+    });
     poller->runLoop(false, register_thread);
     poller->async([cpu_index, name, priority, enable_cpu_affinity]() {
         ThreadPool::setPriority((ThreadPool::Priority)priority);
@@ -324,16 +290,6 @@ TaskExecutor::Ptr TaskExecutorGetterImp::createPoller(const string &name, int pr
             setThreadAffinity(cpu_index);
         }
     });
-    return poller;
-}
-
-TaskExecutor::Ptr TaskExecutorGetterImp::createExclusivePoller(const string &name, int priority, bool register_thread, bool enable_cpu_affinity, size_t cpu_index) {
-    lock_guard<mutex> lock(_executor_mutex);
-    if (_pollers_stopped) {
-        throw logic_error("Poller pool has been shut down");
-    }
-    auto poller = createPoller(name, priority, register_thread, enable_cpu_affinity, cpu_index);
-    _exclusive_threads.emplace_back(poller);
     return poller;
 }
 

@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "H265Rtp.h"
 #include "Common/config.h"
 namespace mediakit{
@@ -43,7 +44,7 @@ H265Frame::Ptr H265RtpDecoder::obtainFrame() {
 
 #define CHECK_SIZE(total, size, ret) \
         if (total < size) {     \
-            WarnL << "invalid rtp data size:" << total << " < " << size << ",rtp:\r\n" << rtp->dumpString(); _gop_dropped = true;  return ret; \
+            MW_LOG_WARNING("zlm", "invalid rtp data size:{} < {},rtp:\r\n{}", total, size, rtp->dumpString()); _gop_dropped = true;  return ret; \
         }
 
 // 4.4.2. Aggregation Packets (APs) (p25)
@@ -190,7 +191,7 @@ bool H265RtpDecoder::inputRtp(const RtpPacket::Ptr &rtp, bool) {
     _is_gop = decodeRtp(rtp);
     if (!_gop_dropped && seq != (uint16_t) (_last_seq + 1) && _last_seq) {
         _gop_dropped = true;
-        WarnL << "start drop h265 gop, last seq:" << _last_seq << ", rtp:\r\n" << rtp->dumpString();
+        MW_LOG_WARNING("zlm", "start drop h265 gop, last seq:{}, rtp:\r\n{}", _last_seq, rtp->dumpString());
     }
     _last_seq = seq;
     // 确保有sps rtp的时候，gop从sps开始；否则从关键帧开始  [AUTO-TRANSLATED:115ae07c]
@@ -225,7 +226,7 @@ bool H265RtpDecoder::decodeRtp(const RtpPacket::Ptr &rtp) {
                 return singleFrame(rtp, frame, payload_size, stamp);
             }
             _gop_dropped = true;
-            WarnL << "不支持该类型的265 RTP包, nal type" << nal << ", rtp:\r\n" << rtp->dumpString();
+            MW_LOG_WARNING("zlm", "不支持该类型的265 RTP包, nal type{}, rtp:\r\n{}", nal, rtp->dumpString());
             return false;
         }
     }
@@ -253,7 +254,7 @@ void H265RtpDecoder::outputFrame(const RtpPacket::Ptr &rtp, const H265Frame::Ptr
 
     if (frame->keyFrame() && _gop_dropped) {
         _gop_dropped = false;
-        InfoL << "new gop received, rtp:\r\n" << rtp->dumpString();
+        MW_LOG_INFO("zlm", "new gop received, rtp:\r\n{}", rtp->dumpString());
     }
     if (!_gop_dropped || frame->configFrame()) {
         RtpCodec::inputFrame(frame);
@@ -327,7 +328,7 @@ void H265RtpEncoder::packRtp(const char *ptr, size_t len, uint64_t pts, bool is_
 }
 void H265RtpEncoder::insertConfigFrame(uint64_t pts){
      if (!_sps || !_pps || !_vps) {
-        WarnL<<" not ok";
+        MW_LOG_WARNING("zlm", " not ok");
         return;
     }
     // gop缓存从vps 开始，vps ,sps、pps后面还有时间戳相同的关键帧，所以mark bit为false  [AUTO-TRANSLATED:2534b06f]

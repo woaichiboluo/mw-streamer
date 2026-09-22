@@ -12,7 +12,7 @@
 #include "sockutil.h"
 #include "Socket.h"
 #include "Util/util.h"
-#include "Util/logger.h"
+#include "mw/log.h"
 #include "Util/uv_errno.h"
 #include "Thread/semaphore.h"
 #include "Poller/EventPoller.h"
@@ -99,7 +99,7 @@ void Socket::setOnMultiRead(onMultiReadCB cb) {
     } else {
         _on_multi_read = [](Buffer::Ptr *buf, struct sockaddr_storage *addr, size_t count) {
             for (auto i = 0u; i < count; ++i) {
-                WarnL << "Socket not set read callback, data ignored: " << buf[i]->size();
+                MW_LOG_WARNING("zlm", "Socket not set read callback, data ignored: {}", buf[i]->size());
             }
         };
     }
@@ -110,7 +110,7 @@ void Socket::setOnErr(onErrCB cb) {
     if (cb) {
         _on_err = std::move(cb);
     } else {
-        _on_err = [](const SockException &err) { WarnL << "Socket not set err callback, err: " << err; };
+        _on_err = [](const SockException &err) { MW_LOG_WARNING("zlm", "Socket not set err callback, err: {}", fmt::streamed(err)); };
     }
 }
 
@@ -119,7 +119,7 @@ void Socket::setOnAccept(onAcceptCB cb) {
     if (cb) {
         _on_accept = std::move(cb);
     } else {
-        _on_accept = [](Socket::Ptr &sock, shared_ptr<void> &complete) { WarnL << "Socket not set accept callback, peer fd: " << sock->rawFD(); };
+        _on_accept = [](Socket::Ptr &sock, shared_ptr<void> &complete) { MW_LOG_WARNING("zlm", "Socket not set accept callback, peer fd: {}", sock->rawFD()); };
     }
 }
 
@@ -321,7 +321,7 @@ ssize_t Socket::onRead(const SockNum::Ptr &sock, const SocketRecvBuffer::Ptr &bu
             if (sock->type() == SockNum::Sock_TCP) {
                 emitErr(SockException(Err_eof, "end of file"));
             } else {
-                WarnL << "Recv eof on udp socket[" << sock->rawFd() << "]";
+                MW_LOG_WARNING("zlm", "Recv eof on udp socket[{}]", sock->rawFd());
             }
             return ret;
         }
@@ -333,7 +333,7 @@ ssize_t Socket::onRead(const SockNum::Ptr &sock, const SocketRecvBuffer::Ptr &bu
                     emitErr(toSockException(err));
                 } else {
                     if (!(err == UV_ECONNREFUSED && _ignore_udp_conn_refused.load(std::memory_order_acquire))) {
-                        WarnL << "Recv err on udp socket[" << sock->rawFd() << "]: " << uv_strerror(err);
+                        MW_LOG_WARNING("zlm", "Recv err on udp socket[{}]: {}", sock->rawFd(), uv_strerror(err));
                     }
                 }
             }
@@ -355,7 +355,7 @@ ssize_t Socket::onRead(const SockNum::Ptr &sock, const SocketRecvBuffer::Ptr &bu
             LOCK_GUARD(_mtx_event);
             _on_multi_read(&buf, &addr, count);
         } catch (std::exception &ex) {
-            ErrorL << "Exception occurred when emit on_read: " << ex.what();
+            MW_LOG_ERROR("zlm", "Exception occurred when emit on_read: {}", ex.what());
         }
     }
     return 0;
@@ -376,7 +376,7 @@ bool Socket::emitErr(const SockException &err) noexcept {
         try {
             strong_self->_on_err(err);
         } catch (std::exception &ex) {
-            ErrorL << "Exception occurred when emit on_err: " << ex.what();
+            MW_LOG_ERROR("zlm", "Exception occurred when emit on_err: {}", ex.what());
         }
         // 延后关闭socket，只移除其io事件，防止Session对象析构时获取fd相关信息失败  [AUTO-TRANSLATED:db5a0958]
         //Delay closing the socket, only remove its IO event, to prevent Session object destruction from failing to get fd related information
@@ -608,7 +608,7 @@ int Socket::onAccept(const SockNum::Ptr &sock, int event) noexcept {
                 }
                 auto ex = toSockException(err);
                 // emitErr(ex); https://github.com/ZLMediaKit/ZLMediaKit/issues/2946
-                ErrorL << "Accept socket failed: " << ex.what();
+                MW_LOG_ERROR("zlm", "Accept socket failed: {}", ex.what());
                 // 可能打开的文件描述符太多了:UV_EMFILE/UV_ENFILE  [AUTO-TRANSLATED:ecd1b4f1]
                 //Possibly too many open file descriptors: UV_EMFILE/UV_ENFILE
 #if defined(HAS_EPOLL) && !defined(_WIN32)
@@ -654,7 +654,7 @@ int Socket::onAccept(const SockNum::Ptr &sock, int event) noexcept {
                 //Intercept the Socket object's constructor
                 peer_sock = _on_before_accept(_poller);
             } catch (std::exception &ex) {
-                ErrorL << "Exception occurred when emit on_before_accept: " << ex.what();
+                MW_LOG_ERROR("zlm", "Exception occurred when emit on_before_accept: {}", ex.what());
                 close(fd);
                 continue;
             }
@@ -683,7 +683,7 @@ int Socket::onAccept(const SockNum::Ptr &sock, int event) noexcept {
                         peer_sock->emitErr(SockException(Err_eof, "add event to poller failed when accept a socket"));
                     }
                 } catch (std::exception &ex) {
-                    ErrorL << "Exception occurred: " << ex.what();
+                    MW_LOG_ERROR("zlm", "Exception occurred: {}", ex.what());
                 }
             });
 
@@ -695,7 +695,7 @@ int Socket::onAccept(const SockNum::Ptr &sock, int event) noexcept {
                 //First trigger the onAccept event, at this point, you should listen for onRead and other events of the Socket
                 _on_accept(peer_sock, completed);
             } catch (std::exception &ex) {
-                ErrorL << "Exception occurred when emit on_accept: " << ex.what();
+                MW_LOG_ERROR("zlm", "Exception occurred when emit on_accept: {}", ex.what());
                 continue;
             }
         }
@@ -703,7 +703,7 @@ int Socket::onAccept(const SockNum::Ptr &sock, int event) noexcept {
         if (event & EventPoller::Event_Error) {
             auto ex = getSockErr(sock->rawFd());
             emitErr(ex);
-            ErrorL << "TCP listener occurred a err: " << ex.what();
+            MW_LOG_ERROR("zlm", "TCP listener occurred a err: {}", ex.what());
             return -1;
         }
     }
@@ -868,7 +868,7 @@ bool Socket::flushData(const SockNum::Ptr &sock, bool poller_thread) {
             // udp发送异常，把数据丢弃  [AUTO-TRANSLATED:3a7d095d]
             //UDP send exception, discard the data
             send_buf_sending_tmp.pop_front();
-            WarnL << "Send udp socket[" << sock->rawFd() << "] failed, data ignored: " << uv_strerror(err);
+            MW_LOG_WARNING("zlm", "Send udp socket[{}] failed, data ignored: {}", sock->rawFd(), uv_strerror(err));
             continue;
         }
         // tcp发送失败时，触发异常  [AUTO-TRANSLATED:06f06449]
@@ -988,7 +988,7 @@ std::shared_ptr<void> Socket::cloneSocket(const Socket &other) {
     {
         LOCK_GUARD(other._mtx_sock_fd);
         if (!other._sock_fd) {
-            WarnL << "sockfd of src socket is null";
+            MW_LOG_WARNING("zlm", "sockfd of src socket is null");
             return nullptr;
         }
         sock = other._sock_fd->sockNum();
@@ -999,7 +999,7 @@ std::shared_ptr<void> Socket::cloneSocket(const Socket &other) {
     return std::shared_ptr<void>(reinterpret_cast<void *>(0x01), [weak_self, sock](void *) {
         if (auto strong_self = weak_self.lock()) {
             if (!strong_self->attachEvent(sock)) {
-                WarnL << "attachEvent failed: " << sock->rawFd();
+                MW_LOG_WARNING("zlm", "attachEvent failed: {}", sock->rawFd());
             }
         }
     });
@@ -1024,7 +1024,7 @@ bool Socket::bindPeerAddr(const struct sockaddr *dst_addr, socklen_t addr_len, b
         //After hard binding, cancel soft binding to prevent performance loss of memcpy target address
         _udp_send_dst = nullptr;
         if (-1 == ::connect(_sock_fd->rawFd(), dst_addr, addr_len)) {
-            WarnL << "Connect socket to peer address failed: " << SockUtil::inet_ntoa(dst_addr);
+            MW_LOG_WARNING("zlm", "Connect socket to peer address failed: {}", SockUtil::inet_ntoa(dst_addr));
             return false;
         }
         memcpy(&_peer_addr, dst_addr, addr_len);
@@ -1044,7 +1044,7 @@ bool Socket::setUdpRecvBuffer(const SocketRecvBuffer::Ptr &buffer) {
     // sockets.
     LOCK_GUARD(_mtx_sock_fd);
     if (_sock_fd || _udp_recv_buffer_frozen) {
-        WarnL << "setUdpRecvBuffer must be called before the socket fd is created and UDP IO is attached";
+        MW_LOG_WARNING("zlm", "setUdpRecvBuffer must be called before the socket fd is created and UDP IO is attached");
         return false;
     }
     _read_buffer = buffer;

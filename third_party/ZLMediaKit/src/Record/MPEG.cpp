@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include <assert.h>
 #include "MPEG.h"
 
@@ -33,7 +34,7 @@ MpegMuxer::~MpegMuxer() {
 bool MpegMuxer::addTrack(const Track::Ptr &track) {
     auto mpeg_id = getMpegIdByCodec(track->getCodecId());
     if (mpeg_id == PSI_STREAM_RESERVED) {
-        WarnL << "Unsupported codec: " << track->getCodecName();
+        MW_LOG_WARNING("zlm", "Unsupported codec: {}", track->getCodecName());
         return false;
     }
 

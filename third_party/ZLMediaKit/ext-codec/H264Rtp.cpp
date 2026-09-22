@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "H264Rtp.h"
 #include "Common/config.h"
 
@@ -48,7 +49,7 @@ bool H264RtpDecoder::inputRtp(const RtpPacket::Ptr &rtp, bool key_pos) {
     _is_gop = decodeRtp(rtp);
     if (!_gop_dropped && seq != (uint16_t)(_last_seq + 1) && _last_seq) {
         _gop_dropped = true;
-        WarnL << "start drop h264 gop, last seq:" << _last_seq << ", rtp:\r\n" << rtp->dumpString();
+        MW_LOG_WARNING("zlm", "start drop h264 gop, last seq:{}, rtp:\r\n{}", _last_seq, rtp->dumpString());
     }
     _last_seq = seq;
     // 确保有sps rtp的时候，gop从sps开始；否则从关键帧开始  [AUTO-TRANSLATED:115ae07c]
@@ -108,7 +109,7 @@ bool H264RtpDecoder::unpackStapA(const RtpPacket::Ptr &rtp, const uint8_t *ptr, 
     while (ptr + 2 < end) {
         uint16_t len = (ptr[0] << 8) | ptr[1];
         if (!len || ptr + len > end) {
-            WarnL << "invalid rtp data size:" << len << ",rtp:\r\n" << rtp->dumpString();
+            MW_LOG_WARNING("zlm", "invalid rtp data size:{},rtp:\r\n{}", len, rtp->dumpString());
             _gop_dropped = true;
             break;
         }
@@ -193,7 +194,7 @@ bool H264RtpDecoder::decodeRtp(const RtpPacket::Ptr &rtp) {
                 return singleFrame(rtp, frame, payload_size, stamp);
             }
             _gop_dropped = true;
-            WarnL << "不支持该类型的264 RTP包, nal type:" << nal << ", rtp:\r\n" << rtp->dumpString();
+            MW_LOG_WARNING("zlm", "不支持该类型的264 RTP包, nal type:{}, rtp:\r\n{}", nal, rtp->dumpString());
             return false;
         }
     }
@@ -212,7 +213,7 @@ void H264RtpDecoder::outputFrame(const RtpPacket::Ptr &rtp, const H264Frame::Ptr
 
     if (frame->keyFrame() && _gop_dropped) {
         _gop_dropped = false;
-        InfoL << "new gop received, rtp:\r\n" << rtp->dumpString();
+        MW_LOG_INFO("zlm", "new gop received, rtp:\r\n{}", rtp->dumpString());
     }
     if (!_gop_dropped || frame->configFrame()) {
         RtpCodec::inputFrame(frame);

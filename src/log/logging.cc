@@ -7,9 +7,9 @@
 #include <spdlog/sinks/stdout_sinks.h>
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
 #include <mutex>
-#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -21,6 +21,7 @@ namespace mw::log {
 namespace {
 
 constexpr std::string_view kDefaultModule = "default";
+constexpr char kDefaultModules[] = "streamer;processor;";
 constexpr std::string_view kLogPattern =
     "[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] %v";
 
@@ -89,23 +90,42 @@ bool FromCLevel(MwLogLevel input, LogLevel* output) noexcept {
   return false;
 }
 
+bool ParseLevel(std::string_view input, LogLevel* output) noexcept {
+  if (input == "trace") {
+    *output = LogLevel::kTrace;
+  } else if (input == "debug") {
+    *output = LogLevel::kDebug;
+  } else if (input == "info") {
+    *output = LogLevel::kInfo;
+  } else if (input == "warn") {
+    *output = LogLevel::kWarning;
+  } else if (input == "error") {
+    *output = LogLevel::kError;
+  } else if (input == "critical") {
+    *output = LogLevel::kCritical;
+  } else if (input == "off") {
+    *output = LogLevel::kOff;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+std::string_view Trim(std::string_view input) noexcept {
+  constexpr std::string_view kWhitespace = " \t\r\n";
+  const auto begin = input.find_first_not_of(kWhitespace);
+  if (begin == std::string_view::npos) return {};
+  const auto end = input.find_last_not_of(kWhitespace);
+  return input.substr(begin, end - begin + 1);
+}
+
 }  // namespace
 
 class LoggingImpl {
  public:
-  explicit LoggingImpl(const LogConfig& config, bool publish = true) {
-    for (const auto& module : config.modules) {
-      if (module.name.empty()) {
-        throw std::invalid_argument("log module name cannot be empty");
-      }
-      const auto duplicate = std::find_if(
-          module_levels_.begin(), module_levels_.end(),
-          [&module](const auto& entry) { return entry.first == module.name; });
-      if (duplicate != module_levels_.end()) {
-        throw std::invalid_argument("duplicate log module: " + module.name);
-      }
-      module_levels_.emplace_back(module.name, module.level);
-    }
+  explicit LoggingImpl(const MwLogConfig& config, bool publish = true) {
+    Validate(config);
+    ParseModules(config);
     CreateSinks(config);
     CreateLogger(config);
     if (publish) {
@@ -139,47 +159,115 @@ class LoggingImpl {
                  NormalizeModule(module), message, FileName(file), line);
   }
 
+  void WriteFormatted(std::string_view module, LogLevel level, const char* file,
+                      std::uint32_t line, fmt::string_view format,
+                      fmt::format_args args) {
+    if (!ShouldLog(module, level)) {
+      return;
+    }
+    logger_->log(ToSpdlogLevel(level), "[{}] {} [{}:{}]",
+                 NormalizeModule(module), fmt::vformat(format, args),
+                 FileName(file), line);
+  }
+
  private:
-  void CreateSinks(const LogConfig& config) {
-    if (config.console.level != LogLevel::kOff) {
+  static void Validate(const MwLogConfig& config) {
+    if (!config.modules && config.modules_size != 0) {
+      throw std::invalid_argument("log modules cannot be null");
+    }
+    if (!config.rotating_file_path && config.rotating_file_path_size != 0) {
+      throw std::invalid_argument("rotating log file path cannot be null");
+    }
+    if (config.async_overflow != kMwLogOverflowBlock &&
+        config.async_overflow != kMwLogOverflowOverrunOldest) {
+      throw std::invalid_argument("invalid log overflow policy");
+    }
+  }
+
+  void ParseModules(const MwLogConfig& config) {
+    const std::string_view modules =
+        config.modules ? std::string_view(config.modules, config.modules_size)
+                       : std::string_view{};
+    std::size_t begin = 0;
+    while (begin < modules.size()) {
+      const auto separator = modules.find(';', begin);
+      const auto end =
+          separator == std::string_view::npos ? modules.size() : separator;
+      const auto raw_entry = modules.substr(begin, end - begin);
+      if (!raw_entry.empty()) {
+        const auto entry = Trim(raw_entry);
+        if (entry.empty()) {
+          throw std::invalid_argument("log module name cannot be empty");
+        }
+        const auto colon = entry.find(':');
+        const auto name = Trim(entry.substr(0, colon));
+        if (name.empty() ||
+            (colon != std::string_view::npos &&
+             entry.find(':', colon + 1) != std::string_view::npos)) {
+          throw std::invalid_argument("invalid log module entry");
+        }
+        LogLevel level = LogLevel::kInfo;
+        if (colon != std::string_view::npos &&
+            !ParseLevel(Trim(entry.substr(colon + 1)), &level)) {
+          throw std::invalid_argument("invalid log module level");
+        }
+        const auto duplicate = std::find_if(
+            module_levels_.begin(), module_levels_.end(),
+            [name](const auto& item) { return item.first == name; });
+        if (duplicate != module_levels_.end()) {
+          throw std::invalid_argument("duplicate log module: " +
+                                      std::string(name));
+        }
+        module_levels_.emplace_back(name, level);
+      }
+      if (separator == std::string_view::npos) break;
+      begin = separator + 1;
+    }
+  }
+
+  void CreateSinks(const MwLogConfig& config) {
+    if (config.console_enabled) {
       spdlog::sink_ptr sink;
-      if (config.console.color) {
+      if (config.console_color) {
         sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
       } else {
         sink = std::make_shared<spdlog::sinks::stdout_sink_mt>();
       }
-      sink->set_level(ToSpdlogLevel(config.console.level));
+      sink->set_level(spdlog::level::trace);
       sink->set_pattern(std::string(kLogPattern));
       sinks_.emplace_back(std::move(sink));
     }
 
-    if (config.rotating_file.level != LogLevel::kOff) {
-      if (config.rotating_file.path.empty()) {
+    if (config.rotating_file_enabled) {
+      const std::string path = config.rotating_file_path
+                                   ? std::string(config.rotating_file_path,
+                                                 config.rotating_file_path_size)
+                                   : std::string{};
+      if (path.empty()) {
         throw std::invalid_argument("rotating log file path cannot be empty");
       }
-      if (config.rotating_file.max_file_size == 0 ||
-          config.rotating_file.max_files == 0) {
+      if (config.rotating_file_max_size == 0 ||
+          config.rotating_file_max_files == 0) {
         throw std::invalid_argument(
             "rotating log file size and count must be greater than zero");
       }
       auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-          config.rotating_file.path, config.rotating_file.max_file_size,
-          config.rotating_file.max_files);
-      sink->set_level(ToSpdlogLevel(config.rotating_file.level));
+          path, config.rotating_file_max_size, config.rotating_file_max_files);
+      sink->set_level(spdlog::level::trace);
       sink->set_pattern(std::string(kLogPattern));
       sinks_.emplace_back(std::move(sink));
     }
   }
 
-  void CreateLogger(const LogConfig& config) {
-    if (config.async.enabled && !sinks_.empty()) {
-      if (config.async.queue_size == 0) {
+  void CreateLogger(const MwLogConfig& config) {
+    if (config.async_enabled && !sinks_.empty()) {
+      if (config.async_queue_size == 0) {
         throw std::invalid_argument(
             "async log queue size must be greater than zero");
       }
       thread_pool_ = std::make_shared<spdlog::details::thread_pool>(
-          config.async.queue_size, 1);
-      const auto overflow = config.async.overflow == OverflowPolicy::kBlock
+          config.async_queue_size, 1);
+      const auto overflow = config.async_overflow == kMwLogOverflowBlock
                                 ? spdlog::async_overflow_policy::block
                                 : spdlog::async_overflow_policy::overrun_oldest;
       logger_ = std::make_shared<spdlog::async_logger>(
@@ -201,32 +289,24 @@ class LoggingImpl {
   bool published_ = false;
 };
 
-std::shared_mutex g_logging_mutex;
-LoggingImpl* g_active_logging = nullptr;
-
-LoggingImpl& DefaultLogging() {
-  static LoggingImpl* logging = [] {
-    auto* instance = new LoggingImpl(LogConfig{}, false);
-    return instance;
-  }();
-  return *logging;
-}
+std::atomic<LoggingImpl*> g_active_logging{nullptr};
 
 void LoggingImpl::Publish() {
-  std::unique_lock<std::shared_mutex> lock(g_logging_mutex);
-  if (g_active_logging) {
+  LoggingImpl* expected = nullptr;
+  if (!g_active_logging.compare_exchange_strong(expected, this,
+                                                std::memory_order_release,
+                                                std::memory_order_acquire)) {
     throw std::logic_error("mw log is already initialized");
   }
-  g_active_logging = this;
   published_ = true;
 }
 
 void LoggingImpl::Shutdown() noexcept {
   if (published_) {
-    std::unique_lock<std::shared_mutex> lock(g_logging_mutex);
-    if (g_active_logging == this) {
-      g_active_logging = nullptr;
-    }
+    LoggingImpl* expected = this;
+    g_active_logging.compare_exchange_strong(expected, nullptr,
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire);
     published_ = false;
   }
   if (logger_) {
@@ -241,28 +321,38 @@ void LoggingImpl::Shutdown() noexcept {
 }
 
 bool ShouldLog(std::string_view module, LogLevel level) noexcept {
-  std::shared_lock<std::shared_mutex> lock(g_logging_mutex);
-  auto* logging = g_active_logging;
+  auto* logging = g_active_logging.load(std::memory_order_acquire);
   if (logging) {
     return logging->ShouldLog(module, level);
   }
-  lock.unlock();
-  return DefaultLogging().ShouldLog(module, level);
+  return false;
 }
 
 void Write(std::string_view module, LogLevel level, const char* file,
-           std::uint32_t line, std::string_view message) {
-  std::shared_lock<std::shared_mutex> lock(g_logging_mutex);
-  auto* logging = g_active_logging;
-  if (logging) {
-    logging->Write(module, level, file, line, message);
-    return;
+           std::uint32_t line, std::string_view message) noexcept {
+  try {
+    auto* logging = g_active_logging.load(std::memory_order_acquire);
+    if (logging) {
+      logging->Write(module, level, file, line, message);
+    }
+  } catch (...) {
   }
-  lock.unlock();
-  DefaultLogging().Write(module, level, file, line, message);
 }
 
-Logging::Logging(const LogConfig& config)
+void WriteFormattedArgs(std::string_view module, LogLevel level,
+                        const char* file, std::uint32_t line,
+                        fmt::string_view format,
+                        fmt::format_args args) noexcept {
+  try {
+    auto* logging = g_active_logging.load(std::memory_order_acquire);
+    if (logging) {
+      logging->WriteFormatted(module, level, file, line, format, args);
+    }
+  } catch (...) {
+  }
+}
+
+Logging::Logging(const MwLogConfig& config)
     : impl_(std::make_unique<LoggingImpl>(config)) {}
 
 Logging::~Logging() = default;
@@ -274,53 +364,6 @@ namespace {
 std::mutex g_c_logging_mutex;
 std::unique_ptr<mw::log::Logging> g_c_logging;
 
-mw::log::LogConfig ToCppConfig(const MwLogConfig& input) {
-  if (input.struct_size < sizeof(MwLogConfig)) {
-    throw std::invalid_argument("invalid MwLogConfig size");
-  }
-  if (input.module_count != 0 && !input.modules) {
-    throw std::invalid_argument("log modules cannot be null");
-  }
-
-  mw::log::LogConfig output;
-  if (!mw::log::FromCLevel(input.console_level, &output.console.level) ||
-      !mw::log::FromCLevel(input.file_level, &output.rotating_file.level)) {
-    throw std::invalid_argument("invalid log level");
-  }
-  output.console.color = input.console_color != 0;
-  if (input.file_path) {
-    output.rotating_file.path.assign(input.file_path, input.file_path_size);
-  }
-  output.rotating_file.max_file_size = input.max_file_size;
-  output.rotating_file.max_files = input.max_files;
-  output.async.enabled = input.async_enabled != 0;
-  output.async.queue_size = input.async_queue_size;
-  switch (input.async_overflow) {
-    case kMwLogOverflowBlock:
-      output.async.overflow = mw::log::OverflowPolicy::kBlock;
-      break;
-    case kMwLogOverflowOverrunOldest:
-      output.async.overflow = mw::log::OverflowPolicy::kOverrunOldest;
-      break;
-    default:
-      throw std::invalid_argument("invalid log overflow policy");
-  }
-  output.modules.reserve(input.module_count);
-  for (std::size_t index = 0; index < input.module_count; ++index) {
-    const auto& module = input.modules[index];
-    if (!module.name && module.name_size != 0) {
-      throw std::invalid_argument("log module name cannot be null");
-    }
-    mw::log::ModuleLogConfig converted;
-    if (module.name) converted.name.assign(module.name, module.name_size);
-    if (!mw::log::FromCLevel(module.level, &converted.level)) {
-      throw std::invalid_argument("invalid module log level");
-    }
-    output.modules.emplace_back(std::move(converted));
-  }
-  return output;
-}
-
 }  // namespace
 
 extern "C" {
@@ -328,12 +371,13 @@ extern "C" {
 void mw_log_default_config(MwLogConfig* config) {
   if (!config) return;
   *config = {};
-  config->struct_size = sizeof(MwLogConfig);
-  config->console_level = kMwLogLevelTrace;
+  config->modules = mw::log::kDefaultModules;
+  config->modules_size = sizeof(mw::log::kDefaultModules) - 1;
+  config->console_enabled = 1;
   config->console_color = 1;
-  config->file_level = kMwLogLevelOff;
-  config->max_file_size = 10 * 1024 * 1024;
-  config->max_files = 5;
+  config->rotating_file_enabled = 0;
+  config->rotating_file_max_size = 10 * 1024 * 1024;
+  config->rotating_file_max_files = 5;
   config->async_queue_size = 8192;
   config->async_overflow = kMwLogOverflowOverrunOldest;
 }
@@ -343,7 +387,7 @@ MwLogResult mw_log_initialize(const MwLogConfig* config) {
   std::lock_guard<std::mutex> lock(g_c_logging_mutex);
   if (g_c_logging) return kMwLogAlreadyInitialized;
   try {
-    g_c_logging = std::make_unique<mw::log::Logging>(ToCppConfig(*config));
+    g_c_logging = std::make_unique<mw::log::Logging>(*config);
     return kMwLogSuccess;
   } catch (const std::invalid_argument&) {
     return kMwLogInvalidArgument;

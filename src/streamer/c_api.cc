@@ -9,8 +9,8 @@
 
 #include "mw/streamer/api.h"
 #include "mw/streamer/config/toml.h"
-#include "mw/streamer/input/input_state.h"
 #include "mw/streamer/init/internal/runtime.h"
+#include "mw/streamer/input/input_state.h"
 #include "mw/streamer/performance/pipeline_snapshot.h"
 #include "mw/streamer/pipeline/pipeline.h"
 #include "mw/streamer/pipeline/pipeline_builder.h"
@@ -275,8 +275,39 @@ extern "C" {
 
 const char* mw_last_error(void) { return last_error.c_str(); }
 
-MwResult mw_streamer_shutdown(void) {
-  return Guard([] { mw::streamer::internal::ShutdownRuntime(); });
+void mw_zlm_default_config(MwZlmConfig* config) {
+  if (!config) return;
+  *config = {};
+  config->enable_cpu_affinity = 1;
+}
+
+bool mw_streamer_initialize(const MwLogConfig* log_config,
+                            const MwZlmConfig* zlm_config) {
+  try {
+    ClearError();
+    mw::streamer::internal::InitializeRuntime(log_config, zlm_config);
+    return true;
+  } catch (const std::exception& error) {
+    Fail(kMwResultInvalidState, error.what());
+  } catch (...) {
+    Fail(kMwResultInternalError, "初始化运行时时发生未知错误");
+  }
+  return false;
+}
+
+bool mw_streamer_is_initialized(void) {
+  return mw::streamer::internal::IsRuntimeInitialized();
+}
+
+void mw_streamer_shutdown(void) {
+  try {
+    ClearError();
+    mw::streamer::internal::ShutdownRuntime();
+  } catch (const std::exception& error) {
+    Fail(kMwResultInvalidState, error.what());
+  } catch (...) {
+    Fail(kMwResultInternalError, "关闭运行时时发生未知错误");
+  }
 }
 
 MwResult mw_pipeline_create_from_toml(const MwPipelineCreateInfo* create_info,

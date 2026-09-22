@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "RtspPlayer.h"
 #include "Common/config.h"
 #include "Rtcp/Rtcp.h"
@@ -40,7 +41,7 @@ RtspPlayer::RtspPlayer(const EventPoller::Ptr &poller)
     : TcpClient(poller) {}
 
 RtspPlayer::~RtspPlayer(void) {
-    DebugL;
+    MW_LOG_DEBUG("zlm", "{}", __FUNCTION__);
 }
 
 void RtspPlayer::sendTeardown() {
@@ -95,7 +96,10 @@ void RtspPlayer::play(const string &strUrl) {
     _beat_type = (*this)[Client::kRtspBeatType].as<int>();
     _beat_interval_ms = (*this)[Client::kBeatIntervalMS].as<int>();
     _speed = (*this)[Client::kRtspSpeed].as<float>();
-    DebugL << url._url << " " << (url._user.size() ? url._user : "null") << " " << (url._passwd.size() ? url._passwd : "null") << " " << _rtp_type;
+    MW_LOG_DEBUG("zlm", "{} {} {} {}", url._url,
+                 (url._user.size() ? url._user : "null"),
+                 (url._passwd.size() ? url._passwd : "null"),
+                 static_cast<int>(_rtp_type));
 
     weak_ptr<RtspPlayer> weak_self = static_pointer_cast<RtspPlayer>(shared_from_this());
     float playTimeOutSec = (*this)[Client::kTimeoutMS].as<int>() / 1000.0f;
@@ -397,7 +401,7 @@ void RtspPlayer::handleResSETUP(const Parser &parser, unsigned int track_idx) {
                 return;
             }
             if (SockUtil::inet_ntoa(addr) != peer_ip) {
-                WarnL << "收到其他地址的rtp数据:" << SockUtil::inet_ntoa(addr);
+                MW_LOG_WARNING("zlm", "收到其他地址的rtp数据:{}", SockUtil::inet_ntoa(addr));
                 return;
             }
             strongSelf->handleOneRtp(
@@ -413,7 +417,7 @@ void RtspPlayer::handleResSETUP(const Parser &parser, unsigned int track_idx) {
                     return;
                 }
                 if (SockUtil::inet_ntoa(addr) != peer_ip) {
-                    WarnL << "收到其他地址的rtcp数据:" << SockUtil::inet_ntoa(addr);
+                    MW_LOG_WARNING("zlm", "收到其他地址的rtcp数据:{}", SockUtil::inet_ntoa(addr));
                     return;
                 }
                 strongSelf->onRtcpPacket(track_idx, strongSelf->_sdp_track[track_idx], (uint8_t *)buf->data(), buf->size());
@@ -468,7 +472,7 @@ void RtspPlayer::sendOptions() {
 void RtspPlayer::sendKeepAlive() {
     if (_play_check_timer)
     {
-        WarnL << "receive RTP packet before handleResPAUSE";
+        MW_LOG_WARNING("zlm", "receive RTP packet before handleResPAUSE");
     }
     _on_keepalive_reponse = [](const Parser &parser) {};
     if (_supported_cmd.find("GET_PARAMETER") != _supported_cmd.end()) {
@@ -536,7 +540,7 @@ void RtspPlayer::sendPause(int type, uint32_t seekMS) {
         } break;
         case type_speed: speed(_speed); break;
         default:
-            WarnL << "unknown type : " << type;
+            MW_LOG_WARNING("zlm", "unknown type : {}", type);
             _on_response = nullptr;
             break;
     }
@@ -557,12 +561,12 @@ void RtspPlayer::seekTo(uint32_t pos) {
 void RtspPlayer::handleResPAUSE(const Parser &parser, int type) {
     if (parser.status() != "200") {
         switch (type) {
-            case type_pause: WarnL << "Pause failed:" << parser.status() << " " << parser.statusStr(); break;
+            case type_pause: MW_LOG_WARNING("zlm", "Pause failed:{} {}", parser.status(), parser.statusStr()); break;
             case type_play:
-                WarnL << "Play failed:" << parser.status() << " " << parser.statusStr();
+                MW_LOG_WARNING("zlm", "Play failed:{} {}", parser.status(), parser.statusStr());
                 onPlayResult_l(SockException(Err_other, StrPrinter << "rtsp play failed:" << parser.status() << " " << parser.statusStr()), !_play_check_timer);
                 break;
-            case type_seek: WarnL << "Seek failed:" << parser.status() << " " << parser.statusStr(); break;
+            case type_seek: MW_LOG_WARNING("zlm", "Seek failed:{} {}", parser.status(), parser.statusStr()); break;
         }
         return;
     }
@@ -586,7 +590,7 @@ void RtspPlayer::handleResPAUSE(const Parser &parser, int type) {
             strStart = "0";
         }
         iSeekTo = (uint32_t)(1000 * atof(strStart.data()));
-        DebugL << "seekTo(ms):" << iSeekTo;
+        MW_LOG_DEBUG("zlm", "seekTo(ms):{}", iSeekTo);
     }
 
     onPlayResult_l(SockException(Err_success, type == type_seek ? "resume rtsp success" : "rtsp play success"), !_play_check_timer);
@@ -596,7 +600,7 @@ void RtspPlayer::onWholeRtspPacket(Parser &parser) {
     if (!start_with(parser.method(), "RTSP")) {
         // 不是rtsp回复，忽略  [AUTO-TRANSLATED:1dca8f64]
         // Not an RTSP response, ignore
-        WarnL << "Not rtsp response: " << parser.method();
+        MW_LOG_WARNING("zlm", "Not rtsp response: {}", parser.method());
         return;
     }
     try {
@@ -760,7 +764,7 @@ void RtspPlayer::sendRtspRequest(const string &cmd, const string &url, const Str
     _StrPrinter printer;
     printer << cmd << " " << url << " RTSP/1.0\r\n";
 
-    TraceL << cmd << " "<< url;
+    MW_LOG_TRACE("zlm", "{} {}", cmd, url);
 
     if (cmd == "PLAY") {
         // play命令时支持覆盖更新rtsp头，用于onvif点播等场景
@@ -839,7 +843,8 @@ void RtspPlayer::onPlayResult_l(const SockException &ex, bool handshake_done) {
         return;
     }
 
-    WarnL << ex.getErrCode() << " " << ex.what();
+    MW_LOG_WARNING("zlm", "{} {}", static_cast<int>(ex.getErrCode()),
+                   ex.what());
     if (!handshake_done) {
         // 开始播放阶段  [AUTO-TRANSLATED:7ef385fc]
         // Start playback stage
@@ -894,7 +899,7 @@ int RtspPlayer::getTrackIndexByPT(int pt) const {
     if (_sdp_track.size() == 1) {
         return 0;
     }
-    WarnL << "no such track with pt:" << pt;
+    MW_LOG_WARNING("zlm", "no such track with pt:{}", pt);
     return -1;
 }
 
@@ -907,7 +912,7 @@ int RtspPlayer::getTrackIndexByInterleaved(int interleaved) const {
     if (_sdp_track.size() == 1) {
         return 0;
     }
-    WarnL << "no such track with interleaved:" << interleaved;
+    MW_LOG_WARNING("zlm", "no such track with interleaved:{}", interleaved);
     return -1;
 }
 

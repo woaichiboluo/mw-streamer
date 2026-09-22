@@ -9,6 +9,7 @@
  */
 
 #if defined(ENABLE_RTPPROXY)
+#include "mw/log.h"
 #include "RtpSession.h"
 #include "RtpProcess.h"
 #include "Network/TcpServer.h"
@@ -68,7 +69,7 @@ void RtpSession::onError(const SockException &err) {
     if (_emit_detach) {
         _process->onDetach(err);
     }
-    WarnP(this) << _tuple.shortUrl() << " " << err;
+    MW_LOG_WARNING("zlm", "{}({}:{}) {} {}", (this)->getIdentifier(), (this)->get_peer_ip(), (this)->get_peer_port(), _tuple.shortUrl(), fmt::streamed(err));
 }
 
 void RtpSession::onManager() {
@@ -86,7 +87,7 @@ void RtpSession::onRtpPacket(const char *data, size_t len) {
     if (!isRtp(data, len)) {
         // 忽略非rtp数据  [AUTO-TRANSLATED:771b77d8]
         // Ignore non-rtp data
-        WarnP(this) << "Not rtp packet";
+        MW_LOG_WARNING("zlm", "{}({}:{}) Not rtp packet", (this)->getIdentifier(), (this)->get_peer_ip(), (this)->get_peer_port());
         return;
     }
     if (!_is_udp) {
@@ -104,7 +105,7 @@ void RtpSession::onRtpPacket(const char *data, size_t len) {
         GET_CONFIG(uint32_t, rtpMaxSize, Rtp::kRtpMaxSize);
         if (len > 1024 * rtpMaxSize) {
             _search_rtp = true;
-            WarnL << "rtp包长度异常(" << len << ")，发送端可能缓存溢出并覆盖，开始搜索ssrc以便恢复上下文";
+            MW_LOG_WARNING("zlm", "rtp包长度异常({})，发送端可能缓存溢出并覆盖，开始搜索ssrc以便恢复上下文", len);
             return;
         }
     }
@@ -135,13 +136,13 @@ void RtpSession::onRtpPacket(const char *data, size_t len) {
         uint32_t rtp_ssrc = 0;
         getSSRC(data, len, rtp_ssrc);
         if (rtp_ssrc != _ssrc) {
-            WarnP(this) << "ssrc mismatched, rtp dropped: " << rtp_ssrc << " != " << _ssrc;
+            MW_LOG_WARNING("zlm", "{}({}:{}) ssrc mismatched, rtp dropped: {} != {}", (this)->getIdentifier(), (this)->get_peer_ip(), (this)->get_peer_port(), rtp_ssrc, _ssrc);
             return;
         }
         _process->inputRtp(false, getSock(), data, len, (struct sockaddr *)&_addr);
     } catch (RtpTrack::BadRtpException &ex) {
         if (!_is_udp) {
-            WarnL << ex.what() << "，开始搜索ssrc以便恢复上下文";
+            MW_LOG_WARNING("zlm", "{}，开始搜索ssrc以便恢复上下文", ex.what());
             _search_rtp = true;
         } else {
             throw;
@@ -192,7 +193,7 @@ const char *RtpSession::onSearchPacketTail(const char *data, size_t len) {
         return RtpSplitter::onSearchPacketTail(data, len);
     }
     if (!_process) {
-        InfoL << "ssrc未获取到，无法通过ssrc恢复tcp上下文；尝试搜索PsSystemHeader恢复tcp上下文。";
+        MW_LOG_INFO("zlm", "ssrc未获取到，无法通过ssrc恢复tcp上下文；尝试搜索PsSystemHeader恢复tcp上下文。");
         auto rtp_ptr1 = searchByPsHeaderFlag(data, len);
         return rtp_ptr1;
     }
@@ -207,14 +208,14 @@ const char *RtpSession::onSearchPacketTail(const char *data, size_t len) {
 }
 
 const char *RtpSession::searchBySSRC(const char *data, size_t len) {
-    InfoL << "尝试rtp搜索ssrc..._ssrc=" << _ssrc;
+    MW_LOG_INFO("zlm", "尝试rtp搜索ssrc..._ssrc={}", _ssrc);
     // 搜索第一个rtp的ssrc  [AUTO-TRANSLATED:6b010df0]
     // Search for the first rtp's ssrc
     auto ssrc_ptr0 = findSSRC(data, len, _ssrc);
     if (!ssrc_ptr0) {
         // 未搜索到任意rtp，返回数据不够  [AUTO-TRANSLATED:50db17ed]
         // Return insufficient data if no rtp is found
-        InfoL << "rtp搜索ssrc失败（第一个数据不够），丢弃rtp数据为：" << len;
+        MW_LOG_INFO("zlm", "rtp搜索ssrc失败（第一个数据不够），丢弃rtp数据为：{}", len);
         return nullptr;
     }
     // 这两个字节是第一个rtp的长度字段  [AUTO-TRANSLATED:75816ba4]
@@ -228,7 +229,7 @@ const char *RtpSession::searchBySSRC(const char *data, size_t len) {
     if (!ssrc_ptr1) {
         // 未搜索到第二个rtp，返回数据不够  [AUTO-TRANSLATED:3a78a586]
         // Return insufficient data if the second rtp is not found
-        InfoL << "rtp搜索ssrc失败(第二个数据不够)，丢弃rtp数据为：" << len;
+        MW_LOG_INFO("zlm", "rtp搜索ssrc失败(第二个数据不够)，丢弃rtp数据为：{}", len);
         return nullptr;
     }
 
@@ -236,7 +237,7 @@ const char *RtpSession::searchBySSRC(const char *data, size_t len) {
     // The interval between the two ssrcs is exactly equal to the length of the rtp (plus the rtp length field), which means that the rtp is found
     auto ssrc_offset = ssrc_ptr1 - ssrc_ptr0;
     if (ssrc_offset == rtp_len + 2 || ssrc_offset == rtp_len + 4) {
-        InfoL << "rtp搜索ssrc成功，tcp上下文恢复成功，丢弃的rtp残余数据为：" << rtp_len_ptr - data;
+        MW_LOG_INFO("zlm", "rtp搜索ssrc成功，tcp上下文恢复成功，丢弃的rtp残余数据为：{}", rtp_len_ptr - data);
         _search_rtp_finished = true;
         if (rtp_len_ptr == data) {
             // 停止搜索rtp，否则会进入死循环  [AUTO-TRANSLATED:319eefa7]
@@ -253,12 +254,12 @@ const char *RtpSession::searchBySSRC(const char *data, size_t len) {
 }
 
 const char *RtpSession::searchByPsHeaderFlag(const char *data, size_t len) {
-    InfoL << "尝试rtp搜索PsSystemHeaderFlag..._ssrc=" << _ssrc;
+    MW_LOG_INFO("zlm", "尝试rtp搜索PsSystemHeaderFlag..._ssrc={}", _ssrc);
     // 搜索rtp中的第一个PsHeaderFlag  [AUTO-TRANSLATED:77a18970]
     // Search for the first PsHeaderFlag in rtp
     auto ps_header_flag_ptr = findPsHeaderFlag(data, len);
     if (!ps_header_flag_ptr) {
-        InfoL << "rtp搜索flag失败，丢弃rtp数据为：" << len;
+        MW_LOG_INFO("zlm", "rtp搜索flag失败，丢弃rtp数据为：{}", len);
         return nullptr;
     }
 
@@ -269,14 +270,14 @@ const char *RtpSession::searchByPsHeaderFlag(const char *data, size_t len) {
         // Stop searching for rtp, otherwise it will enter an infinite loop
         _search_rtp = false;
     }
-    InfoL << "rtp搜索flag成功，tcp上下文恢复成功，丢弃的rtp残余数据为：" << rtp_ptr - data;
+    MW_LOG_INFO("zlm", "rtp搜索flag成功，tcp上下文恢复成功，丢弃的rtp残余数据为：{}", rtp_ptr - data);
 
     // TODO or Not ? 更新设置ssrc  [AUTO-TRANSLATED:9c21db0a]
     // TODO or Not ? Update setting ssrc
     uint32_t rtp_ssrc = 0;
     getSSRC(rtp_ptr + 2, len, rtp_ssrc);
     _ssrc = rtp_ssrc;
-    InfoL << "设置_ssrc为：" << _ssrc;
+    MW_LOG_INFO("zlm", "设置_ssrc为：{}", _ssrc);
     // RtpServer::updateSSRC(uint32_t ssrc)
     return rtp_ptr;
 }

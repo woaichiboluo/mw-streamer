@@ -23,7 +23,6 @@ bool AV1Track::inputFrame(const Frame::Ptr &frame) {
     if (0 == aom_av1_codec_configuration_record_init(&_context, dataPtr, frame->size() - frame->prefixSize())) {
         _width = _context.width;
         _height = _context.height;
-        //InfoL << _width << "x" << _height;
     }
     return VideoTrackImp::inputFrame(frame);
 }

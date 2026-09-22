@@ -1,4 +1,5 @@
-﻿#include "JPEG.h"
+﻿#include "mw/log.h"
+#include "JPEG.h"
 #include "JPEGRtp.h"
 #include "Rtsp/Rtsp.h"
 #include "Util/util.h"
@@ -58,12 +59,12 @@ RtpCodec::Ptr getRtpDecoderByCodecId() {
 }
 
 RtmpCodec::Ptr getRtmpEncoderByTrack(const Track::Ptr &track) {
-    WarnL << "Unsupported jpeg rtmp encoder";
+    MW_LOG_WARNING("zlm", "Unsupported jpeg rtmp encoder");
     return nullptr;
 }
 
 RtmpCodec::Ptr getRtmpDecoderByTrack(const Track::Ptr &track) {
-    WarnL << "Unsupported jpeg rtmp decoder";
+    MW_LOG_WARNING("zlm", "Unsupported jpeg rtmp decoder");
     return nullptr;
 }
 

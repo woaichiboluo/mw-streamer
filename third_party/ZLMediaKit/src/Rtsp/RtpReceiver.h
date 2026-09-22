@@ -11,6 +11,7 @@
 #ifndef ZLMEDIAKIT_RTPRECEIVER_H
 #define ZLMEDIAKIT_RTPRECEIVER_H
 
+#include "mw/log.h"
 #include <map>
 #include <string>
 #include <memory>
@@ -200,10 +201,7 @@ private:
 
     void output(SEQ seq, T packet) {
         if (seq != _next_seq) {
-            WarnL << "packet dropped: " << _next_seq << " -> " << static_cast<SEQ>(seq - 1)
-                  << ", latest seq: " << _latest_seq
-                  << ", jitter buffer size: " << _pkt_sort_cache_map.size()
-                  << ", jitter buffer ms: " << _ticker.elapsedTime();
+            MW_LOG_WARNING("zlm", "packet dropped: {} -> {}, latest seq: {}, jitter buffer size: {}, jitter buffer ms: {}", _next_seq, static_cast<SEQ>(seq - 1), _latest_seq, _pkt_sort_cache_map.size(), _ticker.elapsedTime());
         }
         _next_seq = static_cast<SEQ>(seq + 1);
         _cb(seq, std::move(packet));

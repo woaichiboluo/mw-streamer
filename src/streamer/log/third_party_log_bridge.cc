@@ -16,33 +16,13 @@ extern "C" {
 #include <libavutil/log.h>
 }
 
-#include "Util/NoticeCenter.h"
-#include "Util/logger.h"
 #include "mw/log.h"
 
 namespace mw::streamer::internal {
 namespace {
 
-constexpr std::string_view kZlmModule = "zlm";
 constexpr std::string_view kSrtModule = "srt";
 constexpr std::string_view kFfmpegModule = "ffmpeg";
-constexpr std::string_view kZlmChannelName = "mw-log-event";
-
-mw::log::LogLevel FromZlmLevel(toolkit::LogLevel level) noexcept {
-  switch (level) {
-    case toolkit::LTrace:
-      return mw::log::LogLevel::kTrace;
-    case toolkit::LDebug:
-      return mw::log::LogLevel::kDebug;
-    case toolkit::LInfo:
-      return mw::log::LogLevel::kInfo;
-    case toolkit::LWarn:
-      return mw::log::LogLevel::kWarning;
-    case toolkit::LError:
-      return mw::log::LogLevel::kError;
-  }
-  return mw::log::LogLevel::kError;
-}
 
 mw::log::LogLevel FromSrtLevel(int level) noexcept {
   if (level <= LOG_CRIT) return mw::log::LogLevel::kCritical;
@@ -70,21 +50,6 @@ mw::log::LogLevel EffectiveLevel(std::string_view module) noexcept {
     if (mw::log::ShouldLog(module, level)) return level;
   }
   return mw::log::LogLevel::kOff;
-}
-
-toolkit::LogLevel ToZlmLevel(mw::log::LogLevel level) noexcept {
-  switch (level) {
-    case mw::log::LogLevel::kTrace:
-      return toolkit::LTrace;
-    case mw::log::LogLevel::kDebug:
-      return toolkit::LDebug;
-    case mw::log::LogLevel::kInfo:
-      return toolkit::LInfo;
-    case mw::log::LogLevel::kWarning:
-      return toolkit::LWarn;
-    default:
-      return toolkit::LError;
-  }
 }
 
 int ToSrtLevel(mw::log::LogLevel level) noexcept {
@@ -142,13 +107,11 @@ class ThirdPartyLogBridge::Impl {
  public:
   Impl() : generation_(NextGeneration()) {
     try {
-      InstallZlm();
       InstallSrt();
       InstallFfmpeg();
     } catch (...) {
       UninstallFfmpeg();
       UninstallSrt();
-      UninstallZlm();
       throw;
     }
   }
@@ -156,40 +119,9 @@ class ThirdPartyLogBridge::Impl {
   ~Impl() {
     UninstallFfmpeg();
     UninstallSrt();
-    UninstallZlm();
   }
 
  private:
-  void InstallZlm() {
-    auto& logger = toolkit::getLogger();
-    if (logger.get(std::string(kZlmChannelName))) {
-      throw std::logic_error("ZLM log bridge is already installed");
-    }
-    toolkit::NoticeCenter::Instance().addListener(
-        this, toolkit::EventChannel::getBroadcastLogEventName(),
-        [](const toolkit::Logger&, const toolkit::LogContextPtr& context) {
-          try {
-            const auto level = FromZlmLevel(context->_level);
-            if (!mw::log::ShouldLog(kZlmModule, level)) return;
-            mw::log::Write(kZlmModule, level, context->_file.c_str(),
-                           static_cast<std::uint32_t>(context->_line),
-                           context->str());
-            if (context->_repeat > 1) {
-              mw::log::Write(kZlmModule, level, context->_file.c_str(),
-                             static_cast<std::uint32_t>(context->_line),
-                             fmt::format("last message repeated {} times",
-                                         context->_repeat));
-            }
-          } catch (...) {
-          }
-        });
-    listener_installed_ = true;
-    channel_ = std::make_shared<toolkit::EventChannel>(
-        std::string(kZlmChannelName), ToZlmLevel(EffectiveLevel(kZlmModule)));
-    logger.add(channel_);
-    channel_installed_ = true;
-  }
-
   void InstallSrt() noexcept {
     srt_setlogflags(SRT_LOGF_DISABLE_TIME | SRT_LOGF_DISABLE_THREADNAME |
                     SRT_LOGF_DISABLE_SEVERITY | SRT_LOGF_DISABLE_EOL);
@@ -206,19 +138,6 @@ class ThirdPartyLogBridge::Impl {
     av_log_set_level(ToFfmpegLevel(EffectiveLevel(kFfmpegModule)));
     av_log_set_callback(&Impl::FfmpegCallback);
     ffmpeg_installed_ = true;
-  }
-
-  void UninstallZlm() noexcept {
-    if (channel_installed_) {
-      toolkit::getLogger().del(std::string(kZlmChannelName));
-      channel_.reset();
-      channel_installed_ = false;
-    }
-    if (listener_installed_) {
-      toolkit::NoticeCenter::Instance().delListener(
-          this, toolkit::EventChannel::getBroadcastLogEventName());
-      listener_installed_ = false;
-    }
   }
 
   void UninstallSrt() noexcept {
@@ -315,9 +234,6 @@ class ThirdPartyLogBridge::Impl {
   inline static Impl* g_bridge_ = nullptr;
   std::uint64_t generation_;
   int previous_ffmpeg_level_ = AV_LOG_INFO;
-  std::shared_ptr<toolkit::EventChannel> channel_;
-  bool listener_installed_ = false;
-  bool channel_installed_ = false;
   bool srt_installed_ = false;
   bool ffmpeg_installed_ = false;
 };

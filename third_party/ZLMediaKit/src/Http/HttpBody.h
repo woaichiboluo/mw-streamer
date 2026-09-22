@@ -15,7 +15,7 @@
 #include <memory>
 #include "Network/Buffer.h"
 #include "Util/ResourcePool.h"
-#include "Util/logger.h"
+#include "mw/log.h"
 #include "Thread/WorkThreadPool.h"
 
 #ifndef MIN

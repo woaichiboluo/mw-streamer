@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "G711.h"
 #include "G711Rtp.h"
 #include "Extension/Factory.h"
@@ -40,7 +41,7 @@ void G711Track::setExtraData(const uint8_t *data, size_t size) {
         _channels = wav.nChannels;
         _codecid = (wav.wFormatTag == WAVE_FORMAT_ALAW) ? CodecG711A : CodecG711U;
     } else {
-        WarnL << "Failed to parse G711 extra data";
+        MW_LOG_WARNING("zlm", "Failed to parse G711 extra data");
     }
 }
 
@@ -110,11 +111,7 @@ RtmpCodec::Ptr getRtmpEncoderByTrack(const Track::Ptr &track) {
     if (audio_track->getAudioSampleRate() != 8000 || audio_track->getAudioChannel() != 1 || audio_track->getAudioSampleBit() != 16) {
         // rtmp对g711只支持8000/1/16规格，但是ZLMediaKit可以解析其他规格的G711  [AUTO-TRANSLATED:0ddeaafe]
         // rtmp only supports 8000/1/16 specifications for g711, but ZLMediaKit can parse other specifications of G711
-        WarnL << "RTMP only support G711 with 8000/1/16, now is"
-              << audio_track->getAudioSampleRate() << "/"
-              << audio_track->getAudioChannel() << "/"
-              << audio_track->getAudioSampleBit()
-              << ", ignored it";
+        MW_LOG_WARNING("zlm", "RTMP only support G711 with 8000/1/16, now is{}/{}/{}, ignored it", audio_track->getAudioSampleRate(), audio_track->getAudioChannel(), audio_track->getAudioSampleBit());
         return nullptr;
     }
     return std::make_shared<CommonRtmpEncoder>(track);

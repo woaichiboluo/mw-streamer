@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "SSLBox.h"
 #include "onceToken.h"
 #include "SSLUtil.h"
@@ -128,8 +129,7 @@ int SSL_Initor::findCertificate(SSL *ssl, int *, void *arg) {
             //未找到对应的证书  [AUTO-TRANSLATED:d4550e6f]
             //No corresponding certificate found
             std::lock_guard<std::recursive_mutex> lck(ref._mtx);
-            WarnL << "Can not find any certificate of host: " << vhost
-                  << ", select default certificate of: " << ref._default_vhost[(bool) (arg)];
+            MW_LOG_WARNING("zlm", "Can not find any certificate of host: {}, select default certificate of: {}", vhost, ref._default_vhost[(bool) (arg)]);
         }
     }
 
@@ -142,8 +142,7 @@ int SSL_Initor::findCertificate(SSL *ssl, int *, void *arg) {
     if (!ctx) {
         //未有任何有效的证书  [AUTO-TRANSLATED:e1d7f5b7]
         //No valid certificate available
-        WarnL << "Can not find any available certificate of host: " << (vhost ? vhost : "default host")
-              << ", tls handshake failed";
+        MW_LOG_WARNING("zlm", "Can not find any available certificate of host: {}, tls handshake failed", (vhost ? vhost : "default host"));
         return SSL_TLSEXT_ERR_ALERT_FATAL;
     }
 
@@ -178,11 +177,11 @@ bool SSL_Initor::setContext(const string &vhost, const shared_ptr<SSL_CTX> &ctx,
             //Wildcard certificate
             _ctxs_wildcards[server_mode][vhost.substr(1)] = ctx;
         }
-        DebugL << "Add certificate of: " << vhost;
+        MW_LOG_DEBUG("zlm", "Add certificate of: {}", vhost);
     }
     return true;
 #else
-    WarnL << "ENABLE_OPENSSL disabled, you can not use any features based on openssl";
+    MW_LOG_WARNING("zlm", "ENABLE_OPENSSL disabled, you can not use any features based on openssl");
     return false;
 #endif //defined(ENABLE_OPENSSL)
 }
@@ -200,7 +199,7 @@ void SSL_Initor::setupCtx(SSL_CTX *ctx) {
         if (!ok) {
             int depth = X509_STORE_CTX_get_error_depth(pStore);
             int err = X509_STORE_CTX_get_error(pStore);
-            WarnL << "SSL_CTX_set_verify callback, depth: " << depth << " ,err: " << X509_verify_cert_error_string(err);
+            MW_LOG_WARNING("zlm", "SSL_CTX_set_verify callback, depth: {} ,err: {}", depth, X509_verify_cert_error_string(err));
         }
         return s_ignore_invalid_cer ? 1 : ok;
     });
@@ -299,7 +298,7 @@ std::shared_ptr<SSL_CTX> SSL_Initor::getSSLCtx_l(const string &vhost_in, bool se
             //没默认主机，选择空主机  [AUTO-TRANSLATED:99a7d8d4]
             //No default host, select empty host
             if (server_mode) {
-                WarnL << "Server with ssl must have certification and key";
+                MW_LOG_WARNING("zlm", "Server with ssl must have certification and key");
             }
             return _ctx_empty[server_mode];
         }
@@ -334,7 +333,7 @@ SSL_Box::SSL_Box(bool server_mode, bool enable, int buff_size) {
         SSL_set_bio(_ssl.get(), _read_bio, _write_bio);
         _server_mode ? SSL_set_accept_state(_ssl.get()) : SSL_set_connect_state(_ssl.get());
     } else {
-        WarnL << "makeSSL failed";
+        MW_LOG_WARNING("zlm", "makeSSL failed");
     }
     _send_handshake = false;
     _buff_size = buff_size;
@@ -346,7 +345,7 @@ void SSL_Box::shutdown() {
     _buffer_send.clear();
     int ret = SSL_shutdown(_ssl.get());
     if (ret != 1) {
-        ErrorL << "SSL_shutdown failed: " << SSLUtil::getLastError();
+        MW_LOG_ERROR("zlm", "SSL_shutdown failed: {}", SSLUtil::getLastError());
     } else {
         flush();
     }
@@ -376,7 +375,7 @@ void SSL_Box::onRecv(const Buffer::Ptr &buffer) {
         }
         //nwrite <= 0,出现异常  [AUTO-TRANSLATED:986e8f36]
         //nwrite <= 0, an error occurred
-        ErrorL << "Ssl error on BIO_write: " << SSLUtil::getLastError();
+        MW_LOG_ERROR("zlm", "Ssl error on BIO_write: {}", SSLUtil::getLastError());
         shutdown();
         break;
     }
@@ -524,7 +523,7 @@ void SSL_Box::flush() {
         if (offset != front->size()) {
             //这个包未消费完毕，出现了异常,清空数据并断开ssl  [AUTO-TRANSLATED:1823c65a]
             //This package has not been fully consumed, an exception occurred, clear data and disconnect ssl
-            ErrorL << "Ssl error on SSL_write: " << SSLUtil::getLastError();
+            MW_LOG_ERROR("zlm", "Ssl error on SSL_write: {}", SSLUtil::getLastError());
             shutdown();
             break;
         }

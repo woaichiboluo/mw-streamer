@@ -10,6 +10,7 @@
 
 #ifdef ENABLE_MP4
 
+#include "mw/log.h"
 #include <algorithm>
 #include "MP4Reader.h"
 #include "Common/config.h"
@@ -239,12 +240,12 @@ void MP4Reader::setCurrentStamp(uint32_t new_stamp) {
 bool MP4Reader::seekTo(MediaSource &sender, uint32_t stamp) {
     // 拖动进度条后应该恢复播放  [AUTO-TRANSLATED:8a6d11f7]
     // Playback should resume after dragging the progress bar
-    TraceL << getOriginUrl(sender) << ",stamp:" << stamp;
+    MW_LOG_TRACE("zlm", "{},stamp:{}", getOriginUrl(sender), stamp);
     return seekTo(stamp);
 }
 
 bool MP4Reader::pause(MediaSource &sender, bool paused) {
-    TraceL << getOriginUrl(sender) << ",pause:" << paused;
+    MW_LOG_TRACE("zlm", "{},pause:{}", getOriginUrl(sender), paused);
     return pause(paused);
 }
 
@@ -262,7 +263,7 @@ bool MP4Reader::pause(bool paused) {
 }
 
 bool MP4Reader::speed(MediaSource &sender, float speed) {
-    TraceL << getOriginUrl(sender) << ",speed:" << speed;
+    MW_LOG_TRACE("zlm", "{},speed:{}", getOriginUrl(sender), speed);
     return this->speed(speed);
 }
 
@@ -270,7 +271,7 @@ bool MP4Reader::speed(float speed) {
     ++_control_generation;
     lock_guard<recursive_mutex> lck(_mtx);
     if (speed < 0.1 || speed > 20) {
-        WarnL << "播放速度取值范围非法:" << speed;
+        MW_LOG_WARNING("zlm", "播放速度取值范围非法:{}", speed);
         return false;
     }
     // _seek_ticker重置，赋值_seek_to  [AUTO-TRANSLATED:b30a3f06]
@@ -343,7 +344,7 @@ bool MP4Reader::seekTo(uint32_t stamp_seek) {
 
 bool MP4Reader::close(MediaSource &sender) {
     stopReadMP4();
-    WarnL << "close media: " << sender.getUrl();
+    MW_LOG_WARNING("zlm", "close media: {}", sender.getUrl());
     return true;
 }
 

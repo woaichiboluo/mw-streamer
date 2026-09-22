@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "RtmpPusher.h"
 #include "Rtmp/utils.h"
 #include "Util/util.h"
@@ -27,7 +28,7 @@ RtmpPusher::RtmpPusher(const EventPoller::Ptr &poller, const RtmpMediaSource::Pt
 
 RtmpPusher::~RtmpPusher() {
     teardown();
-    DebugL;
+    MW_LOG_DEBUG("zlm", "{}", __FUNCTION__);
 }
 
 void RtmpPusher::teardown() {
@@ -44,7 +45,7 @@ void RtmpPusher::teardown() {
 }
 
 void RtmpPusher::onPublishResult_l(const SockException &ex, bool handshake_done) {
-    DebugL << ex.what();
+    MW_LOG_DEBUG("zlm", "{}", ex.what());
     if (ex.getErrCode() == Err_shutdown) {
         // 主动shutdown的，不触发回调  [AUTO-TRANSLATED:bd97b1c1]
         // Actively shutdown, no callback triggered
@@ -84,7 +85,7 @@ void RtmpPusher::publish(const string &url) {
         onPublishResult_l(SockException(Err_other, "rtmp url非法"), false);
         return;
     }
-    DebugL << host_url << " " << _app << " " << _stream_id;
+    MW_LOG_DEBUG("zlm", "{} {} {}", host_url, _app, _stream_id);
 
     uint16_t port = start_with(url, "rtmps") ? 443 : 1935;
     splitUrl(host_url, host_url, port);
@@ -156,7 +157,6 @@ void RtmpPusher::send_connect() {
 
     sendInvoke("connect", obj);
     addOnResultCB([this](AMFDecoder &dec) {
-        //TraceL << "connect result";
         dec.load<AMFValue>();
         auto val = dec.load<AMFValue>();
         auto level = val["level"].as_string();
@@ -172,7 +172,6 @@ void RtmpPusher::send_createStream() {
     AMFValue obj(AMF_NULL);
     sendInvoke("createStream", obj);
     addOnResultCB([this](AMFDecoder &dec) {
-        //TraceL << "createStream result";
         dec.load<AMFValue>();
         _stream_index = dec.load<int>();
         send_publish();
@@ -271,7 +270,7 @@ void RtmpPusher::onCmd_result(AMFDecoder &dec){
         it->second(dec);
         _map_on_result.erase(it);
     } else {
-        WarnL << "unhandled _result";
+        MW_LOG_WARNING("zlm", "unhandled _result");
     }
 }
 
@@ -321,13 +320,12 @@ void RtmpPusher::onRtmpChunk(RtmpPacket::Ptr packet) {
                 auto fun = it->second;
                 (this->*fun)(dec);
             } else {
-                WarnL << "can not support cmd:" << type;
+                MW_LOG_WARNING("zlm", "can not support cmd:{}", type);
             }
             break;
         }
 
         default:
-            //WarnL << "unhandled message:" << (int) chunk_data.type_id << hexdump(chunk_data.buffer.data(), chunk_data.buffer.size());
             break;
     }
 }

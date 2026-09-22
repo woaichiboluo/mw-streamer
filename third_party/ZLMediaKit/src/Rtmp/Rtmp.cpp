@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "Rtmp.h"
 #include "Common/config.h"
 #include "Extension/Factory.h"
@@ -91,7 +92,7 @@ uint8_t getAudioRtmpFlags(const Track::Ptr &track) {
         case TrackAudio: {
             auto audioTrack = std::dynamic_pointer_cast<AudioTrack>(track);
             if (!audioTrack) {
-                WarnL << "获取AudioTrack失败";
+                MW_LOG_WARNING("zlm", "获取AudioTrack失败");
                 return 0;
             }
             auto iSampleRate = audioTrack->getAudioSampleRate();
@@ -100,7 +101,7 @@ uint8_t getAudioRtmpFlags(const Track::Ptr &track) {
 
             auto amf = Factory::getAmfByCodecId(track->getCodecId());
             if (!amf) {
-                WarnL << "该编码格式不支持转换为RTMP: " << track->getCodecName();
+                MW_LOG_WARNING("zlm", "该编码格式不支持转换为RTMP: {}", track->getCodecName());
                 return 0;
             }
             uint8_t flvAudioType = amf.as_integer();
@@ -127,7 +128,7 @@ uint8_t getAudioRtmpFlags(const Track::Ptr &track) {
                 case 5512: // not MP3
                     flvSampleRate = 0;
                     break;
-                default: WarnL << "FLV does not support sample rate " << iSampleRate << " ,choose from (44100, 22050, 11025)"; return 0;
+                default: MW_LOG_WARNING("zlm", "FLV does not support sample rate {} ,choose from (44100, 22050, 11025)", iSampleRate); return 0;
             }
 
             uint8_t flvStereoOrMono = (iChannel > 1);
@@ -308,7 +309,7 @@ CodecId parseVideoRtmpPacket(const uint8_t *data, size_t size, RtmpPacketInfo *i
             case RtmpVideoCodec::fourcc_vp8: info->codec = CodecVP8; break;
             case RtmpVideoCodec::fourcc_avc1: info->codec = CodecH264; break;
             case RtmpVideoCodec::fourcc_hevc: info->codec = CodecH265; break;
-            default: WarnL << "Rtmp video codec not supported: " << std::string((char *)data + 1, 4);
+            default: MW_LOG_WARNING("zlm", "Rtmp video codec not supported: {}", std::string((char *)data + 1, 4));
         }
     } else {
         // IsExHeader == 0
@@ -343,7 +344,7 @@ CodecId parseVideoRtmpPacket(const uint8_t *data, size_t size, RtmpPacketInfo *i
                 info->codec = CodecAV1;
                 break;
             }
-            default: WarnL << "Rtmp video codec not supported: " << (int)classic_header->codec_id; break;
+            default: MW_LOG_WARNING("zlm", "Rtmp video codec not supported: {}", (int)classic_header->codec_id); break;
         }
     }
     return info->codec;

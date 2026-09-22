@@ -626,6 +626,19 @@ TEST_CASE("文件加载解析本地路径而字符串解析保留路径") {
         SerializePipelineConfigToToml(reloaded));
 }
 
+TEST_CASE("Pipeline TOML拒绝进程运行时配置") {
+  CHECK_THROWS_AS(ParsePipelineConfigFromToml(
+                      "[log]\n[input]\ntype='file'\npath='a.mp4'\n"
+                      "downstream=['record']\n[[sinks]]\nid='record'\n"
+                      "type='remux'\ntarget='a.mp4'\n"),
+                  std::invalid_argument);
+  CHECK_THROWS_AS(ParsePipelineConfigFromToml(
+                      "[zlm]\n[input]\ntype='file'\npath='a.mp4'\n"
+                      "downstream=['record']\n[[sinks]]\nid='record'\n"
+                      "type='remux'\ntarget='a.mp4'\n"),
+                  std::invalid_argument);
+}
+
 TEST_CASE("保存加载报告IO错误且无效配置不会覆盖原文件") {
   TemporaryDirectory directory;
   const auto file = directory.path() / "pipeline.toml";

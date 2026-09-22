@@ -11,7 +11,7 @@
 #include "Common/config.h"
 #include "MediaSource.h"
 #include "Util/NoticeCenter.h"
-#include "Util/logger.h"
+#include "mw/log.h"
 #include "Util/onceToken.h"
 #include "Util/util.h"
 #include <assert.h>
@@ -37,7 +37,7 @@ bool loadIniConfig(const char *ini_path) {
         for (auto &pr : tmp) {
             if (ref.find(pr.first) == ref.end()) {
                 // 新增键
-                WarnL << "unknow config: " << pr.first << " = " << pr.second;
+                MW_LOG_WARNING("zlm", "unknow config: {} = {}", pr.first, fmt::streamed(pr.second));
                 ref.emplace(pr);
             } else {
                 // 更新键
@@ -49,7 +49,7 @@ bool loadIniConfig(const char *ini_path) {
         NOTICE_EMIT(BroadcastReloadConfigArgs, Broadcast::kBroadcastReloadConfig);
         return true;
     } catch (std::exception &) {
-        InfoL << "dump ini file to:" << ini;
+        MW_LOG_INFO("zlm", "dump ini file to:{}", ini);
         mINI::Instance().dumpFile(ini);
         return false;
     }

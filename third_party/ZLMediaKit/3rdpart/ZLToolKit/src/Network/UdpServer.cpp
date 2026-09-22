@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "Util/uv_errno.h"
 #include "Util/onceToken.h"
 #include "UdpServer.h"
@@ -60,7 +61,7 @@ void UdpServer::setupEvent() {
 
 UdpServer::~UdpServer() {
     if (!_cloned && _socket && _socket->rawFD() != -1) {
-        InfoL << "Close udp server [" << _socket->get_local_ip() << "]: " << _socket->get_local_port();
+        MW_LOG_INFO("zlm", "Close udp server [{}]: {}", _socket->get_local_ip(), _socket->get_local_port());
     }
     _timer.reset();
     _socket.reset();
@@ -125,7 +126,7 @@ void UdpServer::start_l(uint16_t port, const std::string &host) {
         pr.second->_socket->bindUdpSock(_socket->get_local_port(), _socket->get_local_ip());
 #endif
     }
-    InfoL << "UDP server bind to [" << host << "]: " << port;
+    MW_LOG_INFO("zlm", "UDP server bind to [{}]: {}", host, port);
 }
 
 UdpServer::Ptr UdpServer::onCreatServer(const EventPoller::Ptr &poller) {
@@ -183,7 +184,7 @@ void UdpServer::onRead_l(bool is_server_fd, const UdpServer::PeerIdType &id, Buf
             //数据漂移到其他线程，需要先切换线程  [AUTO-TRANSLATED:15235f6f]
             //Data migration to another thread requires switching threads first
 #if !defined(_WIN32)
-            WarnL << "UDP packet incoming from other thread";
+            MW_LOG_WARNING("zlm", "UDP packet incoming from other thread");
 #endif
             std::weak_ptr<SessionHelper> weak_helper = helper;
             //由于socket读buffer是该线程上所有socket共享复用的，所以不能跨线程使用，必须先转移走  [AUTO-TRANSLATED:1134538b]
@@ -198,7 +199,7 @@ void UdpServer::onRead_l(bool is_server_fd, const UdpServer::PeerIdType &id, Buf
 
 #if !defined(NDEBUG) && !defined(_WIN32)
         if (!is_new) {
-            TraceL << "UDP packet incoming from " << (is_server_fd ? "server fd" : "other peer fd");
+            MW_LOG_TRACE("zlm", "UDP packet incoming from {}", (is_server_fd ? "server fd" : "other peer fd"));
         }
 #endif
     }
@@ -225,7 +226,7 @@ void UdpServer::onManagerSession() {
                 //UDP sessions need to handle timeouts
                 session->onManager();
             } catch (exception &ex) {
-                WarnL << "Exception occurred when emit onManager: " << ex.what();
+                MW_LOG_WARNING("zlm", "Exception occurred when emit onManager: {}", ex.what());
             }
         }
     };
@@ -339,7 +340,7 @@ SessionHelper::Ptr UdpServer::createSession(const PeerIdType &id, Buffer::Ptr &b
             if (auto strong_helper = weak_helper.lock()) {
                 // 触发 onError 事件回调  [AUTO-TRANSLATED:82070c3c]
                 //Trigger the onError event callback
-                TraceP(strong_helper->session()) << strong_helper->className() << " on err: " << err;
+                MW_LOG_TRACE("zlm", "{}({}:{}) {} on err: {}", (strong_helper->session())->getIdentifier(), (strong_helper->session())->get_peer_ip(), (strong_helper->session())->get_peer_port(), strong_helper->className(), fmt::streamed(err));
                 strong_helper->enable = false;
                 strong_helper->session()->onError(err);
             }

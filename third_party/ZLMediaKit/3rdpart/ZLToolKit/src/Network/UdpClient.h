@@ -11,6 +11,7 @@
 #ifndef NETWORK_UDPCLIENT_H
 #define NETWORK_UDPCLIENT_H
 
+#include "mw/log.h"
 #include <memory>
 #include "Socket.h"
 #include "Util/SSLBox.h"
@@ -77,7 +78,7 @@ protected:
     void onRecv(const Buffer::Ptr &buf) override {}
 
     void onError(const SockException &err) override {
-        DebugL;
+        MW_LOG_DEBUG("zlm", "{}", __FUNCTION__);
         if (_on_err) {
             _on_err(err);
         }

@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "L16.h"
 #include "Extension/Factory.h"
 #include "Extension/CommonRtp.h"
@@ -49,12 +50,12 @@ RtpCodec::Ptr getRtpDecoderByCodecId() {
 }
 
 RtmpCodec::Ptr getRtmpEncoderByTrack(const Track::Ptr &track) {
-    WarnL << "Unsupported L16 rtmp encoder";
+    MW_LOG_WARNING("zlm", "Unsupported L16 rtmp encoder");
     return nullptr;
 }
 
 RtmpCodec::Ptr getRtmpDecoderByTrack(const Track::Ptr &track) {
-    WarnL << "Unsupported L16 rtmp decoder";
+    MW_LOG_WARNING("zlm", "Unsupported L16 rtmp decoder");
     return nullptr;
 }
 

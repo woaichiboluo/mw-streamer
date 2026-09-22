@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "UdpClient.h"
 
 using namespace std;
@@ -25,7 +26,7 @@ UdpClient::UdpClient(const EventPoller::Ptr &poller) : SocketHelper(nullptr) {
 }
 
 UdpClient::~UdpClient() {
-    TraceL << "~" << UdpClient::getIdentifier();
+    MW_LOG_TRACE("zlm", "~{}", UdpClient::getIdentifier());
 }
 
 void UdpClient::startConnect(const string &peer_host, uint16_t peer_port, uint16_t local_port) {
@@ -52,7 +53,7 @@ void UdpClient::startConnect(const string &peer_host, uint16_t peer_port, uint16
             return;
         }
         strong_self->_timer.reset();
-        TraceL << strong_self->getIdentifier() << " on err: " << ex;
+        MW_LOG_TRACE("zlm", "{} on err: {}", strong_self->getIdentifier(), fmt::streamed(ex));
         strong_self->onError(ex);
     });
 
@@ -87,16 +88,15 @@ void UdpClient::startConnect(const string &peer_host, uint16_t peer_port, uint16
 
     bool ret = getSock()->bindUdpSock(local_port, _net_adapter);
     if (!ret) {
-        WarnL << "UDP output bind local error";
+        MW_LOG_WARNING("zlm", "UDP output bind local error");
     }
     auto peer_addr = SockUtil::make_sockaddr(peer_host.c_str(), peer_port);
 
     //只能软绑定
     ret = getSock()->bindPeerAddr((struct sockaddr *)&peer_addr, 0, true);
     if (!ret) {
-        WarnL << "UDP output bind peer error";
+        MW_LOG_WARNING("zlm", "UDP output bind peer error");
     }
-    // TraceL << getIdentifier() << " start connect " << url << ":" << peer_port;
 }
 
 void UdpClient::shutdown(const SockException &ex) {

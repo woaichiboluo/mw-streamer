@@ -10,6 +10,7 @@
 
 #if defined(ENABLE_RTPPROXY)
 
+#include "mw/log.h"
 #include "PSDecoder.h"
 #include "mpeg-ps.h"
 
@@ -66,9 +67,7 @@ const char *PSDecoder::onSearchPacketTail(const char *data, size_t len) {
         // Parse failed, discard all data
         return data + len;
     } catch (toolkit::AssertFailedException &ex) {
-        InfoL << "解析 ps 异常: bytes=" << len
-              << ", exception=" << ex.what()
-              << ", hex=" << hexdump(data, MIN(len, 32));
+        MW_LOG_INFO("zlm", "解析 ps 异常: bytes={}, exception={}, hex={}", len, ex.what(), hexdump(data, MIN(len, 32)));
         // 触发断言，解析失败，丢弃所有数据  [AUTO-TRANSLATED:b60c6db0]
         // Trigger assertion, parse failed, discard all data
         return data + len;

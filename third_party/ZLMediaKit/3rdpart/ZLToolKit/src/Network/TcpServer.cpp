@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "TcpServer.h"
 #include "Util/uv_errno.h"
 #include "Util/onceToken.h"
@@ -65,7 +66,7 @@ void TcpServer::setupEvent() {
 
 TcpServer::~TcpServer() {
     if (_main_server && _socket && _socket->rawFD() != -1) {
-        InfoL << "Close tcp server [" << _socket->get_local_ip() << "]: " << _socket->get_local_port();
+        MW_LOG_INFO("zlm", "Close tcp server [{}]: {}", _socket->get_local_ip(), _socket->get_local_port());
     }
     _timer.reset();
     //先关闭socket监听，防止收到新的连接  [AUTO-TRANSLATED:cd65064f]
@@ -207,7 +208,7 @@ Session::Ptr TcpServer::onAcceptConnection(const Socket::Ptr &sock) {
         if (strong_session) {
             //触发onError事件回调  [AUTO-TRANSLATED:825d16df]
             //Trigger the onError event callback
-            TraceP(strong_session) << cls << " on err: " << err;
+            MW_LOG_TRACE("zlm", "{}({}:{}) {} on err: {}", (strong_session)->getIdentifier(), (strong_session)->get_peer_ip(), (strong_session)->get_peer_port(), cls, fmt::streamed(err));
             strong_session->onError(err);
         }
     });
@@ -257,7 +258,7 @@ void TcpServer::start_l(uint16_t port, const std::string &host, uint32_t backlog
         pr.second->_socket->cloneSocket(*_socket);
     }
 
-    InfoL << "TCP server listening on [" << host << "]: " << port;
+    MW_LOG_INFO("zlm", "TCP server listening on [{}]: {}", host, port);
 }
 
 void TcpServer::onManagerSession() {
@@ -275,7 +276,7 @@ void TcpServer::onManagerSession() {
         try {
             pr.second->session()->onManager();
         } catch (exception &ex) {
-            WarnL << ex.what();
+            MW_LOG_WARNING("zlm", "{}", ex.what());
         }
     }
 }

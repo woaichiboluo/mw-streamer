@@ -11,7 +11,7 @@
 #include "H264.h"
 #include "H264Rtmp.h"
 #include "H264Rtp.h"
-#include "Util/logger.h"
+#include "mw/log.h"
 #include "Util/base64.h"
 #include "Common/Parser.h"
 #include "Common/config.h"
@@ -347,7 +347,7 @@ toolkit::Buffer::Ptr H264Track::getExtraData() const {
     extra_data.resize(1024);
     auto extra_data_size = mpeg4_avc_decoder_configuration_record_save(&avc, (uint8_t *)extra_data.data(), extra_data.size());
     if (extra_data_size == -1) {
-        WarnL << "生成H264 extra_data 失败";
+        MW_LOG_WARNING("zlm", "生成H264 extra_data 失败");
         return nullptr;
     }
     extra_data.resize(extra_data_size);

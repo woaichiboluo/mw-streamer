@@ -45,7 +45,9 @@ endif()
 find_package(OpenSSL REQUIRED COMPONENTS SSL Crypto)
 find_package(SRT REQUIRED)
 
+add_subdirectory(src/log)
 add_subdirectory(third_party/ZLMediaKit EXCLUDE_FROM_ALL)
+target_link_libraries(ZLToolKit PUBLIC mw::log)
 add_subdirectory(third_party/HdrHistogram_c EXCLUDE_FROM_ALL)
 add_subdirectory(src)
 

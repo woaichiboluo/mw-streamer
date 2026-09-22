@@ -9,6 +9,7 @@
  */
 
 #if defined(ENABLE_RTPPROXY)
+#include "mw/log.h"
 #include "GB28181Process.h"
 #include "RtpProcess.h"
 #include "Util/File.h"
@@ -63,9 +64,7 @@ void RtpProcess::flush() {
 
 RtpProcess::~RtpProcess() {
     uint64_t duration = (_last_frame_time.createdTime() - _last_frame_time.elapsedTime()) / 1000;
-    WarnP(this) << "RTP推流器("
-                << _media_info.shortUrl()
-                << ")断开,耗时(s):" << duration;
+    MW_LOG_WARNING("zlm", "{}({}:{}) RTP推流器({})断开,耗时(s):{}", (this)->getIdentifier(), (this)->get_peer_ip(), (this)->get_peer_port(), _media_info.shortUrl(), duration);
 
     // 流量统计事件广播  [AUTO-TRANSLATED:6b0b1234]
     // Traffic statistics event broadcast
@@ -74,7 +73,7 @@ RtpProcess::~RtpProcess() {
         try {
             NOTICE_EMIT(BroadcastFlowReportArgs, Broadcast::kBroadcastFlowReport, _media_info, _total_bytes, duration, false, *this);
         } catch (std::exception &ex) {
-            WarnL << "Exception occurred: " << ex.what();
+            MW_LOG_WARNING("zlm", "Exception occurred: {}", ex.what());
         }
     }
 }
@@ -101,7 +100,7 @@ void RtpProcess::createTimer() {
 
 bool RtpProcess::inputRtp(bool is_udp, const Socket::Ptr &sock, const char *data, size_t len, const struct sockaddr *addr, uint64_t *dts_out) {
     if (!isRtp(data, len)) {
-        WarnP(this) << "Not rtp packet";
+        MW_LOG_WARNING("zlm", "{}({}:{}) Not rtp packet", (this)->getIdentifier(), (this)->get_peer_ip(), (this)->get_peer_port());
         return false;
     }
     if (!_auth_err.empty()) {
@@ -159,7 +158,7 @@ bool RtpProcess::inputFrame(const Frame::Ptr &frame) {
         return _muxer->inputFrame(frame);
     }
     if (_cache_ticker.elapsedTime() > kMaxCachedFrameMS) {
-        WarnL << "Cached frame of stream(" << _media_info.stream << ") is too much, your on_publish hook responded too late!";
+        MW_LOG_WARNING("zlm", "Cached frame of stream({}) is too much, your on_publish hook responded too late!", _media_info.stream);
         return false;
     }
     auto frame_cached = Frame::getCacheAbleFrame(frame);
@@ -231,7 +230,7 @@ void RtpProcess::setOnlyTrack(OnlyTrack only_track) {
 
 void RtpProcess::onDetach(const SockException &ex) {
     if (_on_detach) {
-        WarnL << ex << ", stream_id: " << getIdentifier();
+        MW_LOG_WARNING("zlm", "{}, stream_id: {}", ex.what(), getIdentifier());
         _on_detach(ex);
     }
 }
@@ -290,10 +289,10 @@ void RtpProcess::emitOnPublish(uint32_t ssrc) {
                 }
                 strong_self->_muxer->setMediaListener(strong_self);
                 strong_self->doCachedFunc();
-                InfoP(strong_self) << "允许RTP推流，ssrc: " << printSSRC(ssrc);
+                MW_LOG_INFO("zlm", "{}({}:{}) 允许RTP推流，ssrc: {}", (strong_self)->getIdentifier(), (strong_self)->get_peer_ip(), (strong_self)->get_peer_port(), printSSRC(ssrc));
             } else {
                 strong_self->_auth_err = err;
-                WarnP(strong_self) << "禁止RTP推流:" << err;
+                MW_LOG_WARNING("zlm", "{}({}:{}) 禁止RTP推流:{}", (strong_self)->getIdentifier(), (strong_self)->get_peer_ip(), (strong_self)->get_peer_port(), err);
             }
         });
     };

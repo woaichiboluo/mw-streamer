@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "TcpClient.h"
 
 using namespace std;
@@ -26,7 +27,7 @@ TcpClient::TcpClient(const EventPoller::Ptr &poller) : SocketHelper(nullptr) {
 }
 
 TcpClient::~TcpClient() {
-    TraceL << "~" << TcpClient::getIdentifier();
+    MW_LOG_TRACE("zlm", "~{}", TcpClient::getIdentifier());
 }
 
 void TcpClient::shutdown(const SockException &ex) {
@@ -77,11 +78,11 @@ void TcpClient::startConnect(const string &url, uint16_t port, float timeout_sec
             return;
         }
         strong_self->_timer.reset();
-        TraceL << strong_self->getIdentifier() << " on err: " << ex;
+        MW_LOG_TRACE("zlm", "{} on err: {}", strong_self->getIdentifier(), fmt::streamed(ex));
         strong_self->onError(ex);
     });
 
-    TraceL << getIdentifier() << " start connect " << url << ":" << port;
+    MW_LOG_TRACE("zlm", "{} start connect {}:{}", getIdentifier(), url, port);
     sock_ptr->connect(url, port, [weak_self](const SockException &err) {
         auto strong_self = weak_self.lock();
         if (strong_self) {
@@ -91,7 +92,7 @@ void TcpClient::startConnect(const string &url, uint16_t port, float timeout_sec
 }
 
 void TcpClient::onSockConnect(const SockException &ex) {
-    TraceL << getIdentifier() << " connect result: " << ex;
+    MW_LOG_TRACE("zlm", "{} connect result: {}", getIdentifier(), fmt::streamed(ex));
     if (ex) {
         //连接失败  [AUTO-TRANSLATED:33415985]
         //Connection failed

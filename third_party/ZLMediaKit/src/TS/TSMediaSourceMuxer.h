@@ -11,6 +11,7 @@
 #ifndef ZLMEDIAKIT_TSMEDIASOURCEMUXER_H
 #define ZLMEDIAKIT_TSMEDIASOURCEMUXER_H
 
+#include "mw/log.h"
 #include "TSMediaSource.h"
 #include "Record/MPEG.h"
 
@@ -30,7 +31,7 @@ public:
         try {
             MpegMuxer::flush();
         } catch (std::exception &ex) {
-            WarnL << ex.what();
+            MW_LOG_WARNING("zlm", "{}", ex.what());
         }
     };
 

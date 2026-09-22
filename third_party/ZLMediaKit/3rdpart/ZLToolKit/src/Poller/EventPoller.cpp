@@ -81,38 +81,13 @@ EventPoller::EventPoller(std::string name) {
 #endif
 
     _name = std::move(name);
-    _logger = Logger::Instance().shared_from_this();
     addEventPipe();
 }
 
 void EventPoller::shutdown() {
-    lock_guard<mutex> lock(_shutdown_mutex);
-    if (_shutdown_complete) {
-        return;
-    }
-    async_l([this]() {
-        // Owners have stopped producing work. Queued teardown can enqueue
-        // more teardown; finish it on this loop before releasing its thread.
-        for (;;) {
-            // Timers/events can capture this poller strongly. Break those
-            // cycles while the pool still owns it, on the owner thread.
-            // Swap first: destroying a callback can reenter delEvent().
-            decltype(_delay_task_map) delays;
-            decltype(_event_map) events;
-            delays.swap(_delay_task_map);
-            events.swap(_event_map);
-            delays.clear();
-            events.clear();
-            {
-                lock_guard<mutex> lock(_mtx_task);
-                if (_list_task.empty()) {
-                    break;
-                }
-            }
-            onPipeEvent(true);
-        }
+    async_l([]() {
         throw ExitException();
-    }, false, false);
+    }, false, true);
 
     if (_loop_thread) {
         //防止作为子进程时崩溃  [AUTO-TRANSLATED:68727e34]
@@ -121,7 +96,6 @@ void EventPoller::shutdown() {
         delete _loop_thread;
         _loop_thread = nullptr;
     }
-    _shutdown_complete = true;
 }
 
 EventPoller::~EventPoller() {
@@ -137,13 +111,13 @@ EventPoller::~EventPoller() {
     //退出前清理管道中的数据  [AUTO-TRANSLATED:60e26f9a]
     //Clean up pipe data before exiting
     onPipeEvent(true);
-    InfoL << getThreadName();
+    MW_LOG_INFO("zlm", "{}", getThreadName());
 }
 
 int EventPoller::addEvent(int fd, int event, PollEventCB cb) {
     TimeTicker();
     if (!cb) {
-        WarnL << "PollEventCB is empty";
+        MW_LOG_WARNING("zlm", "PollEventCB is empty");
         return -1;
     }
 
@@ -163,7 +137,7 @@ int EventPoller::addEvent(int fd, int event, PollEventCB cb) {
         // win32平台，socket套接字不等于文件描述符，所以可能不适用这个限制  [AUTO-TRANSLATED:6adfc664]
         //On the win32 platform, the socket does not equal the file descriptor, so this restriction may not apply
         if (fd >= FD_SETSIZE) {
-            WarnL << "select() can not watch fd bigger than " << FD_SETSIZE;
+            MW_LOG_WARNING("zlm", "select() can not watch fd bigger than {}", FD_SETSIZE);
             return -1;
         }
 #endif
@@ -298,7 +272,7 @@ inline void EventPoller::onPipeEvent(bool flush) {
          if (err == 0 || get_uv_error(true) != UV_EAGAIN) {
              // 收到eof或非EAGAIN(无更多数据)错误,说明管道无效了,重新打开管道  [AUTO-TRANSLATED:5f7a013d]
              //Received eof or non-EAGAIN (no more data) error, indicating that the pipe is invalid, reopen the pipe
-             ErrorL << "Invalid pipe fd of event poller, reopen it";
+             MW_LOG_ERROR("zlm", "Invalid pipe fd of event poller, reopen it");
              delEvent(_pipe.readFD());
              _pipe.reOpen();
              addEventPipe();
@@ -319,7 +293,7 @@ inline void EventPoller::onPipeEvent(bool flush) {
         } catch (ExitException &) {
             _exit_flag = true;
         } catch (std::exception &ex) {
-            ErrorL << "Exception occurred when do async task: " << ex.what();
+            MW_LOG_ERROR("zlm", "Exception occurred when do async task: {}", ex.what());
         }
     });
 }
@@ -393,7 +367,7 @@ void EventPoller::runLoop(bool blocked, bool ref_self) {
                 try {
                     (*cb)(toPoller(ev.events));
                 } catch (std::exception &ex) {
-                    ErrorL << "Exception occurred when do event task: " << ex.what();
+                    MW_LOG_ERROR("zlm", "Exception occurred when do event task: {}", ex.what());
                 }
             }
         }
@@ -468,7 +442,7 @@ void EventPoller::runLoop(bool blocked, bool ref_self) {
                 try {
                     record->call_back(record->attach);
                 } catch (std::exception &ex) {
-                    ErrorL << "Exception occurred when do event task: " << ex.what();
+                    MW_LOG_ERROR("zlm", "Exception occurred when do event task: {}", ex.what());
                 }
             });
             callback_list.clear();
@@ -495,7 +469,7 @@ int64_t EventPoller::flushDelayTask(uint64_t now_time) {
                 _delay_task_map.emplace(next_delay + now_time, std::move(it->second));
             }
         } catch (std::exception &ex) {
-            ErrorL << "Exception occurred when do delay task: " << ex.what();
+            MW_LOG_ERROR("zlm", "Exception occurred when do delay task: {}", ex.what());
         }
     }
 
@@ -548,17 +522,7 @@ EventPoller::DelayTask::Ptr EventPoller::doDelayTask(uint64_t delay_ms, function
 static size_t s_pool_size = 0;
 static atomic<bool> s_enable_cpu_affinity { true };
 
-static atomic<EventPollerPool *> s_event_pool { nullptr };
-
-EventPollerPool &EventPollerPool::Instance() {
-    static shared_ptr<EventPollerPool> instance(new EventPollerPool);
-    s_event_pool.store(instance.get(), memory_order_release);
-    return *instance;
-}
-
-EventPollerPool *EventPollerPool::getInstanceIfCreated() noexcept {
-    return s_event_pool.load(memory_order_acquire);
-}
+INSTANCE_IMP(EventPollerPool)
 
 EventPoller::Ptr EventPollerPool::getFirstPoller() {
     return static_pointer_cast<EventPoller>(getFirstExecutor());
@@ -581,7 +545,7 @@ EventPoller::Ptr EventPollerPool::extractPoller() {
     static atomic<size_t> next_id { 0 };
     auto id = next_id.fetch_add(1);
     auto cpus = max<size_t>(1, thread::hardware_concurrency());
-    return static_pointer_cast<EventPoller>(createExclusivePoller("exclusive poller " + to_string(id), ThreadPool::PRIORITY_HIGHEST, true, s_enable_cpu_affinity.load(), id % cpus));
+    return static_pointer_cast<EventPoller>(createPoller("exclusive poller " + to_string(id), ThreadPool::PRIORITY_HIGHEST, true, s_enable_cpu_affinity.load(), id % cpus));
 }
 
 void EventPollerPool::preferCurrentThread(bool flag) {
@@ -593,7 +557,7 @@ const std::string EventPollerPool::kOnStarted = "kBroadcastEventPollerPoolStarte
 EventPollerPool::EventPollerPool() {
     auto size = addPoller("event poller", s_pool_size, ThreadPool::PRIORITY_HIGHEST, true, s_enable_cpu_affinity.load());
     NOTICE_EMIT(EventPollerPoolOnStartedArgs, kOnStarted, *this, size);
-    InfoL << "EventPoller created size: " << size;
+    MW_LOG_INFO("zlm", "EventPoller created size: {}", size);
 }
 
 void EventPollerPool::setPoolSize(size_t size) {

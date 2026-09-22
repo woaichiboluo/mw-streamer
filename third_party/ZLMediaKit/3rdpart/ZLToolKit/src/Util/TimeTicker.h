@@ -12,7 +12,8 @@
 #define UTIL_TIMETICKER_H_
 
 #include <cassert>
-#include "logger.h"
+#include "mw/log.h"
+#include "util.h"
 
 namespace toolkit {
 
@@ -21,31 +22,22 @@ public:
     /**
      * 此对象可以用于代码执行时间统计，以可以用于一般计时
      * @param min_ms 开启码执行时间统计时，如果代码执行耗时超过该参数，则打印警告日志
-     * @param ctx 日志上下文捕获，用于捕获当前日志代码所在位置
      * @param print_log 是否打印代码执行时间
      * This object can be used for code execution time statistics, and can be used for general timing
      * @param min_ms When the code execution time statistics is enabled, if the code execution time exceeds this parameter, a warning log is printed
-     * @param ctx Log context capture, used to capture the current log code location
      * @param print_log Whether to print the code execution time
      
      * [AUTO-TRANSLATED:4436cf19]
      */
-    Ticker(uint64_t min_ms = 0,
-           LogContextCapture ctx = LogContextCapture(Logger::Instance(), LWarn, __FILE__, "", __LINE__),
-           bool print_log = false) : _ctx(std::move(ctx)) {
-        if (!print_log) {
-            _ctx.clear();
-        }
+    Ticker(uint64_t min_ms = 0, bool print_log = false) : _print_log(print_log) {
         _created = _begin = getCurrentMillisecond();
         _min_ms = min_ms;
     }
 
     ~Ticker() {
         uint64_t tm = createdTime();
-        if (tm > _min_ms) {
-            _ctx << "take time: " << tm << "ms" << ", thread may be overloaded";
-        } else {
-            _ctx.clear();
+        if (_print_log && tm > _min_ms) {
+            MW_LOG_WARNING("zlm", "take time: {}ms, thread may be overloaded", tm);
         }
     }
 
@@ -83,7 +75,7 @@ private:
     uint64_t _min_ms;
     uint64_t _begin;
     uint64_t _created;
-    LogContextCapture _ctx;
+    bool _print_log;
 };
 
 class SmoothTicker {
@@ -159,9 +151,9 @@ private:
 };
 
 #if !defined(NDEBUG)
-#define TimeTicker() Ticker __ticker(5,WarnL,true)
-#define TimeTicker1(tm) Ticker __ticker1(tm,WarnL,true)
-#define TimeTicker2(tm, log) Ticker __ticker2(tm,log,true)
+#define TimeTicker() Ticker __ticker(5, true)
+#define TimeTicker1(tm) Ticker __ticker1(tm, true)
+#define TimeTicker2(tm, log) Ticker __ticker2(tm, true)
 #else
 #define TimeTicker()
 #define TimeTicker1(tm)

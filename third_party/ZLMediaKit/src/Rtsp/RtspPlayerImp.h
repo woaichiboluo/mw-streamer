@@ -11,6 +11,7 @@
 #ifndef SRC_RTP_RTPPARSERTESTER_H_
 #define SRC_RTP_RTPPARSERTESTER_H_
 
+#include "mw/log.h"
 #include <memory>
 #include <algorithm>
 #include <functional>
@@ -28,7 +29,7 @@ public:
     RtspPlayerImp(const toolkit::EventPoller::Ptr &poller) : Super(poller) {}
 
     ~RtspPlayerImp() override {
-        DebugL;
+        MW_LOG_DEBUG("zlm", "{}", __FUNCTION__);
     }
 
     float getProgress() const override {

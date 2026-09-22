@@ -11,6 +11,7 @@
 #ifndef ZLMEDIAKIT_RTSPMEDIASOURCEMUXER_H
 #define ZLMEDIAKIT_RTSPMEDIASOURCEMUXER_H
 
+#include "mw/log.h"
 #include "RtspMuxer.h"
 #include "Rtsp/RtspMediaSource.h"
 
@@ -33,7 +34,7 @@ public:
         try {
             RtspMuxer::flush();
         } catch (std::exception &ex) {
-            WarnL << ex.what();
+            MW_LOG_WARNING("zlm", "{}", ex.what());
         }
     }
 

@@ -1,4 +1,5 @@
-﻿#include "JPEGRtp.h"
+﻿#include "mw/log.h"
+#include "JPEGRtp.h"
 #include "JPEG.h"
 
 using namespace std;
@@ -412,8 +413,6 @@ static void create_default_qtables(uint8_t *qtables, uint8_t q) {
 #define AVERROR_EAGAIN -3
 #define RTP_FLAG_KEY    0x1 ///< RTP packet contains a keyframe
 #define RTP_FLAG_MARKER 0x2 ///< RTP marker bit was set for this packet
-#define av_log(ctx, level, ...)  PrintD(__VA_ARGS__)
-
 #ifndef AV_RB24
 #   define AV_RB24(x)                           \
     ((((const uint8_t*)(x))[0] << 16) |         \
@@ -436,7 +435,7 @@ static int jpeg_parse_packet(void *ctx, PayloadContext *jpeg, uint32_t *timestam
     int ret = 0, dri = 0;
 
     if (len < 8) {
-        av_log(ctx, AV_LOG_ERROR, "Too short RTP/JPEG packet.\n");
+        MW_LOG_ERROR("zlm", "Too short RTP/JPEG packet.\n");
         return AVERROR_INVALIDDATA;
     }
 
@@ -451,7 +450,7 @@ static int jpeg_parse_packet(void *ctx, PayloadContext *jpeg, uint32_t *timestam
 
     if (*type & 0x40) {
         if (len < 4) {
-            av_log(ctx, AV_LOG_ERROR, "Too short RTP/JPEG packet.\n");
+            MW_LOG_ERROR("zlm", "Too short RTP/JPEG packet.\n");
             return AVERROR_INVALIDDATA;
         }
         dri = AV_RB16(buf);
@@ -460,7 +459,7 @@ static int jpeg_parse_packet(void *ctx, PayloadContext *jpeg, uint32_t *timestam
         *type &= ~0x40;
     }
     if (*type > 1) {
-        av_log(ctx, AV_LOG_ERROR, "RTP/JPEG type %d", (int) *type);
+        MW_LOG_ERROR("zlm", "RTP/JPEG type {}", (int) *type);
         return AVERROR_PATCHWELCOME;
     }
 
@@ -473,7 +472,7 @@ static int jpeg_parse_packet(void *ctx, PayloadContext *jpeg, uint32_t *timestam
         if (q > 127) {
             uint8_t precision;
             if (len < 4) {
-                av_log(ctx, AV_LOG_ERROR, "Too short RTP/JPEG packet.\n");
+                MW_LOG_ERROR("zlm", "Too short RTP/JPEG packet.\n");
                 return AVERROR_INVALIDDATA;
             }
 
@@ -484,12 +483,12 @@ static int jpeg_parse_packet(void *ctx, PayloadContext *jpeg, uint32_t *timestam
             len -= 4;
 
             if (precision) {
-                av_log(ctx, AV_LOG_WARNING, "Only 8-bit precision is supported.\n");
+                MW_LOG_WARNING("zlm", "Only 8-bit precision is supported.\n");
             }
 
             if (qtable_len > 0) {
                 if (len < qtable_len) {
-                    av_log(ctx, AV_LOG_ERROR, "Too short RTP/JPEG packet.\n");
+                    MW_LOG_ERROR("zlm", "Too short RTP/JPEG packet.\n");
                     return AVERROR_INVALIDDATA;
                 }
                 qtables = buf;
@@ -499,8 +498,7 @@ static int jpeg_parse_packet(void *ctx, PayloadContext *jpeg, uint32_t *timestam
                     if (jpeg->qtables_len[q - 128] &&
                         (jpeg->qtables_len[q - 128] != qtable_len ||
                          memcmp(qtables, &jpeg->qtables[q - 128][0], qtable_len))) {
-                        av_log(ctx, AV_LOG_WARNING,
-                               "Quantization tables for q=%d changed\n", q);
+                        MW_LOG_WARNING("zlm", "Quantization tables for q={} changed\n", q);
                     } else if (!jpeg->qtables_len[q - 128] && qtable_len <= 128) {
                         memcpy(&jpeg->qtables[q - 128][0], qtables,
                                qtable_len);
@@ -509,13 +507,11 @@ static int jpeg_parse_packet(void *ctx, PayloadContext *jpeg, uint32_t *timestam
                 }
             } else {
                 if (q == 255) {
-                    av_log(ctx, AV_LOG_ERROR,
-                           "Invalid RTP/JPEG packet. Quantization tables not found.\n");
+                    MW_LOG_ERROR("zlm", "Invalid RTP/JPEG packet. Quantization tables not found.\n");
                     return AVERROR_INVALIDDATA;
                 }
                 if (!jpeg->qtables_len[q - 128]) {
-                    av_log(ctx, AV_LOG_ERROR,
-                           "No quantization tables known for q=%d yet.\n", q);
+                    MW_LOG_ERROR("zlm", "No quantization tables known for q={} yet.\n", q);
                     return AVERROR_INVALIDDATA;
                 }
                 qtables = &jpeg->qtables[q - 128][0];
@@ -523,7 +519,7 @@ static int jpeg_parse_packet(void *ctx, PayloadContext *jpeg, uint32_t *timestam
             }
         } else { /* q <= 127 */
             if (q == 0 || q > 99) {
-                av_log(ctx, AV_LOG_ERROR, "Reserved q value %d\n", q);
+                MW_LOG_ERROR("zlm", "Reserved q value {}\n", q);
                 return AVERROR_INVALIDDATA;
             }
             create_default_qtables(new_qtables, q);
@@ -546,8 +542,7 @@ static int jpeg_parse_packet(void *ctx, PayloadContext *jpeg, uint32_t *timestam
 
         if ((size_t)jpeg->hdr_size > kMaxRtpJpegFrameSize) {
             jpeg->frame.clear();
-            av_log(ctx, AV_LOG_ERROR,
-                   "RTP/JPEG header is too large; dropping frame.\n");
+            MW_LOG_ERROR("zlm", "RTP/JPEG header is too large; dropping frame.\n");
             return AVERROR_INVALIDDATA;
         }
 
@@ -556,8 +551,7 @@ static int jpeg_parse_packet(void *ctx, PayloadContext *jpeg, uint32_t *timestam
     }
 
     if (jpeg->frame.empty()) {
-        av_log(ctx, AV_LOG_ERROR,
-               "Received packet without a start chunk; dropping frame.\n");
+        MW_LOG_ERROR("zlm", "Received packet without a start chunk; dropping frame.\n");
         return AVERROR_EAGAIN;
     }
 
@@ -565,20 +559,18 @@ static int jpeg_parse_packet(void *ctx, PayloadContext *jpeg, uint32_t *timestam
         /* Skip the current frame if timestamp is incorrect.
          * A start packet has been lost somewhere. */
         jpeg->frame.clear();
-        av_log(ctx, AV_LOG_ERROR, "RTP timestamps don't match.\n");
+        MW_LOG_ERROR("zlm", "RTP timestamps don't match.\n");
         return AVERROR_INVALIDDATA;
     }
 
     if (off != jpeg->frame.size() - jpeg->hdr_size) {
-        av_log(ctx, AV_LOG_ERROR,
-               "Missing packets; dropping frame.\n");
+        MW_LOG_ERROR("zlm", "Missing packets; dropping frame.\n");
         return AVERROR_EAGAIN;
     }
 
     if (jpeg->frame.size() + len + 2 > kMaxRtpJpegFrameSize) {
         jpeg->frame.clear();
-        av_log(ctx, AV_LOG_ERROR,
-               "RTP/JPEG frame is too large; dropping frame.\n");
+        MW_LOG_ERROR("zlm", "RTP/JPEG frame is too large; dropping frame.\n");
         return AVERROR_INVALIDDATA;
     }
 
@@ -634,17 +626,16 @@ void JPEGRtpEncoder::rtpSendJpeg(const uint8_t *buf, int size, uint64_t pts, uin
         if (buf[i + 1] == DQT) {
             int tables, j;
             if (buf[i + 4] & 0xF0)
-                av_log(s1, AV_LOG_WARNING,
-                       "Only 8-bit precision is supported.\n");
+                MW_LOG_WARNING("zlm", "Only 8-bit precision is supported.\n");
 
             /* a quantization table is 64 bytes long */
             tables = AV_RB16(&buf[i + 2]) / 65;
             if (i + 5 + tables * 65 > size) {
-                av_log(s1, AV_LOG_ERROR, "Too short JPEG header. Aborted!\n");
+                MW_LOG_ERROR("zlm", "Too short JPEG header. Aborted!\n");
                 return;
             }
             if (nb_qtables + tables > 4) {
-                av_log(s1, AV_LOG_ERROR, "Invalid number of quantisation tables\n");
+                MW_LOG_ERROR("zlm", "Invalid number of quantisation tables\n");
                 return;
             }
 
@@ -656,8 +647,7 @@ void JPEGRtpEncoder::rtpSendJpeg(const uint8_t *buf, int size, uint64_t pts, uin
             i += tables << 6;
         } else if (buf[i + 1] == SOF0) {
             if (buf[i + 14] != 17 || buf[i + 17] != 17) {
-                av_log(s1, AV_LOG_ERROR,
-                       "Only 1x1 chroma blocks are supported. Aborted!\n");
+                MW_LOG_ERROR("zlm", "Only 1x1 chroma blocks are supported. Aborted!\n");
                 return;
             }
             h = (buf[i + 5] * 256 + buf[i + 6]) / 8;
@@ -731,8 +721,7 @@ void JPEGRtpEncoder::rtpSendJpeg(const uint8_t *buf, int size, uint64_t pts, uin
             /* SOS is last marker in the header */
             i += AV_RB16(&buf[i + 2]) + 2;
             if (i > size) {
-                av_log(s1, AV_LOG_ERROR,
-                       "Insufficient data. Aborted!\n");
+                MW_LOG_ERROR("zlm", "Insufficient data. Aborted!\n");
                 return;
             }
             break;
@@ -742,14 +731,11 @@ void JPEGRtpEncoder::rtpSendJpeg(const uint8_t *buf, int size, uint64_t pts, uin
         }
     }
     if (default_huffman_tables && default_huffman_tables != 31) {
-        av_log(s1, AV_LOG_ERROR,
-               "RFC 2435 requires standard Huffman tables for jpeg\n");
+        MW_LOG_ERROR("zlm", "RFC 2435 requires standard Huffman tables for jpeg\n");
         return;
     }
     if (nb_qtables && nb_qtables != 2)
-        av_log(s1, AV_LOG_WARNING,
-               "RFC 2435 suggests two quantization tables, %d provided\n",
-               nb_qtables);
+        MW_LOG_WARNING("zlm", "RFC 2435 suggests two quantization tables, {} provided\n", nb_qtables);
 
     /* skip JPEG header */
     buf  += i;

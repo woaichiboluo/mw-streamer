@@ -11,6 +11,7 @@
 #ifndef ZLMEDIAKIT_SRtPLAYERIMP_H
 #define ZLMEDIAKIT_SRtPLAYERIMP_H
 
+#include "mw/log.h"
 #include "SrtPlayer.h"
 #include "Rtp/Decoder.h"
 #include "TS/TSMediaSource.h"
@@ -25,7 +26,7 @@ public:
     using Super = PlayerImp<SrtPlayer, PlayerBase>;
 
     SrtPlayerImp(const toolkit::EventPoller::Ptr &poller) : Super(poller) {}
-    ~SrtPlayerImp() override { DebugL; }
+    ~SrtPlayerImp() override { MW_LOG_DEBUG("zlm", "{}", __FUNCTION__); }
 
     void teardown() override;
 

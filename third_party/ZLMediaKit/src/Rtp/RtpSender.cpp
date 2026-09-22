@@ -9,6 +9,7 @@
  */
 
 #if defined(ENABLE_RTPPROXY)
+#include "mw/log.h"
 #include "RtpSender.h"
 #include "RtpSession.h"
 #include "Thread/WorkThreadPool.h"
@@ -30,7 +31,7 @@ RtpSender::~RtpSender() {
     try {
         flush();
     } catch (std::exception &ex) {
-        WarnL << "Exception occurred: " << ex.what();
+        MW_LOG_WARNING("zlm", "Exception occurred: {}", ex.what());
     }
 }
 
@@ -84,9 +85,9 @@ void RtpSender::startSend(const MediaSourceEvent &sender, const MediaSourceEvent
             delay_task->cancel();
             strong_self->_socket_rtp = sock;
             strong_self->onConnect();
-            InfoL << "accept tcp connection from: " << sock->get_peer_ip() << ":" << sock->get_peer_port();
+            MW_LOG_INFO("zlm", "accept tcp connection from: {}:{}", sock->get_peer_ip(), sock->get_peer_port());
         });
-        InfoL << "start tcp passive server on: " << tcp_listener->get_local_port();
+        MW_LOG_INFO("zlm", "start tcp passive server on: {}", tcp_listener->get_local_port());
         cb(tcp_listener->get_local_port(), SockException());
 
     } else if (args.con_type == MediaSourceEvent::SendRtpArgs::kUdpPassive) {
@@ -121,9 +122,9 @@ void RtpSender::startSend(const MediaSourceEvent &sender, const MediaSourceEvent
             // 异步执行onConnect，防止在OnRead回调中调用setOnRead  [AUTO-TRANSLATED:83881d7f]
             // Execute onConnect asynchronously to prevent calling setOnRead in the OnRead callback
             strong_self->_poller->async([strong_self]() { strong_self->onConnect(); }, false);
-            InfoL << "accept udp connection from: " << strong_self->_socket_rtp->get_peer_ip() << ":" << strong_self->_socket_rtp->get_peer_port();
+            MW_LOG_INFO("zlm", "accept udp connection from: {}:{}", strong_self->_socket_rtp->get_peer_ip(), strong_self->_socket_rtp->get_peer_port());
         });
-        InfoL << "start udp passive server on: " << _socket_rtp->get_local_port();
+        MW_LOG_INFO("zlm", "start udp passive server on: {}", _socket_rtp->get_local_port());
         cb(_socket_rtp->get_local_port(), SockException());
 
     } else if (args.con_type == MediaSourceEvent::SendRtpArgs::kUdpActive) {
@@ -173,7 +174,7 @@ void RtpSender::startSend(const MediaSourceEvent &sender, const MediaSourceEvent
                 cb(strong_self->_socket_rtp->get_local_port(), SockException());
             });
         });
-        InfoL << "start udp active send rtp to: " << args.dst_url << ":" << args.dst_port;
+        MW_LOG_INFO("zlm", "start udp active send rtp to: {}:{}", args.dst_url, args.dst_port);
 
     } else if (args.con_type == MediaSourceEvent::SendRtpArgs::kTcpActive) {
         _socket_rtp->connect(args.dst_url, args.dst_port,[cb, weak_self](const SockException &err) {
@@ -189,7 +190,7 @@ void RtpSender::startSend(const MediaSourceEvent &sender, const MediaSourceEvent
                 cb(0, err);
             }
         }, delay_ms / 1000.0, "::", args.src_port);
-        InfoL << "start tcp active send rtp to: " << args.dst_url << ":" << args.dst_port;
+        MW_LOG_INFO("zlm", "start tcp active send rtp to: {}:{}", args.dst_url, args.dst_port);
     } else if (args.con_type == MediaSourceEvent::SendRtpArgs::kVoiceTalk) {
         auto src = MediaSource::find(args.recv_stream_vhost, args.recv_stream_app, args.recv_stream_id);
         if (!src) {
@@ -222,7 +223,7 @@ void RtpSender::createRtcpSocket() {
     // rtcp端口使用户rtp端口+1  [AUTO-TRANSLATED:8a0a6b2c]
     // The RTCP port is the RTP port + 1
     if(!_socket_rtcp->bindUdpSock(_socket_rtp->get_local_port() + 1, _socket_rtp->get_local_ip(), true)){
-        WarnL << "bind rtcp udp socket failed: " << get_uv_errmsg(true);
+        MW_LOG_WARNING("zlm", "bind rtcp udp socket failed: {}", get_uv_errmsg(true));
         _socket_rtcp = nullptr;
         return;
     }
@@ -253,7 +254,7 @@ void RtpSender::createRtcpSocket() {
             strong_self->onRecvRtcp(rtcp);
         }
     });
-    InfoL << "open rtcp port success, start check rr rtcp timeout";
+    MW_LOG_INFO("zlm", "open rtcp port success, start check rr rtcp timeout");
 }
 
 void RtpSender::onRecvRtcp(RtcpHeader *rtcp) {
@@ -328,7 +329,11 @@ void RtpSender::onConnect() {
             return false;
         });
     }
-    InfoL << "startSend rtp success: " << _socket_rtp->get_peer_ip() << ":" << _socket_rtp->get_peer_port() << ", data_type: " << _args.data_type << ", con_type: " << _args.con_type;
+    MW_LOG_INFO("zlm",
+                "startSend rtp success: {}:{}, data_type: {}, con_type: {}",
+                _socket_rtp->get_peer_ip(), _socket_rtp->get_peer_port(),
+                static_cast<int>(_args.data_type),
+                static_cast<int>(_args.con_type));
 }
 
 bool RtpSender::addTrack(const Track::Ptr &track) {
@@ -391,7 +396,7 @@ void RtpSender::onSendRtpUdp(const toolkit::Buffer::Ptr &buf, bool check) {
     if (_rtcp_recv_ticker.elapsedTime() > _args.rtcp_timeout_ms) {
         // 接收rr rtcp超时  [AUTO-TRANSLATED:a6ccd262]
         // Receive rr rtcp timeout
-        WarnL << "recv rr rtcp timeout";
+        MW_LOG_WARNING("zlm", "recv rr rtcp timeout");
         _rtcp_recv_ticker.resetTime();
         onClose(SockException(Err_timeout, "recv rr rtcp timeout"));
     }
@@ -470,7 +475,7 @@ void RtpSender::onFlushRtpList(shared_ptr<List<Buffer::Ptr>> rtp_list) {
 
 void RtpSender::onErr(const SockException &ex) {
     _is_connect = false;
-    WarnL << "send rtp connection lost: " << ex;
+    MW_LOG_WARNING("zlm", "send rtp connection lost: {}", fmt::streamed(ex));
     onClose(ex);
 }
 

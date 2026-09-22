@@ -11,7 +11,7 @@
 #include <cstdlib>
 #include "RtspSplitter.h"
 #include "Util/util.h"
-#include "Util/logger.h"
+#include "mw/log.h"
 #include "Common/macros.h"
 #include "Rtsp/RtpReceiver.h"
 
@@ -31,7 +31,7 @@ const char *RtspSplitter::onSearchPacketTail(const char *data, size_t len) {
         // rtp is greater than 256KB
         ret = (char *) memchr(data, '$', len);
         if (!ret) {
-            WarnL << "rtp缓存溢出:" << hexdump(data, 1024);
+            MW_LOG_WARNING("zlm", "rtp缓存溢出:{}", hexdump(data, 1024));
             reset();
         }
     }
@@ -69,7 +69,7 @@ ssize_t RtspSplitter::onRecvHeader(const char *data, size_t len) {
         try {
             onRtpPacket(data, len);
         } catch (RtpTrack::BadRtpException &ex) {
-            WarnL << ex.what();
+            MW_LOG_WARNING("zlm", "{}", ex.what());
         }
         return 0;
     }
@@ -88,7 +88,7 @@ ssize_t RtspSplitter::onRecvHeader(const char *data, size_t len) {
         // Handshake has ended, if rtsp server has a send buffer overflow bug, then rtsp signaling may be mixed with rtp
         // 这种情况下，rtsp信令解析异常不中断链接，只丢弃这个包  [AUTO-TRANSLATED:93cd60b4]
         // In this case, rtsp signaling parsing exception does not interrupt the connection, just discard this packet
-        WarnL << ex.what();
+        MW_LOG_WARNING("zlm", "{}", ex.what());
         return 0;
     }
     auto ret = getContentLength(_parser);

@@ -78,19 +78,21 @@ ctest --test-dir build --output-on-failure
 
 ## 运行时关闭
 
-第一次创建 Pipeline 时自动初始化，无需单独调用 init。应用退出前应停止创建新
-Pipeline，销毁全部 Pipeline，再在应用控制线程调用 `mw_streamer_shutdown()`
-（声明位于 `mw/streamer/api.h`）。必须在 `main` 返回或卸载库之前执行，不能放到
-`DllMain`、静态析构或媒体回调中。
+创建任何 Pipeline 或独立媒体对象前，应用必须在控制线程调用
+`mw_streamer_initialize()`，传入由 `mw_log_default_config()` 和
+`mw_zlm_default_config()` 填充并按需修改的 `MwLogConfig`、`MwZlmConfig`。初始化失败
+时返回 `false`，错误可由 `mw_last_error()` 读取。应用停止创建新 Pipeline 并销毁
+全部 Pipeline 和独立媒体对象后，可以调用 `mw_streamer_shutdown()` 关闭后续对象准入。
 
-仍有 Pipeline 存活或正在构造时，关闭返回 `kMwResultInvalidState`，运行时仍可使用。
-成功关闭会等待后台线程退出，重复关闭安全；此后同进程不再支持创建 Pipeline。
-从未初始化就关闭也会永久禁止初始化。普通 Pipeline 的反复创建、启动、停止、销毁
-不触发全局运行时关闭。
+`mw_streamer_is_initialized()` 报告运行时是否可用。仍有对象存活或正在构造时，关闭
+不会执行，运行时仍可使用，错误写入 `mw_last_error()`。成功关闭后重复调用安全，
+此后同进程不再支持再次初始化。初始化前调用关闭不会改变状态。普通 Pipeline 的
+反复创建、启动、停止、销毁不触发全局运行时关闭。
 
-共享池抽取的 Poller 转入池持有的独占集合，不再参与共享调度，也不复用。
-Pipeline 销毁后，这些独占线程保留到全局 shutdown 统一停止和释放；因此同一
-运行时反复创建 Pipeline 会增加保留的线程数量，这是当前明确采用的生命周期约定。
+当前 `mw_streamer_shutdown()` 不销毁 ZLM 的进程级线程池、SRT Reactor、毫秒时钟线程
+或日志对象，这些资源仍由 ZLM 原有的进程退出路径处理，因此该接口不能作为动态库
+卸载屏障。共享池抽取的 Poller 不再参与共享调度；其最后一个引用释放时按 ZLToolKit
+原有析构路径退出。
 
 SRT 每次新建或重连发布会丢弃关键帧之前的残缺历史数据，并从包含 PAT、PMT 和随机访问点的完整 TS 关键帧批次开始发送，避免高码率流从 GOP 中段接入时无法完成接收端初始化。
 
@@ -654,7 +656,7 @@ type = "analysis_processor"
 - `SerializePipelineConfigToToml(config)`：结构体转 TOML 字符串。
 - `LoadPipelineConfigFromToml(path)`：从文件加载。
 - `SavePipelineConfigToToml(config, path)`：保存到文件，写入前先序列化并校验。
-- `BuildPipelineFromToml(path, bindings)`：读取同一文件中的 `[log]`、`[zlm]` 和媒体拓扑并构建 Pipeline。
+- `BuildPipelineFromToml(path, bindings)`：读取媒体拓扑并构建 Pipeline；运行时必须已经显式初始化。
 
 双向转换保留节点参数、声明及下游顺序和编码属性的语义，不保留注释、
 空白、引号样式或字段排版。序列化显式写出默认参数。Processor 的业务配置不属于
@@ -699,11 +701,10 @@ SavePipelineConfigToToml(restored, "pipeline.toml");
 
 ## 运行时配置
 
-[`template/pipeline.toml`](template/pipeline.toml) 是唯一的 streamer TOML：顶部的
-`[log]` 和 `[zlm]` 配置进程运行时，`[input]` 与 `[[sinks]]` 描述媒体拓扑。
-`BuildPipelineFromToml()` 会在创建媒体对象前应用前两者；手工构建 Pipeline 时运行时
-按 C++ 默认值自动初始化，无需主动 Init。未知字段会被忽略并记录警告，错误类型及
-整数越界仍直接报错。
+[`template/pipeline.toml`](template/pipeline.toml) 只使用 `[input]` 与 `[[sinks]]`
+描述媒体拓扑。进程日志和 ZLToolKit 线程池通过 `MwLogConfig`、`MwZlmConfig` 在
+`mw_streamer_initialize()` 中配置。旧的根级 `[log]`、`[zlm]` 会直接报错。
+其他未知字段会被忽略并记录警告，错误类型及整数越界仍直接报错。
 
 ## 日志
 
@@ -712,9 +713,15 @@ SavePipelineConfigToToml(restored, "pipeline.toml");
 模块，`MW_LOG_INFO_DEFAULT(...)` 等宏使用 `default` 模块；日志末尾包含调用处的
 文件名和行号。
 
-所有模块共享同一组输出端。Console 和滚动文件的级别为 `off` 时不创建对应 Sink，
-二者可以单独或同时输出；`[log.modules]` 可以用任意字符串配置模块级别。未配置的
-`default` 模块默认为 `info`，其他未配置模块默认为 `error`；显式配置会覆盖默认值，
-也可以设为 `off` 关闭对应模块。streamer 只负责接管 ZLMediaKit、
-libsrt 和 FFmpeg 日志并转发给 `mw::log`。异步日志默认关闭，线程数为 0 时由
-ZLToolKit 按硬件并发数决定。
+所有模块共享同一组输出端。Console 和滚动文件分别由 `console_enabled`、
+`rotating_file_enabled` 开启，输出端自身固定接收 `trace` 及以上日志；实际过滤只由
+`modules` 决定。该字段使用分号分隔，裸模块名默认为 `info`，例如
+`"ffmpeg;streamer:warn;"`。未配置的 `default` 模块默认为 `info`，其他未配置模块
+默认为 `error`；显式配置可以使用 `trace`、`debug`、`info`、`warn`、`error`、
+`critical` 或 `off`。`mw_log_default_config()` 默认启用
+`"streamer;processor;"` 和 Console，关闭滚动文件与异步输出。
+
+ZLMediaKit 和 ZLToolKit 直接使用 `MW_LOG_*` 写入独立的 `mw_log`；它们不感知
+streamer Runtime，也不再拥有 Logger、Channel 或异步日志线程。streamer 只为 libsrt
+和 FFmpeg 安装日志回调。`mw_zlm_default_config()` 默认让线程池按硬件并发数决定规模并
+启用 CPU 亲和性。

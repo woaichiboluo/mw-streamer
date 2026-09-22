@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "AAC.h"
 #include "AACRtp.h"
 #include "AACRtmp.h"
@@ -153,7 +154,7 @@ string makeAacConfig(const uint8_t *hex, size_t length){
             return string(buf, len);
         }
     }
-    WarnL << "生成aac config失败, adts header:" << hexdump(hex, length);
+    MW_LOG_WARNING("zlm", "生成aac config失败, adts header:{}", hexdump(hex, length));
     return "";
 #endif
 }
@@ -173,7 +174,7 @@ int dumpAacConfig(const string &config, size_t length, uint8_t *out, size_t out_
         ret = mpeg4_aac_adts_save(&aac, length, out, out_size);
     }
     if (ret < 0) {
-        WarnL << "生成adts头失败:" << ret << ", aac config:" << hexdump(config.data(), config.size());
+        MW_LOG_WARNING("zlm", "生成adts头失败:{}, aac config:{}", ret, hexdump(config.data(), config.size()));
     }
     assert((int)out_size >= ret);
     return ret;
@@ -198,7 +199,7 @@ bool parseAacConfig(const string &config, int &samplerate, int &channels) {
         channels = aac.channels;
         return true;
     }
-    WarnL << "获取aac采样率、声道数失败:" << hexdump(config.data(), config.size());
+    MW_LOG_WARNING("zlm", "获取aac采样率、声道数失败:{}", hexdump(config.data(), config.size()));
     return false;
 #endif
 }
@@ -324,8 +325,7 @@ bool AACTrack::inputFrame(const Frame::Ptr &frame) {
         auto sub_frame = std::make_shared<FrameInternalBase<FrameFromPtr>>(frame, (char *)ptr, frame_len, dts, pts, ADTS_HEADER_LEN);
         ptr += frame_len;
         if (ptr > end) {
-            WarnL << "invalid aac length in adts header: " << frame_len
-                  << ", remain data size: " << end - (ptr - frame_len);
+            MW_LOG_WARNING("zlm", "invalid aac length in adts header: {}, remain data size: {}", frame_len, end - (ptr - frame_len));
             break;
         }
         if (inputFrame_l(sub_frame)) {

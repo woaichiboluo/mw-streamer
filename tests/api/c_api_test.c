@@ -30,6 +30,30 @@ static MwPerformanceSnapshot Snapshot(int64_t sampled_at_ns,
 }
 
 int main(void) {
+  MwLogConfig log_config;
+  MwZlmConfig zlm_config;
+  mw_log_default_config(&log_config);
+  mw_zlm_default_config(&zlm_config);
+  if (Check(zlm_config.event_poller_threads == 0) ||
+      Check(zlm_config.work_threads == 0) ||
+      Check(zlm_config.enable_cpu_affinity == 1)) {
+    return 1;
+  }
+  zlm_config.event_poller_threads = 1;
+  zlm_config.work_threads = 1;
+  zlm_config.enable_cpu_affinity = 0;
+  if (Check(!mw_streamer_is_initialized()) ||
+      Check(!mw_streamer_initialize(NULL, &zlm_config)) ||
+      Check(strlen(mw_last_error()) != 0) ||
+      Check(!mw_streamer_initialize(&log_config, NULL)) ||
+      Check(strlen(mw_last_error()) != 0) ||
+      Check(mw_streamer_initialize(&log_config, &zlm_config)) ||
+      Check(mw_streamer_is_initialized()) ||
+      Check(!mw_streamer_initialize(&log_config, &zlm_config)) ||
+      Check(strlen(mw_last_error()) != 0)) {
+    return 1;
+  }
+
   MwPipeline* pipeline = (MwPipeline*)1;
   MwPipelineCreateInfo create_info = {0};
   if (Check(mw_pipeline_create_from_toml(NULL, &pipeline) ==
@@ -125,6 +149,10 @@ int main(void) {
   strcpy(current.nodes[0].id, "other");
   if (Check(mw_performance_calculate_rates(&current, &previous) ==
             kMwResultInvalidArgument)) {
+    return 1;
+  }
+  mw_streamer_shutdown();
+  if (Check(!mw_streamer_is_initialized())) {
     return 1;
   }
   return 0;

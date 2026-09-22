@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include <iomanip>
 #include "HlsMaker.h"
 #include "Common/config.h"
@@ -99,7 +100,7 @@ void HlsMaker::inputData(const char *data, size_t len, uint64_t timestamp, bool 
         if (timestamp < _last_timestamp) {
             // 时间戳回退了，切片时长重新计时  [AUTO-TRANSLATED:fe91bd7f]
             // Timestamp has been rolled back, slice duration is recalculated
-            WarnL << "Timestamp reduce: " << _last_timestamp << " -> " << timestamp;
+            MW_LOG_WARNING("zlm", "Timestamp reduce: {} -> {}", _last_timestamp, timestamp);
             _last_seg_timestamp = _last_timestamp = timestamp;
         }
         if (is_idr_fast_packet) {

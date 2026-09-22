@@ -27,6 +27,7 @@ extern "C" {
 #include <libavutil/mathematics.h>
 }
 
+#include "mw/streamer/api.h"
 #include "mw/streamer/decoder/decoder_sink.h"
 #include "mw/streamer/encoder/encoder_sink.h"
 #include "mw/streamer/input/file_input.h"
@@ -1235,10 +1236,21 @@ int main(int argc, char* argv[]) {
   std::signal(SIGINT, HandleSignal);
   std::signal(SIGTERM, HandleSignal);
 
-  try {
-    return Run(ParseArguments(argc, argv));
-  } catch (const std::exception& error) {
-    fmt::print(stderr, "mw_streamer_e2e_runner: {}\n", error.what());
+  MwLogConfig log_config;
+  mw_log_default_config(&log_config);
+  MwZlmConfig zlm_config;
+  mw_zlm_default_config(&zlm_config);
+  if (!mw_streamer_initialize(&log_config, &zlm_config)) {
+    fmt::print(stderr, "mw_streamer_e2e_runner: {}\n", mw_last_error());
     return 1;
   }
+  int result = 1;
+  try {
+    result = Run(ParseArguments(argc, argv));
+  } catch (const std::exception& error) {
+    fmt::print(stderr, "mw_streamer_e2e_runner: {}\n", error.what());
+  }
+  mw_streamer_shutdown();
+  if (mw_streamer_is_initialized()) result = 1;
+  return result;
 }

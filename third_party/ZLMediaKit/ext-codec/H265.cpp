@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "H265.h"
 #include "H265Rtp.h"
 #include "H265Rtmp.h"
@@ -415,13 +416,13 @@ toolkit::Buffer::Ptr H265Track::getExtraData() const {
     extra_data.resize(1024);
     auto extra_data_size = mpeg4_hevc_decoder_configuration_record_save(&hevc, (uint8_t *)extra_data.data(), extra_data.size());
     if (extra_data_size == -1) {
-        WarnL << "生成H265 extra_data 失败";
+        MW_LOG_WARNING("zlm", "生成H265 extra_data 失败");
         return nullptr;
     }
     extra_data.resize(extra_data_size);
     return std::make_shared<BufferString>(std::move(extra_data));
 #else
-    WarnL << "请开启MP4相关功能并使能\"ENABLE_MP4\",否则对H265的支持不完善";
+    MW_LOG_WARNING("zlm", "请开启MP4相关功能并使能\"ENABLE_MP4\",否则对H265的支持不完善");
     return nullptr;
 #endif
 }
@@ -441,7 +442,7 @@ void H265Track::setExtraData(const uint8_t *data, size_t bytes) {
         }
     }
 #else
-    WarnL << "请开启MP4相关功能并使能\"ENABLE_MP4\",否则对H265的支持不完善";
+    MW_LOG_WARNING("zlm", "请开启MP4相关功能并使能\"ENABLE_MP4\",否则对H265的支持不完善");
 #endif
 }
 

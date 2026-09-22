@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "HttpRequester.h"
 
 using namespace std;
@@ -28,7 +29,7 @@ void HttpRequester::onResponseCompleted(const SockException &ex) {
         std::weak_ptr<HttpRequester> weak_self = std::static_pointer_cast<HttpRequester>(shared_from_this());
         getPoller()->doDelayTask(_retry_delay, [weak_self]() {
             if (auto self = weak_self.lock()) {
-                InfoL << "resend request " << self->getUrl() << " with retry " << self->getRetry();
+                MW_LOG_INFO("zlm", "resend request {} with retry {}", self->getUrl(), self->getRetry());
                 self->sendRequest(self->getUrl());
             }
             return 0;
@@ -43,7 +44,7 @@ void HttpRequester::onResponseCompleted(const SockException &ex) {
 }
 
 void HttpRequester::setRetry(size_t count, size_t delay) {
-    InfoL << "setRetry max=" << count << ", delay=" << delay;
+    MW_LOG_INFO("zlm", "setRetry max={}, delay={}", count, delay);
     _max_retry = count;
     _retry_delay = delay;
 }

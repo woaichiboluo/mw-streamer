@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "VpxRtmp.h"
 #include "Rtmp/utils.h"
 #include "Common/config.h"
@@ -53,7 +54,7 @@ void VpxRtmpDecoder::inputRtmp(const RtmpPacket::Ptr &pkt) {
                 break;
             }
             default: 
-                WarnL << "Unknown pkt_type: " << (int)_info.video.pkt_type; 
+                MW_LOG_WARNING("zlm", "Unknown pkt_type: {}", (int)_info.video.pkt_type); 
                 break;
         }
     } else {

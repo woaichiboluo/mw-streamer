@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "Stamp.h"
 
 // 时间戳最大允许跳变3秒，主要是防止网络抖动导致的跳变  [AUTO-TRANSLATED:144154de]
@@ -119,8 +120,6 @@ void Stamp::revise(int64_t dts, int64_t pts, int64_t &dts_out, int64_t &pts_out,
     }
 
     if (dts_out < _last_dts_out) {
-        // WarnL << "dts回退:" << dts_out << " < " << _last_dts_out;  [AUTO-TRANSLATED:c36316f5]
-        // WarnL << "dts rollback:" << dts_out << " < " << _last_dts_out;
         dts_out = _last_dts_out;
         pts_out = _last_pts_out;
         return;
@@ -163,7 +162,7 @@ void Stamp::revise_l(int64_t dts, int64_t pts, int64_t &dts_out, int64_t &pts_ou
                 if (_relative_stamp == target_stamp) {
                     return;
                 }
-                TraceL << "Relative stamp changed: " << _relative_stamp << " -> " << target_stamp;
+                MW_LOG_TRACE("zlm", "Relative stamp changed: {} -> {}", _relative_stamp, target_stamp);
                 _relative_stamp = target_stamp;
             } else {
                 // 不允许回退, 则让另外一个Track的时间戳增长  [AUTO-TRANSLATED:428e8ce2]
@@ -172,7 +171,7 @@ void Stamp::revise_l(int64_t dts, int64_t pts, int64_t &dts_out, int64_t &pts_ou
                 if (_sync_master->_relative_stamp == target_stamp) {
                     return;
                 }
-                TraceL << "Relative stamp changed: " << _sync_master->_relative_stamp << " -> " << target_stamp;
+                MW_LOG_TRACE("zlm", "Relative stamp changed: {} -> {}", _sync_master->_relative_stamp, target_stamp);
                 _sync_master->_relative_stamp = target_stamp;
             }
         }
@@ -353,7 +352,7 @@ void NtpStamp::setNtpStamp(uint32_t rtp_stamp, uint64_t ntp_stamp_ms) {
     if (!ntp_stamp_ms || !rtp_stamp) {
         // 实测发现有些rtsp服务器发送的rtp时间戳和ntp时间戳一直为0  [AUTO-TRANSLATED:d3c200fc]
         // It has been found that some rtsp servers send rtp timestamps and ntp timestamps that are always 0
-        WarnL << "Invalid sender report rtcp, ntp_stamp_ms = " << ntp_stamp_ms << ", rtp_stamp = " << rtp_stamp;
+        MW_LOG_WARNING("zlm", "Invalid sender report rtcp, ntp_stamp_ms = {}, rtp_stamp = {}", ntp_stamp_ms, rtp_stamp);
         return;
     }
     update(rtp_stamp, ntp_stamp_ms * 1000);
@@ -400,7 +399,7 @@ uint64_t NtpStamp::getNtpStampUS(uint32_t rtp_stamp, uint32_t sample_rate) {
         }
         // 不明原因的时间戳大幅跳跃，直接返回上次值  [AUTO-TRANSLATED:952b769c]
         // The timestamp jumps significantly for unknown reasons, directly return the last value
-        WarnL << "rtp stamp abnormal increased:" << _last_rtp_stamp << " -> " << rtp_stamp;
+        MW_LOG_WARNING("zlm", "rtp stamp abnormal increased:{} -> {}", _last_rtp_stamp, rtp_stamp);
         update(rtp_stamp, _last_ntp_stamp_us);
         return _last_ntp_stamp_us;
     }
@@ -426,7 +425,7 @@ uint64_t NtpStamp::getNtpStampUS(uint32_t rtp_stamp, uint32_t sample_rate) {
     }
     // 不明原因的时间戳回退，直接返回上次值  [AUTO-TRANSLATED:c5105c14]
     // Timestamp rollback for unknown reasons, return the last value directly
-    WarnL << "rtp stamp abnormal reduced:" << _last_rtp_stamp << " -> " << rtp_stamp;
+    MW_LOG_WARNING("zlm", "rtp stamp abnormal reduced:{} -> {}", _last_rtp_stamp, rtp_stamp);
     update(rtp_stamp, _last_ntp_stamp_us);
     return _last_ntp_stamp_us;
 }

@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "Timer.h"
 
 namespace toolkit {
@@ -28,7 +29,7 @@ Timer::Timer(float second, const std::function<bool()> &cb, const EventPoller::P
             //This task no longer recurs
             return (uint64_t) 0;
         } catch (std::exception &ex) {
-            ErrorL << "Exception occurred when do timer task: " << ex.what();
+            MW_LOG_ERROR("zlm", "Exception occurred when do timer task: {}", ex.what());
             return (uint64_t) (1000 * second);
         }
     });

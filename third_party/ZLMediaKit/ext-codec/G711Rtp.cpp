@@ -1,4 +1,5 @@
-﻿#include "G711Rtp.h"
+﻿#include "mw/log.h"
+#include "G711Rtp.h"
 
 namespace mediakit {
 
@@ -13,7 +14,7 @@ void G711RtpEncoder::setOpt(int opt, const toolkit::Any &param) {
         if (param.is<uint32_t>()) {
             auto dur = param.get<uint32_t>();
             if (dur < 20 || dur > 180) {
-                WarnL << "set g711 rtp encoder  duration ms failed for " << dur;
+                MW_LOG_WARNING("zlm", "set g711 rtp encoder duration ms failed for {}", dur);
                 return;
             }
             // 向上 20ms 取整  [AUTO-TRANSLATED:b8a9e39e]

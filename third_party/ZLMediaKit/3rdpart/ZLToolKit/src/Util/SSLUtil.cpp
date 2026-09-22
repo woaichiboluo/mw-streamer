@@ -10,7 +10,7 @@
 
 #include "SSLUtil.h"
 #include "onceToken.h"
-#include "logger.h"
+#include "mw/log.h"
 
 #if defined(ENABLE_OPENSSL)
 #include <openssl/bio.h>
@@ -101,7 +101,7 @@ vector<shared_ptr<X509> > SSLUtil::loadPublicKey(const string &file_path_or_data
     BIO *bio = isFile ? BIO_new_file((char *) file_path_or_data.data(), "r") :
                BIO_new_mem_buf((char *) file_path_or_data.data(), file_path_or_data.size());
     if (!bio) {
-        WarnL << (isFile ? "BIO_new_file" : "BIO_new_mem_buf") << " failed: " << getLastError();
+        MW_LOG_WARNING("zlm", "{} failed: {}", (isFile ? "BIO_new_file" : "BIO_new_mem_buf"), getLastError());
         return ret;
     }
 
@@ -129,7 +129,7 @@ shared_ptr<EVP_PKEY> SSLUtil::loadPrivateKey(const string &file_path_or_data, co
                BIO_new_file((char *) file_path_or_data.data(), "r") :
                BIO_new_mem_buf((char *) file_path_or_data.data(), file_path_or_data.size());
     if (!bio) {
-        WarnL << (isFile ? "BIO_new_file" : "BIO_new_mem_buf") << " failed: " << getLastError();
+        MW_LOG_WARNING("zlm", "{} failed: {}", (isFile ? "BIO_new_file" : "BIO_new_mem_buf"), getLastError());
         return nullptr;
     }
 
@@ -178,7 +178,7 @@ shared_ptr<SSL_CTX> SSLUtil::makeSSLContext(const vector<shared_ptr<X509> > &cer
 #if defined(ENABLE_OPENSSL)
     SSL_CTX *ctx = SSL_CTX_new(serverMode ? SSLv23_server_method() : SSLv23_client_method());
     if (!ctx) {
-        WarnL << "SSL_CTX_new " << (serverMode ? "SSLv23_server_method" : "SSLv23_client_method") << " failed: " << getLastError();
+        MW_LOG_WARNING("zlm", "SSL_CTX_new {} failed: {}", (serverMode ? "SSLv23_server_method" : "SSLv23_client_method"), getLastError());
         return nullptr;
     }
     int i = 0;
@@ -200,7 +200,7 @@ shared_ptr<SSL_CTX> SSLUtil::makeSSLContext(const vector<shared_ptr<X509> > &cer
         //提供了私钥  [AUTO-TRANSLATED:1b23bc8c]
         //Provided private key
         if (SSL_CTX_use_PrivateKey(ctx, key.get()) != 1) {
-            WarnL << "SSL_CTX_use_PrivateKey failed: " << getLastError();
+            MW_LOG_WARNING("zlm", "SSL_CTX_use_PrivateKey failed: {}", getLastError());
             SSL_CTX_free(ctx);
             return nullptr;
         }
@@ -210,7 +210,7 @@ shared_ptr<SSL_CTX> SSLUtil::makeSSLContext(const vector<shared_ptr<X509> > &cer
         //加载私钥成功  [AUTO-TRANSLATED:80e96abb]
         //Private key loaded successfully
         if (SSL_CTX_check_private_key(ctx) != 1) {
-            WarnL << "SSL_CTX_check_private_key failed: " << getLastError();
+            MW_LOG_WARNING("zlm", "SSL_CTX_check_private_key failed: {}", getLastError());
             SSL_CTX_free(ctx);
             return nullptr;
         }
@@ -245,7 +245,7 @@ bool SSLUtil::loadDefaultCAs(SSL_CTX *ctx) {
     }
 
     if (SSL_CTX_set_default_verify_paths(ctx) != 1) {
-        WarnL << "SSL_CTX_set_default_verify_paths failed: " << getLastError();
+        MW_LOG_WARNING("zlm", "SSL_CTX_set_default_verify_paths failed: {}", getLastError());
         return false;
     }
     return true;
@@ -259,7 +259,7 @@ bool SSLUtil::trustCertificate(SSL_CTX *ctx, X509 *cer) {
     X509_STORE *store = SSL_CTX_get_cert_store(ctx);
     if (store && cer) {
         if (X509_STORE_add_cert(store, cer) != 1) {
-            WarnL << "X509_STORE_add_cert failed: " << getLastError();
+            MW_LOG_WARNING("zlm", "X509_STORE_add_cert failed: {}", getLastError());
             return false;
         }
         return true;
@@ -288,14 +288,14 @@ bool SSLUtil::verifyX509(X509 *cer, ...) {
     if (ret != 1) {
         int depth = X509_STORE_CTX_get_error_depth(store_ctx);
         int err = X509_STORE_CTX_get_error(store_ctx);
-        WarnL << "X509_verify_cert failed, depth: " << depth << ", err: " << X509_verify_cert_error_string(err);
+        MW_LOG_WARNING("zlm", "X509_verify_cert failed, depth: {}, err: {}", depth, X509_verify_cert_error_string(err));
     }
 
     X509_STORE_CTX_free(store_ctx);
     X509_STORE_free(store);
     return ret == 1;
 #else
-    WarnL << "ENABLE_OPENSSL disabled, you can not use any features based on openssl";
+    MW_LOG_WARNING("zlm", "ENABLE_OPENSSL disabled, you can not use any features based on openssl");
     return false;
 #endif //defined(ENABLE_OPENSSL)
 }
@@ -345,10 +345,10 @@ string SSLUtil::cryptWithRsaPublicKey(X509 *cer, const string &in_str, bool enc_
         out_str.resize(ret);
         return out_str;
     }
-    WarnL << (enc_or_dec ? "RSA_public_encrypt" : "RSA_public_decrypt") << " failed: " << getLastError();
+    MW_LOG_WARNING("zlm", "{} failed: {}", (enc_or_dec ? "RSA_public_encrypt" : "RSA_public_decrypt"), getLastError());
     return "";
 #else
-    WarnL << "ENABLE_OPENSSL disabled, you can not use any features based on openssl";
+    MW_LOG_WARNING("zlm", "ENABLE_OPENSSL disabled, you can not use any features based on openssl");
     return "";
 #endif //defined(ENABLE_OPENSSL)
 }
@@ -372,10 +372,10 @@ string SSLUtil::cryptWithRsaPrivateKey(EVP_PKEY *private_key, const string &in_s
         out_str.resize(ret);
         return out_str;
     }
-    WarnL << getLastError();
+    MW_LOG_WARNING("zlm", "{}", getLastError());
     return "";
 #else
-    WarnL << "ENABLE_OPENSSL disabled, you can not use any features based on openssl";
+    MW_LOG_WARNING("zlm", "ENABLE_OPENSSL disabled, you can not use any features based on openssl");
     return "";
 #endif //defined(ENABLE_OPENSSL)
 }

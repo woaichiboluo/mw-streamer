@@ -1,23 +1,35 @@
-#include <cstdlib>
 #include <condition_variable>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 
-#include "Poller/EventPoller.h"
 #include "Thread/WorkThreadPool.h"
+#include "mw/log.h"
 #include "mw/streamer/init/internal/runtime.h"
 #include "mw/streamer/log/internal/third_party_log_bridge.h"
-#include "srt/SrtEpollReactor.h"
 
 namespace mw::streamer::internal {
 namespace {
 
-void ConfigureZlmThreadPools(const ZlmConfig& config) {
+void ConfigureZlmThreadPools(const MwZlmConfig& config) {
   toolkit::EventPollerPool::setPoolSize(config.event_poller_threads);
-  toolkit::EventPollerPool::enableCpuAffinity(config.enable_cpu_affinity);
+  toolkit::EventPollerPool::enableCpuAffinity(config.enable_cpu_affinity != 0);
   toolkit::WorkThreadPool::setPoolSize(config.work_threads);
-  toolkit::WorkThreadPool::enableCpuAffinity(config.enable_cpu_affinity);
+  toolkit::WorkThreadPool::enableCpuAffinity(config.enable_cpu_affinity != 0);
+}
+
+const char* LogInitializationError(MwLogResult result) {
+  switch (result) {
+    case kMwLogInvalidArgument:
+      return "invalid MwLogConfig";
+    case kMwLogAlreadyInitialized:
+      return "mw_log is already initialized";
+    case kMwLogInternalError:
+      return "mw_log initialization failed";
+    case kMwLogSuccess:
+      break;
+  }
+  return "unknown mw_log initialization error";
 }
 
 class Initializer final {
@@ -27,14 +39,40 @@ class Initializer final {
     return *initializer;
   }
 
-  void EnsureInitialized(const RuntimeConfig& config) {
+  void Initialize(const MwLogConfig* log_config,
+                  const MwZlmConfig* zlm_config) {
     std::lock_guard<std::mutex> lock(mutex_);
-    EnsureInitializedLocked(config);
+    if (state_ != State::kUninitialized) {
+      throw RuntimeStateError(
+          "mw-streamer runtime is already initialized or shut down");
+    }
+
+    if (!log_config || !zlm_config) {
+      throw std::invalid_argument("runtime configurations cannot be null");
+    }
+    const auto log_result = mw_log_initialize(log_config);
+    if (log_result != kMwLogSuccess) {
+      throw std::invalid_argument(LogInitializationError(log_result));
+    }
+    try {
+      ConfigureZlmThreadPools(*zlm_config);
+      log_bridge_.emplace();
+      state_ = State::kOpen;
+    } catch (...) {
+      log_bridge_.reset();
+      mw_log_shutdown();
+      throw;
+    }
   }
 
-  void Acquire(const RuntimeConfig& config) {
+  bool IsInitialized() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    EnsureInitializedLocked(config);
+    return state_ == State::kOpen;
+  }
+
+  void Acquire() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    RequireLocked();
     ++users_;
   }
 
@@ -44,62 +82,32 @@ class Initializer final {
   }
 
   void Shutdown() {
-    if (toolkit::EventPoller::getCurrentPoller()) {
-      throw RuntimeStateError("runtime shutdown must run on the host control thread");
-    }
     {
       std::unique_lock<std::mutex> lock(mutex_);
       shutdown_done_.wait(lock, [this] { return state_ != State::kClosing; });
+      if (state_ == State::kUninitialized) return;
       if (state_ == State::kClosed) return;
       if (state_ == State::kFailed) {
         throw RuntimeStateError("runtime shutdown previously failed");
       }
       if (users_ != 0) {
-        throw RuntimeStateError("destroy all Pipelines before runtime shutdown");
+        throw RuntimeStateError(
+            "destroy all Pipelines before runtime shutdown");
       }
       state_ = State::kClosing;
     }
-    try {
-      ShutdownBackends();
-      log_bridge_.reset();
-      logging_.reset();
-    } catch (...) {
-      FinishShutdown(State::kFailed);
-      throw;
-    }
+    // ZLM owns process-lifetime worker threads again. Keep the logger and
+    // third-party callbacks alive until process teardown so those workers
+    // cannot race with logging destruction.
     FinishShutdown(State::kClosed);
   }
 
  private:
-  enum class State { kOpen, kClosing, kClosed, kFailed };
+  enum class State { kUninitialized, kOpen, kClosing, kClosed, kFailed };
 
-  void EnsureInitializedLocked(const RuntimeConfig& config) {
+  void RequireLocked() const {
     if (state_ != State::kOpen) {
-      throw RuntimeStateError("mw-streamer runtime is shut down or shutting down");
-    }
-    if (logging_) {
-      return;
-    }
-    if (IsSrtReactorStopped()) {
-      throw std::logic_error(
-          "mw-streamer cannot be initialized after the SRT reactor was "
-          "stopped");
-    }
-
-    std::call_once(init_once_, [this, &config]() {
-      logging_.emplace(config.log);
-      try {
-        ConfigureZlmThreadPools(config.zlm);
-        log_bridge_.emplace();
-      } catch (...) {
-        logging_.reset();
-        throw;
-      }
-      (void)std::atexit(&Initializer::ShutdownAtExit);
-    });
-    if (!logging_) {
-      throw std::logic_error(
-          "mw-streamer cannot be initialized after it was shut down");
+      throw RuntimeStateError("mw-streamer runtime is not initialized");
     }
   }
 
@@ -109,50 +117,27 @@ class Initializer final {
     shutdown_done_.notify_all();
   }
 
-  static void ShutdownBackends() {
-    auto* events = toolkit::EventPollerPool::getInstanceIfCreated();
-    // The event pool retains both shared and exclusive loops while the
-    // producer pool delivers its final completion callbacks.
-    mediakit::SrtEpollReactor::shutdownIfCreated();
-    if (auto* work = toolkit::WorkThreadPool::getInstanceIfCreated()) {
-      work->shutdown();
-    }
-    if (events) events->shutdown();
-    toolkit::shutdownMillisecondThreadIfCreated();
-  }
-
   Initializer() = default;
-
-  static void ShutdownAtExit() noexcept {
-    auto& initializer = Instance();
-    std::lock_guard<std::mutex> lock(initializer.mutex_);
-    initializer.log_bridge_.reset();
-    initializer.logging_.reset();
-  }
-
-  static bool IsSrtReactorStopped() noexcept {
-    return mediakit::SrtEpollReactor::isCreated() &&
-           !mediakit::SrtEpollReactor::Instance().available();
-  }
 
   std::mutex mutex_;
   std::condition_variable shutdown_done_;
-  State state_ = State::kOpen;
+  State state_ = State::kUninitialized;
   std::size_t users_ = 0;
-  std::once_flag init_once_;
-  std::optional<mw::log::Logging> logging_;
   std::optional<ThirdPartyLogBridge> log_bridge_;
 };
 
 }  // namespace
 
-void EnsureInitialized(const RuntimeConfig& config) {
-  Initializer::Instance().EnsureInitialized(config);
+void InitializeRuntime(const MwLogConfig* log_config,
+                       const MwZlmConfig* zlm_config) {
+  Initializer::Instance().Initialize(log_config, zlm_config);
 }
 
-RuntimeUse::RuntimeUse(const RuntimeConfig& config) {
-  Initializer::Instance().Acquire(config);
+bool IsRuntimeInitialized() noexcept {
+  return Initializer::Instance().IsInitialized();
 }
+
+RuntimeUse::RuntimeUse() { Initializer::Instance().Acquire(); }
 
 RuntimeUse::~RuntimeUse() { Initializer::Instance().Release(); }
 

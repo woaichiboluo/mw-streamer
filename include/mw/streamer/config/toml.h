@@ -21,9 +21,8 @@ PipelineConfig LoadPipelineConfigFromToml(const std::filesystem::path& path);
 void SavePipelineConfigToToml(const PipelineConfig& config,
                               const std::filesystem::path& path);
 
-// Builds a Pipeline from one streamer TOML document. Its optional [log] and
-// [zlm] sections configure the process runtime before any media object is
-// created. The returned Pipeline is not started.
+// Builds an idle Pipeline from one topology document. The process runtime must
+// already be initialized explicitly.
 std::unique_ptr<Pipeline> BuildPipelineFromToml(
     const std::filesystem::path& path, const ProcessorBindings& bindings = {});
 

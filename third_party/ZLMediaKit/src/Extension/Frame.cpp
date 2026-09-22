@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "Frame.h"
 #include "Common/Parser.h"
 #include "Common/Stamp.h"
@@ -85,7 +86,7 @@ CodecId getCodecByMovId(int object_id) {
 #undef XX
     auto it = s_map.find(object_id);
     if (it == s_map.end()) {
-        WarnL << "Unsupported mov: " << object_id;
+        MW_LOG_WARNING("zlm", "Unsupported mov: {}", object_id);
         return CodecInvalid;
     }
     return it->second;
@@ -114,7 +115,7 @@ CodecId getCodecByMpegId(int mpeg_id) {
 #undef XX
     auto it = s_map.find(mpeg_id);
     if (it == s_map.end()) {
-        WarnL << "Unsupported mpeg: " << mpeg_id;
+        MW_LOG_WARNING("zlm", "Unsupported mpeg: {}", mpeg_id);
         return CodecInvalid;
     }
     return it->second;

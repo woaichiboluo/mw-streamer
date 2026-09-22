@@ -9,6 +9,7 @@
  */
 
 #if defined(ENABLE_RTPPROXY)
+#include "mw/log.h"
 #include "Util/uv_errno.h"
 #include "RtpServer.h"
 #include "RtpProcess.h"
@@ -181,7 +182,7 @@ void RtpServer::start(uint16_t local_port, const char *local_ip, const MediaTupl
             auto rtp_ssrc = ntohl(header->ssrc);
             auto ssrc = *ssrc_ptr;
             if (ssrc && rtp_ssrc != ssrc) {
-                WarnL << "ssrc mismatched, rtp dropped: " << rtp_ssrc << " != " << ssrc;
+                MW_LOG_WARNING("zlm", "ssrc mismatched, rtp dropped: {} != {}", rtp_ssrc, ssrc);
             } else {
                 if (!bind_peer_addr) {
                     // 绑定对方ip+端口，防止多个设备或一个设备多次推流从而日志报ssrc不匹配问题  [AUTO-TRANSLATED:f27dd373]
@@ -265,9 +266,9 @@ void RtpServer::connectToServer(const std::string &url, uint16_t port, const fun
             return;
         }
         if (err) {
-            WarnL << "连接到服务器 " << url << ":" << port << " 失败 " << err;
+            MW_LOG_WARNING("zlm", "连接到服务器 {}:{} 失败 {}", url, port, fmt::streamed(err));
         } else {
-            InfoL << "连接到服务器 " << url << ":" << port << " 成功";
+            MW_LOG_INFO("zlm", "连接到服务器 {}:{} 成功", url, port);
             strong_self->onConnect();
         }
         cb(err);

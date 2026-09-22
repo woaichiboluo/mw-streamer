@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "AACRtp.h"
 
 namespace mediakit{
@@ -74,7 +75,7 @@ bool AACRtpDecoder::inputRtp(const RtpPacket::Ptr &rtp, bool key_pos) {
     if (!au_header_count) {
         // 问题issue: https://github.com/ZLMediaKit/ZLMediaKit/issues/1869  [AUTO-TRANSLATED:14be1ff8]
         // Issue: https://github.com/ZLMediaKit/ZLMediaKit/issues/1869
-        WarnL << "invalid aac rtp au_header_count";
+        MW_LOG_WARNING("zlm", "invalid aac rtp au_header_count");
         return false;
     }
     // 记录au_header起始指针  [AUTO-TRANSLATED:b9083b72]

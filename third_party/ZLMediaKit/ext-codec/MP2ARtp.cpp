@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "MP2ARtp.h"
 
 namespace mediakit {
@@ -151,7 +152,7 @@ bool MP2ARtpDecoder::inputRtp(const RtpPacket::Ptr &rtp, bool key_pos) {
         return false;
     } else if (seq != (uint16_t)(_last_seq + 1)) {
         // 分片包 seq 不连续，丢包了，丢弃当前帧
-        WarnL << "mp2a rtp packet loss:" << _last_seq << " -> " << seq;
+        MW_LOG_WARNING("zlm", "mp2a rtp packet loss:{} -> {}", _last_seq, seq);
         _frame->_buffer.clear();
         _last_seq = seq;
         _last_stamp = stamp;

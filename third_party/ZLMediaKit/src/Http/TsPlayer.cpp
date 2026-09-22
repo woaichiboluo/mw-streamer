@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "TsPlayer.h"
 #include "Common/config.h"
 using namespace std;
@@ -18,7 +19,7 @@ namespace mediakit {
 TsPlayer::TsPlayer(const EventPoller::Ptr &poller) : HttpTSPlayer(poller) {}
 
 void TsPlayer::play(const string &url) {
-    TraceL << "play http-ts: " << url;
+    MW_LOG_TRACE("zlm", "play http-ts: {}", url);
     _play_result = false;
     _benchmark_mode = (*this)[Client::kBenchmarkMode].as<int>();
     setProxyUrl((*this)[Client::kProxyUrl]);

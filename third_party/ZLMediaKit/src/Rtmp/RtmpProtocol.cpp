@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include <algorithm>
 #include "RtmpProtocol.h"
 #include "Rtmp/utils.h"
@@ -391,7 +392,7 @@ const char * RtmpProtocol::handle_C0C1(const char *data, size_t len) {
         //complex handsharke
         handle_C1_complex(data);
 #else
-        WarnL << "未打开ENABLE_OPENSSL宏，复杂握手采用简单方式处理，flash播放器可能无法播放！";
+        MW_LOG_WARNING("zlm", "未打开ENABLE_OPENSSL宏，复杂握手采用简单方式处理，flash播放器可能无法播放！");
         handle_C1_simple(data);
 #endif//ENABLE_OPENSSL
     }
@@ -440,11 +441,9 @@ void RtmpProtocol::handle_C1_complex(const char *data){
         check_C1_Digest(digest, c1_joined);
 
         send_complex_S0S1S2(0, digest);
-//      InfoL << "schema0";
     } catch (std::exception &) {
         // 貌似flash从来都不用schema1  [AUTO-TRANSLATED:2c6d140f]
         // It seems that flash never uses schema1
-//		WarnL << "try rtmp complex schema0 failed:" <<  ex.what();
         try {
             /* c1s1 schema1
             time: 4bytes
@@ -458,9 +457,7 @@ void RtmpProtocol::handle_C1_complex(const char *data){
             check_C1_Digest(digest, c1_joined);
 
             send_complex_S0S1S2(1, digest);
-//          InfoL << "schema1";
         } catch (std::exception &) {
-			//WarnL << "try rtmp complex schema1 failed:" <<  ex.what();
             handle_C1_simple(data);
         }
     }
@@ -471,7 +468,7 @@ void RtmpProtocol::check_S1_Digest(const std::string &digest,const std::string &
     if (sha256 != digest) {
         throw std::runtime_error("digest mismatched");
     } else {
-        InfoL << "check rtmp complex handshark success!";
+        MW_LOG_INFO("zlm", "check rtmp complex handshark success!");
     }
 }
 
@@ -492,11 +489,9 @@ void RtmpProtocol::handle_S1_complex(const char *data,RtmpHandshake &c2){
         string s1_joined(s1_start, C1_HANDSHARK_SIZE);
         s1_joined.erase(digest_start - s1_start, C1_DIGEST_SIZE);
         check_S1_Digest(digest, s1_joined);
-		//InfoL << "schema0";
     } catch (std::exception &ex) {
         // 貌似flash从来都不用schema1  [AUTO-TRANSLATED:2c6d140f]
         // It seems that flash never uses schema1
-		//WarnL << "try rtmp complex schema0 failed:" << ex.what();
         try {
             /* c1s1 schema1
             time: 4bytes
@@ -509,14 +504,12 @@ void RtmpProtocol::handle_S1_complex(const char *data,RtmpHandshake &c2){
             s1_joined.erase(digest_start - s1_start, C1_DIGEST_SIZE);
             check_S1_Digest(digest, s1_joined);
             //send_complex_S0S1S2(1, digest);
-			//InfoL << "schema1";
         } catch (std::exception &ex) {
-			WarnL << "try rtmp complex schema1 failed:" <<  ex.what();
+			MW_LOG_WARNING("zlm", "try rtmp complex schema1 failed:{}", ex.what());
             return;
         }
     }
 
-    //InfoL << "send complex C2";
     auto c2_key = openssl_HMACsha256(FPKey, sizeof(FPKey), digest.data(), digest.size());
     std::string c2_str((char*)(&c2), sizeof(c2)- C1_DIGEST_SIZE);
     auto c2_digest = openssl_HMACsha256(c2_key.data(), c2_key.size(), c2_str.data(), c2_str.size());
@@ -528,7 +521,7 @@ void RtmpProtocol::check_C1_Digest(const string &digest,const string &data){
     if (sha256 != digest) {
         throw std::runtime_error("digest mismatched");
     } else {
-        InfoL << "check rtmp complex handshark success!";
+        MW_LOG_INFO("zlm", "check rtmp complex handshark success!");
     }
 }
 
@@ -553,7 +546,6 @@ string RtmpProtocol::get_C1_digest(const uint8_t *ptr,char **digestPos){
     offset %= (C1_SCHEMA_SIZE - C1_DIGEST_SIZE - C1_OFFSET_SIZE);
     *digestPos = (char *) ptr + C1_OFFSET_SIZE + offset;
     string digest(*digestPos, C1_DIGEST_SIZE);
-    //DebugL << "digest offset:" << offset << ",digest:" << hexdump(digest.data(),digest.size());
     return digest;
 }
 
@@ -577,7 +569,6 @@ string RtmpProtocol::get_C1_key(const uint8_t *ptr){
     }
     offset %= (C1_SCHEMA_SIZE - C1_KEY_SIZE - C1_OFFSET_SIZE);
     string key((char *) ptr + offset, C1_KEY_SIZE);
-    //DebugL << "key offset:" << offset << ",key:" << hexdump(key.data(),key.size());
     return key;
 }
 
@@ -795,7 +786,6 @@ void RtmpProtocol::handle_chunk(RtmpPacket::Ptr packet) {
                 throw std::runtime_error("MSG_ACK: Not enough data");
             }
             //auto bytePeerRecv = load_be32(&chunk_data.buffer[0]);
-            //TraceL << "MSG_ACK:" << bytePeerRecv;
             break;
         }
 
@@ -804,7 +794,7 @@ void RtmpProtocol::handle_chunk(RtmpPacket::Ptr packet) {
                 throw std::runtime_error("MSG_SET_CHUNK :Not enough data");
             }
             _chunk_size_in = load_be32(&chunk_data.buffer[0]);
-            TraceL << "MSG_SET_CHUNK:" << _chunk_size_in;
+            MW_LOG_TRACE("zlm", "MSG_SET_CHUNK:{}", _chunk_size_in);
             break;
         }
 
@@ -821,7 +811,6 @@ void RtmpProtocol::handle_chunk(RtmpPacket::Ptr packet) {
                         throw std::runtime_error("CONTROL_PING_REQUEST: Not enough data.");
                     }
                     uint32_t timeStamp = load_be32(&chunk_data.buffer[0]);
-                    //TraceL << "CONTROL_PING_REQUEST:" << time_stamp;
                     sendUserControl(CONTROL_PING_RESPONSE, timeStamp);
                     break;
                 }
@@ -831,7 +820,6 @@ void RtmpProtocol::handle_chunk(RtmpPacket::Ptr packet) {
                         throw std::runtime_error("CONTROL_PING_RESPONSE: Not enough data.");
                     }
                     //uint32_t time_stamp = load_be32(&chunk_data.buffer[0]);
-                    //TraceL << "CONTROL_PING_RESPONSE:" << time_stamp;
                     break;
                 }
 
@@ -839,12 +827,12 @@ void RtmpProtocol::handle_chunk(RtmpPacket::Ptr packet) {
                     // 开始播放  [AUTO-TRANSLATED:1d82b293]
                     // Start playback
                     if (chunk_data.buffer.size() < 4) {
-                        WarnL << "CONTROL_STREAM_BEGIN: Not enough data:" << chunk_data.buffer.size();
+                        MW_LOG_WARNING("zlm", "CONTROL_STREAM_BEGIN: Not enough data:{}", chunk_data.buffer.size());
                         break;
                     }
                     uint32_t stream_index = load_be32(&chunk_data.buffer[0]);
                     onStreamBegin(stream_index);
-                    TraceL << "CONTROL_STREAM_BEGIN:" << stream_index;
+                    MW_LOG_TRACE("zlm", "CONTROL_STREAM_BEGIN:{}", stream_index);
                     break;
                 }
 
@@ -856,7 +844,7 @@ void RtmpProtocol::handle_chunk(RtmpPacket::Ptr packet) {
                     }
                     uint32_t stream_index = load_be32(&chunk_data.buffer[0]);
                     onStreamEof(stream_index);
-                    TraceL << "CONTROL_STREAM_EOF:" << stream_index;
+                    MW_LOG_TRACE("zlm", "CONTROL_STREAM_EOF:{}", stream_index);
                     break;
                 }
 
@@ -868,11 +856,11 @@ void RtmpProtocol::handle_chunk(RtmpPacket::Ptr packet) {
                     }
                     uint32_t stream_index = load_be32(&chunk_data.buffer[0]);
                     onStreamDry(stream_index);
-                    TraceL << "CONTROL_STREAM_DRY:" << stream_index;
+                    MW_LOG_TRACE("zlm", "CONTROL_STREAM_DRY:{}", stream_index);
                     break;
                 }
 
-                default: /*WarnL << "unhandled user control:" << event_type; */ break;
+                default:  break;
             }
             break;
         }
@@ -883,14 +871,14 @@ void RtmpProtocol::handle_chunk(RtmpPacket::Ptr packet) {
             // 窗口太大，也可能导致fms服务器认为播放器心跳超时  [AUTO-TRANSLATED:30147e88]
             // If the window is too large, it may also cause the fms server to consider the player heartbeat timeout
             _windows_size = min(max(load_be32(&chunk_data.buffer[0]), 32 * 1024U), 1280 * 1024U);
-            TraceL << "MSG_WIN_SIZE:" << _windows_size;
+            MW_LOG_TRACE("zlm", "MSG_WIN_SIZE:{}", _windows_size);
             break;
         }
 
         case MSG_SET_PEER_BW: {
             _bandwidth = load_be32(&chunk_data.buffer[0]);
             _band_limit_type =  chunk_data.buffer[4];
-            TraceL << "MSG_SET_PEER_BW:" << _bandwidth << " " << (int)_band_limit_type;
+            MW_LOG_TRACE("zlm", "MSG_SET_PEER_BW:{} {}", _bandwidth, (int)_band_limit_type);
             break;
         }
 

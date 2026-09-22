@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include <cstdlib>
 #include <cinttypes>
 #include <random>
@@ -39,7 +40,7 @@ int RtpPayload::getClockRateByCodec(CodecId codec) {
 #undef XX
     auto it = s_map.find(codec);
     if (it == s_map.end()) {
-        WarnL << "Unsupported codec: " << getCodecName(codec);
+        MW_LOG_WARNING("zlm", "Unsupported codec: {}", getCodecName(codec));
         return 90000;
     }
     return it->second;
@@ -478,7 +479,7 @@ private:
         }
         auto pos = _port_pair_pool.front();
         _port_pair_pool.pop_front();
-        InfoL << "got port from pool:" << 2 * pos << "-" << 2 * pos + 1;
+        MW_LOG_INFO("zlm", "got port from pool:{}-{}", 2 * pos, 2 * pos + 1);
 
         weak_ptr<PortManager> weak_self = this->shared_from_this();
         std::shared_ptr<uint16_t> ret(new uint16_t(pos), [weak_self, pos](uint16_t *ptr) {
@@ -487,7 +488,7 @@ private:
             if (!strong_self) {
                 return;
             }
-            InfoL << "return port to pool:" << 2 * pos << "-" << 2 * pos + 1;
+            MW_LOG_INFO("zlm", "return port to pool:{}-{}", 2 * pos, 2 * pos + 1);
             // 回收端口号  [AUTO-TRANSLATED:646a5284]
             // Recycle port number
             lock_guard<recursive_mutex> lck(strong_self->_pool_mtx);
@@ -517,7 +518,7 @@ void makeSockPair(std::pair<Socket::Ptr, Socket::Ptr> &pair, const string &local
             if (++try_count == 3) {
                 throw;
             }
-            WarnL << "open socket failed:" << ex.what() << ", retry: " << try_count;
+            MW_LOG_WARNING("zlm", "open socket failed:{}, retry: {}", ex.what(), try_count);
         }
     }
 }

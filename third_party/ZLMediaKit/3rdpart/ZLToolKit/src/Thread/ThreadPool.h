@@ -15,7 +15,7 @@
 #include "TaskQueue.h"
 #include "TaskExecutor.h"
 #include "Util/util.h"
-#include "Util/logger.h"
+#include "mw/log.h"
 
 namespace toolkit {
 
@@ -40,7 +40,6 @@ public:
                 setThreadAffinity(index % std::thread::hardware_concurrency());
             }
         };
-        _logger = Logger::Instance().shared_from_this();
         if (auto_run) {
             start();
         }
@@ -148,7 +147,7 @@ private:
                 task(index);
                 task = nullptr;
             } catch (std::exception &ex) {
-                ErrorL << "ThreadPool catch a exception: " << ex.what();
+                MW_LOG_ERROR("zlm", "ThreadPool catch a exception: {}", ex.what());
             }
         }
     }
@@ -163,7 +162,6 @@ private:
 
 private:
     size_t _thread_num;
-    Logger::Ptr _logger;
     thread_group _thread_group;
     TaskQueue<std::function<void(size_t index)>> _queue;
     std::function<void(int)> _on_setup;

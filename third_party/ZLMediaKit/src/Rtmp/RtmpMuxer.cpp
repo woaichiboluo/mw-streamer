@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "RtmpMuxer.h"
 #include "Extension/Factory.h"
 
@@ -26,7 +27,7 @@ bool RtmpMuxer::addTrack(const Track::Ptr &track) {
     if (_track_existed[track->getTrackType()]) {
         // rtmp不支持多个同类型track  [AUTO-TRANSLATED:c69a7864]
         // rtmp does not support multiple tracks of the same type
-        WarnL << "Already add a track kind of: " << track->getTrackTypeStr() << ", ignore track: " << track->getCodecName();
+        MW_LOG_WARNING("zlm", "Already add a track kind of: {}, ignore track: {}", track->getTrackTypeStr(), track->getCodecName());
         return false;
     }
 

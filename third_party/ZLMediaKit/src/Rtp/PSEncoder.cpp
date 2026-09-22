@@ -10,6 +10,7 @@
 
 #if defined(ENABLE_RTPPROXY)
 
+#include "mw/log.h"
 #include "PSEncoder.h"
 #include "Common/config.h"
 #include "Extension/CommonRtp.h"
@@ -35,11 +36,11 @@ PSEncoderImp::PSEncoderImp(uint32_t ssrc, uint8_t payload_type, bool ps_or_ts) :
     auto ring = std::make_shared<RtpRing::RingType>();
     ring->setDelegate(std::make_shared<RingDelegateHelper>([this](RtpPacket::Ptr rtp, bool is_key) { onRTP(std::move(rtp), is_key); }));
     _rtp_encoder->setRtpRing(std::move(ring));
-    InfoL << this << " " << ssrc;
+    MW_LOG_INFO("zlm", "{} {}", fmt::ptr(this), ssrc);
 }
 
 PSEncoderImp::~PSEncoderImp() {
-    InfoL << this;
+    MW_LOG_INFO("zlm", "{}", fmt::ptr(this));
 }
 
 void PSEncoderImp::onWrite(std::shared_ptr<Buffer> buffer, uint64_t stamp, bool key_pos) {

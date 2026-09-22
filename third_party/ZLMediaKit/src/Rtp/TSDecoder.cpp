@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "TSDecoder.h"
 namespace mediakit {
 
@@ -21,7 +22,7 @@ void TSSegment::setOnSegment(TSSegment::onSegment cb) {
 
 ssize_t TSSegment::onRecvHeader(const char *data, size_t len) {
     if (!isTSPacket(data, len)) {
-        WarnL << "不是ts包:" << (int) (data[0]) << " " << len;
+        MW_LOG_WARNING("zlm", "不是ts包:{} {}", (int) (data[0]), len);
         return 0;
     }
     _onSegment(data, len);
@@ -66,7 +67,7 @@ TSDecoder::TSDecoder() : _ts_segment() {
         TSDecoder *thiz = (TSDecoder*)param;
         if (thiz->_on_decode) {
             if (flags & MPEG_FLAG_PACKET_CORRUPT) {
-                WarnL << "ts packet lost, dts:" << dts << " pts:" << pts << " bytes:" << bytes;
+                MW_LOG_WARNING("zlm", "ts packet lost, dts:{} pts:{} bytes:{}", dts, pts, bytes);
             } else {
                 thiz->_on_decode(stream, codecid, flags, pts, dts, data, bytes);
             }

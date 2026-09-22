@@ -8,41 +8,6 @@
 # 所有 *_ms 字段的单位均为毫秒。省略可选字段时使用这里展示的默认值。
 
 # =============================================================================
-# 进程级日志配置，可整体省略
-# 日志级别：off / trace / debug / info / warning / error / critical
-# =============================================================================
-[log.modules]
-# 键是任意模块名，值是该模块的日志级别；显式配置覆盖默认值，off 可关闭模块。
-# 未配置的 default 模块默认为 info，其他未配置模块默认为 error。
-streamer = "info"
-processor = "info"
-
-# Console 和滚动文件是独立的第二层过滤，可以单独或同时启用。
-[log.console]
-color = true
-level = "trace" # off 表示不创建控制台日志 Sink
-
-[log.rotating_file]
-path = "" # level 非 off 时必须非空
-level = "off"
-max_file_size = 10485760 # 字节；启用文件日志时必须大于 0
-max_files = 5 # 启用文件日志时必须大于 0
-
-[log.async]
-enabled = false
-queue_size = 8192 # 启用异步日志且存在输出 Sink 时必须大于 0
-overflow = "overrun_oldest" # block / overrun_oldest
-
-# =============================================================================
-# 进程级 ZLToolKit 配置，可整体省略
-# 线程数为 0 时由 ZLToolKit 按硬件并发数决定。
-# =============================================================================
-[zlm]
-event_poller_threads = 0
-work_threads = 0
-enable_cpu_affinity = true
-
-# =============================================================================
 # Input 字段字典
 # 实际配置只能选择一种 type，并删除另一种类型的字段。
 # Input 固定输出 Packet，downstream 至少包含一个接收 Packet 的 Sink ID。

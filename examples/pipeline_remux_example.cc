@@ -8,8 +8,8 @@
 #include <thread>
 #include <utility>
 
-#include "mw/streamer/input/zlm_input.h"
 #include "mw/streamer/api.h"
+#include "mw/streamer/input/zlm_input.h"
 #include "mw/streamer/output/remux_sink.h"
 #include "mw/streamer/pipeline/pipeline.h"
 
@@ -97,6 +97,14 @@ int main(int argc, char* argv[]) {
     fmt::print(stderr, "用法：{} input_url push_url\n", argv[0]);
     return 2;
   }
+  MwLogConfig log_config;
+  mw_log_default_config(&log_config);
+  MwZlmConfig zlm_config;
+  mw_zlm_default_config(&zlm_config);
+  if (!mw_streamer_initialize(&log_config, &zlm_config)) {
+    fmt::print(stderr, "运行时初始化失败：{}\n", mw_last_error());
+    return 1;
+  }
   int result = 1;
   try {
     result = Run(argc, argv);
@@ -104,9 +112,7 @@ int main(int argc, char* argv[]) {
     fmt::print(stderr, "运行失败：{}\n", error.what());
   }
   // Run's Pipeline has been destroyed, including on the exception path.
-  if (mw_streamer_shutdown() != kMwResultSuccess) {
-    fmt::print(stderr, "运行时关闭失败：{}\n", mw_last_error());
-    result = 1;
-  }
+  mw_streamer_shutdown();
+  if (mw_streamer_is_initialized()) result = 1;
   return result;
 }

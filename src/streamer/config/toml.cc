@@ -21,16 +21,11 @@
 #include <vector>
 
 #include "mw/log.h"
-#include "mw/streamer/init/internal/runtime.h"
-#include "mw/streamer/pipeline/internal/pipeline_builder.h"
 
 namespace mw::streamer {
 namespace {
 
 using Table = toml::table;
-using mw::log::LogConfig;
-using mw::log::LogLevel;
-using mw::log::OverflowPolicy;
 
 std::string FieldPath(std::string_view table_path, std::string_view key) {
   if (table_path.empty()) {
@@ -216,73 +211,6 @@ Table ParseFile(const std::filesystem::path& path) {
   }
 }
 
-void ReadLogLevel(const Table& table, std::string_view key,
-                  std::string_view table_path, LogLevel* output) {
-  ReadEnum(table, key, table_path,
-           {{"off", LogLevel::kOff},
-            {"trace", LogLevel::kTrace},
-            {"debug", LogLevel::kDebug},
-            {"info", LogLevel::kInfo},
-            {"warning", LogLevel::kWarning},
-            {"error", LogLevel::kError},
-            {"critical", LogLevel::kCritical}},
-           output);
-}
-
-void ReadLogConfig(const Table& table, LogConfig* config) {
-  WarnUnknownKeys(table, {"modules", "console", "rotating_file", "async"},
-                  "log");
-  if (const auto* modules = OptionalTable(table, "modules", "log")) {
-    constexpr std::string_view kPath = "log.modules";
-    for (const auto& [key, value] : *modules) {
-      static_cast<void>(value);
-      mw::log::ModuleLogConfig module;
-      module.name = key.str();
-      ReadLogLevel(*modules, module.name, kPath, &module.level);
-      config->modules.emplace_back(std::move(module));
-    }
-  }
-  if (const auto* console = OptionalTable(table, "console", "log")) {
-    constexpr std::string_view kPath = "log.console";
-    WarnUnknownKeys(*console, {"color", "level"}, kPath);
-    ReadBool(*console, "color", kPath, &config->console.color);
-    ReadLogLevel(*console, "level", kPath, &config->console.level);
-  }
-  if (const auto* rotating_file =
-          OptionalTable(table, "rotating_file", "log")) {
-    constexpr std::string_view kPath = "log.rotating_file";
-    WarnUnknownKeys(*rotating_file,
-                    {"path", "level", "max_file_size", "max_files"}, kPath);
-    ReadString(*rotating_file, "path", kPath, &config->rotating_file.path);
-    ReadLogLevel(*rotating_file, "level", kPath, &config->rotating_file.level);
-    ReadInteger(*rotating_file, "max_file_size", kPath,
-                &config->rotating_file.max_file_size);
-    ReadInteger(*rotating_file, "max_files", kPath,
-                &config->rotating_file.max_files);
-  }
-  if (const auto* async = OptionalTable(table, "async", "log")) {
-    constexpr std::string_view kPath = "log.async";
-    WarnUnknownKeys(*async, {"enabled", "queue_size", "overflow"}, kPath);
-    ReadBool(*async, "enabled", kPath, &config->async.enabled);
-    ReadInteger(*async, "queue_size", kPath, &config->async.queue_size);
-    ReadEnum(*async, "overflow", kPath,
-             {{"block", OverflowPolicy::kBlock},
-              {"overrun_oldest", OverflowPolicy::kOverrunOldest}},
-             &config->async.overflow);
-  }
-}
-
-void ReadInitZlmConfig(const Table& table, ZlmConfig* config) {
-  constexpr std::string_view kPath = "zlm";
-  WarnUnknownKeys(
-      table, {"event_poller_threads", "work_threads", "enable_cpu_affinity"},
-      kPath);
-  ReadInteger(table, "event_poller_threads", kPath,
-              &config->event_poller_threads);
-  ReadInteger(table, "work_threads", kPath, &config->work_threads);
-  ReadBool(table, "enable_cpu_affinity", kPath, &config->enable_cpu_affinity);
-}
-
 void ReadPlayerConfig(const Table& table, PlayerConfig* config,
                       std::string_view path) {
   WarnUnknownKeys(
@@ -378,14 +306,6 @@ void ReadVideoEncoderConfigAt(const Table& table, VideoEncoderConfig* config,
     ReadInteger(*frame_rate, "den", frame_rate_path, &config->frame_rate.den);
   }
   ReadStringMap(table, "properties", path, &config->properties);
-}
-
-template <typename Config, typename Reader>
-void ReadOptionalConfigTable(const Table& root, std::string_view key,
-                             Config* config, Reader reader) {
-  if (const auto* table = OptionalTable(root, key, "")) {
-    reader(*table, config);
-  }
 }
 
 void RequireField(const Table& table, std::string_view key,
@@ -590,7 +510,11 @@ std::unique_ptr<SinkConfig> ReadSinkNode(const Table& table,
 }
 
 PipelineConfig ReadPipeline(const Table& root) {
-  WarnUnknownKeys(root, {"log", "zlm", "input", "sinks"}, "");
+  if (root.contains("log") || root.contains("zlm")) {
+    throw std::invalid_argument(
+        "运行时配置不能写入Pipeline TOML，请调用mw_streamer_initialize");
+  }
+  WarnUnknownKeys(root, {"input", "sinks"}, "");
   PipelineConfig result;
   result.input = ReadInput(root);
   RequireField(root, "sinks", "");
@@ -827,26 +751,7 @@ void SavePipelineConfigToToml(const PipelineConfig& config,
 
 std::unique_ptr<Pipeline> BuildPipelineFromToml(
     const std::filesystem::path& path, const ProcessorBindings& bindings) {
-  const auto root = ParseFile(path);
-  internal::RuntimeConfig init_config;
-  ReadOptionalConfigTable(root, "log", &init_config.log, ReadLogConfig);
-  ReadOptionalConfigTable(root, "zlm", &init_config.zlm, ReadInitZlmConfig);
-  auto config = ReadPipeline(root);
-  const auto directory = std::filesystem::absolute(path).parent_path();
-  if (config.input.type == InputType::kFile) {
-    ResolveLocalPath(&config.input.file.path, directory);
-  } else {
-    ResolveLocalPath(&config.input.options.url, directory);
-  }
-  for (const auto& sink : config.sinks) {
-    if (auto* remux = dynamic_cast<RemuxNodeConfig*>(sink.get())) {
-      ResolveLocalPath(&remux->options.target, directory);
-    } else if (auto* synchronizer =
-                   dynamic_cast<SynchronizerNodeConfig*>(sink.get())) {
-      ResolveLocalPath(&synchronizer->options.standby_image_path, directory);
-    }
-  }
-  return internal::BuildPipelineWithRuntime(config, bindings, init_config);
+  return BuildPipeline(LoadPipelineConfigFromToml(path), bindings);
 }
 
 }  // namespace mw::streamer

@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "Factory.h"
 #include "Rtmp/Rtmp.h"
 #include "CommonRtmp.h"
@@ -37,7 +38,7 @@ REGISTER_CODEC(mp2v_plugin);
 REGISTER_CODEC(mp2a_plugin);
 
 void Factory::registerPlugin(const CodecPlugin &plugin) {
-    InfoL << "Load codec: " << getCodecName(plugin.getCodec());
+    MW_LOG_INFO("zlm", "Load codec: {}", getCodecName(plugin.getCodec()));
     s_plugins[(int)(plugin.getCodec())] = &plugin;
 }
 
@@ -67,7 +68,7 @@ Track::Ptr Factory::getTrackByAbstractTrack(const Track::Ptr &track) {
 RtpCodec::Ptr Factory::getRtpEncoderByCodecId(CodecId codec, uint8_t pt) {
     auto it = s_plugins.find(codec);
     if (it == s_plugins.end()) {
-        WarnL << "Unsupported codec: " << getCodecName(codec) << ", use CommonRtpEncoder";
+        MW_LOG_WARNING("zlm", "Unsupported codec: {}, use CommonRtpEncoder", getCodecName(codec));
         return std::make_shared<CommonRtpEncoder>();
     }
     return it->second->getRtpEncoderByCodecId(pt);
@@ -76,7 +77,7 @@ RtpCodec::Ptr Factory::getRtpEncoderByCodecId(CodecId codec, uint8_t pt) {
 RtpCodec::Ptr Factory::getRtpDecoderByCodecId(CodecId codec) {
     auto it = s_plugins.find(codec);
     if (it == s_plugins.end()) {
-        WarnL << "Unsupported codec: " << getCodecName(codec) << ", use CommonRtpDecoder";
+        MW_LOG_WARNING("zlm", "Unsupported codec: {}, use CommonRtpDecoder", getCodecName(codec));
         return std::make_shared<CommonRtpDecoder>(codec, 10 * 1024);
     }
     return it->second->getRtpDecoderByCodecId();
@@ -94,7 +95,7 @@ static CodecId getVideoCodecIdByAmf(const AMFValue &val) {
         if (str == "hev1" || str == "hvc1") {
             return CodecH265;
         }
-        WarnL << "Unsupported codec: " << str;
+        MW_LOG_WARNING("zlm", "Unsupported codec: {}", str);
         return CodecInvalid;
     }
 
@@ -111,7 +112,7 @@ static CodecId getVideoCodecIdByAmf(const AMFValue &val) {
             case RtmpVideoCodec::fourcc_vp8: return CodecVP8;
             case RtmpVideoCodec::vp9:
             case RtmpVideoCodec::fourcc_vp9: return CodecVP9;
-            default: WarnL << "Unsupported codec: " << (int)type_id; return CodecInvalid;
+            default: MW_LOG_WARNING("zlm", "Unsupported codec: {}", (int)type_id); return CodecInvalid;
         }
     }
     return CodecInvalid;
@@ -123,14 +124,14 @@ Track::Ptr Factory::getTrackByCodecId(CodecId codec, int sample_rate, int channe
         auto type = mediakit::getTrackType(codec);
         switch (type) {
             case TrackAudio: {
-                WarnL << "Unsupported codec: " << getCodecName(codec) << ", use default audio track";
+                MW_LOG_WARNING("zlm", "Unsupported codec: {}, use default audio track", getCodecName(codec));
                 return std::make_shared<AudioTrackImp>(codec, sample_rate, channels, sample_bit);
             }
             case TrackVideo: {
-                WarnL << "Unsupported codec: " << getCodecName(codec) << ", use default video track";
+                MW_LOG_WARNING("zlm", "Unsupported codec: {}, use default video track", getCodecName(codec));
                 return std::make_shared<VideoTrackImp>(codec, 0, 0, 0);
             }
-            default: WarnL << "Unsupported codec: " << getCodecName(codec); return nullptr;
+            default: MW_LOG_WARNING("zlm", "Unsupported codec: {}", getCodecName(codec)); return nullptr;
         }
     }
     return it->second->getTrackByCodecId(sample_rate, channels, sample_bit);
@@ -150,7 +151,7 @@ static CodecId getAudioCodecIdByAmf(const AMFValue &val) {
         if (str == "mp4a") {
             return CodecAAC;
         }
-        WarnL << "Unsupported codec: " << str;
+        MW_LOG_WARNING("zlm", "Unsupported codec: {}", str);
         return CodecInvalid;
     }
 
@@ -164,7 +165,7 @@ static CodecId getAudioCodecIdByAmf(const AMFValue &val) {
             case RtmpAudioCodec::g711u: return CodecG711U;
             case RtmpAudioCodec::opus:
             case RtmpAudioCodec::fourcc_opus: return CodecOpus;
-            default: WarnL << "Unsupported codec: " << (int)type_id; return CodecInvalid;
+            default: MW_LOG_WARNING("zlm", "Unsupported codec: {}", (int)type_id); return CodecInvalid;
         }
     }
     return CodecInvalid;
@@ -181,7 +182,7 @@ Track::Ptr Factory::getAudioTrackByAmf(const AMFValue &amf, int sample_rate, int
 RtmpCodec::Ptr Factory::getRtmpDecoderByTrack(const Track::Ptr &track) {
     auto it = s_plugins.find(track->getCodecId());
     if (it == s_plugins.end()) {
-        WarnL << "Unsupported codec: " << track->getCodecName() << ", use CommonRtmpDecoder";
+        MW_LOG_WARNING("zlm", "Unsupported codec: {}, use CommonRtmpDecoder", track->getCodecName());
         return std::make_shared<CommonRtmpDecoder>(track);
     }
     return it->second->getRtmpDecoderByTrack(track);
@@ -191,7 +192,7 @@ RtmpCodec::Ptr Factory::getRtmpEncoderByTrack(const Track::Ptr &track) {
     auto it = s_plugins.find(track->getCodecId());
     if (it == s_plugins.end()) {
         auto amf = Factory::getAmfByCodecId(track->getCodecId());
-        WarnL << "Unsupported codec: " << track->getCodecName() << (amf ? ", use CommonRtmpEncoder" : "");
+        MW_LOG_WARNING("zlm", "Unsupported codec: {}{}", track->getCodecName(), (amf ? ", use CommonRtmpEncoder" : ""));
         return amf ? std::make_shared<CommonRtmpEncoder>(track) : nullptr;
     }
     return it->second->getRtmpEncoderByTrack(track);

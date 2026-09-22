@@ -21,7 +21,10 @@
 #include "local_time.h"
 #include "File.h"
 #include "onceToken.h"
-#include "logger.h"
+#include <mutex>
+#include <thread>
+
+#include "mw/log.h"
 #include "uv_errno.h"
 #include "Network/sockutil.h"
 
@@ -386,60 +389,15 @@ static atomic<uint64_t> s_currentMillisecond(0);
 static atomic<uint64_t> s_currentMicrosecond_system(getCurrentMicrosecondOrigin());
 static atomic<uint64_t> s_currentMillisecond_system(getCurrentMicrosecondOrigin() / 1000);
 
-struct MillisecondThreadState {
-    mutex init_mutex;
-    mutex shutdown_mutex;
-    atomic<bool> running { false };
-    bool stop_requested = false;
-    unique_ptr<thread> worker;
-
-    void shutdown() {
-        lock_guard<mutex> shutdown_lock(shutdown_mutex);
-        unique_ptr<thread> joining;
-        {
-            lock_guard<mutex> lock(init_mutex);
-            if (stop_requested) {
-                return;
-            }
-            stop_requested = true;
-            running.store(false, memory_order_release);
-            joining = std::move(worker);
-        }
-        // The worker can still log and read a clock while finishing. Never
-        // hold its initialization mutex while waiting for it.
-        if (joining && joining->joinable()) {
-            joining->join();
-        }
-    }
-
-    ~MillisecondThreadState() { shutdown(); }
-};
-
-static MillisecondThreadState &millisecondThreadState() {
-    static MillisecondThreadState state;
-    return state;
-}
-
-void shutdownMillisecondThreadIfCreated() {
-    millisecondThreadState().shutdown();
-}
-
 static inline bool initMillisecondThread() {
-    auto &state = millisecondThreadState();
-    lock_guard<mutex> lock(state.init_mutex);
-    if (state.stop_requested || state.worker) {
-        return true;
-    }
-    state.running.store(true, memory_order_release);
-    auto lam = [&state]() {
-        // 确该保线程退出前日志打印可用
-        auto logger = Logger::Instance().shared_from_this();
+    auto running = std::make_shared<bool>(true);
+    auto lam = [running]() {
         setThreadName("stamp thread");
-        DebugL << "Stamp thread started";
+        MW_LOG_DEBUG("zlm", "Stamp thread started");
         uint64_t last = getCurrentMicrosecondOrigin();
         uint64_t now;
         uint64_t microsecond = 0;
-        while (state.running.load(memory_order_acquire)) {
+        while (*running) {
             now = getCurrentMicrosecondOrigin();
             //记录系统时间戳，可回退  [AUTO-TRANSLATED:495a0114]
             //Record system timestamp, can be rolled back
@@ -457,14 +415,18 @@ static inline bool initMillisecondThread() {
                 s_currentMicrosecond.store(microsecond, memory_order_release);
                 s_currentMillisecond.store(microsecond / 1000, memory_order_release);
             } else if (expired != 0) {
-                WarnL << "Stamp expired is abnormal: " << expired;
+                MW_LOG_WARNING("zlm", "Stamp expired is abnormal: {}", expired);
             }
             //休眠0.5 ms  [AUTO-TRANSLATED:5e20acdd]
             //Sleep for 0.5 ms
             usleep(500);
         }
     };
-    state.worker.reset(new thread(std::move(lam)));
+    static std::shared_ptr<std::thread> s_thread(new std::thread(lam), [running](std::thread *t) {
+        *running = false;
+        t->join();
+        delete t;
+    });
     return true;
 }
 
@@ -640,7 +602,7 @@ bool setThreadAffinity(int i) {
     if (!pthread_setaffinity_np(pthread_self(), sizeof(mask), &mask)) {
         return true;
     }
-    WarnL << "pthread_setaffinity_np failed: " << get_uv_errmsg();
+    MW_LOG_WARNING("zlm", "pthread_setaffinity_np failed: {}", get_uv_errmsg());
 #endif
     return false;
 }
@@ -694,7 +656,7 @@ string getEnv(const string &key) {
 
 
 void Creator::onDestoryException(const type_info &info, const exception &ex) {
-    ErrorL << "Invoke " << demangle(info.name()) << "::onDestory throw a exception: " << ex.what();
+    MW_LOG_ERROR("zlm", "Invoke {}::onDestory throw a exception: {}", demangle(info.name()), ex.what());
 }
 
 }  // namespace toolkit

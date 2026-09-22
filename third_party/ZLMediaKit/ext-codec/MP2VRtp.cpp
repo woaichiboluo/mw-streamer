@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "MP2VRtp.h"
 #include "Common/config.h"
 
@@ -29,7 +30,7 @@ bool MP2VRtpDecoder::inputRtp(const RtpPacket::Ptr &rtp, bool key_pos) {
     bool is_gop_start = decodeRtp(rtp);
     if (!_gop_dropped && seq != (uint16_t)(_last_seq + 1) && _last_seq) {
         _gop_dropped = true;
-        WarnL << "start drop mp2v gop, last seq:" << _last_seq << ", rtp:\r\n" << rtp->dumpString();
+        MW_LOG_WARNING("zlm", "start drop mp2v gop, last seq:{}, rtp:\r\n{}", _last_seq, rtp->dumpString());
     }
     _last_seq = seq;
     return is_gop_start && !last_gop_dropped;
@@ -132,7 +133,7 @@ void MP2VRtpDecoder::outputFrame(const RtpPacket::Ptr &rtp) {
     bool is_key = _frame->keyFrame();
     if (is_key && _gop_dropped) {
         _gop_dropped = false;
-        InfoL << "new mp2v gop received, rtp:\r\n" << rtp->dumpString();
+        MW_LOG_INFO("zlm", "new mp2v gop received, rtp:\r\n{}", rtp->dumpString());
     }
     if (!_gop_dropped) {
         RtpCodec::inputFrame(_frame);

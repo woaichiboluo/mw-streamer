@@ -9,7 +9,7 @@
  */
 
 #include "RtcpContext.h"
-#include "Util/logger.h"
+#include "mw/log.h"
 using namespace toolkit;
 
 namespace mediakit {
@@ -75,7 +75,6 @@ void RtcpContextForSend::onRtcp(RtcpHeader *rtcp) {
                 // rtt不可能小于0  [AUTO-TRANSLATED:34914014]
                 // RTT cannot be less than 0
                 _rtt[item->ssrc] = rtt;
-                // InfoL << "ssrc:" << item->ssrc << ",rtt:" << rtt;
             }
         }
         break;
@@ -87,9 +86,9 @@ void RtcpContextForSend::onRtcp(RtcpHeader *rtcp) {
                 = ((rtcp_xr->ntpmsw & 0xFFFF) << 16) | ((rtcp_xr->ntplsw >> 16) & 0xFFFF);
             _xr_rrtr_recv_sys_stamp[rtcp_xr->ssrc] = getCurrentMillisecond();
         } else if (rtcp_xr->bt == 5) {
-            TraceL << "for sender not recive dlrr";
+            MW_LOG_TRACE("zlm", "for sender not recive dlrr");
         } else {
-            TraceL << "not support xr bt " << rtcp_xr->bt;
+            MW_LOG_TRACE("zlm", "not support xr bt {}", rtcp_xr->bt);
         }
         break;
     }
@@ -137,14 +136,14 @@ toolkit::Buffer::Ptr RtcpContextForSend::createRtcpXRDLRR(uint32_t rtcp_ssrc, ui
 
     if (_xr_xrrtr_recv_last_rr.find(rtp_ssrc) == _xr_xrrtr_recv_last_rr.end()) {
         rtcp->items.lrr = 0;
-        WarnL;
+        MW_LOG_WARNING("zlm", "{}", __FUNCTION__);
     } else {
         rtcp->items.lrr = htonl(_xr_xrrtr_recv_last_rr[rtp_ssrc]);
     }
 
     if (_xr_rrtr_recv_sys_stamp.find(rtp_ssrc) == _xr_rrtr_recv_sys_stamp.end()) {
         rtcp->items.dlrr = 0;
-        WarnL;
+        MW_LOG_WARNING("zlm", "{}", __FUNCTION__);
     } else {
         // now - Last SR time,单位毫秒  [AUTO-TRANSLATED:cc449199]
         // now - Last SR time, in milliseconds

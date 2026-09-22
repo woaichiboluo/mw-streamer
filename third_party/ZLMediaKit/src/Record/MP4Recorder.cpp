@@ -9,6 +9,7 @@
  */
 
 #ifdef ENABLE_MP4
+#include "mw/log.h"
 #include <ctime>
 #include <sys/stat.h>
 #include "Util/File.h"
@@ -36,7 +37,7 @@ MP4Recorder::~MP4Recorder() {
         flush();
         closeFile();
     } catch (std::exception &ex) {
-        WarnL << ex.what();
+        MW_LOG_WARNING("zlm", "{}", ex.what());
     }
 }
 
@@ -57,7 +58,7 @@ void MP4Recorder::createFile() {
 
     try {
         _muxer = std::make_shared<MP4Muxer>();
-        TraceL << "Open tmp mp4 file: " << full_path_tmp;
+        MW_LOG_TRACE("zlm", "Open tmp mp4 file: {}", full_path_tmp);
         _muxer->openMP4(full_path_tmp);
         for (auto &track :_tracks) {
             // 添加track  [AUTO-TRANSLATED:80ae762a]
@@ -66,7 +67,7 @@ void MP4Recorder::createFile() {
         }
         _full_path_tmp = full_path_tmp;
     } catch (std::exception &ex) {
-        WarnL << ex.what();
+        MW_LOG_WARNING("zlm", "{}", ex.what());
     }
 }
 
@@ -74,14 +75,14 @@ void MP4Recorder::asyncClose() {
     auto muxer = _muxer;
     auto full_path_tmp = _full_path_tmp;
     auto info = _info;
-    TraceL << "Start close tmp mp4 file: " << full_path_tmp;
+    MW_LOG_TRACE("zlm", "Start close tmp mp4 file: {}", full_path_tmp);
     WorkThreadPool::Instance().getExecutor()->async([muxer, full_path_tmp, info]() mutable {
         info.time_len = muxer->getDuration() / 1000.0f;
         // 关闭mp4可能非常耗时，所以要放在后台线程执行  [AUTO-TRANSLATED:a7378a11]
         // Closing mp4 can be very time-consuming, so it should be executed in the background thread
-        TraceL << "Closing tmp mp4 file: " << full_path_tmp;
+        MW_LOG_TRACE("zlm", "Closing tmp mp4 file: {}", full_path_tmp);
         muxer->closeMP4();
-        TraceL << "Closed tmp mp4 file: " << full_path_tmp;
+        MW_LOG_TRACE("zlm", "Closed tmp mp4 file: {}", full_path_tmp);
         if (!full_path_tmp.empty()) {
             // 获取文件大小  [AUTO-TRANSLATED:7b90eb41]
             // Get file size
@@ -96,7 +97,7 @@ void MP4Recorder::asyncClose() {
             // Change the temporary file name to the official file name to prevent access to the mp4 before it is completed
             rename(full_path_tmp.data(), info.file_path.data());
         }
-        TraceL << "Emit mp4 record event: " << info.file_path;
+        MW_LOG_TRACE("zlm", "Emit mp4 record event: {}", info.file_path);
         // 触发mp4录制切片生成事件  [AUTO-TRANSLATED:9959dcd4]
         // Trigger mp4 recording slice generation event
         NOTICE_EMIT(BroadcastRecordMP4Args, Broadcast::kBroadcastRecordMP4, info);

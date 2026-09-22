@@ -7,6 +7,7 @@
  * LICENSE file in the root of the source tree. All contributing project authors
  * may be found in the AUTHORS file in the root of the source tree.
  */
+#include "mw/log.h"
 #include "RtmpCodec.h"
 #include "RtmpDemuxer.h"
 #include "Extension/Factory.h"
@@ -95,7 +96,7 @@ bool RtmpDemuxer::loadMetaData(const AMFValue &val) {
             makeAudioTrack(*audiocodecid, audiosamplerate, audiochannels, audiosamplesize, audiodatarate * 1024);
         }
     } catch (std::exception &ex) {
-        WarnL << ex.what();
+        MW_LOG_WARNING("zlm", "{}", ex.what());
     }
 
     if (ret) {

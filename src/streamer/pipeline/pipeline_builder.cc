@@ -11,11 +11,11 @@
 
 #include "mw/streamer/decoder/decoder_sink.h"
 #include "mw/streamer/encoder/encoder_sink.h"
+#include "mw/streamer/init/internal/runtime.h"
 #include "mw/streamer/input/file_input.h"
 #include "mw/streamer/input/zlm_input.h"
 #include "mw/streamer/output/internal/remux_output.h"
 #include "mw/streamer/output/remux_sink.h"
-#include "mw/streamer/pipeline/internal/pipeline_builder.h"
 #include "mw/streamer/processor/analysis_processor_sink.h"
 #include "mw/streamer/processor/transform_processor_sink.h"
 #include "mw/streamer/sink/frame_custom_sink_node.h"
@@ -294,15 +294,7 @@ void ValidatePipelineConfig(const PipelineConfig& config) {
 
 std::unique_ptr<Pipeline> BuildPipeline(const PipelineConfig& config,
                                         const ProcessorBindings& bindings) {
-  return internal::BuildPipelineWithRuntime(config, bindings, {});
-}
-
-namespace internal {
-
-std::unique_ptr<Pipeline> BuildPipelineWithRuntime(
-    const PipelineConfig& config, const ProcessorBindings& bindings,
-    const RuntimeConfig& runtime) {
-  RuntimeUse construction_use(runtime);
+  internal::RuntimeUse construction_use;
   ValidatePipelineConfig(config);
   const auto index = IndexNodes(config);
   ValidateBindings(bindings.analysis, SinkType::kAnalysisProcessor, index);
@@ -323,7 +315,5 @@ std::unique_ptr<Pipeline> BuildPipelineWithRuntime(
   }
   return pipeline;
 }
-
-}  // namespace internal
 
 }  // namespace mw::streamer

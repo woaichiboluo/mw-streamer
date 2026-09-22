@@ -10,6 +10,7 @@
 
 #if defined(ENABLE_MP4)
 
+#include "mw/log.h"
 #include "MP4Muxer.h"
 #include "Common/config.h"
 
@@ -24,7 +25,7 @@ MP4Muxer::~MP4Muxer() {
     try {
         closeMP4();
     } catch (std::exception &e) {
-        WarnL << e.what();
+        MW_LOG_WARNING("zlm", "{}", e.what());
     }
 }
 
@@ -192,12 +193,12 @@ bool MP4MuxerInterface::addTrack(const Track::Ptr &track) {
     }
     auto mp4_object = getMovIdByCodec(track->getCodecId());
     if (mp4_object == MOV_OBJECT_NONE) {
-        WarnL << "Unsupported codec: " << track->getCodecName();
+        MW_LOG_WARNING("zlm", "Unsupported codec: {}", track->getCodecName());
         return false;
     }
 
     if (!track->ready()) {
-        WarnL << "Track " << track->getCodecName() << " unready";
+        MW_LOG_WARNING("zlm", "Track {} unready", track->getCodecName());
         return false;
     }
 
@@ -211,7 +212,7 @@ bool MP4MuxerInterface::addTrack(const Track::Ptr &track) {
         CHECK(video_track);
         auto track_id = mp4_writer_add_video(_mov_writter.get(), mp4_object, video_track->getVideoWidth(), video_track->getVideoHeight(), extra_data, extra_size);
         if (track_id < 0) {
-            WarnL << "mp4_writer_add_video failed: " << video_track->getCodecName();
+            MW_LOG_WARNING("zlm", "mp4_writer_add_video failed: {}", video_track->getCodecName());
             return false;
         }
         _tracks[track->getIndex()].track_id = track_id;
@@ -222,7 +223,7 @@ bool MP4MuxerInterface::addTrack(const Track::Ptr &track) {
         CHECK(audio_track);
         auto track_id = mp4_writer_add_audio(_mov_writter.get(), mp4_object, audio_track->getAudioChannel(), audio_track->getAudioSampleBit() * audio_track->getAudioChannel(), audio_track->getAudioSampleRate(), extra_data, extra_size);
         if (track_id < 0) {
-            WarnL << "mp4_writer_add_audio failed: " << audio_track->getCodecName();
+            MW_LOG_WARNING("zlm", "mp4_writer_add_audio failed: {}", audio_track->getCodecName());
             return false;
         }
         _tracks[track->getIndex()].track_id = track_id;

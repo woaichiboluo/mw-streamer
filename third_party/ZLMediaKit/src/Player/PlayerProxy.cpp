@@ -15,7 +15,7 @@
 #include "Rtsp/RtspMediaSource.h"
 #include "Rtsp/RtspPlayer.h"
 #include "Util/MD5.h"
-#include "Util/logger.h"
+#include "mw/log.h"
 #include "Util/mini.h"
 
 using namespace toolkit;
@@ -142,7 +142,7 @@ void PlayerProxy::play(const string &url) {
             strongSelf->setTranslationInfo();
             strongSelf->_on_connect(strongSelf->_transtalion_info);
 
-            InfoL << "play " << strongSelf->_pull_url << " success";
+            MW_LOG_INFO("zlm", "play {} success", strongSelf->_pull_url);
             strongSelf->_status = std::make_shared<std::string>("playing");
         } else if (!strongSelf->isFinite() && (*piFailedCnt < strongSelf->_retry_count || strongSelf->_retry_count < 0)) {
             // 播放失败，延时重试播放  [AUTO-TRANSLATED:d7537c9c]
@@ -193,7 +193,7 @@ void PlayerProxy::play(const string &url) {
             // Update the duration for the first time
             strongSelf->_live_secs += strongSelf->_live_ticker.elapsedTime() / 1000;
             strongSelf->_live_ticker.resetTime();
-            TraceL << " live secs " << strongSelf->_live_secs;
+            MW_LOG_TRACE("zlm", " live secs {}", strongSelf->_live_secs.load());
         }
 
         // 播放异常中断，延时重试播放  [AUTO-TRANSLATED:fee316b2]
@@ -212,7 +212,7 @@ void PlayerProxy::play(const string &url) {
         MediaPlayer::play(_pull_url );
     } catch (std::exception &ex) {
         _status = std::make_shared<std::string>(std::string("play failed: ") + ex.what());
-        ErrorL << ex.what();
+        MW_LOG_ERROR("zlm", "{}", ex.what());
         onPlayResult(SockException(Err_other, ex.what()));
         return;
     }
@@ -249,7 +249,7 @@ PlayerProxy::~PlayerProxy() {
         try {
             _on_play(SockException(Err_shutdown, "player proxy close"));
         } catch (std::exception &ex) {
-            WarnL << "Exception occurred: " << ex.what();
+            MW_LOG_WARNING("zlm", "Exception occurred: {}", ex.what());
         }
         _on_play = nullptr;
     }
@@ -265,7 +265,7 @@ void PlayerProxy::rePlay(int iFailedCnt) {
         if (!strongPlayer) {
             return false;
         }
-        WarnL << "重试播放[" << iFailedCnt << "]:" << strongPlayer->_pull_url;
+        MW_LOG_WARNING("zlm", "重试播放[{}]:{}", iFailedCnt, strongPlayer->_pull_url);
         strongPlayer->MediaPlayer::play(strongPlayer->_pull_url);
         strongPlayer->setDirectProxy();
         return false;
@@ -279,7 +279,7 @@ bool PlayerProxy::close(MediaSource &sender) {
     setMediaSource(nullptr);
     teardown();
     _on_close(SockException(Err_shutdown, "closed by user"));
-    WarnL << "close media: " << sender.getUrl();
+    MW_LOG_WARNING("zlm", "close media: {}", sender.getUrl());
     return true;
 }
 

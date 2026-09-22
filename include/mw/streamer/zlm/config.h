@@ -7,16 +7,6 @@
 
 namespace mw::streamer {
 
-// Process-wide ZLToolKit configuration consumed by Pipeline TOML [zlm].
-struct ZlmConfig {
-  // Zero lets ZLToolKit use std::thread::hardware_concurrency().
-  std::size_t event_poller_threads = 0;
-  std::size_t work_threads = 0;
-
-  // Applies to both EventPollerPool and WorkThreadPool.
-  bool enable_cpu_affinity = true;
-};
-
 struct PlayerConfig {
   std::chrono::milliseconds connect_timeout_ms{10000};
   std::chrono::milliseconds media_timeout_ms{5000};

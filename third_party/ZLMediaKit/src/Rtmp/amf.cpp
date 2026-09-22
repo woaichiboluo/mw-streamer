@@ -13,7 +13,7 @@
 #include "amf.h"
 #include "utils.h"
 #include "Util/util.h"
-#include "Util/logger.h"
+#include "mw/log.h"
 #include "Network/sockutil.h"
 #include "Network/Buffer.h"
 
@@ -461,7 +461,7 @@ uint8_t AMFDecoder::front() {
 
 uint8_t AMFDecoder::pop_front() {
     if (version == 0 && front() == AMF0_SWITCH_AMF3) {
-        InfoL << "entering AMF3 mode";
+        MW_LOG_INFO("zlm", "entering AMF3 mode");
         pos++;
         version = 3;
     }

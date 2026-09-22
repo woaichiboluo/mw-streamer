@@ -3,7 +3,11 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
 
 #include "mw/log.h"
 
@@ -11,7 +15,6 @@ extern "C" {
 #include <libavutil/log.h>
 }
 
-#include "Util/logger.h"
 #include "mw/streamer/log/internal/third_party_log_bridge.h"
 
 namespace {
@@ -43,25 +46,116 @@ class TemporaryLogFile {
   std::filesystem::path path_;
 };
 
-mw::log::LogConfig MakeFileLogConfig(const std::filesystem::path& path) {
-  mw::log::LogConfig config;
-  config.console.level = mw::log::LogLevel::kOff;
-  config.rotating_file.path = path.string();
-  config.rotating_file.level = mw::log::LogLevel::kTrace;
-  config.rotating_file.max_file_size = 1024 * 1024;
-  config.rotating_file.max_files = 1;
-  return config;
+class TestLogConfig final {
+ public:
+  explicit TestLogConfig(const std::filesystem::path& path)
+      : file_path_(path.string()) {
+    mw_log_default_config(&config_);
+    modules_.assign(config_.modules, config_.modules_size);
+    config_.console_enabled = 0;
+    config_.rotating_file_enabled = 1;
+    config_.rotating_file_max_size = 1024 * 1024;
+    config_.rotating_file_max_files = 1;
+  }
+
+  void SetModules(std::string modules) { modules_ = std::move(modules); }
+
+  void EnableAsync(std::size_t queue_size,
+                   MwLogOverflowPolicy overflow) noexcept {
+    config_.async_enabled = 1;
+    config_.async_queue_size = queue_size;
+    config_.async_overflow = overflow;
+  }
+
+  const MwLogConfig& view() noexcept {
+    config_.modules = modules_.data();
+    config_.modules_size = modules_.size();
+    config_.rotating_file_path = file_path_.data();
+    config_.rotating_file_path_size = file_path_.size();
+    return config_;
+  }
+
+ private:
+  MwLogConfig config_{};
+  std::string modules_;
+  std::string file_path_;
+};
+
+TestLogConfig MakeFileLogConfig(const std::filesystem::path& path) {
+  return TestLogConfig(path);
 }
 
 }  // namespace
 
+TEST_CASE("default log config enables standard modules", "[logging]") {
+  MwLogConfig config{};
+  mw_log_default_config(&config);
+  CHECK(std::string_view(config.modules, config.modules_size) ==
+        "streamer;processor;");
+  CHECK(config.console_enabled == 1);
+  CHECK(config.rotating_file_enabled == 0);
+}
+
+TEST_CASE("module string accepts every level and trims whitespace",
+          "[logging]") {
+  TemporaryLogFile file;
+  auto config = MakeFileLogConfig(file.path());
+  config.SetModules(
+      " trace-module : trace ;debug-module:debug;info-module:info;"
+      "warn-module:warn;error-module:error;critical-module:critical;"
+      "off-module:off;bare-module;;");
+
+  mw::log::Logging logging(config.view());
+  CHECK(mw::log::ShouldLog("trace-module", mw::log::LogLevel::kTrace));
+  CHECK_FALSE(mw::log::ShouldLog("debug-module", mw::log::LogLevel::kTrace));
+  CHECK(mw::log::ShouldLog("debug-module", mw::log::LogLevel::kDebug));
+  CHECK(mw::log::ShouldLog("info-module", mw::log::LogLevel::kInfo));
+  CHECK_FALSE(mw::log::ShouldLog("warn-module", mw::log::LogLevel::kInfo));
+  CHECK(mw::log::ShouldLog("warn-module", mw::log::LogLevel::kWarning));
+  CHECK(mw::log::ShouldLog("error-module", mw::log::LogLevel::kError));
+  CHECK(mw::log::ShouldLog("critical-module", mw::log::LogLevel::kCritical));
+  CHECK_FALSE(mw::log::ShouldLog("off-module", mw::log::LogLevel::kCritical));
+  CHECK_FALSE(mw::log::ShouldLog("bare-module", mw::log::LogLevel::kDebug));
+  CHECK(mw::log::ShouldLog("bare-module", mw::log::LogLevel::kInfo));
+  CHECK_FALSE(mw::log::ShouldLog("unconfigured", mw::log::LogLevel::kWarning));
+  CHECK(mw::log::ShouldLog("unconfigured", mw::log::LogLevel::kError));
+  CHECK_FALSE(mw::log::ShouldLog("default", mw::log::LogLevel::kDebug));
+  CHECK(mw::log::ShouldLog("default", mw::log::LogLevel::kInfo));
+}
+
+TEST_CASE("module string rejects invalid entries", "[logging]") {
+  const auto invalid = [](std::string modules) {
+    MwLogConfig config{};
+    mw_log_default_config(&config);
+    config.modules = modules.data();
+    config.modules_size = modules.size();
+    config.console_enabled = 0;
+    CHECK_THROWS_AS(mw::log::Logging(config), std::invalid_argument);
+  };
+
+  invalid("streamer:verbose");
+  invalid("streamer:info:debug");
+  invalid("streamer; streamer:debug");
+  invalid("   ;");
+  invalid(":info");
+}
+
+TEST_CASE("Logging copies borrowed config strings", "[logging]") {
+  TemporaryLogFile file;
+  auto config = MakeFileLogConfig(file.path());
+  config.SetModules("copied:warn;");
+  mw::log::Logging logging(config.view());
+  config.SetModules("copied:off;");
+  CHECK(mw::log::ShouldLog("copied", mw::log::LogLevel::kWarning));
+}
+
 TEST_CASE("named module level filters before fmt formatting", "[logging]") {
   TemporaryLogFile file;
   auto config = MakeFileLogConfig(file.path());
-  config.modules.push_back({"streamer", mw::log::LogLevel::kWarning});
+  config.SetModules("streamer:warn;");
 
   {
-    mw::log::Logging logging(config);
+    mw::log::Logging logging(config.view());
     MW_LOG_INFO("streamer", "hidden info message");
     MW_LOG_WARNING("streamer", "visible warning {}", 42);
   }
@@ -74,20 +168,19 @@ TEST_CASE("named module level filters before fmt formatting", "[logging]") {
 
 TEST_CASE("unconfigured named modules default to error", "[logging]") {
   TemporaryLogFile file;
-  const auto config = MakeFileLogConfig(file.path());
+  auto config = MakeFileLogConfig(file.path());
 
   {
-    mw::log::Logging logging(config);
-    MW_LOG_WARNING("streamer", "hidden streamer warning");
-    MW_LOG_ERROR("streamer", "visible streamer error");
-    MW_LOG_CRITICAL("streamer", "visible streamer critical");
+    mw::log::Logging logging(config.view());
+    MW_LOG_WARNING("other", "hidden other warning");
+    MW_LOG_ERROR("other", "visible other error");
+    MW_LOG_CRITICAL("other", "visible other critical");
   }
 
   const auto content = file.Read();
-  CHECK(content.find("hidden streamer warning") == std::string::npos);
-  CHECK(content.find("[streamer] visible streamer error") != std::string::npos);
-  CHECK(content.find("[streamer] visible streamer critical") !=
-        std::string::npos);
+  CHECK(content.find("hidden other warning") == std::string::npos);
+  CHECK(content.find("[other] visible other error") != std::string::npos);
+  CHECK(content.find("[other] visible other critical") != std::string::npos);
 }
 
 TEST_CASE("default macros use the default module", "[logging]") {
@@ -95,7 +188,7 @@ TEST_CASE("default macros use the default module", "[logging]") {
   auto config = MakeFileLogConfig(file.path());
 
   {
-    mw::log::Logging logging(config);
+    mw::log::Logging logging(config.view());
     MW_LOG_DEBUG_DEFAULT("hidden default debug");
     MW_LOG_INFO_DEFAULT("default message {}", 7);
   }
@@ -108,12 +201,10 @@ TEST_CASE("default macros use the default module", "[logging]") {
 TEST_CASE("explicit module levels override built-in levels", "[logging]") {
   TemporaryLogFile file;
   auto config = MakeFileLogConfig(file.path());
-  config.modules.push_back({"default", mw::log::LogLevel::kOff});
-  config.modules.push_back({"streamer", mw::log::LogLevel::kOff});
-  config.modules.push_back({"processor", mw::log::LogLevel::kWarning});
+  config.SetModules("default:off;streamer:off;processor:warn;");
 
   {
-    mw::log::Logging logging(config);
+    mw::log::Logging logging(config.view());
     MW_LOG_CRITICAL_DEFAULT("hidden default critical");
     MW_LOG_CRITICAL("streamer", "hidden streamer critical");
     MW_LOG_INFO("processor", "hidden processor info");
@@ -128,35 +219,34 @@ TEST_CASE("explicit module levels override built-in levels", "[logging]") {
         std::string::npos);
 }
 
-TEST_CASE("third-party bridges preserve their module names",
+TEST_CASE("direct ZLM logging and third-party bridges preserve module names",
           "[logging][bridge]") {
   TemporaryLogFile file;
   auto config = MakeFileLogConfig(file.path());
-  config.modules.push_back({"zlm", mw::log::LogLevel::kInfo});
-  config.modules.push_back({"ffmpeg", mw::log::LogLevel::kInfo});
+  config.SetModules("zlm;ffmpeg;");
 
   {
-    mw::log::Logging logging(config);
+    mw::log::Logging logging(config.view());
     mw::streamer::internal::ThirdPartyLogBridge bridge;
-    InfoL << "zlm bridge message";
+    MW_LOG_INFO("zlm", "zlm direct message");
     av_log(nullptr, AV_LOG_INFO, "ffmpeg bridge message\n");
   }
 
   const auto content = file.Read();
-  CHECK(content.find("[zlm] zlm bridge message") != std::string::npos);
+  CHECK(content.find("[zlm] zlm direct message") != std::string::npos);
   CHECK(content.find("[ffmpeg] ffmpeg bridge message") != std::string::npos);
 }
 
 TEST_CASE("unconfigured third-party modules default to error",
           "[logging][bridge]") {
   TemporaryLogFile file;
-  const auto config = MakeFileLogConfig(file.path());
+  auto config = MakeFileLogConfig(file.path());
 
   {
-    mw::log::Logging logging(config);
+    mw::log::Logging logging(config.view());
     mw::streamer::internal::ThirdPartyLogBridge bridge;
-    InfoL << "hidden zlm info";
-    ErrorL << "visible zlm error";
+    MW_LOG_INFO("zlm", "hidden zlm info");
+    MW_LOG_ERROR("zlm", "visible zlm error");
     av_log(nullptr, AV_LOG_INFO, "hidden ffmpeg info\n");
     av_log(nullptr, AV_LOG_ERROR, "visible ffmpeg error\n");
   }
@@ -168,16 +258,75 @@ TEST_CASE("unconfigured third-party modules default to error",
   CHECK(content.find("[ffmpeg] visible ffmpeg error") != std::string::npos);
 }
 
+TEST_CASE("direct ZLM logs preserve source locations and message boundaries",
+          "[logging]") {
+  TemporaryLogFile file;
+  auto config = MakeFileLogConfig(file.path());
+  config.SetModules("zlm:trace;");
+  {
+    mw::log::Logging logging(config.view());
+    mw::log::Write("zlm", mw::log::LogLevel::kWarning, "zlm_source.cc", 42,
+                   "source preserved");
+    for (int index = 0; index < 3; ++index) {
+      MW_LOG_INFO("zlm", "unmerged message");
+    }
+    MW_LOG_TRACE("zlm", "zlm trace");
+    MW_LOG_DEBUG("zlm", "zlm debug");
+    MW_LOG_ERROR("zlm", "zlm error");
+  }
+  const auto content = file.Read();
+  CHECK(content.find("[zlm_source.cc:42]") != std::string::npos);
+  CHECK(content.find("[zlm] source preserved") != std::string::npos);
+  CHECK(content.find("[zlm] zlm trace") != std::string::npos);
+  CHECK(content.find("[zlm] zlm debug") != std::string::npos);
+  CHECK(content.find("[zlm] zlm error") != std::string::npos);
+  std::size_t count = 0;
+  std::size_t position = 0;
+  while ((position = content.find("[zlm] unmerged message", position)) !=
+         std::string::npos) {
+    ++count;
+    ++position;
+  }
+  CHECK(count == 3);
+}
+
+TEST_CASE("concurrent ZLM logs go directly to the mw backend", "[logging]") {
+  TemporaryLogFile file;
+  auto config = MakeFileLogConfig(file.path());
+  config.SetModules("zlm;");
+  constexpr int kThreads = 4;
+  constexpr int kMessages = 200;
+  {
+    mw::log::Logging logging(config.view());
+    std::vector<std::thread> threads;
+    for (int index = 0; index < kThreads; ++index) {
+      threads.emplace_back([] {
+        for (int message = 0; message < kMessages; ++message) {
+          MW_LOG_INFO("zlm", "concurrent zlm message");
+        }
+      });
+    }
+    for (auto& thread : threads) thread.join();
+  }
+  const auto content = file.Read();
+  std::size_t count = 0;
+  std::size_t position = 0;
+  while ((position = content.find("[zlm] concurrent zlm message", position)) !=
+         std::string::npos) {
+    ++count;
+    ++position;
+  }
+  CHECK(count == kThreads * kMessages);
+}
+
 TEST_CASE("async logging drains on destruction", "[logging][async]") {
   TemporaryLogFile file;
   auto config = MakeFileLogConfig(file.path());
-  config.modules.push_back({"streamer", mw::log::LogLevel::kInfo});
-  config.async.enabled = true;
-  config.async.queue_size = 128;
-  config.async.overflow = mw::log::OverflowPolicy::kBlock;
+  config.SetModules("streamer;");
+  config.EnableAsync(128, kMwLogOverflowBlock);
 
   {
-    mw::log::Logging logging(config);
+    mw::log::Logging logging(config.view());
     for (int index = 0; index < 32; ++index) {
       MW_LOG_INFO("streamer", "async message {}", index);
     }
@@ -191,10 +340,10 @@ TEST_CASE("async logging drains on destruction", "[logging][async]") {
 TEST_CASE("C ABI writes text with source location", "[logging][c-api]") {
   TemporaryLogFile file;
   auto config = MakeFileLogConfig(file.path());
-  config.modules.push_back({"c-client", mw::log::LogLevel::kInfo});
+  config.SetModules("c-client;");
 
   {
-    mw::log::Logging logging(config);
+    mw::log::Logging logging(config.view());
     constexpr char kModule[] = "c-client";
     constexpr char kMessage[] = "plain C text";
     mw_log_write(kMwLogLevelInfo, kModule, sizeof(kModule) - 1, "client.c", 23,

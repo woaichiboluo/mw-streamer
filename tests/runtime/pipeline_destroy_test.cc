@@ -1,14 +1,14 @@
-#include "mw/streamer/api.h"
-
-#include <chrono>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+
+#include "mw/streamer/api.h"
 
 namespace {
 
@@ -45,16 +45,17 @@ std::filesystem::path WriteConfig(const TestDirectory& directory,
   const auto path = directory.path() / "pipeline.toml";
   std::ofstream config(path);
   if (mode == "srt") {
-    config << "[input]\ntype = 'zlm'\nurl = 'srt://127.0.0.1:1?streamid=missing'\n";
+    config << "[input]\ntype = 'zlm'\nurl = "
+              "'srt://127.0.0.1:1?streamid=missing'\n";
   } else if (mode == "network") {
     config << "[input]\ntype = 'zlm'\nurl = 'rtsp://localhost:1/missing'\n";
   } else {
     config << "[input]\n"
-            "type = 'file'\n"
-            "path = '"
-         << (std::filesystem::path(MW_RUNTIME_TEST_DATA_DIR) / "h264_aac.mp4")
-                .generic_string()
-         << "'\n";
+              "type = 'file'\n"
+              "path = '"
+           << (std::filesystem::path(MW_RUNTIME_TEST_DATA_DIR) / "h264_aac.mp4")
+                  .generic_string()
+           << "'\n";
   }
   config << "downstream = ['record']\n"
             "[[sinks]]\n"
@@ -74,37 +75,64 @@ std::filesystem::path WriteConfig(const TestDirectory& directory,
 int main(int argc, char** argv) {
   try {
     const std::string mode = argc > 1 ? argv[1] : "idle";
+    if (mw_streamer_is_initialized()) {
+      throw std::runtime_error("runtime unexpectedly initialized");
+    }
+    if (mode == "cold") {
+      mw_streamer_shutdown();
+      if (mw_streamer_is_initialized()) {
+        throw std::runtime_error("cold shutdown initialized the runtime");
+      }
+    }
     TestDirectory directory;
     const auto config_path = WriteConfig(directory, mode);
     const auto config_path_string = config_path.string();
     MwPipelineCreateInfo create_info{};
     create_info.toml_path = config_path_string.c_str();
-
+    if (mode == "uninitialized") {
+      MwPipeline* pipeline = nullptr;
+      const auto result = mw_pipeline_create_from_toml(&create_info, &pipeline);
+      if (result != kMwResultInvalidState || pipeline != nullptr ||
+          std::string(mw_last_error()).empty() ||
+          mw_streamer_is_initialized()) {
+        mw_pipeline_destroy(pipeline);
+        throw std::runtime_error(
+            "Pipeline creation implicitly initialized the runtime");
+      }
+      return 0;
+    }
+    MwLogConfig log_config;
+    mw_log_default_config(&log_config);
+    MwZlmConfig zlm_config;
+    mw_zlm_default_config(&zlm_config);
+    zlm_config.event_poller_threads = 1;
+    zlm_config.work_threads = 1;
+    zlm_config.enable_cpu_affinity = 0;
+    if (!mw_streamer_initialize(&log_config, &zlm_config)) {
+      throw std::runtime_error(std::string("runtime initialization failed: ") +
+                               mw_last_error());
+    }
     if (mode == "race") {
       std::atomic<bool> go{false};
-      std::array<MwResult, 2> results{};
+      MwResult create_result = kMwResultInternalError;
       std::thread creator([&] {
         while (!go.load()) std::this_thread::yield();
         MwPipeline* pipeline = nullptr;
-        results[0] = mw_pipeline_create_from_toml(&create_info, &pipeline);
+        create_result = mw_pipeline_create_from_toml(&create_info, &pipeline);
         mw_pipeline_destroy(pipeline);
       });
       std::thread closer([&] {
         while (!go.load()) std::this_thread::yield();
-        results[1] = mw_streamer_shutdown();
+        mw_streamer_shutdown();
       });
       go.store(true);
       creator.join();
       closer.join();
-      for (auto result : results) {
-        if (result != kMwResultSuccess && result != kMwResultInvalidState) {
-          throw std::runtime_error("unexpected create/shutdown race result");
-        }
+      if (create_result != kMwResultSuccess &&
+          create_result != kMwResultInvalidState) {
+        throw std::runtime_error("unexpected create/shutdown race result");
       }
-      Check(mw_streamer_shutdown(), "shutdown after creation race failed");
-    }
-    if (mode == "cold") {
-      Check(mw_streamer_shutdown(), "cold shutdown failed");
+      if (mw_streamer_is_initialized()) mw_streamer_shutdown();
     }
     if (mode == "failed_build") {
       MwFrameCustomSinkBinding wrong_binding{};
@@ -120,8 +148,8 @@ int main(int argc, char** argv) {
       create_info.frame_custom_sinks = nullptr;
       create_info.frame_custom_sink_count = 0;
     }
-    const bool create_pipelines = mode != "cold" && mode != "race" &&
-                                  mode != "failed_build";
+    const bool create_pipelines =
+        mode != "cold" && mode != "race" && mode != "failed_build";
     for (int iteration = 0; create_pipelines && iteration < 10; ++iteration) {
       MwPipeline* pipeline = nullptr;
       Check(mw_pipeline_create_from_toml(&create_info, &pipeline),
@@ -129,8 +157,9 @@ int main(int argc, char** argv) {
       if (pipeline == nullptr) {
         throw std::runtime_error("pipeline create returned null");
       }
-      const auto rejected_shutdown = mw_streamer_shutdown();
-      if (rejected_shutdown != kMwResultInvalidState) {
+      mw_streamer_shutdown();
+      const auto shutdown_error = std::string(mw_last_error());
+      if (!mw_streamer_is_initialized() || shutdown_error.empty()) {
         mw_pipeline_destroy(pipeline);
         throw std::runtime_error("shutdown accepted a live Pipeline");
       }
@@ -142,24 +171,25 @@ int main(int argc, char** argv) {
       mw_pipeline_destroy(pipeline);
       std::cout << "destroy end: " << iteration << std::endl;
     }
-    std::array<MwResult, 4> shutdown_results{};
     std::array<std::thread, 4> shutdown_threads;
     for (std::size_t i = 0; i < shutdown_threads.size(); ++i) {
-      shutdown_threads[i] = std::thread([&, i] {
-        shutdown_results[i] = mw_streamer_shutdown();
-      });
+      shutdown_threads[i] = std::thread([] { mw_streamer_shutdown(); });
     }
     for (auto& thread : shutdown_threads) thread.join();
-    for (auto result : shutdown_results) {
-      Check(result, "concurrent shutdown failed");
+    if (mw_streamer_is_initialized()) {
+      throw std::runtime_error("concurrent shutdown did not close runtime");
     }
-    Check(mw_streamer_shutdown(), "repeated shutdown failed");
+    mw_streamer_shutdown();
     MwPipeline* rejected = nullptr;
     const auto result = mw_pipeline_create_from_toml(&create_info, &rejected);
     if (result != kMwResultInvalidState || rejected != nullptr ||
         std::string(mw_last_error()).empty()) {
       mw_pipeline_destroy(rejected);
-      throw std::runtime_error("Pipeline creation after shutdown was not rejected");
+      throw std::runtime_error(
+          "Pipeline creation after shutdown was not rejected");
+    }
+    if (mw_streamer_initialize(&log_config, &zlm_config)) {
+      throw std::runtime_error("runtime restarted after terminal shutdown");
     }
     std::cout << "runtime shutdown complete" << std::endl;
   } catch (const std::exception& error) {

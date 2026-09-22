@@ -84,7 +84,6 @@ class ZlmInput::Impl final {
       throw std::invalid_argument("输入URL不能为空");
     }
     internal::ValidatePlayerConfig(config_.player);
-    internal::EnsureInitialized();
     player_ = std::make_unique<PlayerProxy>(
         toolkit::EventPollerPool::Instance().extractPoller(),
         config_.reconnect_policy);
@@ -146,6 +145,8 @@ class ZlmInput::Impl final {
   }
 
  private:
+  // Declared first so the runtime outlives every ZLM object and callback.
+  internal::RuntimeUse runtime_use_;
   class Bridge final : public PacketSink {
    public:
     explicit Bridge(Impl& owner) : owner_(owner) {}

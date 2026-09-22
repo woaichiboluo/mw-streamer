@@ -11,6 +11,7 @@
 #ifndef COMMON_CONFIG_H
 #define COMMON_CONFIG_H
 
+#include "mw/log.h"
 #include "Util/NoticeCenter.h"
 #include "Util/mini.h"
 #include "Util/onceToken.h"
@@ -112,7 +113,7 @@ extern const std::string kBroadcastCreateMuxer;
             return;                                                                                                    \
         }                                                                                                              \
         arg = arg##_tmp;                                                                                               \
-        InfoL << "reload config:" << key << "=" << arg;                                                                \
+        MW_LOG_INFO("zlm", "reload config:{}={}", key, fmt::streamed(arg));                                                 \
     } while (0)
 
 // 监听某个配置发送变更  [AUTO-TRANSLATED:7f46b5b1]

@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "SrtPlayer.h"
 #include "SrtPlayerImp.h"
 #include "Common/config.h"
@@ -22,15 +23,15 @@ namespace mediakit {
 SrtPlayer::SrtPlayer(const EventPoller::Ptr &poller) 
     : SrtCaller(poller) {
     (*this)[Client::kSrtTrackReadyTimeoutMS] = 30000;
-    DebugL;
+    MW_LOG_DEBUG("zlm", "{}", __FUNCTION__);
 }
 
 SrtPlayer::~SrtPlayer(void) {
-    DebugL;
+    MW_LOG_DEBUG("zlm", "{}", __FUNCTION__);
 }
 
 void SrtPlayer::play(const string &strUrl) {
-    DebugL;
+    MW_LOG_DEBUG("zlm", "{}", __FUNCTION__);
     try {
         _url.parse(strUrl);
     } catch (std::exception &ex) {
@@ -59,11 +60,11 @@ void SrtPlayer::teardown() {
 }
 
 void SrtPlayer::pause(bool bPause) {
-    DebugL;
+    MW_LOG_DEBUG("zlm", "{}", __FUNCTION__);
 }
 
 void SrtPlayer::speed(float speed) {
-    DebugL;
+    MW_LOG_DEBUG("zlm", "{}", __FUNCTION__);
 }
 
 void SrtPlayer::onHandShakeFinished() {
@@ -99,7 +100,7 @@ void SrtPlayer::onResult(const SockException &ex, bool was_connected) {
             }, getPoller());
     } else {
         _check_timer.reset();
-        WarnL << ex.getErrCode() << " " << ex.what();
+        MW_LOG_WARNING("zlm", "{} {}", static_cast<int>(ex.getErrCode()), ex.what());
         if (ex.getErrCode() == Err_shutdown) {
             // 主动shutdown的，不触发回调
             return;

@@ -3,8 +3,12 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#ifndef __cplusplus
+#include <stdbool.h>
+#endif
 
 #include "mw/export.h"
+#include "mw/log.h"
 #include "mw/streamer/processor/processor.h"
 #include "mw/streamer/sink/frame_custom_sink.h"
 #include "mw/streamer/sink/packet_custom_sink.h"
@@ -24,6 +28,16 @@ extern "C" {
 // non-null handle. A handle must not be used concurrently with or after
 // destruction.
 typedef struct MwPipeline MwPipeline;
+
+typedef struct MwZlmConfig {
+  // Zero lets ZLToolKit use the hardware concurrency.
+  size_t event_poller_threads;
+  size_t work_threads;
+  int enable_cpu_affinity;
+} MwZlmConfig;
+
+// Fills config with the recommended defaults. A null pointer is ignored.
+MW_STREAMER_API void mw_zlm_default_config(MwZlmConfig* config);
 
 typedef enum MwResult {
   kMwResultSuccess = 0,
@@ -174,13 +188,22 @@ typedef struct MwPerformanceSnapshot {
 // library owns the string until the next C API call on the same thread.
 MW_STREAMER_API const char* mw_last_error(void);
 
-// Permanently shuts down this library runtime. Call on the application's
-// control thread before returning from main or unloading the library, after
-// destroying every Pipeline. Never call from a media callback or DllMain.
-// Returns kMwResultInvalidState if a Pipeline exists or is being constructed;
-// that rejection leaves the runtime usable. Successful shutdown is idempotent
-// and forbids subsequent Pipeline creation, even if never initialized before.
-MW_STREAMER_API MwResult mw_streamer_shutdown(void);
+// Initializes the process-wide runtime. Both configurations are required and
+// copied before this call returns. Returns false and records mw_last_error if
+// initialization fails or the runtime was already initialized or shut down.
+MW_STREAMER_API bool mw_streamer_initialize(const MwLogConfig* log_config,
+                                            const MwZlmConfig* zlm_config);
+
+// Returns whether initialization completed and shutdown has not begun.
+MW_STREAMER_API bool mw_streamer_is_initialized(void);
+
+// Permanently closes this library runtime to new media objects after every
+// Pipeline and standalone media object has been destroyed. Process-wide ZLM
+// workers and logging remain alive until process teardown; this function is
+// therefore not a dynamic-library unload barrier. Calling before initialization
+// or after successful shutdown is harmless. A rejected shutdown leaves the
+// runtime initialized and records mw_last_error.
+MW_STREAMER_API void mw_streamer_shutdown(void);
 
 // Loads TOML, copies callback tables into the corresponding node maps and
 // constructs an idle Pipeline. On failure, *output is set to NULL. Each

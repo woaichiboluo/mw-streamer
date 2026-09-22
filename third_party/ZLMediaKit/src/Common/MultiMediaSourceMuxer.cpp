@@ -8,6 +8,7 @@
 * may be found in the AUTHORS file in the root of the source tree.
 */
 
+#include "mw/log.h"
 #include <math.h>
 #include "Common/config.h"
 #include "MultiMediaSourceMuxer.h"
@@ -70,14 +71,13 @@ public:
         }
         auto &last_dts = _last_dts[frame->getTrackType()];
         if (last_dts > frame->dts()) {
-            WarnL << "Dts decrease: " << last_dts << "->" << frame->dts()
-                  << ", flush paced sender cache: " << _cache.size();
+            MW_LOG_WARNING("zlm", "Dts decrease: {}->{}, flush paced sender cache: {}", last_dts, frame->dts(), _cache.size());
             flushCache(frame->dts());
         }
         _cache.emplace(frame->dts(), Frame::getCacheAbleFrame(frame));
         last_dts = frame->dts();
         if (_cache.size() > kMaxCacheSize) {
-            WarnL << "Force flush paced sender cache: size=" << _cache.size();
+            MW_LOG_WARNING("zlm", "Force flush paced sender cache: size={}", _cache.size());
             flushCache(frame->dts());
         }
         return true;
@@ -132,7 +132,7 @@ private:
 
         // Safety flush when buffer grows too deep
         if (buf_ms > kHighMS * 2) {
-            WarnL << "Force flush paced sender cache: buf=" << buf_ms << "ms";
+            MW_LOG_WARNING("zlm", "Force flush paced sender cache: buf={}ms", buf_ms);
             flushCache(_cache.empty() ? _virtual_pos : _cache.rbegin()->first);
         }
     }
@@ -444,7 +444,7 @@ std::string MultiMediaSourceMuxer::startRecord(const std::string &file_path, int
     } else {
         path = file_path;
     }
-    TraceL << "mp4 save path: " << path;
+    MW_LOG_TRACE("zlm", "mp4 save path: {}", path);
 
     auto muxer = std::make_shared<MP4Muxer>();
     muxer->openMP4(path);
@@ -476,7 +476,7 @@ std::string MultiMediaSourceMuxer::startRecord(const std::string &file_path, int
             }
             if (pos != history.end()) {
                 // 移除历史视频前面过多的数据
-                DebugL << "clear history front video: " << history.front()->dts() << " -> " << (*pos)->dts();
+                MW_LOG_DEBUG("zlm", "clear history front video: {} -> {}", history.front()->dts(), (*pos)->dts());
                 history.erase(history.begin(), pos);
             }
 
@@ -497,16 +497,14 @@ std::string MultiMediaSourceMuxer::startRecord(const std::string &file_path, int
 
                 if (pos != history.end()) {
                     // 移除历史视频后面过多的数据
-                    DebugL << "clear history tail video: " << (*pos)->dts() << " -> " << now_dts;
+                    MW_LOG_DEBUG("zlm", "clear history tail video: {} -> {}", (*pos)->dts(), now_dts);
                     history.erase(pos, history.end());
                 }
             }
 
             if (!history.empty()) {
                 auto &front = history.front();
-                InfoL << "start record: " << path
-                      << ", start_dts: " << front->dts() << ", key_frame: " << front->keyFrame() << ", config_frame: " << front->configFrame()
-                      << ", now_dts: " << now_dts;
+                MW_LOG_INFO("zlm", "start record: {}, start_dts: {}, key_frame: {}, config_frame: {}, now_dts: {}", path, front->dts(), front->keyFrame(), front->configFrame(), now_dts);
                 have_history = true;
             }
 
@@ -518,7 +516,7 @@ std::string MultiMediaSourceMuxer::startRecord(const std::string &file_path, int
 
     if (forward_time_ms > 0) {
         if (!have_history) {
-            InfoL << "start record: " << path << ", back_time_ms: " << back_time_ms << ", forward_time_ms: " << forward_time_ms;
+            MW_LOG_INFO("zlm", "start record: {}, back_time_ms: {}, forward_time_ms: {}", path, back_time_ms, forward_time_ms);
         }
 
         weak_ptr<MultiMediaSourceMuxer> weak_self = shared_from_this();
@@ -545,7 +543,7 @@ std::string MultiMediaSourceMuxer::startRecord(const std::string &file_path, int
                 // 新增兜底机制，如果直播录制任务时长超过预期时间3秒，不管数据时间戳是否增长是否达到预期，都强制停止录制
                 if ((frame->getIndex() == selected_index && now_dts + forward_time_ms < frame->dts())
                     || (is_live_stream && ticker.createdTime() > forward_time_ms + 3000ULL)) {
-                    InfoL << "stop record: " << path << ", end dts: " << frame->dts();
+                    MW_LOG_INFO("zlm", "stop record: {}, end dts: {}", path, frame->dts());
                     WorkThreadPool::Instance().getPoller()->async([muxer]() { muxer->closeMP4(); });
                     reader = nullptr;
                     return;
@@ -607,7 +605,7 @@ void MultiMediaSourceMuxer::startSendRtp(const MediaSourceEvent::SendRtpArgs &ar
             // 可能归属线程发生变更  [AUTO-TRANSLATED:2b379e30]
             // The owning thread may change
             strong_self->getOwnerPoller(MediaSource::NullMediaSource())->async([=]() {
-                WarnL << "stream:" << strong_self->shortUrl() << " stop send rtp:" << ssrc << ", reason:" << ex;
+                MW_LOG_WARNING("zlm", "stream:{} stop send rtp:{}, reason:{}", strong_self->shortUrl(), ssrc, fmt::streamed(ex));
                 strong_self->_rtp_sender.erase(ssrc);
                 NOTICE_EMIT(BroadcastSendRtpStoppedArgs, Broadcast::kBroadcastSendRtpStopped, *strong_self, ssrc, ex);
             });
@@ -678,7 +676,7 @@ EventPoller::Ptr MultiMediaSourceMuxer::getOwnerPoller(MediaSource &sender) {
     try {
         auto ret = listener->getOwnerPoller(sender);
         if (ret != _poller) {
-            WarnL << "OwnerPoller changed " << _poller->getThreadName() << " -> " << ret->getThreadName() << " : " << shortUrl();
+            MW_LOG_WARNING("zlm", "OwnerPoller changed {} -> {} : {}", _poller->getThreadName(), ret->getThreadName(), shortUrl());
             _poller = ret;
             if (_paced_sender) {
                 _paced_sender->resetTimer(_poller);
@@ -800,7 +798,7 @@ void MultiMediaSourceMuxer::onAllTrackReady() {
     if (_delegate) {
         _delegate->addTrackCompleted();
     }
-    InfoL << "stream: " << shortUrl() << " , codec info: " << getTrackInfoStr(this);
+    MW_LOG_INFO("zlm", "stream: {} , codec info: {}", shortUrl(), getTrackInfoStr(this));
 }
 
 void MultiMediaSourceMuxer::createGopCacheIfNeed() {

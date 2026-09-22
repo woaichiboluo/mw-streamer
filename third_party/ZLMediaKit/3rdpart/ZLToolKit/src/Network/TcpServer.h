@@ -11,6 +11,7 @@
 #ifndef TCPSERVER_TCPSERVER_H
 #define TCPSERVER_TCPSERVER_H
 
+#include "mw/log.h"
 #include <memory>
 #include <functional>
 #include <unordered_map>
@@ -63,13 +64,13 @@ public:
         //Session creator, creates different types of servers through it
         _session_alloc = [cb](const TcpServer::Ptr &server, const Socket::Ptr &sock) {
             auto session = std::shared_ptr<SessionType>(new SessionType(sock), [](SessionType *ptr) {
-                TraceP(static_cast<Session *>(ptr)) << "~" << cls_name;
+                MW_LOG_TRACE("zlm", "{}({}:{}) ~{}", (static_cast<Session *>(ptr))->getIdentifier(), (static_cast<Session *>(ptr))->get_peer_ip(), (static_cast<Session *>(ptr))->get_peer_port(), cls_name);
                 delete ptr;
             });
             if (cb) {
                 cb(session);
             }
-            TraceP(static_cast<Session *>(session.get())) << cls_name;
+            MW_LOG_TRACE("zlm", "{}({}:{}) {}", (static_cast<Session *>(session.get()))->getIdentifier(), (static_cast<Session *>(session.get()))->get_peer_ip(), (static_cast<Session *>(session.get()))->get_peer_port(), cls_name);
             session->setOnCreateSocket(server->_on_create_socket);
             return std::make_shared<SessionHelper>(server, std::move(session), cls_name);
         };

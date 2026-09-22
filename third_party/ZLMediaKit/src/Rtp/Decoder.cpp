@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "Decoder.h"
 #include "PSDecoder.h"
 #include "TSDecoder.h"
@@ -36,7 +37,7 @@ static Decoder::Ptr createDecoder_l(DecoderImp::Type type) {
 #ifdef ENABLE_RTPPROXY
             return std::make_shared<PSDecoder>();
 #else
-            WarnL << "创建ps解复用器失败，请打开ENABLE_RTPPROXY然后重新编译";
+            MW_LOG_WARNING("zlm", "创建ps解复用器失败，请打开ENABLE_RTPPROXY然后重新编译");
             return nullptr;
 #endif//ENABLE_RTPPROXY
 
@@ -44,7 +45,7 @@ static Decoder::Ptr createDecoder_l(DecoderImp::Type type) {
 #ifdef ENABLE_HLS
             return std::make_shared<TSDecoder>();
 #else
-            WarnL << "创建mpegts解复用器失败，请打开ENABLE_HLS然后重新编译";
+            MW_LOG_WARNING("zlm", "创建mpegts解复用器失败，请打开ENABLE_HLS然后重新编译");
             return nullptr;
 #endif//ENABLE_HLS
 
@@ -103,7 +104,7 @@ void DecoderImp::onStream(int stream, int codecid, const void *extra, size_t byt
     if (finish && _have_video) {
         _finished = true;
         _sink->addTrackCompleted();
-        InfoL << "Add track finished";
+        MW_LOG_INFO("zlm", "Add track finished");
     }
 }
 
@@ -120,7 +121,7 @@ void DecoderImp::onDecode(int stream, int codecid, int flags, int64_t pts, int64
         onTrack(stream, Factory::getTrackByCodecId(codec));
     }
     if (!ref.first) {
-        WarnL << "Unsupported codec :" << getCodecName(codec);
+        MW_LOG_WARNING("zlm", "Unsupported codec :{}", getCodecName(codec));
         return;
     }
     GET_CONFIG(bool, merge_frame, RtpProxy::kMergeFrame)
@@ -151,12 +152,11 @@ void DecoderImp::onTrack(int index, const Track::Ptr &track) {
     track->setIndex(index);
     auto &ref = _tracks[index];
     if (ref.first) {
-        // WarnL << "Already existed a same track: " << index << ", codec: " << track->getCodecName();
         return;
     }
     ref.first = track;
     _sink->addTrack(track);
-    InfoL << "Got track: " << track->getCodecName();
+    MW_LOG_INFO("zlm", "Got track: {}", track->getCodecName());
     _have_video = track->getTrackType() == TrackVideo ? true : _have_video;
 }
 

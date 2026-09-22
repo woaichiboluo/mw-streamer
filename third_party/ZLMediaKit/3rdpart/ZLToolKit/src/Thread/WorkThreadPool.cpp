@@ -15,17 +15,7 @@ namespace toolkit {
 static size_t s_pool_size = 0;
 static bool s_enable_cpu_affinity = true;
 
-static std::atomic<WorkThreadPool *> s_work_pool { nullptr };
-
-WorkThreadPool &WorkThreadPool::Instance() {
-    static std::shared_ptr<WorkThreadPool> instance(new WorkThreadPool);
-    s_work_pool.store(instance.get(), std::memory_order_release);
-    return *instance;
-}
-
-WorkThreadPool *WorkThreadPool::getInstanceIfCreated() noexcept {
-    return s_work_pool.load(std::memory_order_acquire);
-}
+INSTANCE_IMP(WorkThreadPool)
 
 EventPoller::Ptr WorkThreadPool::getFirstPoller() {
     return std::static_pointer_cast<EventPoller>(getFirstExecutor());
@@ -50,3 +40,4 @@ void WorkThreadPool::enableCpuAffinity(bool enable) {
 }
 
 } /* namespace toolkit */
+

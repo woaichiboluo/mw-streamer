@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "Common/config.h"
 #include "RtpReceiver.h"
 
@@ -35,7 +36,7 @@ RtpPacket::Ptr RtpTrack::inputRtp(TrackType type, int sample_rate, uint8_t *ptr,
     }
     GET_CONFIG(uint32_t, rtpMaxSize, Rtp::kRtpMaxSize);
     if (len > 1024 * rtpMaxSize) {
-        WarnL << "超大的rtp包:" << len << " > " << 1024 * rtpMaxSize;
+        MW_LOG_WARNING("zlm", "超大的rtp包:{} > {}", len, 1024 * rtpMaxSize);
         return nullptr;
     }
     if (!sample_rate) {
@@ -60,7 +61,6 @@ RtpPacket::Ptr RtpTrack::inputRtp(TrackType type, int sample_rate, uint8_t *ptr,
     if (_pt == 0xFF) {
         _pt = header->pt;
     } else if (header->pt != _pt) {
-        //TraceL << "rtp pt mismatch:" << (int) header->pt << " !=" << (int) _pt;
         return nullptr;
     }
 
@@ -79,10 +79,10 @@ RtpPacket::Ptr RtpTrack::inputRtp(TrackType type, int sample_rate, uint8_t *ptr,
         if (_ssrc_alive.elapsedTime() < 3 * 1000) {
             // 接收正确ssrc的rtp在10秒内，那么我们认为存在多路rtp,忽略掉ssrc不匹配的rtp  [AUTO-TRANSLATED:2f98c2b5]
             // If the RTP with the correct SSRC is received within 10 seconds, we consider it to be multi-path RTP, and ignore the RTP with mismatched SSRC
-            WarnL << "ssrc mismatch, rtp dropped:" << ssrc << " != " << _ssrc;
+            MW_LOG_WARNING("zlm", "ssrc mismatch, rtp dropped:{} != {}", ssrc, _ssrc);
             return nullptr;
         }
-        InfoL << "rtp ssrc changed:" << _ssrc << " -> " << ssrc;
+        MW_LOG_INFO("zlm", "rtp ssrc changed:{} -> {}", _ssrc, ssrc);
         _ssrc = ssrc;
         _ssrc_alive.resetTime();
     }

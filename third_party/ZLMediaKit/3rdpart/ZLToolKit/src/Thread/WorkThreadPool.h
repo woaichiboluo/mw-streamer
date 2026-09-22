@@ -29,7 +29,6 @@ public:
      * [AUTO-TRANSLATED:c8852589]
      */
     static WorkThreadPool &Instance();
-    static WorkThreadPool *getInstanceIfCreated() noexcept;
 
     /**
      * 设置EventPoller个数，在WorkThreadPool单例创建前有效

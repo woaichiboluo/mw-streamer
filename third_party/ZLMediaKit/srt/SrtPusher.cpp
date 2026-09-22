@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "SrtPusher.h"
 #include "Common/config.h"
 
@@ -17,15 +18,15 @@ namespace mediakit {
 
 SrtPusher::SrtPusher(const EventPoller::Ptr &poller, const TSMediaSource::Ptr &src) : SrtCaller(poller) {
     _push_src = src;
-    DebugL;
+    MW_LOG_DEBUG("zlm", "{}", __FUNCTION__);
 }
 
 SrtPusher::~SrtPusher(void) {
-    DebugL;
+    MW_LOG_DEBUG("zlm", "{}", __FUNCTION__);
 }
 
 void SrtPusher::publish(const string &strUrl) {
-    DebugL;
+    MW_LOG_DEBUG("zlm", "{}", __FUNCTION__);
     try {
         _url.parse(strUrl);
     } catch (std::exception &ex) {
@@ -63,7 +64,7 @@ void SrtPusher::onResult(const SockException &ex, bool was_connected) {
         onPublishResult(ex);
     } else {
         _ts_reader.reset();
-        WarnL << ex.getErrCode() << " " << ex.what();
+        MW_LOG_WARNING("zlm", "{} {}", static_cast<int>(ex.getErrCode()), ex.what());
         if (ex.getErrCode() == Err_shutdown) {
             // 主动shutdown的，不触发回调
             return;

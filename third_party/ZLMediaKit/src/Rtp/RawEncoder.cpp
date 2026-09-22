@@ -10,6 +10,7 @@
 
 #if defined(ENABLE_RTPPROXY)
 
+#include "mw/log.h"
 #include "RawEncoder.h"
 #include "Extension/Factory.h"
 #include "Rtsp/RtspMuxer.h"
@@ -25,7 +26,7 @@ RawEncoderImp::RawEncoderImp(uint32_t ssrc, uint8_t payload_type, bool send_audi
     , _ssrc(ssrc) {}
 
 RawEncoderImp::~RawEncoderImp() {
-    InfoL << this << " " << printSSRC(_ssrc);
+    MW_LOG_INFO("zlm", "{} {}", fmt::ptr(this), printSSRC(_ssrc));
 }
 
 bool RawEncoderImp::addTrack(const Track::Ptr &track) {

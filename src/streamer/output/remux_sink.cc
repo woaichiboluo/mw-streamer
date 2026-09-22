@@ -55,7 +55,6 @@ class RemuxSink::Impl final {
     if (config_.packet_queue_capacity == 0) {
       throw std::invalid_argument("RemuxSink包队列容量必须大于零");
     }
-    internal::EnsureInitialized();
     poller_ = toolkit::EventPollerPool::Instance().getPoller(false);
     network_snapshot_.target = config_.target;
   }
@@ -378,6 +377,8 @@ class RemuxSink::Impl final {
     }
   }
 
+  // Declared first so the runtime outlives the output and its Poller work.
+  internal::RuntimeUse runtime_use_;
   RemuxSink& owner_;
   const RemuxSinkConfig config_;
   toolkit::EventPoller::Ptr poller_;

@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "RtspMuxer.h"
 #include "Common/config.h"
 #include "Extension/Factory.h"
@@ -62,11 +63,11 @@ bool RtspMuxer::addTrack(const Track::Ptr &track) {
     if (_track_existed[track->getTrackType()]) {
         // rtsp不支持多个同类型track  [AUTO-TRANSLATED:87262d86]
         // RTSP does not support multiple tracks of the same type
-        WarnL << "Already add a track kind of: " << track->getTrackTypeStr() << ", ignore track: " << track->getCodecName();
+        MW_LOG_WARNING("zlm", "Already add a track kind of: {}, ignore track: {}", track->getTrackTypeStr(), track->getCodecName());
         return false;
     }
     if (!track->ready()) {
-        WarnL << track->getCodecName() << " unready!";
+        MW_LOG_WARNING("zlm", "{} unready!", track->getCodecName());
         return false;
     }
 
@@ -79,7 +80,7 @@ bool RtspMuxer::addTrack(const Track::Ptr &track) {
     // Payload type 96 and above is dynamic PT
     Sdp::Ptr sdp = track->getSdp(pt == -1 ? 96 + _index : pt);
     if (!sdp) {
-        WarnL << "Unsupported codec: " << track->getCodecName();
+        MW_LOG_WARNING("zlm", "Unsupported codec: {}", track->getCodecName());
         return false;
     }
 

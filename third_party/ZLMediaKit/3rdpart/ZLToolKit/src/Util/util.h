@@ -328,10 +328,6 @@ uint64_t getCurrentMillisecond(bool system_time = false);
  */
 uint64_t getCurrentMicrosecond(bool system_time = false);
 
-// Terminal shutdown of the cached-clock worker. Never starts or restarts it.
-// Call off the stamp thread, before unloading the library.
-void shutdownMillisecondThreadIfCreated();
-
 /**
  * 获取时间字符串
  * @param fmt 时间格式，譬如%Y-%m-%d %H:%M:%S

@@ -57,6 +57,7 @@ set(MW_STREAMER_CORE_SOURCES
 )
 
 set(MW_STREAMER_PUBLIC_DEPENDENCIES
+    mw::log
     ZLMediaKit::MediaKit
     ZLMediaKit::ToolKit
     SRT::SRT
@@ -64,7 +65,6 @@ set(MW_STREAMER_PUBLIC_DEPENDENCIES
 )
 
 set(MW_STREAMER_PRIVATE_DEPENDENCIES
-    mw::log
     fmt::fmt
     HdrHistogram::HdrHistogram
     ZLMediaKit::ext-codec
@@ -156,6 +156,7 @@ if(BUILD_SHARED AND BUILD_TESTS)
     # hidden from the shared library ABI. Reuse the production object files so
     # those tests do not require exporting private C++ symbols.
     add_library(mw_streamer_test STATIC
+        c_api.cc
         $<TARGET_OBJECTS:mw_streamer_core_objects>
     )
     target_compile_definitions(mw_streamer_test

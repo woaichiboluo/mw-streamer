@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "PusherProxy.h"
 
 using namespace toolkit;
@@ -58,7 +59,7 @@ void PusherProxy::publish(const string &dst_url) {
             strong_self->_live_ticker.resetTime();
             strong_self->_live_status = 0;
             *failed_cnt = 0;
-            InfoL << "Publish " << dst_url << " success";
+            MW_LOG_INFO("zlm", "Publish {} success", dst_url);
         } else if (src && (*failed_cnt < strong_self->_retry_count || strong_self->_retry_count < 0)) {
             // 推流失败，延时重试推送  [AUTO-TRANSLATED:92b094ae]
             // Stream failed, retry pushing with delay
@@ -83,7 +84,7 @@ void PusherProxy::publish(const string &dst_url) {
             // Update duration for the first re-push
             strong_self->_live_secs += strong_self->_live_ticker.elapsedTime() / 1000;
             strong_self->_live_ticker.resetTime();
-            TraceL << " live secs " << strong_self->_live_secs;
+            MW_LOG_TRACE("zlm", " live secs {}", strong_self->_live_secs.load());
         }
 
         auto src = strong_self->getSrc();
@@ -114,11 +115,11 @@ void PusherProxy::rePublish(const string &dst_url, int failed_cnt) {
             if (!strong_self) {
                 return false;
             }
-            WarnL << "推流重试[" << failed_cnt << "]:" << dst_url;
+            MW_LOG_WARNING("zlm", "推流重试[{}]:{}", failed_cnt, dst_url);
             try {
                 strong_self->MediaPusher::publish(dst_url);
             } catch (std::exception &e) {
-                WarnL << e.what();
+                MW_LOG_WARNING("zlm", "{}", e.what());
                 // 回调推流失败，一般是媒体注销了
                 strong_self->_on_close(SockException(Err_other, e.what()));
             }

@@ -210,7 +210,6 @@ class PlayerProxy::Impl final
        ReconnectPolicy reconnect_policy)
       : poller_(std::move(poller)), reconnect_policy_(reconnect_policy) {
     if (!poller_) {
-      internal::EnsureInitialized();
       poller_ = toolkit::EventPollerPool::Instance().getPoller();
     }
     ValidatePolicy(reconnect_policy_);
@@ -1015,6 +1014,8 @@ class PlayerProxy::Impl final
     return static_cast<std::uint64_t>(attempt_->player->getRecvTotalBytes());
   }
 
+  // Declared first so the runtime outlives every player callback and Poller.
+  internal::RuntimeUse runtime_use_;
   std::shared_ptr<toolkit::EventPoller> poller_;
   ReconnectPolicy reconnect_policy_;
   PlayerConfig config_;

@@ -11,6 +11,7 @@
 #ifndef ZLMEDIAKIT_FMP4MEDIASOURCEMUXER_H
 #define ZLMEDIAKIT_FMP4MEDIASOURCEMUXER_H
 
+#include "mw/log.h"
 #include "FMP4MediaSource.h"
 #include "Record/MP4Muxer.h"
 
@@ -30,7 +31,7 @@ public:
         try {
             MP4MuxerMemory::flush();
         } catch (std::exception &ex) {
-            WarnL << ex.what();
+            MW_LOG_WARNING("zlm", "{}", ex.what());
         }
     }
 

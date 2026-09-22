@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "mw/log.h"
 #include "MediaSink.h"
 #include "Common/config.h"
 #include "Extension/Factory.h"
@@ -20,7 +21,7 @@ namespace mediakit{
 
 bool MediaSink::addTrack(const Track::Ptr &track_in) {
     if (_only_audio && track_in->getTrackType() != TrackAudio) {
-        InfoL << "Only audio enabled, track ignored: " << track_in->getCodecName();
+        MW_LOG_INFO("zlm", "Only audio enabled, track ignored: {}", track_in->getCodecName());
         return false;
     }
     if (!_enable_audio) {
@@ -29,16 +30,16 @@ bool MediaSink::addTrack(const Track::Ptr &track_in) {
         if (track_in->getTrackType() == TrackAudio) {
             // 音频被全局忽略  [AUTO-TRANSLATED:a8134a0b]
             // Audio is globally ignored
-            InfoL << "Audio disabled, audio track ignored";
+            MW_LOG_INFO("zlm", "Audio disabled, audio track ignored");
             return false;
         }
     }
     if (_all_track_ready) {
-        WarnL << "All track is ready, add track too late: " << track_in->getCodecName();
+        MW_LOG_WARNING("zlm", "All track is ready, add track too late: {}", track_in->getCodecName());
         return false;
     }
     if (_track_map.size() >= _max_track_size) {
-        WarnL << "Max track size reached: " << _max_track_size << ", add track ignored:" << track_in->getCodecName();
+        MW_LOG_WARNING("zlm", "Max track size reached: {}, add track ignored:{}", _max_track_size, track_in->getCodecName());
         return false;
     }
     // 克隆Track，只拷贝其数据，不拷贝其数据转发关系  [AUTO-TRANSLATED:09edaa31]
@@ -47,7 +48,7 @@ bool MediaSink::addTrack(const Track::Ptr &track_in) {
     CHECK(track, "Clone track failed: ", track_in->getCodecName());
     auto index = track->getIndex();
     if (!_track_map.emplace(index, std::make_pair(track, false)).second) {
-        WarnL << "Already add a same track: " << track->getIndex() << ", codec: " << track->getCodecName();
+        MW_LOG_WARNING("zlm", "Already add a same track: {}, codec: {}", track->getIndex(), track->getCodecName());
         return false;
     }
     _ticker.resetTime();
@@ -65,7 +66,7 @@ bool MediaSink::addTrack(const Track::Ptr &track_in) {
             // 未就绪的的track，不能缓存太多的帧，否则可能内存溢出  [AUTO-TRANSLATED:23958376]
             // Unready tracks cannot cache too many frames, otherwise memory may overflow
             frame_unread.clear();
-            WarnL << "Cached frame of unready track(" << frame->getCodecName() << ") is too much, now cleared";
+            MW_LOG_WARNING("zlm", "Cached frame of unready track({}) is too much, now cleared", frame->getCodecName());
         }
         // 还有Track未就绪，先缓存之  [AUTO-TRANSLATED:f96eadfa]
         // There are still unready tracks, cache them first
@@ -125,8 +126,7 @@ void MediaSink::checkTrackIfReady() {
             if (it->second.first->getTrackType() == TrackAudio && _ticker.elapsedTime() > kWaitAudioTrackDataMS && !it->second.second) {
                 // 音频超时且完全没收到音频数据，忽略音频
                 auto index = it->second.first->getIndex();
-                WarnL << "Audio track index " << index << " codec " << it->second.first->getCodecName() << " receive no data for long "
-                      << _ticker.elapsedTime() << "ms. Ignore it!";
+                MW_LOG_WARNING("zlm", "Audio track index {} codec {} receive no data for long {}ms. Ignore it!", index, it->second.first->getCodecName(), _ticker.elapsedTime());
                 it = _track_map.erase(it);
                 _max_track_size -= 1;
                 _track_ready_callback.erase(index);
@@ -187,7 +187,7 @@ void MediaSink::addTrackCompleted() {
 
 void MediaSink::setMaxTrackCount(size_t i) {
     if (_all_track_ready) {
-        WarnL << "All track is ready, set max track count ignored";
+        MW_LOG_WARNING("zlm", "All track is ready, set max track count ignored");
         return;
     }
     _max_track_size = MAX(i, 1);
@@ -199,7 +199,7 @@ void MediaSink::emitAllTrackReady() {
         return;
     }
 
-    DebugL << "All track ready use " << _ticker.elapsedTime() << "ms";
+    MW_LOG_DEBUG("zlm", "All track ready use {}ms", _ticker.elapsedTime());
     if (!_track_ready_callback.empty()) {
         // 这是超时强制忽略未准备好的Track  [AUTO-TRANSLATED:d4f57e00]
         // This is a timeout forced ignore of unprepared Tracks
@@ -208,7 +208,7 @@ void MediaSink::emitAllTrackReady() {
         // Remove unprepared Tracks
         for (auto it = _track_map.begin(); it != _track_map.end();) {
             if (!it->second.second || !it->second.first->ready()) {
-                WarnL << "Track not ready for a long time, ignored: " << it->second.first->getCodecName();
+                MW_LOG_WARNING("zlm", "Track not ready for a long time, ignored: {}", it->second.first->getCodecName());
                 it = _track_map.erase(it);
                 continue;
             }
@@ -325,7 +325,7 @@ bool MediaSink::addMuteAudioTrack() {
     _mute_audio_maker = std::make_shared<MuteAudioMaker>();
     _mute_audio_maker->addDelegate([audio](const Frame::Ptr &frame) { return audio->inputFrame(frame); });
     onTrackReady(audio);
-    TraceL << "Mute aac track added";
+    MW_LOG_TRACE("zlm", "Mute aac track added");
     return true;
 }
 

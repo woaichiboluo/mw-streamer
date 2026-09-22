@@ -11,6 +11,7 @@
 #ifndef SRC_RTSP_RTSPMEDIASOURCE_H_
 #define SRC_RTSP_RTSPMEDIASOURCE_H_
 
+#include "mw/log.h"
 #include <mutex>
 #include <string>
 #include <memory>
@@ -61,7 +62,7 @@ public:
         try {
             flush();
         } catch (std::exception &ex) {
-            WarnL << ex.what();
+            MW_LOG_WARNING("zlm", "{}", ex.what());
         }
     }
 

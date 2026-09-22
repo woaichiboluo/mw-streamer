@@ -9,6 +9,7 @@
  */
 
 #if defined(ENABLE_RTPPROXY)
+#include "mw/log.h"
 #include "GB28181Process.h"
 #include "Extension/CommonRtp.h"
 #include "Extension/Factory.h"
@@ -81,7 +82,7 @@ bool GB28181Process::inputRtp(bool, const char *data, size_t data_len) {
         if (_rtp_receiver.size() > 2) {
             // 防止pt类型太多导致内存溢出  [AUTO-TRANSLATED:7695e49b]
             // Prevent too many pt types from causing memory overflow
-            WarnL << "Rtp payload type more than 2 types: " << _rtp_receiver.size();
+            MW_LOG_WARNING("zlm", "Rtp payload type more than 2 types: {}", _rtp_receiver.size());
         }
 
         do {
@@ -134,7 +135,7 @@ bool GB28181Process::inputRtp(bool, const char *data, size_t data_len) {
             }
 
             if (pt != Rtsp::PT_MP2T && pt != ps_pt) {
-                WarnL << "Unknown rtp payload type(" << (int)pt << "), decode it as mpeg-ps or mpeg-ts";
+                MW_LOG_WARNING("zlm", "Unknown rtp payload type({}), decode it as mpeg-ps or mpeg-ts", (int)pt);
             }
             ref = std::make_shared<RtpReceiverImp>(90000, [this](RtpPacket::Ptr rtp) { onRtpSorted(std::move(rtp)); });
             // ts或ps负载  [AUTO-TRANSLATED:3ca31480]
@@ -190,12 +191,12 @@ void GB28181Process::onRtpDecode(const Frame::Ptr &frame) {
         if (checkTS((uint8_t *)frame->data(), frame->size())) {
             // 猜测是ts负载  [AUTO-TRANSLATED:c2be3a47]
             // Guess it is a ts payload
-            InfoL << _media_info.stream << " judged to be TS";
+            MW_LOG_INFO("zlm", "{} judged to be TS", _media_info.stream);
             _decoder = DecoderImp::createDecoder(DecoderImp::decoder_ts, _interface);
         } else {
             // 猜测是ps负载  [AUTO-TRANSLATED:b7c0ff45]
             // Guess it is a ps payload
-            InfoL << _media_info.stream << " judged to be PS";
+            MW_LOG_INFO("zlm", "{} judged to be PS", _media_info.stream);
             _decoder = DecoderImp::createDecoder(DecoderImp::decoder_ps, _interface);
         }
     }

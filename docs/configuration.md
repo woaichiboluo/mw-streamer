@@ -4,9 +4,10 @@
 默认值和静态校验规则。配套的说明性配置字典见
 [`template/configuration_reference.toml`](../template/configuration_reference.toml)。
 
-说明性 TOML 用于查阅和复制字段，不表示一条可运行拓扑。实际配置仍使用
-`[log]`、`[zlm]`、`[input]` 和一个或多个 `[[sinks]]`，并通过
-`BuildPipelineFromToml()` 加载。
+说明性 TOML 用于查阅和复制字段，不表示一条可运行拓扑。实际 Pipeline 配置使用
+`[input]` 和一个或多个 `[[sinks]]`，并通过 `BuildPipelineFromToml()` 加载。
+日志和 ZLToolKit 线程池属于进程运行时，分别通过 `MwLogConfig`、`MwZlmConfig`
+传给 `mw_streamer_initialize()`。
 
 ## 通用约定
 
@@ -17,38 +18,38 @@
   为基准。直接构造 C++ 配置时，相对路径以调用方工作目录为基准。
 - 当前解析器会记录并忽略未知字段；类型错误、未知枚举、整数越界和静态配置错误
   会抛出异常。
-- `[log]` 和根级 `[zlm]` 是进程级配置，仅由 `BuildPipelineFromToml()` 应用；
-  `ParsePipelineConfigFromToml()` 返回的 `PipelineConfig` 只包含 Input 和 Sink。
+- Pipeline TOML 中出现旧的根级 `[log]` 或 `[zlm]` 会报错，避免运行时配置被静默忽略。
 
-## 日志 `[log]`
+## 进程运行时配置
 
-`[log]` 可省略。日志级别可取 `off`、`trace`、`debug`、`info`、
-`warning`、`error`、`critical`。
-模块级别先决定日志是否进入输出端，Console 和滚动文件随后按各自级别独立过滤，
-二者可以单独或同时启用。
+调用 `mw_streamer_initialize(&log_config, &zlm_config)` 前，分别使用
+`mw_log_default_config()` 和 `mw_zlm_default_config()` 填入默认值，再覆盖需要调整的
+字段。初始化会同步复制所有字符串，不保留调用方内存。
 
-| TOML 字段 | C++ 字段 | 类型 | 默认值 | 约束与说明 |
-| --- | --- | --- | --- | --- |
-| `log.modules.<module>` | `ModuleLogConfig` | string enum | `default` 模块为 `info`，其他模块为 `error` | `<module>` 是任意非空模块名；显式配置覆盖模块默认级别，设为 `off` 可关闭该模块。 |
-| `log.console.color` | `ConsoleSinkConfig::color` | bool | `true` | 是否启用彩色控制台输出。 |
-| `log.console.level` | `ConsoleSinkConfig::level` | string enum | `trace` | `off` 表示不创建控制台 Sink。 |
-| `log.rotating_file.path` | `RotatingFileSinkConfig::path` | string | `""` | 文件日志启用时必须非空。 |
-| `log.rotating_file.level` | `RotatingFileSinkConfig::level` | string enum | `off` | `off` 表示不创建滚动文件 Sink。 |
-| `log.rotating_file.max_file_size` | `RotatingFileSinkConfig::max_file_size` | integer | `10485760` | 单位为字节；文件日志启用时必须大于 0。 |
-| `log.rotating_file.max_files` | `RotatingFileSinkConfig::max_files` | integer | `5` | 文件日志启用时必须大于 0。 |
-| `log.async.enabled` | `AsyncConfig::enabled` | bool | `false` | 是否启用异步日志。 |
-| `log.async.queue_size` | `AsyncConfig::queue_size` | integer | `8192` | 异步日志启用且存在输出 Sink 时必须大于 0。 |
-| `log.async.overflow` | `AsyncConfig::overflow` | string enum | `overrun_oldest` | 可取 `block`、`overrun_oldest`。 |
+`MwLogConfig::modules` 使用分号分隔模块。裸模块名使用 `info`，也可以写成
+`ffmpeg:trace;streamer:warn;`。支持 `trace`、`debug`、`info`、`warn`、`error`、
+`critical`、`off`。未配置的 `default` 模块默认为 `info`，其他模块默认为 `error`。
 
-## ZLToolKit 运行时 `[zlm]`
+| `MwLogConfig` 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `modules` | `streamer;processor;` | 模块级别覆盖字符串。 |
+| `console_enabled` | `1` | 是否创建 Console Sink。 |
+| `console_color` | `1` | Console 是否使用颜色。 |
+| `rotating_file_enabled` | `0` | 是否创建滚动文件 Sink。 |
+| `rotating_file_path` | 空 | 文件启用时必须非空。 |
+| `rotating_file_max_size` | `10485760` | 单文件最大字节数。 |
+| `rotating_file_max_files` | `5` | 保留文件数。 |
+| `async_enabled` | `0` | 是否异步输出。 |
+| `async_queue_size` | `8192` | 异步队列容量。 |
+| `async_overflow` | `overrun_oldest` | 也可选择 `block`。 |
 
-根级 `[zlm]` 可省略，并且只在进程首次初始化时生效。
+Console 与滚动文件不再各自配置级别，均接收模块过滤后的全部日志。
 
-| TOML 字段 | C++ 字段 | 类型 | 默认值 | 约束与说明 |
-| --- | --- | --- | --- | --- |
-| `zlm.event_poller_threads` | `ZlmConfig::event_poller_threads` | integer | `0` | 非负；0 由 ZLToolKit 按硬件并发数决定。 |
-| `zlm.work_threads` | `ZlmConfig::work_threads` | integer | `0` | 非负；0 由 ZLToolKit 按硬件并发数决定。 |
-| `zlm.enable_cpu_affinity` | `ZlmConfig::enable_cpu_affinity` | bool | `true` | 同时作用于 EventPollerPool 和 WorkThreadPool。 |
+| `MwZlmConfig` 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `event_poller_threads` | `0` | 0 表示按硬件并发数决定。 |
+| `work_threads` | `0` | 0 表示按硬件并发数决定。 |
+| `enable_cpu_affinity` | `1` | 同时作用于两个线程池。 |
 
 ## Input
 

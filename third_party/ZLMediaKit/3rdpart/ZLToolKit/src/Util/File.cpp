@@ -19,7 +19,7 @@
 #include <sys/stat.h>
 #include "File.h"
 #include "util.h"
-#include "logger.h"
+#include "mw/log.h"
 #include "uv_errno.h"
 
 using namespace std;
@@ -116,7 +116,7 @@ FILE *File::create_file(const std::string &file, const std::string &mode) {
         }
         if (_access(dir.data(), 0) == -1) { //access函数是查看是不是存在
             if (mkdir(dir.data(), 0777) == -1) {  //如果不存在就用mkdir函数来创建
-                TraceL << "mkdir " << dir << " failed: " << get_uv_errmsg();
+                MW_LOG_TRACE("zlm", "mkdir {} failed: {}", dir, get_uv_errmsg());
             }
         }
     }
@@ -138,7 +138,7 @@ bool File::create_path(const std::string &file, unsigned int mod) {
         }
         if (_access(dir.data(), 0) == -1) { //access函数是查看是不是存在
             if (mkdir(dir.data(), mod) == -1) {  //如果不存在就用mkdir函数来创建
-                WarnL << "mkdir " << dir << " failed: " << get_uv_errmsg();
+                MW_LOG_WARNING("zlm", "mkdir {} failed: {}", dir, get_uv_errmsg());
                 return false;
             }
         }
