@@ -389,15 +389,14 @@ public:
      */
     EventPoller::Ptr getPoller(bool prefer_current_thread = true);
 
-    // Removes an instance never handed out by the shared pool and transfers
-    // its lifetime to the caller. Always leaves at least one shared instance.
+    // Moves an instance never handed out by the shared pool into the pool's
+    // exclusive collection. Always leaves at least one shared instance.
     // If only one remains, or all have been handed out, creates a new private
     // instance. No shared getter (including current-thread preference) returns
     // it afterwards. Independent calls return different live instances.
-    // Returned references belong to the owner's execution graph; explicitly
-    // sharing them with another owner forfeits exclusivity. There is no return
-    // to the pool. Releasing the last reference shuts down the private loop;
-    // release from its own callback defers destruction to a joining thread.
+    // Returned references may be shared within one owner's execution graph.
+    // There is no return to shared scheduling. The pool retains every exclusive
+    // instance so their loops are destroyed and joined with the pool.
     EventPoller::Ptr extractPoller();
 
     /**

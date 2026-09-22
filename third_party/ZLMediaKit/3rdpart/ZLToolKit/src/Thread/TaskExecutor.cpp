@@ -263,7 +263,8 @@ TaskExecutor::Ptr TaskExecutorGetterImp::extractUnusedExecutor() {
     }
     for (auto it = _threads.begin(); it != _threads.end(); ++it) {
         if (_issued_executors.count(it->get()) == 0) {
-            auto executor = std::move(*it);
+            auto executor = *it;
+            _exclusive_pollers.emplace(executor);
             _threads.erase(it);
             _thread_pos = 0;
             return executor;
@@ -273,15 +274,7 @@ TaskExecutor::Ptr TaskExecutorGetterImp::extractUnusedExecutor() {
 }
 
 TaskExecutor::Ptr TaskExecutorGetterImp::createPoller(const string &name, int priority, bool register_thread, bool enable_cpu_affinity, size_t cpu_index) {
-    EventPoller::Ptr poller(new EventPoller(name), [](EventPoller *poller) {
-        // runLoop borrows this. A last reference released by its own callback
-        // must be reclaimed elsewhere, after shutdown has joined the loop.
-        if (poller->isCurrentThread()) {
-            thread([poller]() { delete poller; }).detach();
-        } else {
-            delete poller;
-        }
-    });
+    EventPoller::Ptr poller(new EventPoller(name));
     poller->runLoop(false, register_thread);
     poller->async([cpu_index, name, priority, enable_cpu_affinity]() {
         ThreadPool::setPriority((ThreadPool::Priority)priority);
@@ -290,6 +283,13 @@ TaskExecutor::Ptr TaskExecutorGetterImp::createPoller(const string &name, int pr
             setThreadAffinity(cpu_index);
         }
     });
+    return poller;
+}
+
+TaskExecutor::Ptr TaskExecutorGetterImp::createExclusivePoller(const string &name, int priority, bool register_thread, bool enable_cpu_affinity, size_t cpu_index) {
+    auto poller = createPoller(name, priority, register_thread, enable_cpu_affinity, cpu_index);
+    lock_guard<mutex> lock(_executor_mutex);
+    _exclusive_pollers.emplace(poller);
     return poller;
 }
 

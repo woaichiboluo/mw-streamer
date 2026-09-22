@@ -545,7 +545,7 @@ EventPoller::Ptr EventPollerPool::extractPoller() {
     static atomic<size_t> next_id { 0 };
     auto id = next_id.fetch_add(1);
     auto cpus = max<size_t>(1, thread::hardware_concurrency());
-    return static_pointer_cast<EventPoller>(createPoller("exclusive poller " + to_string(id), ThreadPool::PRIORITY_HIGHEST, true, s_enable_cpu_affinity.load(), id % cpus));
+    return static_pointer_cast<EventPoller>(createExclusivePoller("exclusive poller " + to_string(id), ThreadPool::PRIORITY_HIGHEST, true, s_enable_cpu_affinity.load(), id % cpus));
 }
 
 void EventPollerPool::preferCurrentThread(bool flag) {

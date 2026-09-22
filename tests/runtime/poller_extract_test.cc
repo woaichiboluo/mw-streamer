@@ -44,29 +44,24 @@ class ReleaseGate final {
   std::shared_future<void> future_;
 };
 
-struct ThreadExitSignal {
-  explicit ThreadExitSignal(std::shared_ptr<std::promise<void>> signal)
-      : signal(std::move(signal)) {}
-  ~ThreadExitSignal() { signal->set_value(); }
-  std::shared_ptr<std::promise<void>> signal;
-};
-
-// A thread-local destructor proves the actual loop thread exited; an expired
-// weak_ptr alone only proves the strong reference count reached zero.
-void CheckReleaseOnLoop(Poller::Ptr poller) {
-  auto exited = std::make_shared<std::promise<void>>();
-  auto future = exited->get_future();
+void CheckPoolRetainsReleaseOnLoop(Poller::Ptr poller) {
+  auto released = std::make_shared<std::promise<void>>();
+  auto future = released->get_future();
   std::weak_ptr<Poller> weak = poller;
   auto* raw = poller.get();
   raw->async(
-      [owner = std::move(poller), exited]() mutable {
-        thread_local std::unique_ptr<ThreadExitSignal> signal;
-        signal = std::make_unique<ThreadExitSignal>(exited);
+      [owner = std::move(poller), released]() mutable {
         owner.reset();
+        released->set_value();
       },
       false);
   REQUIRE(future.wait_for(5s) == std::future_status::ready);
-  CHECK(weak.expired());
+  auto retained = weak.lock();
+  REQUIRE(retained);
+  auto executed = std::make_shared<std::promise<void>>();
+  auto executed_future = executed->get_future();
+  retained->async([executed] { executed->set_value(); }, false);
+  CHECK(executed_future.wait_for(5s) == std::future_status::ready);
 }
 
 }  // namespace
@@ -211,7 +206,7 @@ TEST_CASE("Poller提取保持独占并保留可用的共享池") {
   CHECK(pool.getExecutorSize() == shared_count);
 
   // Exercise both a removed pool member (size 3) and newly allocated members.
-  CheckReleaseOnLoop(std::move(first));
-  CheckReleaseOnLoop(std::move(second));
-  CheckReleaseOnLoop(pool.extractPoller());
+  CheckPoolRetainsReleaseOnLoop(std::move(first));
+  CheckPoolRetainsReleaseOnLoop(std::move(second));
+  CheckPoolRetainsReleaseOnLoop(pool.extractPoller());
 }

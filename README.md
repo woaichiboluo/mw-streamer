@@ -91,8 +91,8 @@ ctest --test-dir build --output-on-failure
 
 当前 `mw_streamer_shutdown()` 不销毁 ZLM 的进程级线程池、SRT Reactor、毫秒时钟线程
 或日志对象，这些资源仍由 ZLM 原有的进程退出路径处理，因此该接口不能作为动态库
-卸载屏障。共享池抽取的 Poller 不再参与共享调度；其最后一个引用释放时按 ZLToolKit
-原有析构路径退出。
+卸载屏障。共享池抽取的 Poller 不再参与共享调度，由 Pool 的独占集合继续持有并在
+Pool 析构时按 ZLToolKit 原有析构路径退出。
 
 SRT 每次新建或重连发布会丢弃关键帧之前的残缺历史数据，并从包含 PAT、PMT 和随机访问点的完整 TS 关键帧批次开始发送，避免高码率流从 GOP 中段接入时无法完成接收端初始化。
 
@@ -148,8 +148,9 @@ PacketQueue 依赖 Sink 作为消费者。组件不依赖 Pipeline 的实现，F
 `EventPollerPool::extractPoller()` 从公共池移除尚未对外发放的 Poller，供调用方
 独占使用。公共池只剩一个实例，或其余实例均已对外发放时，新建独占 Poller，
 公共池始终保留至少一个实例。普通获取和遍历接口不会返回已提取的实例，即使
-从独占 Poller 的线程调用 `getPoller()` 也是如此。独占实例释放后销毁，不归还池；
-返回值沿用 ZLM 的 `EventPoller::Ptr`，调用方应仅在该输入的内部链路传递。
+从独占 Poller 的线程调用 `getPoller()` 也是如此。独占实例不归还共享调度，生命周期
+继续由 Pool 持有；返回值沿用 ZLM 的 `EventPoller::Ptr`，调用方应仅在该输入的内部
+链路传递。
 因此输入投递阻塞时，RemuxSink 所用的公共 Poller 仍可继续消费输出队列。
 
 每个接口使用专用参数结构：`StreamsReady`、`PacketReady`、`TimelineReset` 和

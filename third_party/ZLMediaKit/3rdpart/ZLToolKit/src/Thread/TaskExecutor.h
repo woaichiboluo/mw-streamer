@@ -301,6 +301,7 @@ public:
 protected:
     size_t addPoller(const std::string &name, size_t size, int priority, bool register_thread, bool enable_cpu_affinity = true);
     TaskExecutor::Ptr createPoller(const std::string &name, int priority, bool register_thread, bool enable_cpu_affinity, size_t cpu_index);
+    TaskExecutor::Ptr createExclusivePoller(const std::string &name, int priority, bool register_thread, bool enable_cpu_affinity, size_t cpu_index);
     TaskExecutor::Ptr getFirstExecutor();
     TaskExecutor::Ptr getSharedExecutor(const TaskExecutor::Ptr &executor);
     // Only an executor never exposed by a public getter can become exclusive.
@@ -313,6 +314,7 @@ protected:
     std::unordered_set<const TaskExecutor *> _issued_executors;
     size_t _thread_pos = 0;
     std::vector<TaskExecutor::Ptr> _threads;
+    std::unordered_set<TaskExecutor::Ptr> _exclusive_pollers;
 };
 
 }//toolkit
