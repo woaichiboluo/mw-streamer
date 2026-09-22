@@ -300,7 +300,7 @@ TEST_CASE("concurrent ZLM logs go directly to the mw backend", "[logging]") {
     mw::log::Logging logging(config.view());
     std::vector<std::thread> threads;
     for (int index = 0; index < kThreads; ++index) {
-      threads.emplace_back([] {
+      threads.emplace_back([kMessages] {
         for (int message = 0; message < kMessages; ++message) {
           MW_LOG_INFO("zlm", "concurrent zlm message");
         }
