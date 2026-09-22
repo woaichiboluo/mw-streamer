@@ -12,6 +12,7 @@
 #include "mw/streamer/processor/processor.h"
 #include "mw/streamer/sink/frame_custom_sink.h"
 #include "mw/streamer/sink/packet_custom_sink.h"
+#include "mw/streamer/sink/sink_message.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -215,6 +216,16 @@ MW_STREAMER_API MwResult mw_pipeline_create_from_toml(
 // A Pipeline permits one start attempt. Synchronous failures are returned;
 // later failures are reported by state and error queries.
 MW_STREAMER_API MwResult mw_pipeline_start(MwPipeline* pipeline);
+
+// Asynchronously submits a message to one sink. The Pipeline copies the
+// target ID, message type and payload before returning. Safe during Start and
+// Stop and from sink or Processor callbacks. Calls after submission closes
+// return success and are ignored by the Pipeline. While submission is open,
+// an unknown target or invalid message returns kMwResultInvalidArgument.
+// Destruction must not race with this call.
+MW_STREAMER_API MwResult
+mw_pipeline_submit_message(MwPipeline* pipeline, const char* target_sink_id,
+                           const MwStreamerMessage* message);
 
 // Idempotently stops the Pipeline and waits for in-flight callbacks. Do not
 // call from an input, sink or Processor callback.

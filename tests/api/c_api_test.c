@@ -118,6 +118,8 @@ int main(void) {
   }
 
   if (Check(mw_pipeline_start(NULL) == kMwResultInvalidArgument) ||
+      Check(mw_pipeline_submit_message(NULL, "sink", NULL) ==
+            kMwResultInvalidArgument) ||
       Check(mw_pipeline_get_state(NULL, NULL) == kMwResultInvalidArgument) ||
       Check(mw_pipeline_get_performance(NULL, NULL) ==
             kMwResultInvalidArgument)) {

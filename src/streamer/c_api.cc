@@ -357,6 +357,18 @@ MwResult mw_pipeline_start(MwPipeline* pipeline) {
   });
 }
 
+MwResult mw_pipeline_submit_message(MwPipeline* pipeline,
+                                    const char* target_sink_id,
+                                    const MwStreamerMessage* message) {
+  return Guard([&] {
+    if (pipeline == nullptr || target_sink_id == nullptr ||
+        message == nullptr) {
+      throw std::invalid_argument("Pipeline消息参数不能为空");
+    }
+    pipeline->pipeline->SubmitMessage(target_sink_id, *message);
+  });
+}
+
 void mw_pipeline_stop(MwPipeline* pipeline) {
   try {
     ClearError();

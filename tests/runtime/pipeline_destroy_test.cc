@@ -157,6 +157,15 @@ int main(int argc, char** argv) {
       if (pipeline == nullptr) {
         throw std::runtime_error("pipeline create returned null");
       }
+      const MwStreamerMessage message{"test"};
+      if (mw_pipeline_submit_message(pipeline, nullptr, &message) !=
+              kMwResultInvalidArgument ||
+          mw_pipeline_submit_message(pipeline, "record", nullptr) !=
+              kMwResultInvalidArgument) {
+        throw std::runtime_error("invalid message arguments were accepted");
+      }
+      Check(mw_pipeline_submit_message(pipeline, "record", &message),
+            "message submit before start failed");
       mw_streamer_shutdown();
       const auto shutdown_error = std::string(mw_last_error());
       if (!mw_streamer_is_initialized() || shutdown_error.empty()) {
@@ -165,6 +174,12 @@ int main(int argc, char** argv) {
       }
       if (mode == "start" || mode == "network" || mode == "srt") {
         Check(mw_pipeline_start(pipeline), "pipeline start failed");
+        Check(mw_pipeline_submit_message(pipeline, "record", &message),
+              "message submit while running failed");
+        if (mw_pipeline_submit_message(pipeline, "missing", &message) !=
+            kMwResultInvalidArgument) {
+          throw std::runtime_error("unknown message target was accepted");
+        }
         mw_pipeline_stop(pipeline);
       }
       std::cout << "destroy begin: " << iteration << std::endl;
