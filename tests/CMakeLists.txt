@@ -28,6 +28,8 @@ foreach(target IN ITEMS
     mw_sink_message_tests
     mw_input_player_proxy_tests
     mw_pipeline_input_tests
+    mw_file_player_tests
+    mw_srt_demuxer_tests
     mw_opencv_adapter_frame_tests)
     if(TARGET ${target})
         target_sources(${target} PRIVATE support/runtime_environment.cc)

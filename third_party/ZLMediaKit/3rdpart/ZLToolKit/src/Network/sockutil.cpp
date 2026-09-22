@@ -18,19 +18,14 @@
 #include "Util/util.h"
 #include "mw/log.h"
 #include "Util/uv_errno.h"
-#include "Util/onceToken.h"
 using namespace std;
 
 namespace toolkit {
 
 #if defined(_WIN32)
-static onceToken g_token([]() {
-    WORD wVersionRequested = MAKEWORD(2, 2);
-    WSADATA wsaData;
-    WSAStartup(wVersionRequested, &wsaData);
-}, []() {
-    WSACleanup();
-});
+static mutex s_winsock_mutex;
+static bool s_winsock_initialized = false;
+
 int ioctl(int fd, long cmd, u_long *ptr) {
     return ioctlsocket(fd, cmd, ptr);
 }
@@ -327,6 +322,11 @@ public:
         }
     }
 
+    void clear() {
+        lock_guard<mutex> lck(_mtx);
+        _dns_cache.clear();
+    }
+
 private:
     class DnsItem {
     public:
@@ -390,6 +390,41 @@ private:
     mutex _mtx;
     unordered_map<string, DnsItem> _dns_cache;
 };
+
+int SockUtil::initialize() {
+#if defined(_WIN32)
+    lock_guard<mutex> lck(s_winsock_mutex);
+    if (s_winsock_initialized) {
+        return 0;
+    }
+    WSADATA wsa_data;
+    auto result = WSAStartup(MAKEWORD(2, 2), &wsa_data);
+    if (result != 0) {
+        return result;
+    }
+    if (LOBYTE(wsa_data.wVersion) != 2 || HIBYTE(wsa_data.wVersion) != 2) {
+        WSACleanup();
+        return WSAVERNOTSUPPORTED;
+    }
+    s_winsock_initialized = true;
+#endif
+    return 0;
+}
+
+int SockUtil::release() {
+    DnsCache::Instance().clear();
+#if defined(_WIN32)
+    lock_guard<mutex> lck(s_winsock_mutex);
+    if (!s_winsock_initialized) {
+        return 0;
+    }
+    if (WSACleanup() == SOCKET_ERROR) {
+        return WSAGetLastError();
+    }
+    s_winsock_initialized = false;
+#endif
+    return 0;
+}
 
 bool SockUtil::getDomainIP(const char *host, uint16_t port, struct sockaddr_storage &addr,
                            int ai_family, int ai_socktype, int ai_protocol, int expire_sec) {

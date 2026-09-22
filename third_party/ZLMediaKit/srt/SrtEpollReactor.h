@@ -34,7 +34,7 @@ public:
 
     static SrtEpollReactor &Instance();
     static bool isCreated() noexcept;
-    static void shutdownIfCreated();
+    static void release();
 
     /**
      * Register a socket and its interested epoll events.

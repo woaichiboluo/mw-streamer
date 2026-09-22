@@ -89,10 +89,10 @@ ctest --test-dir build --output-on-failure
 此后同进程不再支持再次初始化。初始化前调用关闭不会改变状态。普通 Pipeline 的
 反复创建、启动、停止、销毁不触发全局运行时关闭。
 
-当前 `mw_streamer_shutdown()` 不销毁 ZLM 的进程级线程池、SRT Reactor、毫秒时钟线程
-或日志对象，这些资源仍由 ZLM 原有的进程退出路径处理，因此该接口不能作为动态库
-卸载屏障。共享池抽取的 Poller 不再参与共享调度，由 Pool 的独占集合继续持有并在
-Pool 析构时按 ZLToolKit 原有析构路径退出。
+`mw_streamer_shutdown()` 依次释放 SRT Reactor、WorkThreadPool 和 EventPollerPool；
+共享池抽取的 Poller 由 Pool 的独占集合统一持有，并与普通 Poller 一样通过 ZLToolKit
+原有析构路径退出和等待线程结束。Windows 下随后清理 WinSock。毫秒时钟线程和日志
+对象仍保持进程级生命周期，因此该接口不能作为动态库卸载屏障。
 
 SRT 每次新建或重连发布会丢弃关键帧之前的残缺历史数据，并从包含 PAT、PMT 和随机访问点的完整 TS 关键帧批次开始发送，避免高码率流从 GOP 中段接入时无法完成接收端初始化。
 

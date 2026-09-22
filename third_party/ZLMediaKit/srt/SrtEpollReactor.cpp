@@ -251,7 +251,7 @@ bool SrtEpollReactor::isCreated() noexcept {
     return g_reactor_instance.load(std::memory_order_acquire) != nullptr;
 }
 
-void SrtEpollReactor::shutdownIfCreated() {
+void SrtEpollReactor::release() {
     auto *instance = g_reactor_instance.load(std::memory_order_acquire);
     if (instance) {
         instance->shutdown();

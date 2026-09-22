@@ -349,6 +349,10 @@ public:
      */
     static EventPollerPool &Instance();
 
+    // Releases all pollers if the singleton has been created. The singleton
+    // itself remains alive and empty until process exit.
+    static void releasePool();
+
     /**
      * 设置EventPoller个数，在EventPollerPool单例创建前有效
      * 在不调用此方法的情况下，默认创建thread::hardware_concurrency()个EventPoller实例

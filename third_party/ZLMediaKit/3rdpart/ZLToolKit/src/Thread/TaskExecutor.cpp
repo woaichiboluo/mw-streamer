@@ -229,6 +229,20 @@ size_t TaskExecutorGetterImp::getExecutorSize() const {
     return _threads.size();
 }
 
+void TaskExecutorGetterImp::releaseAllPollers() {
+    vector<TaskExecutor::Ptr> threads;
+    unordered_set<TaskExecutor::Ptr> exclusive_pollers;
+    {
+        lock_guard<mutex> lock(_executor_mutex);
+        threads.swap(_threads);
+        exclusive_pollers.swap(_exclusive_pollers);
+        _issued_executors.clear();
+        _thread_pos = 0;
+    }
+    exclusive_pollers.clear();
+    threads.clear();
+}
+
 TaskExecutor::Ptr TaskExecutorGetterImp::getFirstExecutor() {
     lock_guard<mutex> lock(_executor_mutex);
     if (_threads.empty()) {

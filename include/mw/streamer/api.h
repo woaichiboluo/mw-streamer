@@ -198,11 +198,12 @@ MW_STREAMER_API bool mw_streamer_initialize(const MwLogConfig* log_config,
 MW_STREAMER_API bool mw_streamer_is_initialized(void);
 
 // Permanently closes this library runtime to new media objects after every
-// Pipeline and standalone media object has been destroyed. Process-wide ZLM
-// workers and logging remain alive until process teardown; this function is
-// therefore not a dynamic-library unload barrier. Calling before initialization
-// or after successful shutdown is harmless. A rejected shutdown leaves the
-// runtime initialized and records mw_last_error.
+// Pipeline and standalone media object has been destroyed. This releases SRT
+// and ZLM worker threads and, on Windows, the WinSock runtime. Logging remains
+// alive until process teardown, so this is not a dynamic-library unload
+// barrier. Calling before initialization or after successful shutdown is
+// harmless. A rejected shutdown leaves the runtime initialized and records
+// mw_last_error.
 MW_STREAMER_API void mw_streamer_shutdown(void);
 
 // Loads TOML, copies callback tables into the corresponding node maps and

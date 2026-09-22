@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "Network/sockutil.h"
 #include "Poller/EventPoller.h"
 
 #ifdef CHECK
@@ -67,6 +68,7 @@ void CheckPoolRetainsReleaseOnLoop(Poller::Ptr poller) {
 }  // namespace
 
 TEST_CASE("Poller提取保持独占并保留可用的共享池") {
+  REQUIRE(toolkit::SockUtil::initialize() == 0);
   auto& pool = Pool();
   REQUIRE(pool.getExecutorSize() == MW_POLLER_TEST_POOL_SIZE);
   auto first = pool.extractPoller();
@@ -209,4 +211,20 @@ TEST_CASE("Poller提取保持独占并保留可用的共享池") {
   CheckPoolRetainsReleaseOnLoop(std::move(first));
   CheckPoolRetainsReleaseOnLoop(std::move(second));
   CheckPoolRetainsReleaseOnLoop(pool.extractPoller());
+
+  std::vector<std::weak_ptr<Poller>> released;
+  released.emplace_back(callback_exclusive);
+  for (const auto& poller : reentrant) released.emplace_back(poller);
+  for (const auto& group : extracted) {
+    for (const auto& poller : group) released.emplace_back(poller);
+  }
+  callback_exclusive.reset();
+  reentrant.clear();
+  for (auto& group : extracted) group.clear();
+
+  toolkit::EventPollerPool::releasePool();
+  CHECK(pool.getExecutorSize() == 0);
+  for (const auto& poller : released) CHECK(poller.expired());
+  CHECK_THROWS_AS(pool.getPoller(), std::logic_error);
+  CHECK(toolkit::SockUtil::release() == 0);
 }

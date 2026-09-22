@@ -2,11 +2,15 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <string>
 
+#include "Network/sockutil.h"
+#include "Poller/EventPoller.h"
 #include "Thread/WorkThreadPool.h"
 #include "mw/log.h"
 #include "mw/streamer/init/internal/runtime.h"
 #include "mw/streamer/log/internal/third_party_log_bridge.h"
+#include "srt/SrtEpollReactor.h"
 
 namespace mw::streamer::internal {
 namespace {
@@ -54,12 +58,19 @@ class Initializer final {
     if (log_result != kMwLogSuccess) {
       throw std::invalid_argument(LogInitializationError(log_result));
     }
+    const auto network_result = toolkit::SockUtil::initialize();
+    if (network_result != 0) {
+      mw_log_shutdown();
+      throw std::runtime_error("failed to initialize WinSock: " +
+                               std::to_string(network_result));
+    }
     try {
       ConfigureZlmThreadPools(*zlm_config);
       log_bridge_.emplace();
       state_ = State::kOpen;
     } catch (...) {
       log_bridge_.reset();
+      toolkit::SockUtil::release();
       mw_log_shutdown();
       throw;
     }
@@ -96,10 +107,20 @@ class Initializer final {
       }
       state_ = State::kClosing;
     }
-    // ZLM owns process-lifetime worker threads again. Keep the logger and
-    // third-party callbacks alive until process teardown so those workers
-    // cannot race with logging destruction.
-    FinishShutdown(State::kClosed);
+    try {
+      mediakit::SrtEpollReactor::release();
+      toolkit::WorkThreadPool::releasePool();
+      toolkit::EventPollerPool::releasePool();
+      const auto network_result = toolkit::SockUtil::release();
+      if (network_result != 0) {
+        throw std::runtime_error("failed to release WinSock: " +
+                                 std::to_string(network_result));
+      }
+      FinishShutdown(State::kClosed);
+    } catch (...) {
+      FinishShutdown(State::kFailed);
+      throw;
+    }
   }
 
  private:

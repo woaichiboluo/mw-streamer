@@ -298,6 +298,12 @@ public:
      */
     size_t getExecutorSize() const override;
 
+    /**
+     * Release all shared and exclusive pollers held by this pool.
+     * Pollers are destroyed after the collection lock is released.
+     */
+    void releaseAllPollers();
+
 protected:
     size_t addPoller(const std::string &name, size_t size, int priority, bool register_thread, bool enable_cpu_affinity = true);
     TaskExecutor::Ptr createPoller(const std::string &name, int priority, bool register_thread, bool enable_cpu_affinity, size_t cpu_index);

@@ -2,6 +2,7 @@
 #include <utility>
 #include <vector>
 
+#include "Network/sockutil.h"
 #include "Poller/EventPoller.h"
 #include "Util/RingBuffer.h"
 
@@ -104,6 +105,7 @@ TEST_CASE("清空缓存不会恢复已淘汰的启动音频", "[startup_ring]") 
 
 TEST_CASE("延迟挂接的推流读者无遗漏无重复接收启动缓存和实时包",
           "[startup_ring]") {
+  REQUIRE(toolkit::SockUtil::initialize() == 0);
   toolkit::EventPollerPool::setPoolSize(1);
   toolkit::EventPollerPool::enableCpuAffinity(false);
   auto poller = toolkit::EventPollerPool::Instance().getPoller();
@@ -132,6 +134,10 @@ TEST_CASE("延迟挂接的推流读者无遗漏无重复接收启动缓存和实
   });
   CHECK(received == std::vector<int>{0, 1, 2, 3, 4, 5, 6, 7, 8});
   CHECK(late_received == std::vector<int>{7, 8});
+  reader.reset();
   ring.reset();
   poller->sync([] {});
+  poller.reset();
+  toolkit::EventPollerPool::releasePool();
+  CHECK(toolkit::SockUtil::release() == 0);
 }

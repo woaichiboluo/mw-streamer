@@ -50,9 +50,7 @@ target_compile_definitions(mw_pipeline_destroy_tests PRIVATE
     MW_RUNTIME_TEST_DATA_DIR="${MW_STREAMER_TEST_DATA_DIR}")
 add_test(NAME mw_pipeline_create_destroy COMMAND mw_pipeline_destroy_tests)
 set_tests_properties(mw_pipeline_create_destroy PROPERTIES TIMEOUT 30)
-# RTSP process teardown remains outside the runtime shutdown contract until the
-# ZLM static destruction order is redesigned.
-foreach(mode IN ITEMS uninitialized cold start srt race failed_build)
+foreach(mode IN ITEMS uninitialized cold start network srt race failed_build)
     add_test(NAME mw_runtime_shutdown_${mode}
         COMMAND mw_pipeline_destroy_tests ${mode})
     set_tests_properties(mw_runtime_shutdown_${mode} PROPERTIES TIMEOUT 30)

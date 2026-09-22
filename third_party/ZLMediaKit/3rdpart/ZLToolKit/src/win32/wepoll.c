@@ -732,7 +732,6 @@ int err_check_handle(HANDLE handle) {
 #define inline __inline
 #endif
 
-WEPOLL_INTERNAL int ws_global_init(void);
 WEPOLL_INTERNAL SOCKET ws_get_base_socket(SOCKET socket);
 
 static bool init__done = false;
@@ -744,7 +743,7 @@ static BOOL CALLBACK init__once_callback(INIT_ONCE *once, void *parameter, void 
     unused_var(context);
 
     /* N.b. that initialization order matters here. */
-    if (ws_global_init() < 0 || nt_global_init() < 0 || reflock_global_init() < 0 || epoll_global_init() < 0)
+    if (nt_global_init() < 0 || reflock_global_init() < 0 || epoll_global_init() < 0)
         return FALSE;
 
     init__done = true;
@@ -2005,17 +2004,6 @@ tree_node_t *tree_root(const tree_t *tree) {
 #ifndef SIO_BASE_HANDLE
 #define SIO_BASE_HANDLE 0x48000022
 #endif
-
-int ws_global_init(void) {
-    int r;
-    WSADATA wsa_data;
-
-    r = WSAStartup(MAKEWORD(2, 2), &wsa_data);
-    if (r != 0)
-        return_set_error(-1, (DWORD)r);
-
-    return 0;
-}
 
 static inline SOCKET ws__ioctl_get_bsp_socket(SOCKET socket, DWORD ioctl) {
     SOCKET bsp_socket;

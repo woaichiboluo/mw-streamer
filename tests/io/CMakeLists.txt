@@ -13,6 +13,7 @@ target_link_libraries(mw_file_player_tests
         ZLMediaKit::MediaKit
         ZLMediaKit::SRT
         ZLMediaKit::ext-codec
+        mw::streamer_test
 )
 
 add_test(NAME mw_file_player_tests COMMAND mw_file_player_tests)
@@ -24,6 +25,7 @@ target_link_libraries(mw_srt_demuxer_tests
         Catch2::Catch2WithMain
         ZLMediaKit::MediaKit
         ZLMediaKit::ext-codec
+        mw::streamer_test
 )
 
 add_test(NAME mw_srt_demuxer_tests COMMAND mw_srt_demuxer_tests)

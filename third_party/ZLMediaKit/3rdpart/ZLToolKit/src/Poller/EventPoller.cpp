@@ -521,8 +521,20 @@ EventPoller::DelayTask::Ptr EventPoller::doDelayTask(uint64_t delay_ms, function
 
 static size_t s_pool_size = 0;
 static atomic<bool> s_enable_cpu_affinity { true };
+static atomic<EventPollerPool *> s_event_poller_pool { nullptr };
 
-INSTANCE_IMP(EventPollerPool)
+EventPollerPool &EventPollerPool::Instance() {
+    static shared_ptr<EventPollerPool> instance(new EventPollerPool);
+    s_event_poller_pool.store(instance.get(), memory_order_release);
+    return *instance;
+}
+
+void EventPollerPool::releasePool() {
+    auto instance = s_event_poller_pool.load(memory_order_acquire);
+    if (instance) {
+        instance->releaseAllPollers();
+    }
+}
 
 EventPoller::Ptr EventPollerPool::getFirstPoller() {
     return static_pointer_cast<EventPoller>(getFirstExecutor());

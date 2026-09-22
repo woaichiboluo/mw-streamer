@@ -62,6 +62,11 @@ int close(int fd);
 //Socket tool class, encapsulating some basic socket and network operations
 class SockUtil {
 public:
+    // Initializes and releases the process network runtime. On Windows these
+    // functions own the matching WSAStartup/WSACleanup pair.
+    static int initialize();
+    static int release();
+
     struct SockAddrHash {
         std::size_t operator()(const sockaddr_storage& addr) const {
             switch (addr.ss_family) {
