@@ -60,18 +60,18 @@ void CopyViewToFrame(const MwStreamerVideoFrameView& source,
     const auto* source_base =
         reinterpret_cast<const std::uint8_t*>(plane.address);
     for (std::uint32_t row = 0; row < plane.row_count; ++row) {
-      std::memcpy(destination.data[index] +
-                      static_cast<std::ptrdiff_t>(row) *
-                          destination.linesize[index],
-                  source_base + static_cast<std::ptrdiff_t>(row) *
-                                    plane.stride_bytes,
-                  plane.row_bytes);
+      std::memcpy(
+          destination.data[index] +
+              static_cast<std::ptrdiff_t>(row) * destination.linesize[index],
+          source_base + static_cast<std::ptrdiff_t>(row) * plane.stride_bytes,
+          plane.row_bytes);
     }
   }
 }
 
 void CopyMatToFrame(const cv::Mat& source, AVFrame& destination) {
-  const auto row_bytes = static_cast<std::size_t>(source.cols) * source.elemSize();
+  const auto row_bytes =
+      static_cast<std::size_t>(source.cols) * source.elemSize();
   for (int row = 0; row < source.rows; ++row) {
     std::memcpy(destination.data[0] +
                     static_cast<std::ptrdiff_t>(row) * destination.linesize[0],
@@ -86,10 +86,10 @@ void CopyFrameToView(const AVFrame& source,
     const auto& plane = linear.planes[index];
     auto* destination_base = reinterpret_cast<std::uint8_t*>(plane.address);
     for (std::uint32_t row = 0; row < plane.row_count; ++row) {
-      std::memcpy(destination_base + static_cast<std::ptrdiff_t>(row) *
-                                         plane.stride_bytes,
-                  source.data[index] + static_cast<std::ptrdiff_t>(row) *
-                                           source.linesize[index],
+      std::memcpy(destination_base +
+                      static_cast<std::ptrdiff_t>(row) * plane.stride_bytes,
+                  source.data[index] +
+                      static_cast<std::ptrdiff_t>(row) * source.linesize[index],
                   plane.row_bytes);
     }
   }
@@ -258,8 +258,7 @@ cv::Mat HostMatAdapter::ToBgr(const MwStreamerVideoFrameView& source) {
   std::unique_ptr<HostFrame> host_source;
   const MwStreamerVideoFrameView* source_view = &source;
   if (source.buffer.memory_type == kMwStreamerMemoryCuda) {
-    host_source =
-        std::make_unique<HostFrame>(HostFrame::CopyFrom(source));
+    host_source = std::make_unique<HostFrame>(HostFrame::CopyFrom(source));
     source_view = &host_source->view();
   }
 
@@ -276,8 +275,7 @@ cv::Mat HostMatAdapter::ToBgr(const MwStreamerVideoFrameView& source) {
                              GetRange(source.color.range), 1);
   CheckConvertedRows(
       sws_scale(context.get(), source_data.data(), source_frame->linesize, 0,
-                height, destination_frame->data,
-                destination_frame->linesize),
+                height, destination_frame->data, destination_frame->linesize),
       source.buffer.height);
   return cv::Mat(height, width, format.mat_type, destination_frame->data[0],
                  static_cast<std::size_t>(destination_frame->linesize[0]))

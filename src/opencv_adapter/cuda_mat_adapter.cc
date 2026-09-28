@@ -764,8 +764,8 @@ CudaFrame CudaMatAdapter::FromBgr(const cv::cuda::GpuMat& source,
   ValidateGpuMat(source, prototype, format);
   auto destination = CudaFrame::AllocateLike(prototype);
   auto& destination_view = destination.mutable_view();
-  const CUcontext destination_context = GetPointerContext(
-      reinterpret_cast<const void*>(
+  const CUcontext destination_context =
+      GetPointerContext(reinterpret_cast<const void*>(
           destination_view.buffer.storage.linear.planes[0].address));
   ScopedCudaContext context(destination_context);
   const cv::cuda::GpuMat prepared_source =

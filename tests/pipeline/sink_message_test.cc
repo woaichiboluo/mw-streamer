@@ -517,7 +517,7 @@ TEST_CASE("Pipeline消息投递不受旧256条容量限制") {
   for (int index = 0; index < 1024; ++index) {
     const std::string payload = std::to_string(index);
     graph.pipeline.SubmitMessage("receiver",
-                               {"queued", payload.data(), payload.size()});
+                                 {"queued", payload.data(), payload.size()});
   }
   release.Release();
   const bool delivered = state.WaitMessages(1025);
