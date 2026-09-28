@@ -106,3 +106,15 @@ target_link_libraries(mw_file_input_tests PRIVATE
     mw::streamer_test)
 
 add_test(NAME mw_file_input_tests COMMAND mw_file_input_tests)
+
+add_executable(mw_rtsp_server_tests rtsp_server_test.cc)
+target_link_libraries(mw_rtsp_server_tests PRIVATE
+    Catch2::Catch2WithMain
+    ZLMediaKit::MediaKit
+    ZLMediaKit::ext-codec
+    ZLMediaKit::ToolKit
+    mw::streamer_test)
+if(WIN32)
+    target_link_libraries(mw_rtsp_server_tests PRIVATE ws2_32)
+endif()
+add_test(NAME mw_rtsp_server_tests COMMAND mw_rtsp_server_tests)

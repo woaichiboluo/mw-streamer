@@ -207,6 +207,10 @@ public:
     // Not a server-wide setting; normal live GOP replacement remains unchanged.
     bool preserve_startup_packets = false;
 
+    // Programmatic RTSP output option: preserve the shared 64-bit source
+    // timeline when mapping RTP packets to NTP across live tracks.
+    bool rtsp_ntp_from_source_stamp = false;
+
     // 转协议是否开启音频  [AUTO-TRANSLATED:220dddfa]
     // Whether to enable audio for protocol conversion
     bool enable_audio;

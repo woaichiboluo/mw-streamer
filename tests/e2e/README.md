@@ -20,21 +20,23 @@
 - 同步后的 Frame 同时交给本地观察 Sink 和 EncoderSink，编码目标覆盖 FILE、RTMP、
   RTSP、SRT；
 - Input 连接多个独立 RemuxSink，将源压缩流同时转推并录制为本地 MP4；
+- 两路 RtspPublishSink 共用业务进程中的 RTSP 监听，并由三个 FFmpeg 客户端从两个发布地址同时拉流；
+- 从本地 RTSP 发布地址拉取 H.264/H.265 音画标记媒体，分别验证编码包直通和同步编码链路的 40ms 音画同步边界；
 - 原流 Remux 旁路与解码、处理、同步、编码链路同时运行；
 - FileInput 全速读取本地文件，经 DecoderSink 和 AnalysisProcessorSink 验证自然 EOF、
   音视频计数及 Processor 生命周期；
 - 多推过程中单个输出故障后的隔离和恢复。
 - H.264/H.265 专用白闪与音频脉冲媒体的内容级音画同步；
-- FILE、RTMP、RTSP、SRT 输入到 FILE、RTMP、RTSP、SRT 输出的完整同步矩阵；每种输入在一次 Pipeline 中同时输出四种目标，每组连续运行 5 分钟；
+- FILE、RTMP、RTSP、SRT 输入到 FILE、RTMP、RTSP 推流、SRT 和本地 RTSP 发布的完整同步矩阵；每种输入在一次 Pipeline 中同时输出五种目标，每组连续运行 5 分钟；
 - 四种输入在视频偶发阻塞 100～200ms 时的同步边界；
 - 断线备播恢复后的同步边界。
 
 同步测试确定性生成 330 秒专用媒体。所有输出统一忽略前 15 秒起播阶段，之后对
 完整稳定窗口中的每组内容标记检查绝对音画偏差，声音领先或滞后均不得超过 40ms，
 不进行起播偏移归一化。五分钟长稳矩阵共执行 H.264/H.265 × 四种输入 8 组，
-每组同时检查 FILE、RTMP、RTSP、SRT 四份输出，串行运行约 40 分钟。
-RTMP、SRT 输出由对应协议的独立 MediaMTX sink 在入站侧直接录制；RTSP 输出由
-FFmpeg 的 RTSP RECORD 监听端直接录制，避免 MediaMTX 默认按音视频首包到达时间
+每组同时检查 FILE、RTMP、RTSP 推流、SRT 和本地 RTSP 发布五份输出，串行运行约 40 分钟。
+RTMP、SRT 输出由对应协议的独立 MediaMTX sink 在入站侧直接录制；RTSP 推流输出由
+FFmpeg 的 RTSP RECORD 监听端直接录制，本地 RTSP 发布由 FFmpeg 客户端拉流录制，避免 MediaMTX 默认按音视频首包到达时间
 分别重建 NTP 后引入固定起播偏移。宿主机系统时钟调整可能使 MediaMTX 自动切分
 录像，测试会无损拼接全部分段，并且只在完整录像开头忽略一次 15 秒。
 
@@ -102,13 +104,18 @@ python3 -m venv .cache/e2e-venv
   --e2e-runner build/tests/e2e/mw_streamer_e2e_runner
 ```
 
-运行器的 `--scenario streaming|remux|file` 只选择测试链路：
+运行器的 `--scenario streaming|remux|rtsp_publish|file` 只选择测试链路：
 
 - `streaming`：ZlmInput → DecoderSink → TransformProcessorSink →
   SynchronizerSink → EncoderSink → 每个输出目标各自的 RemuxSink。本地观察 Sink
   接在 SynchronizerSink 后；原流输出直接接在 Input 后。没有处理后输出和本地观察
   Sink 时，使用 AnalysisProcessorSink，避免创建无消费者的编码节点。
 - `remux`：ZlmInput → 每个输出目标各自的 RemuxSink，至少需要一个目标。
+- `rtsp_publish`：ZlmInput → 每个 `--rtsp-publish app/stream` 各自的
+  RtspPublishSink；`--rtsp-port` 指定共享的本地监听端口。测试先确认没有输入轨道时
+  端口尚未监听，再通过真实 FFmpeg 客户端验证两个地址及同一路多客户端拉流。
+- `streaming` 也支持 `--rtsp-publish app/stream` 和 `--rtsp-port`，把
+  RtspPublishSink 接到 EncoderSink 后，用于验证完整同步编码链路的 RTSP 拉流。
 - `file`：FileInput → 软件 DecoderSink → AnalysisProcessorSink。FileInput 通过
   FFmpeg 全速读取文件，解码队列有界等待，不主动丢包；保留 Skip Samples 等
   packet side data，两份 AAC 样本精确验证 94 帧、96256 个音频样本。
@@ -133,7 +140,8 @@ SynchronizerSink 自带实时调度和备播，不再使用旧 `--standby` 开�
 
 Bench 分别选择媒体目录中像素数最小的 H.264 和 H.265 真实视频。每种编码分别
 通过 FILE、RTSP、RTMP、SRT 输入，并在一次 Pipeline 编码后同时推送 RTSP、
-RTMP、SRT。每组持续 10 分钟，共 8 组，串行执行约 80 分钟。网络输入通过
+RTMP、SRT，且通过本地 RTSP Server 发布一路供客户端拉流。每组持续 10 分钟，
+共 8 组，串行执行约 80 分钟。网络输入通过
 FFmpeg 循环发布；FILE 输入则在用例开始前通过压缩包复制生成约 11 分钟的临时
 MP4，因此两种输入都会运行多轮真实媒体，且不会重新编码测试源。
 
@@ -148,9 +156,10 @@ Bench 默认跳过，需要显式启用：
   --e2e-runner build/tests/e2e/mw_streamer_e2e_runner
 ```
 
-每个目标都必须先由对应 MediaMTX sink 确认发布路径可用，分别证明 RTSP、RTMP、
-SRT 推流成功。三个 FFmpeg 探针再从各 sink 的 RTSP 出口读取完整轨道，并使用
-压缩包复制避免探针解码高分辨率视频干扰 Pipeline 性能。这也避开 RTMP reader
+三个推流目标都必须先由对应 MediaMTX sink 确认发布路径可用，分别证明 RTSP、
+RTMP、SRT 推流成功。三个 FFmpeg 探针从各 sink 的 RTSP 出口读取完整轨道，
+第四个探针从本地 RTSP 发布地址拉流；全部使用压缩包复制，避免探针解码高分辨率
+视频干扰 Pipeline 性能。这也避开 RTMP reader
 无法暴露 H.265 视频轨道的协议限制。如果任一路媒体进度连续超过启动超时时间没有
 增长，或十分钟内累计媒体时间不足墙上时间的 98%，测试立即失败。媒体目录缺少
 H.264 或 H.265 视频时也会明确报错。

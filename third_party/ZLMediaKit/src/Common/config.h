@@ -38,6 +38,16 @@ bool loadIniConfig(const char *ini_path = nullptr);
 // //////////Broadcast Name///////////
 namespace Broadcast {
 
+extern const std::string kBroadcastOnGetRtspRealm;
+#define BroadcastOnGetRtspRealmArgs const MediaInfo &args, const RtspSession::onGetRealm &invoker, toolkit::SockInfo &sender
+
+extern const std::string kBroadcastOnRtspAuth;
+#define BroadcastOnRtspAuthArgs const MediaInfo &args, const std::string &realm, const std::string &user_name, const bool &must_no_encrypt, const RtspSession::onAuth &invoker, toolkit::SockInfo &sender
+
+using AuthInvoker = std::function<void(const std::string &err)>;
+extern const std::string kBroadcastMediaPlayed;
+#define BroadcastMediaPlayedArgs const MediaInfo &args, const Broadcast::AuthInvoker &invoker, toolkit::SockInfo &sender
+
 // 注册或反注册MediaSource事件广播  [AUTO-TRANSLATED:ec55c1cf]
 // Register or unregister MediaSource event broadcast
 extern const std::string kBroadcastMediaChanged;
@@ -294,6 +304,10 @@ extern const std::string kCharSet;
 // //////////RTSP服务器配置///////////  [AUTO-TRANSLATED:950e1981]
 // //////////RTSP Server Configuration///////////
 namespace Rtsp {
+extern const std::string kAuthBasic;
+extern const std::string kHandshakeSecond;
+extern const std::string kKeepAliveSecond;
+extern const std::string kRtpTransportType;
 // rtsp拉流代理是否直接代理  [AUTO-TRANSLATED:9cd82709]
 // Whether RTSP pull stream proxy is direct proxy
 // 直接代理后支持任意编码格式，但是会导致GOP缓存无法定位到I帧，可能会导致开播花屏  [AUTO-TRANSLATED:36525a92]

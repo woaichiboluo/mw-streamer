@@ -172,6 +172,18 @@ def test_av_sync_protocol_matrix(
         listen=True,
         listen_timeout_seconds=settings.startup_timeout_seconds,
     )
+    local_rtsp_port = allocate_tcp_port()
+    local_rtsp_path = f"sync/local-{input_protocol}-{digest}"
+    local_rtsp_recording = artifact_directory / "sync-playback-rtsp-local.mkv"
+    local_rtsp_recorder = MediaRecorder(
+        e2e_config,
+        "rtsp",
+        f"rtsp://127.0.0.1:{local_rtsp_port}/{local_rtsp_path}",
+        sync_media_asset,
+        _LONG_SYNC_DURATION_SECONDS,
+        local_rtsp_recording,
+        artifact_directory / "recorder-rtsp-local",
+    )
     output_urls = [
         str(requested_recording),
         _stream_url(
@@ -200,6 +212,8 @@ def test_av_sync_protocol_matrix(
         artifact_directory,
         cache_duration_ms=0,
         passthrough_video=True,
+        rtsp_publish_paths=[local_rtsp_path],
+        rtsp_port=local_rtsp_port,
     )
     try:
         rtsp_recorder.start()
@@ -211,6 +225,7 @@ def test_av_sync_protocol_matrix(
             settings.startup_timeout_seconds,
             lambda event: event.get("state") == "running",
         )
+        local_rtsp_recorder.start()
         for protocol, sink in output_servers.items():
             output_path = output_paths[protocol]
             sink.wait_for_path(
@@ -223,11 +238,13 @@ def test_av_sync_protocol_matrix(
             + _LONG_SYNC_DURATION_SECONDS
             + 5.0
         )
+        local_rtsp_recorder.wait(settings.startup_timeout_seconds)
         runner.process.ensure_running()
         runner.interrupt_and_wait(settings.startup_timeout_seconds)
     finally:
         runner.stop()
         rtsp_recorder.stop()
+        local_rtsp_recorder.stop()
         for server in reversed(started_servers):
             server.stop()
         if publisher is not None:
@@ -238,6 +255,7 @@ def test_av_sync_protocol_matrix(
     recordings = {
         "file": find_recording(requested_recording),
         "rtsp": rtsp_recording,
+        "rtsp_local": local_rtsp_recording,
         **{
             protocol: concatenate_recordings(
                 e2e_config,

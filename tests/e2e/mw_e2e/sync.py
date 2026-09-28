@@ -12,7 +12,7 @@ from .process import ProcessError
 
 
 _MARKER_PERIOD_SECONDS = 2
-_MARKER_START_SECONDS = 1
+_MARKER_START_SECONDS = 0.759
 _MARKER_DURATION_SECONDS = 0.12
 _SYNC_MEDIA_DURATION_SECONDS = 330
 _MINIMUM_MARKER_DURATION_SECONDS = 0.06
@@ -44,10 +44,16 @@ def generate_sync_media(
     output_directory.mkdir(parents=True, exist_ok=True)
     path = output_directory / f"sync-{codec}.mp4"
     video_encoder = "libx264" if codec == "h264" else "libx265"
+    # Distinct marker positions prevent a whole-period A/V shift from looking
+    # synchronized when a live recorder joins after the first marker.
+    marker_position = (
+        f"{_MARKER_START_SECONDS}+0.04*"
+        f"mod(floor(t/{_MARKER_PERIOD_SECONDS})*7+floor(t/26)*5\\,13)"
+    )
     marker_expression = (
         f"between(mod(t\\,{_MARKER_PERIOD_SECONDS})"
-        f"\\,{_MARKER_START_SECONDS}"
-        f"\\,{_MARKER_START_SECONDS + _MARKER_DURATION_SECONDS})"
+        f"\\,{marker_position}"
+        f"\\,{marker_position}+{_MARKER_DURATION_SECONDS})"
     )
     # All-intra video prevents an arbitrary live join point from discarding
     # video until the next GOP while audio has already started.
@@ -196,13 +202,17 @@ def analyze_sync(
     audio_markers = _bounded_intervals(
         audio_output, "silence_end", "silence_start"
     )
+    offsets = [
+        offset
+        for video, offset in _match_markers(video_markers, audio_markers)
+        if video >= ignore_before_seconds
+    ]
     video_markers = [
         marker for marker in video_markers if marker >= ignore_before_seconds
     ]
     audio_markers = [
         marker for marker in audio_markers if marker >= ignore_before_seconds
     ]
-    offsets = _match_markers(video_markers, audio_markers)
     analysis = SyncAnalysis(
         tuple(video_markers), tuple(audio_markers), tuple(offsets)
     )
@@ -302,9 +312,9 @@ def _bounded_intervals(
 
 def _match_markers(
     video_markers: list[float], audio_markers: list[float]
-) -> list[float]:
+) -> list[tuple[float, float]]:
     available = list(audio_markers)
-    offsets: list[float] = []
+    offsets: list[tuple[float, float]] = []
     for video in video_markers:
         insertion = bisect.bisect_left(available, video)
         candidate_indices = [
@@ -318,6 +328,8 @@ def _match_markers(
             candidate_indices, key=lambda value: abs(available[value] - video)
         )
         offset = available[index] - video
-        offsets.append(offset)
+        if abs(offset) >= _MARKER_PERIOD_SECONDS / 2:
+            continue
+        offsets.append((video, offset))
         available.pop(index)
     return offsets

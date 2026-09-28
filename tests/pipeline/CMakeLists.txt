@@ -52,6 +52,17 @@ target_link_libraries(mw_remux_sink_tests
 
 add_test(NAME mw_remux_sink_tests COMMAND mw_remux_sink_tests)
 
+add_executable(mw_rtsp_publish_sink_tests rtsp_publish_sink_test.cc)
+target_compile_definitions(mw_rtsp_publish_sink_tests PRIVATE
+    MW_RTSP_PUBLISH_SINK_TEST_DATA_DIR="${MW_STREAMER_TEST_DATA_DIR}")
+target_link_libraries(mw_rtsp_publish_sink_tests PRIVATE
+    Catch2::Catch2WithMain FFmpeg::avcodec ZLMediaKit::MediaKit
+    ZLMediaKit::ext-codec mw::streamer_test)
+if(WIN32)
+    target_link_libraries(mw_rtsp_publish_sink_tests PRIVATE ws2_32)
+endif()
+add_test(NAME mw_rtsp_publish_sink_tests COMMAND mw_rtsp_publish_sink_tests)
+
 add_executable(mw_pipeline_packet_queue_tests packet_queue_test.cc)
 
 target_link_libraries(mw_pipeline_packet_queue_tests

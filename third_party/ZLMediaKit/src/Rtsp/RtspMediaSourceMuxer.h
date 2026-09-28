@@ -24,7 +24,7 @@ public:
 
     RtspMediaSourceMuxer(const MediaTuple& tuple,
                          const ProtocolOption &option,
-                         const TitleSdp::Ptr &title = nullptr) : RtspMuxer(title) {
+                         const TitleSdp::Ptr &title = nullptr) : RtspMuxer(title, option.rtsp_ntp_from_source_stamp) {
         _option = option;
         _media_src = std::make_shared<RtspMediaSource>(tuple);
         getRtpRing()->setDelegate(_media_src);

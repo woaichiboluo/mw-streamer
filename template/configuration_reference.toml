@@ -165,6 +165,19 @@ paced_sender_interval_ms = 0 # 范围：0..UINT32_MAX；0 表示禁用
 file_buffer_size = 65536 # 字节；范围：1..UINT32_MAX
 hls_segment_duration_ms = 10000 # 范围：1..UINT32_MAX
 
+# RTSP 本地发布 Sink 可替换上面的 remux 节点：
+# [[sinks]]
+# id = "rtsp_publish"
+# type = "rtsp_publish"
+# downstream = []
+# app = "live"
+# stream = "camera"
+# bind_ip = "0.0.0.0"
+# port = 8554
+# packet_queue_capacity = 384
+# [sinks.muxer]
+# paced_sender_interval_ms = 0
+
 # =============================================================================
 # 静态拓扑规则摘要
 #

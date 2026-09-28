@@ -6,11 +6,12 @@
 
 - RTMP、RTSP、SRT、HTTP-FLV、HTTP-TS、HLS 拉流。
 - RTMP、RTSP、SRT 推流。
+- RTSP 本地发布，客户端可从嵌入库所在的业务进程拉流。
 - MP4、FMP4、FLV、MPEG-TS、MPEG-PS 封装与解封装能力。
 - Linux 和 Windows 网络运行时。
 - FFmpeg、SRT 和 OpenSSL 由用户环境提供，项目不内置这些依赖。
 
-服务端主程序、Web API、WebRTC、语言绑定、移动端工程和上游测试未保留。当前源码不依赖 JSON。
+独立服务端主程序、Web API、WebRTC、语言绑定、移动端工程和上游测试未保留。当前源码不依赖 JSON。
 
 ## 构建
 
@@ -111,7 +112,7 @@ SRT 每次新建或重连发布会丢弃关键帧之前的残缺历史数据，�
 | `processor` | `mw/streamer/processor/` | AnalysisProcessorSink、TransformProcessorSink 及业务回调适配 |
 | `synchronizer` | `mw/streamer/synchronizer/` | SynchronizerSink；内部实时调度、同步和备播 |
 | `encoder` | `mw/streamer/encoder/` | EncoderSink、音视频编码器；输出 Packet |
-| `output` | `mw/streamer/output/` | RemuxSink、单目标转封装、推流和录像 |
+| `output` | `mw/streamer/output/` | RemuxSink、RtspPublishSink、单目标转封装、推流、RTSP 本地发布和录像 |
 
 各节点的参数结构放在所属模块的 `config.h`；`mw/streamer/pipeline/pipeline_config.h` 只描述
 Input、节点 ID 和媒体连接，并复用这些参数。`ffmpeg`、`common`、
@@ -255,6 +256,29 @@ PTS/DTS 间隔，不进行逐轨归零或大间隔平滑。EOF 写完启动缓�
 
 可运行示例：`mw_remux_sink_example input_url target [target...]`，每个 target
 创建一个独立 RemuxSink；有限输入 EOF 后等待输出完成，Ctrl+C 有序停止。
+
+### RtspPublishSink：本地 RTSP 发布
+
+`RtspPublishSink` 消费编码 Packet，一个 Sink 对应一个 `app/stream` 发布地址。
+它使用有界队列和 ZLM Poller 转换并登记 RTSP 媒体源，不向外部服务器推流。
+第一路发布收到轨道信息时才启动 RTSP 监听；同一监听地址和端口上的多路发布
+共享监听器，最后一路结束或停止时关闭监听。输入短暂中断时保留发布和监听，
+相同 `app/stream` 在进程内不能重复发布。客户端连接由 ZLM 的 Poller 池处理，
+不会为每路 Sink 新建监听端口或专用 Poller。
+
+```cpp
+#include "mw/streamer/output/rtsp_publish_sink.h"
+
+mw::streamer::RtspPublishSinkConfig config;
+config.app = "live";
+config.stream = "camera";
+config.port = 8554;
+pipeline.AddSink(std::make_unique<mw::streamer::RtspPublishSink>(
+    "rtsp", std::move(config)));
+// 客户端拉取 rtsp://业务主机:8554/live/camera
+```
+
+完整示例：`mw_rtsp_publish_example input_url app stream [port]`。
 
 ## DecoderSink：Packet 到 Frame
 
@@ -617,7 +641,8 @@ PlayerProxy，通用 Input 当前只公开 Start、Stop 与状态查询。
 [`docs/configuration.md`](docs/configuration.md)；可复制查阅的说明性 TOML 见
 [`template/configuration_reference.toml`](template/configuration_reference.toml)。
 可用节点类型为 `decoder`、`analysis_processor`、`transform_processor`、
-`frame_custom`、`packet_custom`、`synchronizer`、`encoder` 和 `remux`。
+`frame_custom`、`packet_custom`、`synchronizer`、`encoder`、`remux` 和
+`rtsp_publish`。
 FrameCustomSink 接收解码帧；PacketCustomSink 通过 `on_video_packet` 和
 `on_audio_packet` 接收压缩包，参数 `const void*` 实际是仅在回调期间有效的
 `const AVPacket*`。两者提供 `on_start`、`on_stop`、`on_message`、`on_boundary`，

@@ -19,7 +19,7 @@ using namespace toolkit;
 namespace mediakit {
 
 void RtspMuxer::onRtp(RtpPacket::Ptr in, bool is_key) {
-    if (_live) {
+    if (_live && !_ntp_from_source_stamp) {
         auto &ref = _tracks[in->track_index];
         if (ref.rtp_stamp != in->getHeader()->stamp) {
             // rtp时间戳变化才计算ntp，节省cpu资源  [AUTO-TRANSLATED:729d54f2]
@@ -35,6 +35,10 @@ void RtspMuxer::onRtp(RtpPacket::Ptr in, bool is_key) {
         // rtp拦截入口，此处统一赋值ntp  [AUTO-TRANSLATED:1412435a]
         // RTP interception entry, set NTP here uniformly
         in->ntp_stamp = ref.ntp_stamp;
+    } else if (_ntp_from_source_stamp) {
+        // The encoder retains the full source PTS here. The 32-bit RTP header
+        // stamp wraps, so it cannot be used to reconstruct a long-lived NTP clock.
+        in->ntp_stamp += _ntp_stamp_start;
     } else {
         // 点播情况下设置ntp时间戳为rtp时间戳加基准ntp时间戳  [AUTO-TRANSLATED:b9f77de4]
         // In on-demand scenarios, set the NTP timestamp to the RTP timestamp plus the base NTP timestamp
@@ -43,7 +47,8 @@ void RtspMuxer::onRtp(RtpPacket::Ptr in, bool is_key) {
     _rtpRing->write(std::move(in), is_key);
 }
 
-RtspMuxer::RtspMuxer(const TitleSdp::Ptr &title) {
+RtspMuxer::RtspMuxer(const TitleSdp::Ptr &title, bool ntp_from_source_stamp) {
+    _ntp_from_source_stamp = ntp_from_source_stamp;
     if (!title) {
         _sdp = std::make_shared<TitleSdp>()->getSdp();
     } else {

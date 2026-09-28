@@ -24,6 +24,7 @@ enum class SinkType {
   kSynchronizer,
   kEncoder,
   kRemux,
+  kRtspPublish,
 };
 
 struct InputConfig {
@@ -90,6 +91,12 @@ struct RemuxNodeConfig final : SinkConfig {
   using SinkConfig::SinkConfig;
   SinkType type() const noexcept override { return SinkType::kRemux; }
   RemuxSinkConfig options;
+};
+
+struct RtspPublishNodeConfig final : SinkConfig {
+  using SinkConfig::SinkConfig;
+  SinkType type() const noexcept override { return SinkType::kRtspPublish; }
+  RtspPublishSinkConfig options;
 };
 
 // Move-only, exclusively owns all node descriptions in declaration order.

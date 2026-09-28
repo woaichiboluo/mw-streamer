@@ -237,6 +237,80 @@ TEST_CASE("统一配置完整参数双向转换并保持节点与连接顺序") 
   CHECK(remux.zlm.recording.hls_segment_duration_ms == 1400ms);
 }
 
+TEST_CASE("RTSP发布Sink配置可解析、构建并往返序列化") {
+  auto config = ParsePipelineConfigFromToml(R"toml(
+[input]
+type = "zlm"
+url = "./input.mp4"
+downstream = ["publish"]
+
+[[sinks]]
+id = "publish"
+type = "rtsp_publish"
+app = "live"
+stream = "camera"
+bind_ip = "127.0.0.1"
+port = 9554
+packet_queue_capacity = 64
+[sinks.muxer]
+paced_sender_interval_ms = 7
+)toml");
+  const auto& options =
+      FindNode<RtspPublishNodeConfig>(config, "publish").options;
+  CHECK(options.app == "live");
+  CHECK(options.stream == "camera");
+  CHECK(options.bind_ip == "127.0.0.1");
+  CHECK(options.port == 9554);
+  CHECK(options.packet_queue_capacity == 64);
+  CHECK(options.muxer.paced_sender_interval_ms == 7ms);
+  CHECK_NOTHROW(ValidatePipelineConfig(config));
+  auto pipeline = BuildPipeline(config);
+  REQUIRE(pipeline);
+  pipeline->Stop();
+  const auto serialized = SerializePipelineConfigToToml(config);
+  auto restored = ParsePipelineConfigFromToml(serialized);
+  CHECK(SerializePipelineConfigToToml(restored) == serialized);
+  CHECK(FindNode<RtspPublishNodeConfig>(restored, "publish").options.port ==
+        9554);
+}
+
+TEST_CASE("RTSP发布Sink配置在构建前校验地址和队列") {
+  auto config = ParsePipelineConfigFromToml(R"toml(
+[input]
+type = "zlm"
+url = "./input.mp4"
+downstream = ["publish"]
+[[sinks]]
+id = "publish"
+type = "rtsp_publish"
+app = "live"
+stream = "camera"
+)toml");
+  const auto& defaults =
+      FindNode<RtspPublishNodeConfig>(config, "publish").options;
+  CHECK(defaults.bind_ip == "0.0.0.0");
+  CHECK(defaults.port == 8554);
+  CHECK(defaults.packet_queue_capacity == 384);
+  SECTION("空app") {
+    FindNode<RtspPublishNodeConfig>(config, "publish").options.app.clear();
+  }
+  SECTION("路径包含斜杠") {
+    FindNode<RtspPublishNodeConfig>(config, "publish").options.stream =
+        "camera/other";
+  }
+  SECTION("空监听地址") {
+    FindNode<RtspPublishNodeConfig>(config, "publish").options.bind_ip.clear();
+  }
+  SECTION("零端口") {
+    FindNode<RtspPublishNodeConfig>(config, "publish").options.port = 0;
+  }
+  SECTION("零队列") {
+    FindNode<RtspPublishNodeConfig>(config, "publish")
+        .options.packet_queue_capacity = 0;
+  }
+  CHECK_THROWS_AS(ValidatePipelineConfig(config), std::invalid_argument);
+}
+
 TEST_CASE("统一配置省略参数保持默认值") {
   auto config = ParsePipelineConfigFromToml(R"(
 [input]

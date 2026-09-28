@@ -16,6 +16,7 @@
 #include "mw/streamer/input/zlm_input.h"
 #include "mw/streamer/output/internal/remux_output.h"
 #include "mw/streamer/output/remux_sink.h"
+#include "mw/streamer/output/rtsp_publish_sink.h"
 #include "mw/streamer/processor/analysis_processor_sink.h"
 #include "mw/streamer/processor/transform_processor_sink.h"
 #include "mw/streamer/sink/frame_custom_sink_node.h"
@@ -105,6 +106,24 @@ MediaContract ValidateNode(const SinkConfig& config) {
       internal::ValidateRemuxOutputConfig({options.target, options.zlm});
       return {SinkMediaType::kPacket, SinkMediaType::kNone};
     }
+    case SinkType::kRtspPublish: {
+      const auto& options = Options<RtspPublishNodeConfig>(config);
+      Require(options.packet_queue_capacity > 0, config,
+              "RTSP发布队列容量必须大于0");
+      Require(!options.bind_ip.empty() && options.port != 0 &&
+                  !options.app.empty() && !options.stream.empty() &&
+                  options.app.find('/') == std::string::npos &&
+                  options.stream.find('/') == std::string::npos,
+              config, "RTSP监听地址、端口、app或stream无效");
+      OutputConfig output;
+      output.muxer = options.muxer;
+      internal::ValidateRemuxOutputConfig(
+          {{},
+           output,
+           options.packet_queue_capacity,
+           internal::LocalRtspTarget{options.app, options.stream}});
+      return {SinkMediaType::kPacket, SinkMediaType::kNone};
+    }
   }
   throw std::invalid_argument(fmt::format("未知Sink配置类型: {}", config.id));
 }
@@ -180,6 +199,9 @@ std::unique_ptr<Sink> CreateSink(const SinkConfig& config,
     case SinkType::kRemux:
       return std::make_unique<RemuxSink>(config.id,
                                          Options<RemuxNodeConfig>(config));
+    case SinkType::kRtspPublish:
+      return std::make_unique<RtspPublishSink>(
+          config.id, Options<RtspPublishNodeConfig>(config));
   }
   throw std::invalid_argument("未知Sink配置类型");
 }

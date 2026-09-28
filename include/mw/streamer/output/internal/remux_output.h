@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -22,10 +23,16 @@ class OperationRecorder;
 
 namespace mw::streamer::internal {
 
+struct LocalRtspTarget {
+  std::string app;
+  std::string stream;
+};
+
 struct RemuxOutputConfig {
   std::string target;
   OutputConfig zlm;
   std::size_t startup_packet_capacity = 384;
+  std::optional<LocalRtspTarget> local_rtsp;
 };
 
 // Validates target syntax and ZLM options without creating execution resources.

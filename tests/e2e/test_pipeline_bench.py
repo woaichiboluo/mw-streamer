@@ -8,7 +8,7 @@ import pytest
 
 from mw_e2e.events import assert_pipeline_succeeded, read_events, wait_for_event
 from mw_e2e.ffmpeg import MediaProbe, MediaPublisher, monitor_stable_probes
-from mw_e2e.mediamtx import MediaEnvironment
+from mw_e2e.mediamtx import MediaEnvironment, allocate_tcp_port
 from mw_e2e.models import E2EConfig, MediaAsset
 from mw_e2e.process import ManagedProcess, ProcessError
 from mw_e2e.runner import Runner
@@ -128,6 +128,8 @@ def test_pipeline_protocol_codec_bench(
         protocol: f"bench/output-{case_id}-{protocol}"
         for protocol in OUTPUT_PROTOCOLS
     }
+    rtsp_publish_path = f"bench/local-{case_id}"
+    rtsp_port = allocate_tcp_port()
     runner = Runner(
         e2e_config,
         runner_path,
@@ -141,6 +143,8 @@ def test_pipeline_protocol_codec_bench(
         ],
         BENCH_DURATION_SECONDS + settings.startup_timeout_seconds * 5,
         artifact_directory,
+        rtsp_publish_paths=[rtsp_publish_path],
+        rtsp_port=rtsp_port,
     )
 
     probes: list[MediaProbe] = []
@@ -172,6 +176,18 @@ def test_pipeline_protocol_codec_bench(
                     stream_copy=True,
                 )
             )
+        probes.append(
+            MediaProbe(
+                e2e_config,
+                "rtsp",
+                f"rtsp://127.0.0.1:{rtsp_port}/{rtsp_publish_path}",
+                bench_media_asset,
+                None,
+                artifact_directory,
+                "probe-rtsp-publish",
+                stream_copy=True,
+            )
+        )
 
         for probe in probes:
             probe.start()

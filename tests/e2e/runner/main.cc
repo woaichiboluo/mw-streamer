@@ -33,6 +33,7 @@ extern "C" {
 #include "mw/streamer/input/file_input.h"
 #include "mw/streamer/input/zlm_input.h"
 #include "mw/streamer/output/remux_sink.h"
+#include "mw/streamer/output/rtsp_publish_sink.h"
 #include "mw/streamer/pipeline/pipeline.h"
 #include "mw/streamer/processor/analysis_processor_sink.h"
 #include "mw/streamer/processor/processor.h"
@@ -102,6 +103,7 @@ class EventWriter final {
 enum class Scenario {
   kStreaming,
   kRemux,
+  kRtspPublish,
   kFile,
 };
 
@@ -109,6 +111,8 @@ struct Arguments {
   Scenario scenario = Scenario::kStreaming;
   std::string input;
   std::vector<std::string> outputs;
+  std::vector<std::string> rtsp_publishes;
+  std::uint16_t rtsp_port = 0;
   std::vector<std::string> input_outputs;
   std::string events_path;
   std::chrono::milliseconds cache_duration{1000};
@@ -173,10 +177,14 @@ Scenario ParseScenario(const std::string& value) {
   if (value == "remux") {
     return Scenario::kRemux;
   }
+  if (value == "rtsp_publish") {
+    return Scenario::kRtspPublish;
+  }
   if (value == "file") {
     return Scenario::kFile;
   }
-  throw std::invalid_argument("--scenario必须是streaming、remux或file");
+  throw std::invalid_argument(
+      "--scenario必须是streaming、remux、rtsp_publish或file");
 }
 
 Arguments ParseArguments(int argc, char* argv[]) {
@@ -189,6 +197,15 @@ Arguments ParseArguments(int argc, char* argv[]) {
       arguments.input = RequireValue(argc, argv, index);
     } else if (option == "--output") {
       arguments.outputs.push_back(RequireValue(argc, argv, index));
+    } else if (option == "--rtsp-publish") {
+      arguments.rtsp_publishes.push_back(RequireValue(argc, argv, index));
+    } else if (option == "--rtsp-port") {
+      const auto port =
+          ParseUnsigned(RequireValue(argc, argv, index), option.c_str());
+      if (port == 0 || port > 65535) {
+        throw std::invalid_argument("--rtsp-port必须在1到65535之间");
+      }
+      arguments.rtsp_port = static_cast<std::uint16_t>(port);
     } else if (option == "--input-output") {
       arguments.input_outputs.push_back(RequireValue(argc, argv, index));
     } else if (option == "--events") {
@@ -231,6 +248,24 @@ Arguments ParseArguments(int argc, char* argv[]) {
   }
   if (arguments.scenario == Scenario::kRemux && arguments.outputs.empty()) {
     throw std::invalid_argument("Remux场景的--output至少需要一个");
+  }
+  if (arguments.scenario == Scenario::kRtspPublish &&
+      arguments.rtsp_publishes.empty()) {
+    throw std::invalid_argument("RTSP发布场景需要--rtsp-publish和--rtsp-port");
+  }
+  if ((!arguments.rtsp_publishes.empty() && arguments.rtsp_port == 0) ||
+      (arguments.rtsp_publishes.empty() && arguments.rtsp_port != 0)) {
+    throw std::invalid_argument("--rtsp-publish和--rtsp-port必须一起提供");
+  }
+  if (arguments.scenario != Scenario::kRtspPublish &&
+      arguments.scenario != Scenario::kStreaming &&
+      !arguments.rtsp_publishes.empty()) {
+    throw std::invalid_argument(
+        "只有Streaming和RTSP发布场景支持--rtsp-publish");
+  }
+  if (arguments.scenario == Scenario::kRtspPublish &&
+      (!arguments.outputs.empty() || !arguments.input_outputs.empty())) {
+    throw std::invalid_argument("RTSP发布场景不支持--output和--input-output");
   }
   if (arguments.events_path.empty()) {
     throw std::invalid_argument("--events不能为空");
@@ -900,10 +935,12 @@ RunResult RunPipeline(Pipeline& chain, const Arguments& arguments,
     if (!result.running_seen && ready) {
       result.running_seen = true;
       events.Write("pipeline_status", {{"state", "running"}});
-      if (!arguments.outputs.empty() || !arguments.input_outputs.empty()) {
+      if (!arguments.outputs.empty() || !arguments.input_outputs.empty() ||
+          !arguments.rtsp_publishes.empty()) {
         events.Write(
             "output_opened",
-            {{"target_count", std::to_string(arguments.outputs.size())},
+            {{"target_count", std::to_string(arguments.outputs.size() +
+                                             arguments.rtsp_publishes.size())},
              {"input_target_count",
               std::to_string(arguments.input_outputs.size())}});
       }
@@ -962,6 +999,33 @@ std::unique_ptr<mw::streamer::RemuxSink> MakeRemux(
   return sink;
 }
 
+std::unique_ptr<RtspPublishSink> MakeRtspPublish(
+    const std::string& id, const std::string& path, std::uint16_t port,
+    std::vector<SinkProbe>& probes) {
+  const auto separator = path.find('/');
+  if (separator == std::string::npos || separator == 0 ||
+      separator + 1 == path.size()) {
+    throw std::invalid_argument("--rtsp-publish必须为app/stream");
+  }
+  RtspPublishSinkConfig config;
+  config.app = path.substr(0, separator);
+  config.stream = path.substr(separator + 1);
+  config.bind_ip = "127.0.0.1";
+  config.port = port;
+  auto sink = std::make_unique<RtspPublishSink>(id, std::move(config));
+  auto probe = MakeProbe(*sink, PacketSinkState::kRunning,
+                         PacketSinkState::kEnded, PacketSinkState::kFailed);
+  auto* node = sink.get();
+  probe.ready = [node] {
+    if (node->state() != PacketSinkState::kRunning) return false;
+    const auto snapshot = node->GetPerformance();
+    return !snapshot.operations.empty() &&
+           snapshot.operations.front().input_count > 0;
+  };
+  probes.push_back(std::move(probe));
+  return sink;
+}
+
 MwStreamerProcessorStartResult OnAnalysisStart(
     const MwStreamerAnalysisProcessorStartRequest* request,
     void* user_context) {
@@ -988,6 +1052,12 @@ std::unique_ptr<mw::streamer::EncoderSink> MakeEncoder(
     encoder->AddSink(MakeRemux(fmt::format("output_{}", index),
                                arguments.outputs[index], probes));
   }
+  for (std::size_t index = 0; index < arguments.rtsp_publishes.size();
+       ++index) {
+    encoder->AddSink(MakeRtspPublish(fmt::format("publish_{}", index),
+                                     arguments.rtsp_publishes[index],
+                                     arguments.rtsp_port, probes));
+  }
   return encoder;
 }
 
@@ -1007,7 +1077,7 @@ std::unique_ptr<mw::streamer::SynchronizerSink> MakeSynchronizer(
            node->state() == mw::streamer::SynchronizerSinkState::kEnded;
   };
   probes.push_back(std::move(probe));
-  if (!arguments.outputs.empty()) {
+  if (!arguments.outputs.empty() || !arguments.rtsp_publishes.empty()) {
     synchronizer->AddSink(
         MakeEncoder(arguments,
                     {static_cast<int>(arguments.frame_rate_num),
@@ -1023,7 +1093,8 @@ std::unique_ptr<mw::streamer::SynchronizerSink> MakeSynchronizer(
 std::unique_ptr<mw::streamer::Sink> MakeProcessor(
     const Arguments& arguments, ProcessorObserver& observer,
     LocalSinkObserver& local_observer, std::vector<SinkProbe>& probes) {
-  if (arguments.outputs.empty() && !arguments.local_sink) {
+  if (arguments.outputs.empty() && arguments.rtsp_publishes.empty() &&
+      !arguments.local_sink) {
     MwStreamerAnalysisProcessorCallbacks callbacks{};
     callbacks.user_context = &observer;
     callbacks.on_start = OnAnalysisStart;
@@ -1141,6 +1212,27 @@ int RunRemux(const Arguments& arguments, EventWriter& events) {
   return result.running_seen && !result.failed_seen ? 0 : 2;
 }
 
+int RunRtspPublish(const Arguments& arguments, EventWriter& events) {
+  ZlmInputConfig input;
+  input.url = arguments.input;
+  Pipeline chain(std::make_unique<ZlmInput>(input));
+  std::vector<SinkProbe> probes;
+  for (std::size_t index = 0; index < arguments.rtsp_publishes.size();
+       ++index) {
+    chain.AddSink(MakeRtspPublish(fmt::format("publish_{}", index),
+                                  arguments.rtsp_publishes[index],
+                                  arguments.rtsp_port, probes));
+  }
+  const auto result = RunPipeline(chain, arguments, probes, events);
+  events.Write("summary", {
+                              {"running_seen", result.running_seen ? "1" : "0"},
+                              {"failed_seen", result.failed_seen ? "1" : "0"},
+                              {"final_status", ToString(chain.state())},
+                              {"timeline_reset_count", "0"},
+                          });
+  return result.running_seen && !result.failed_seen ? 0 : 2;
+}
+
 std::uint64_t OutputCount(const PipelineSnapshot& snapshot,
                           PerformanceType type) {
   std::uint64_t count = 0;
@@ -1222,6 +1314,9 @@ int Run(const Arguments& arguments) {
       break;
     case Scenario::kRemux:
       result = RunRemux(arguments, events);
+      break;
+    case Scenario::kRtspPublish:
+      result = RunRtspPublish(arguments, events);
       break;
     case Scenario::kFile:
       result = RunFile(arguments, events);

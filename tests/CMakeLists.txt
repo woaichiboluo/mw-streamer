@@ -21,6 +21,7 @@ foreach(target IN ITEMS
     mw_pipeline_tests
     mw_pipeline_fatal_tests
     mw_remux_sink_tests
+    mw_rtsp_publish_sink_tests
     mw_decoder_sink_tests
     mw_encoder_pipeline_tests
     mw_pipeline_builder_tests
@@ -29,6 +30,7 @@ foreach(target IN ITEMS
     mw_input_player_proxy_tests
     mw_pipeline_input_tests
     mw_recording_target_tests
+    mw_rtsp_server_tests
     mw_file_player_tests
     mw_srt_demuxer_tests
     mw_opencv_adapter_frame_tests)

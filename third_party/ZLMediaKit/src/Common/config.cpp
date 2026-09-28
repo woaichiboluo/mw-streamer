@@ -57,6 +57,9 @@ bool loadIniConfig(const char *ini_path) {
 // //////////广播名称///////////  [AUTO-TRANSLATED:439b2d74]
 // //////////Broadcast Name///////////
 namespace Broadcast {
+const string kBroadcastOnGetRtspRealm = "kBroadcastOnGetRtspRealm";
+const string kBroadcastOnRtspAuth = "kBroadcastOnRtspAuth";
+const string kBroadcastMediaPlayed = "kBroadcastMediaPlayed";
 const string kBroadcastMediaChanged = "kBroadcastMediaChanged";
 const string kBroadcastRecordMP4 = "kBroadcastRecordMP4";
 const string kBroadcastRecordTs = "kBroadcastRecordTs";
@@ -189,10 +192,18 @@ static onceToken token([]() {
 // //////////RTSP Server Configuration///////////
 namespace Rtsp {
 #define RTSP_FIELD "rtsp."
+const string kAuthBasic = RTSP_FIELD "authBasic";
+const string kHandshakeSecond = RTSP_FIELD "handshakeSecond";
+const string kKeepAliveSecond = RTSP_FIELD "keepAliveSecond";
+const string kRtpTransportType = RTSP_FIELD "rtpTransportType";
 const string kDirectProxy = RTSP_FIELD "directProxy";
 const string kLowLatency = RTSP_FIELD"lowLatency";
 
 static onceToken token([]() {
+    mINI::Instance()[kAuthBasic] = 0;
+    mINI::Instance()[kHandshakeSecond] = 15;
+    mINI::Instance()[kKeepAliveSecond] = 15;
+    mINI::Instance()[kRtpTransportType] = -1;
     mINI::Instance()[kDirectProxy] = 1;
     mINI::Instance()[kLowLatency] = 0;
 });

@@ -97,6 +97,7 @@ File Input 不接受 `url`、`player` 或 `reconnect_policy`。其 Decoder Sink 
 | `synchronizer` | Frame | Frame | 否 | 有 |
 | `encoder` | Frame | Packet | 否 | 有 |
 | `remux` | Packet | 无 | 是 | 有 |
+| `rtsp_publish` | Packet | 无 | 是 | 有 |
 
 “无”表示该节点不再向下游输出媒体。消息通过 `Pipeline::SubmitMessage()` 按目标
 Sink ID 投递，不需要在配置中声明连接。
@@ -216,6 +217,24 @@ Encoder 不负责音视频同步、节奏控制、备播、像素格式转换或
 
 `.mp4` 输出为 fragmented MP4，`.m3u8` 输出为 HLS-fMP4。文件扩展名按当前实现
 区分大小写。
+
+## RTSP Publish Sink
+
+`type = "rtsp_publish"`，媒体契约为 Packet → 无。一个节点发布一个
+`app/stream` 地址，客户端从业务进程拉流。第一路活动发布启动监听；同一
+`bind_ip:port` 的节点共用监听，最后一路结束或停止后关闭监听。暂时断流
+保留监听和媒体源。进程内重复的 `app/stream` 会在发布启动时失败。
+
+| TOML 字段 | C++ 字段 | 类型 | 默认值 | 必填 | 约束与说明 |
+| --- | --- | --- | --- | --- | --- |
+| `app` | `RtspPublishSinkConfig::app` | string | 无 | 是 | 非空，不含 `/`。 |
+| `stream` | `RtspPublishSinkConfig::stream` | string | 无 | 是 | 非空，不含 `/`。 |
+| `bind_ip` | `RtspPublishSinkConfig::bind_ip` | string | `0.0.0.0` | 否 | 监听地址，非空。 |
+| `port` | `RtspPublishSinkConfig::port` | integer | `8554` | 否 | 1～65535。 |
+| `packet_queue_capacity` | `RtspPublishSinkConfig::packet_queue_capacity` | integer | `384` | 否 | 必须大于 0；投递队列和启动缓存分别使用该容量。 |
+| `muxer.paced_sender_interval_ms` | `MuxerConfig::paced_sender_interval_ms` | integer | `0` | 否 | 0～`UINT32_MAX`；0 禁用 ZLM paced sending。 |
+
+监听失败会使对应 Sink 失败。
 
 ## Pipeline 静态拓扑规则
 

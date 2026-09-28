@@ -221,6 +221,13 @@ void ReadPlayerConfig(const Table& table, PlayerConfig* config,
   ReadString(table, "local_bind_ip", path, &config->local_bind_ip);
 }
 
+void ReadMuxerConfig(const Table& table, MuxerConfig* config,
+                     std::string_view path) {
+  WarnUnknownKeys(table, {"paced_sender_interval_ms"}, path);
+  ReadMilliseconds(table, "paced_sender_interval_ms", path,
+                   &config->paced_sender_interval_ms);
+}
+
 void ReadOutputConfig(const Table& table, OutputConfig* config,
                       std::string_view path) {
   WarnUnknownKeys(table, {"pusher", "muxer", "recording"}, path);
@@ -235,9 +242,7 @@ void ReadOutputConfig(const Table& table, OutputConfig* config,
   }
   if (const auto* muxer = OptionalTable(table, "muxer", path)) {
     const auto child_path = FieldPath(path, "muxer");
-    WarnUnknownKeys(*muxer, {"paced_sender_interval_ms"}, child_path);
-    ReadMilliseconds(*muxer, "paced_sender_interval_ms", child_path,
-                     &config->muxer.paced_sender_interval_ms);
+    ReadMuxerConfig(*muxer, &config->muxer, child_path);
   }
   if (const auto* recording = OptionalTable(table, "recording", path)) {
     const auto child_path = FieldPath(path, "recording");
@@ -465,6 +470,29 @@ std::unique_ptr<SinkConfig> ReadRemuxNode(const Table& table, std::string id,
   return node;
 }
 
+std::unique_ptr<SinkConfig> ReadRtspPublishNode(const Table& table,
+                                                std::string id,
+                                                std::string_view path) {
+  WarnUnknownKeys(table,
+                  {"id", "type", "downstream", "app", "stream", "bind_ip",
+                   "port", "packet_queue_capacity", "muxer"},
+                  path);
+  RequireField(table, "app", path);
+  RequireField(table, "stream", path);
+  auto node = std::make_unique<RtspPublishNodeConfig>(std::move(id));
+  auto& config = node->options;
+  ReadString(table, "app", path, &config.app);
+  ReadString(table, "stream", path, &config.stream);
+  ReadString(table, "bind_ip", path, &config.bind_ip);
+  ReadInteger(table, "port", path, &config.port);
+  ReadInteger(table, "packet_queue_capacity", path,
+              &config.packet_queue_capacity);
+  if (const auto* muxer = OptionalTable(table, "muxer", path)) {
+    ReadMuxerConfig(*muxer, &config.muxer, FieldPath(path, "muxer"));
+  }
+  return node;
+}
+
 std::unique_ptr<SinkConfig> ReadSinkNode(const Table& table,
                                          std::string_view path) {
   RequireField(table, "id", path);
@@ -480,7 +508,8 @@ std::unique_ptr<SinkConfig> ReadSinkNode(const Table& table,
             {"packet_custom", SinkType::kPacketCustom},
             {"synchronizer", SinkType::kSynchronizer},
             {"encoder", SinkType::kEncoder},
-            {"remux", SinkType::kRemux}},
+            {"remux", SinkType::kRemux},
+            {"rtsp_publish", SinkType::kRtspPublish}},
            &type);
   std::unique_ptr<SinkConfig> result;
   switch (type) {
@@ -503,6 +532,9 @@ std::unique_ptr<SinkConfig> ReadSinkNode(const Table& table,
       break;
     case SinkType::kRemux:
       result = ReadRemuxNode(table, std::move(id), path);
+      break;
+    case SinkType::kRtspPublish:
+      result = ReadRtspPublishNode(table, std::move(id), path);
       break;
   }
   ReadStringArray(table, "downstream", path, &result->downstream);
@@ -633,23 +665,35 @@ void WriteEncoderNode(Table& table, const EncoderSinkConfig& config) {
             {"properties", WriteProperties(config.video_encoder.properties)}});
 }
 
+Table WriteOutputConfig(const OutputConfig& output) {
+  return Table{
+      {"pusher",
+       Table{{"connect_timeout_ms", output.pusher.connect_timeout_ms.count()},
+             {"local_bind_ip", output.pusher.local_bind_ip}}},
+      {"muxer", Table{{"paced_sender_interval_ms",
+                       output.muxer.paced_sender_interval_ms.count()}}},
+      {"recording", Table{{"file_buffer_size",
+                           WriteCapacity(output.recording.file_buffer_size)},
+                          {"hls_segment_duration_ms",
+                           output.recording.hls_segment_duration_ms.count()}}}};
+}
+
 void WriteRemuxNode(Table& table, const RemuxSinkConfig& config) {
   table.insert("target", config.target);
   table.insert("packet_queue_capacity",
                WriteCapacity(config.packet_queue_capacity));
-  const auto& output = config.zlm;
-  table.insert(
-      "zlm",
-      Table{{"pusher", Table{{"connect_timeout_ms",
-                              output.pusher.connect_timeout_ms.count()},
-                             {"local_bind_ip", output.pusher.local_bind_ip}}},
-            {"muxer", Table{{"paced_sender_interval_ms",
-                             output.muxer.paced_sender_interval_ms.count()}}},
-            {"recording",
-             Table{{"file_buffer_size",
-                    WriteCapacity(output.recording.file_buffer_size)},
-                   {"hls_segment_duration_ms",
-                    output.recording.hls_segment_duration_ms.count()}}}});
+  table.insert("zlm", WriteOutputConfig(config.zlm));
+}
+
+void WriteRtspPublishNode(Table& table, const RtspPublishSinkConfig& config) {
+  table.insert("app", config.app);
+  table.insert("stream", config.stream);
+  table.insert("bind_ip", config.bind_ip);
+  table.insert("port", config.port);
+  table.insert("packet_queue_capacity",
+               WriteCapacity(config.packet_queue_capacity));
+  table.insert("muxer", Table{{"paced_sender_interval_ms",
+                               config.muxer.paced_sender_interval_ms.count()}});
 }
 
 Table WriteSinkNode(const SinkConfig& node) {
@@ -686,6 +730,11 @@ Table WriteSinkNode(const SinkConfig& node) {
     case SinkType::kRemux:
       result.insert("type", "remux");
       WriteRemuxNode(result, static_cast<const RemuxNodeConfig&>(node).options);
+      break;
+    case SinkType::kRtspPublish:
+      result.insert("type", "rtsp_publish");
+      WriteRtspPublishNode(
+          result, static_cast<const RtspPublishNodeConfig&>(node).options);
       break;
   }
   return result;

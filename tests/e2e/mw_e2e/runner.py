@@ -21,15 +21,17 @@ class Runner:
         artifact_directory: Path,
         cache_duration_ms: int | None = None,
         *,
-        scenario: Literal["streaming", "remux", "file"] = "streaming",
+        scenario: Literal["streaming", "remux", "rtsp_publish", "file"] = "streaming",
         input_output_urls: Sequence[str] = (),
+        rtsp_publish_paths: Sequence[str] = (),
+        rtsp_port: int | None = None,
         passthrough_video: bool = False,
         software_video: bool = False,
         local_sink: bool = False,
         observe_cache: bool = False,
         video_jitter_ms: tuple[int, int] | None = None,
     ) -> None:
-        if scenario not in {"streaming", "remux", "file"}:
+        if scenario not in {"streaming", "remux", "rtsp_publish", "file"}:
             raise ValueError(f"未知测试场景: {scenario}")
         if scenario == "remux" and not output_urls:
             raise ValueError("Remux 场景 至少需要一个输出目标")
@@ -37,6 +39,15 @@ class Runner:
             raise ValueError("Remux 场景请通过output_urls配置输出")
         if scenario == "file" and (output_urls or input_output_urls):
             raise ValueError("文件分析场景不支持输出目标")
+        if scenario == "rtsp_publish":
+            if output_urls or input_output_urls:
+                raise ValueError("RTSP发布场景不支持其他输出目标")
+            if not rtsp_publish_paths:
+                raise ValueError("RTSP发布场景需要发布路径")
+        if bool(rtsp_publish_paths) != (rtsp_port is not None):
+            raise ValueError("RTSP发布路径和端口必须一起提供")
+        if scenario not in {"rtsp_publish", "streaming"} and rtsp_publish_paths:
+            raise ValueError("只有RTSP发布和Streaming场景支持发布路径")
         if observe_cache and scenario != "streaming":
             raise ValueError("缓存观测仅支持 streaming 场景")
         self.events_path = artifact_directory / "runner.events"
@@ -97,6 +108,10 @@ class Runner:
                 command.extend(["--input-output", input_output_url])
         for output_url in output_urls:
             command.extend(["--output", output_url])
+        if rtsp_port is not None:
+            command.extend(["--rtsp-port", str(rtsp_port)])
+        for path in rtsp_publish_paths:
+            command.extend(["--rtsp-publish", path])
         self.process = ManagedProcess(
             command, artifact_directory / "runner.log"
         )

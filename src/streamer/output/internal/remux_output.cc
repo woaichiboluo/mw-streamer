@@ -32,7 +32,7 @@
 namespace mw::streamer::internal {
 namespace {
 
-enum class TargetKind { kRtmp, kRtsp, kSrt, kFmp4, kHls };
+enum class TargetKind { kRtmp, kRtsp, kLocalRtsp, kSrt, kFmp4, kHls };
 
 TargetKind ParseTarget(const std::string& target) {
   if (target.empty()) {
@@ -63,6 +63,7 @@ std::string GetSchema(TargetKind kind) {
     case TargetKind::kRtmp:
       return RTMP_SCHEMA;
     case TargetKind::kRtsp:
+    case TargetKind::kLocalRtsp:
       return RTSP_SCHEMA;
     case TargetKind::kSrt:
       return TS_SCHEMA;
@@ -117,6 +118,7 @@ mediakit::ProtocolOption MakeProtocolOption(TargetKind kind,
   mediakit::ProtocolOption option;
   option.modify_stamp = mediakit::ProtocolOption::kModifyStampOff;
   option.preserve_startup_packets = true;
+  option.rtsp_ntp_from_source_stamp = kind == TargetKind::kLocalRtsp;
   option.enable_audio = true;
   option.add_mute_audio = false;
   option.auto_close = false;
@@ -125,7 +127,8 @@ mediakit::ProtocolOption MakeProtocolOption(TargetKind kind,
   option.enable_hls = false;
   option.enable_hls_fmp4 = false;
   option.enable_mp4 = false;
-  option.enable_rtsp = kind == TargetKind::kRtsp;
+  option.enable_rtsp =
+      kind == TargetKind::kRtsp || kind == TargetKind::kLocalRtsp;
   option.enable_rtmp = kind == TargetKind::kRtmp;
   option.enable_ts = kind == TargetKind::kSrt;
   option.enable_fmp4 = false;
@@ -163,7 +166,13 @@ std::chrono::system_clock::time_point NextRecordingStartTime() {
 }  // namespace
 
 void ValidateRemuxOutputConfig(const RemuxOutputConfig& config) {
-  static_cast<void>(ParseTarget(config.target));
+  if (config.local_rtsp) {
+    if (config.local_rtsp->app.empty() || config.local_rtsp->stream.empty()) {
+      throw std::invalid_argument("本地RTSP发布路径不能为空");
+    }
+  } else {
+    static_cast<void>(ParseTarget(config.target));
+  }
   internal::ValidateOutputConfig(config.zlm);
 }
 
@@ -177,7 +186,8 @@ class RemuxOutput::Impl final {
         streams_(std::move(streams)),
         poller_(std::move(poller)),
         on_failed_(std::move(on_failed)),
-        kind_(ParseTarget(config_.target)),
+        kind_(config_.local_rtsp ? TargetKind::kLocalRtsp
+                                 : ParseTarget(config_.target)),
         performance_(performance) {
     if (!poller_) throw std::invalid_argument("Remux输出需要Poller");
   }
@@ -321,7 +331,12 @@ class RemuxOutput::Impl final {
     // Recording consumes the supplied packets directly. MediaSink's live
     // track discovery cache may reorder or evict packets before tracks ready.
     if (IsRecording(kind_)) return;
-    tuple_ = MakeMediaTuple();
+    tuple_ = config_.local_rtsp
+                 ? mediakit::MediaTuple{DEFAULT_VHOST,
+                                        config_.local_rtsp->app,
+                                        config_.local_rtsp->stream,
+                                        {}}
+                 : MakeMediaTuple();
     bridge_ = std::make_shared<ListenerBridge>(*this, poller_);
     muxer_ = std::make_shared<mediakit::MultiMediaSourceMuxer>(
         tuple_, 0.0F,
@@ -412,6 +427,7 @@ class RemuxOutput::Impl final {
   void OnRegistered(const mediakit::MediaTuple& tuple,
                     const std::string& schema) {
     if (state_ != State::kOpen || IsRecording(kind_) ||
+        kind_ == TargetKind::kLocalRtsp ||
         !mediakit::equalMediaTuple(tuple, tuple_) ||
         schema != GetSchema(kind_)) {
       return;

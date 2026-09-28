@@ -50,7 +50,7 @@ public:
      
      * [AUTO-TRANSLATED:41469869]
      */
-    RtspMuxer(const TitleSdp::Ptr &title = nullptr);
+    RtspMuxer(const TitleSdp::Ptr &title = nullptr, bool ntp_from_source_stamp = false);
 
     /**
      * 获取完整的SDP字符串
@@ -113,6 +113,7 @@ private:
 
 private:
     bool _live = true;
+    bool _ntp_from_source_stamp = false;
     bool _track_existed[2] = { false, false };
 
     uint8_t _index {0};

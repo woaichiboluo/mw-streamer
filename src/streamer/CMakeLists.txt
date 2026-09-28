@@ -31,8 +31,10 @@ set(MW_STREAMER_CORE_SOURCES
     log/third_party_log_bridge.cc
     media/internal/codec_bridge.cc
     output/internal/remux_output.cc
+    output/internal/rtsp_listener_manager.cc
     output/recording_target.cc
     output/remux_sink.cc
+    output/rtsp_publish_sink.cc
     performance/operation_recorder.cc
     performance/pipeline_snapshot.cc
     pipeline/pipeline.cc
