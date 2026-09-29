@@ -13,12 +13,12 @@ namespace mw::streamer::internal {
 MwStreamerExecutionContext MakeProcessorExecutionContext(
     const HardwareContext* hardware_context) {
   if (!hardware_context) {
-    return {kMwStreamerExecutionCpu};
+    return {kMwStreamerExecutionCpu, nullptr};
   }
 
   switch (hardware_context->type()) {
     case AV_HWDEVICE_TYPE_CUDA:
-      return {kMwStreamerExecutionCuda};
+      return {kMwStreamerExecutionCuda, hardware_context->get()->data};
     default:
       throw std::invalid_argument("Processor暂不支持该硬件执行上下文");
   }

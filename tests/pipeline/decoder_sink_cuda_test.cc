@@ -39,6 +39,7 @@ using namespace mw::streamer;
 
 struct Recording {
   std::vector<Frame> frames;
+  const void* processor_device_context = nullptr;
   int sources = 0;
   int ends = 0;
   int stops = 0;
@@ -119,8 +120,18 @@ TEST_CASE("DecoderSink CUDA frames outlive the decoder context") {
     sink->AddSink(std::make_unique<CudaRecorder>("recording", recording));
   }
   SECTION("processor without a callback preserves CUDA storage") {
-    auto processor = std::make_unique<TransformProcessorSink>(
-        "processor", MwStreamerTransformProcessorCallbacks{});
+    MwStreamerTransformProcessorCallbacks callbacks{};
+    callbacks.user_context = &recording;
+    callbacks.on_start =
+        [](const MwStreamerTransformProcessorStartRequest* request,
+           void* user_context) {
+          auto& recording = *static_cast<Recording*>(user_context);
+          recording.processor_device_context =
+              request->execution->ffmpeg_device_context;
+          return kMwStreamerProcessorStartSuccess;
+        };
+    auto processor =
+        std::make_unique<TransformProcessorSink>("processor", callbacks);
     processor->AddSink(std::make_unique<CudaRecorder>("recording", recording));
     sink->AddSink(std::move(processor));
   }
@@ -150,6 +161,12 @@ TEST_CASE("DecoderSink CUDA frames outlive the decoder context") {
   CHECK(recording.ends == 1);
   CHECK(recording.stops == 1);
   REQUIRE(recording.frames.size() == 20);
+  if (recording.processor_device_context) {
+    const auto* frames_context =
+        HardwareContext::GetFramesContext(*recording.frames.front().get());
+    REQUIRE(frames_context != nullptr);
+    CHECK(recording.processor_device_context == frames_context->device_ctx);
+  }
   for (const auto& frame : recording.frames) {
     Frame downloaded;
     downloaded->format = AV_PIX_FMT_NV12;

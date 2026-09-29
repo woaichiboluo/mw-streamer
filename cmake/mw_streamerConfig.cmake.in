@@ -180,13 +180,13 @@ if("adapter" IN_LIST mw_streamer_FIND_COMPONENTS)
             set(mw_streamer_NOT_FOUND_MESSAGE
                 "mw_streamer adapter requires OpenCV core and cudaarithm"
             )
-        elseif(NOT _mw_package_is_shared)
+        else()
             find_package(CUDAToolkit QUIET)
             if(NOT CUDAToolkit_FOUND)
                 set(_mw_adapter_dependencies_found FALSE)
                 set(mw_streamer_adapter_FOUND FALSE)
                 set(mw_streamer_NOT_FOUND_MESSAGE
-                    "Static mw_streamer adapter requires CUDAToolkit"
+                    "mw_streamer adapter requires CUDAToolkit"
                 )
             endif()
         endif()
@@ -202,13 +202,14 @@ if("adapter" IN_LIST mw_streamer_FIND_COMPONENTS)
                 INTERFACE_INCLUDE_DIRECTORIES "${OpenCV_INCLUDE_DIRS}"
             )
             set_property(TARGET mw::opencv_adapter APPEND PROPERTY
-                INTERFACE_LINK_LIBRARIES "${OpenCV_LIBS}"
+                INTERFACE_LINK_LIBRARIES
+                    "${OpenCV_LIBS};CUDA::cuda_driver"
             )
 
             if(NOT _mw_package_is_shared)
                 set_property(TARGET mw::opencv_adapter APPEND PROPERTY
                     INTERFACE_LINK_LIBRARIES
-                        "mw::log;CUDA::cuda_driver;CUDA::cudart;CUDA::nppc;CUDA::nppial;CUDA::nppicc;CUDA::nppidei;CUDA::nppig;CUDA::nppitc;FFmpeg::swscale;FFmpeg::avutil"
+                        "mw::log;CUDA::cudart;CUDA::nppc;CUDA::nppial;CUDA::nppicc;CUDA::nppitc;FFmpeg::swscale;FFmpeg::avutil"
                 )
             endif()
             set(mw_streamer_adapter_FOUND TRUE)

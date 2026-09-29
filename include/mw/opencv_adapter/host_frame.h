@@ -1,6 +1,8 @@
 #ifndef MW_OPENCV_ADAPTER_HOST_FRAME_H_
 #define MW_OPENCV_ADAPTER_HOST_FRAME_H_
 
+#include <cuda.h>
+
 #include <memory>
 
 #include "mw/export.h"
@@ -10,19 +12,24 @@ namespace mw::opencv_adapter {
 
 class HostMatAdapter;
 
-// Owns a tight Host copy of a linear video frame. The copied frame preserves
-// the source pixel format and metadata and no longer depends on the source
-// callback or its storage lifetime.
+// Owns a tight Host copy of a linear Host video frame. The copied frame
+// preserves the source pixel format and metadata and no longer depends on the
+// source callback or its storage lifetime.
 class MW_OPENCV_ADAPTER_API HostFrame final {
  public:
-  // Copies a Host linear frame directly into a matching Host or CUDA output
-  // buffer. No intermediate frame allocation is created.
+  // Copies tight positive-stride Host planes into a matching Host output.
+  // Contiguous planes are copied in one memcpy; no row-by-row fallback exists.
   static void Copy(const MwStreamerVideoFrameView& source,
                    const MwStreamerVideoBufferView& destination);
 
-  // CUDA downloads wait for pending work in the source context before reading
-  // its pixels. The caller must not submit concurrent writes during this copy.
+  // Allocates ordinary CPU storage and copies a tight Host frame into it.
   static HostFrame CopyFrom(const MwStreamerVideoFrameView& source);
+
+  // Allocates reusable page-locked storage for asynchronous CUDA transfers.
+  // This is a setup operation; context must remain alive until destruction.
+  // No source pixels are copied.
+  static HostFrame AllocatePinned(const MwStreamerVideoFrameView& prototype,
+                                  CUcontext context);
 
   ~HostFrame();
 
@@ -31,8 +38,7 @@ class MW_OPENCV_ADAPTER_API HostFrame final {
   HostFrame(HostFrame&& other) noexcept;
   HostFrame& operator=(HostFrame&& other) noexcept;
 
-  // Synchronously copies this frame into a matching writable output buffer.
-  // Host and CUDA linear destinations are supported.
+  // Copies this frame into a matching tight Host output buffer.
   void CopyTo(const MwStreamerVideoBufferView& destination) const;
 
   // The returned view remains valid until this HostFrame is moved from or

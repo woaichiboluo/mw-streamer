@@ -2,12 +2,9 @@
 
 #include <array>
 #include <catch2/catch_test_macros.hpp>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <memory>
-#include <thread>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -17,26 +14,56 @@ extern "C" {
 #include <libavutil/hwcontext_cuda.h>
 }
 
-#include "mw/opencv_adapter/cuda_frame.h"
 #include "mw/opencv_adapter/host_frame.h"
-#include "mw/streamer/ffmpeg/error.h"
-#include "mw/streamer/ffmpeg/frame.h"
 #include "mw/streamer/ffmpeg/hardware_context.h"
-#include "mw/streamer/processor/internal/frame_adapter.h"
 
 namespace {
 
-using mw::opencv_adapter::CudaFrame;
 using mw::opencv_adapter::HostFrame;
-using mw::streamer::Frame;
 using mw::streamer::HardwareContext;
-using mw::streamer::ThrowIfError;
-using mw::streamer::internal::VideoFrameAdapter;
 
 static_assert(!std::is_copy_constructible_v<HostFrame>);
 static_assert(!std::is_copy_assignable_v<HostFrame>);
 static_assert(std::is_nothrow_move_constructible_v<HostFrame>);
 static_assert(std::is_nothrow_move_assignable_v<HostFrame>);
+
+void ThrowIfCudaError(CUresult result, const char* operation) {
+  if (result != CUDA_SUCCESS) {
+    throw std::runtime_error(operation);
+  }
+}
+
+class ScopedCudaContext final {
+ public:
+  explicit ScopedCudaContext(CUcontext context) {
+    ThrowIfCudaError(cuCtxPushCurrent(context), "设置测试CUDA context失败");
+  }
+
+  ~ScopedCudaContext() {
+    CUcontext popped = nullptr;
+    cuCtxPopCurrent(&popped);
+  }
+
+  ScopedCudaContext(const ScopedCudaContext&) = delete;
+  ScopedCudaContext& operator=(const ScopedCudaContext&) = delete;
+};
+
+class CudaEnvironment final {
+ public:
+  CudaEnvironment() : hardware_context_(HardwareContext::CreateCuda(0)) {
+    const auto* device = reinterpret_cast<const AVHWDeviceContext*>(
+        hardware_context_.get()->data);
+    const auto* cuda_device =
+        static_cast<const AVCUDADeviceContext*>(device->hwctx);
+    context_ = cuda_device->cuda_ctx;
+  }
+
+  CUcontext context() const noexcept { return context_; }
+
+ private:
+  HardwareContext hardware_context_;
+  CUcontext context_ = nullptr;
+};
 
 MwStreamerVideoColorInfo MakeColorInfo() {
   return {
@@ -48,364 +75,158 @@ MwStreamerVideoColorInfo MakeColorInfo() {
 
 MwStreamerMediaTimestamp MakeTimestamp() { return {1234, 40, {1, 1000}}; }
 
-TEST_CASE("HostFrame直接复制到已有Host输出且保留padding") {
-  constexpr std::uint32_t kWidth = 4;
-  constexpr std::uint32_t kHeight = 4;
-  constexpr std::int32_t kSourceStride = 6;
-  constexpr std::int32_t kDestinationStride = 7;
-  std::vector<std::uint8_t> source_y(kSourceStride * kHeight, 0xee);
-  std::vector<std::uint8_t> source_uv(kSourceStride * (kHeight / 2), 0xdd);
-  for (std::uint32_t row = 0; row < kHeight; ++row) {
-    std::memset(source_y.data() + row * kSourceStride,
-                static_cast<int>(0x10 + row), kWidth);
-  }
-  for (std::uint32_t row = 0; row < kHeight / 2; ++row) {
-    std::memset(source_uv.data() + row * kSourceStride,
-                static_cast<int>(0x50 + row), kWidth);
-  }
-  const std::array<MwStreamerVideoPlaneView, 2> source_planes = {{
-      {reinterpret_cast<std::uintptr_t>(source_y.data()), kSourceStride, kWidth,
-       kHeight},
-      {reinterpret_cast<std::uintptr_t>(source_uv.data()), kSourceStride,
-       kWidth, kHeight / 2},
-  }};
-  const MwStreamerVideoFrameView source = {
-      {kMwStreamerMemoryHost,
-       kMwStreamerVideoStorageLinear,
-       kMwStreamerVideoPixelFormatNv12,
-       kWidth,
-       kHeight,
-       {{source_planes.data(),
-         static_cast<std::uint32_t>(source_planes.size())}}},
-      MakeColorInfo(),
-      MakeTimestamp(),
-  };
+class HostNv12Frame final {
+ public:
+  HostNv12Frame(std::uint32_t width, std::uint32_t height, std::uint8_t y_value,
+                std::uint8_t uv_value)
+      : y_(static_cast<std::size_t>(width) * height, y_value),
+        uv_(static_cast<std::size_t>(width) * height / 2, uv_value),
+        planes_({{{reinterpret_cast<std::uintptr_t>(y_.data()),
+                   static_cast<std::int32_t>(width), width, height},
+                  {reinterpret_cast<std::uintptr_t>(uv_.data()),
+                   static_cast<std::int32_t>(width), width, height / 2}}}),
+        view_({{kMwStreamerMemoryHost,
+                kMwStreamerVideoStorageLinear,
+                kMwStreamerVideoPixelFormatNv12,
+                width,
+                height,
+                {{planes_.data(), static_cast<std::uint32_t>(planes_.size())}}},
+               MakeColorInfo(),
+               MakeTimestamp()}) {}
 
-  std::vector<std::uint8_t> output_y(kDestinationStride * kHeight, 0xff);
-  std::vector<std::uint8_t> output_uv(kDestinationStride * (kHeight / 2), 0xff);
-  const std::array<MwStreamerVideoPlaneView, 2> output_planes = {{
-      {reinterpret_cast<std::uintptr_t>(output_y.data()), kDestinationStride,
-       kWidth, kHeight},
-      {reinterpret_cast<std::uintptr_t>(output_uv.data()), kDestinationStride,
-       kWidth, kHeight / 2},
-  }};
-  auto destination = source.buffer;
-  destination.storage.linear = {
-      output_planes.data(), static_cast<std::uint32_t>(output_planes.size())};
+  const MwStreamerVideoFrameView& view() const noexcept { return view_; }
 
-  HostFrame::Copy(source, destination);
-  for (std::uint32_t row = 0; row < kHeight; ++row) {
-    CHECK(output_y[row * kDestinationStride] == 0x10 + row);
-    CHECK(output_y[row * kDestinationStride + kWidth] == 0xff);
-  }
-  for (std::uint32_t row = 0; row < kHeight / 2; ++row) {
-    CHECK(output_uv[row * kDestinationStride] == 0x50 + row);
-    CHECK(output_uv[row * kDestinationStride + kWidth] == 0xff);
-  }
+ private:
+  std::vector<std::uint8_t> y_;
+  std::vector<std::uint8_t> uv_;
+  std::array<MwStreamerVideoPlaneView, 2> planes_{};
+  MwStreamerVideoFrameView view_{};
+};
 
-  auto invalid = destination;
-  invalid.width -= 1;
-  CHECK_THROWS_AS(HostFrame::Copy(source, invalid), std::invalid_argument);
-  invalid = destination;
-  invalid.memory_type = static_cast<MwStreamerMemoryType>(999);
-  CHECK_THROWS_AS(HostFrame::Copy(source, invalid), std::invalid_argument);
+void CheckNv12Values(const MwStreamerVideoFrameView& frame,
+                     std::uint8_t y_value, std::uint8_t uv_value) {
+  const auto& linear = frame.buffer.storage.linear;
+  REQUIRE(linear.plane_count == 2);
+  const auto* y =
+      reinterpret_cast<const std::uint8_t*>(linear.planes[0].address);
+  const auto* uv =
+      reinterpret_cast<const std::uint8_t*>(linear.planes[1].address);
+  CHECK(y[0] == y_value);
+  CHECK(y[linear.planes[0].row_bytes * linear.planes[0].row_count - 1] ==
+        y_value);
+  CHECK(uv[0] == uv_value);
+  CHECK(uv[linear.planes[1].row_bytes * linear.planes[1].row_count - 1] ==
+        uv_value);
 }
 
-TEST_CASE("HostFrame深拷贝带padding和负stride的Host帧") {
-  constexpr std::uint32_t kWidth = 4;
+TEST_CASE("HostFrame复制紧密Host帧并按需显式分配page-locked内存") {
+  constexpr std::uint32_t kWidth = 8;
   constexpr std::uint32_t kHeight = 4;
-  constexpr std::int32_t kStride = 6;
-  std::vector<std::uint8_t> y(kStride * kHeight, 0xee);
-  std::vector<std::uint8_t> uv(kStride * (kHeight / 2), 0xdd);
-  for (std::uint32_t row = 0; row < kHeight; ++row) {
-    for (std::uint32_t column = 0; column < kWidth; ++column) {
-      y[(kHeight - 1 - row) * kStride + column] =
-          static_cast<std::uint8_t>(row * 10 + column);
-    }
-  }
-  for (std::uint32_t row = 0; row < kHeight / 2; ++row) {
-    for (std::uint32_t column = 0; column < kWidth; ++column) {
-      uv[row * kStride + column] =
-          static_cast<std::uint8_t>(100 + row * 10 + column);
-    }
-  }
+  CudaEnvironment cuda;
+  ScopedCudaContext scoped_context(cuda.context());
+  HostNv12Frame source(kWidth, kHeight, 0x31, 0x72);
+  HostNv12Frame empty(kWidth, kHeight, 0, 0);
 
-  const std::array<MwStreamerVideoPlaneView, 2> planes = {{
-      {reinterpret_cast<std::uintptr_t>(y.data() + (kHeight - 1) * kStride),
-       -kStride, kWidth, kHeight},
-      {reinterpret_cast<std::uintptr_t>(uv.data()), kStride, kWidth,
-       kHeight / 2},
-  }};
-  const MwStreamerVideoFrameView source = {
-      {kMwStreamerMemoryHost,
-       kMwStreamerVideoStorageLinear,
-       kMwStreamerVideoPixelFormatNv12,
-       kWidth,
-       kHeight,
-       {{planes.data(), static_cast<std::uint32_t>(planes.size())}}},
-      MakeColorInfo(),
-      MakeTimestamp(),
-  };
+  auto frame = HostFrame::CopyFrom(source.view());
+  CHECK(frame.view().buffer.memory_type == kMwStreamerMemoryHost);
+  CHECK(frame.view().buffer.pixel_format == kMwStreamerVideoPixelFormatNv12);
+  CHECK(frame.view().color.space == kMwStreamerColorSpaceBt709);
+  CHECK(frame.view().timestamp.pts == 1234);
+  CheckNv12Values(frame.view(), 0x31, 0x72);
 
-  auto frame = HostFrame::CopyFrom(source);
-  std::memset(y.data(), 0, y.size());
-  std::memset(uv.data(), 0, uv.size());
-
-  const auto& view = frame.view();
-  CHECK(view.buffer.memory_type == kMwStreamerMemoryHost);
-  CHECK(view.buffer.pixel_format == kMwStreamerVideoPixelFormatNv12);
-  CHECK(view.buffer.width == kWidth);
-  CHECK(view.buffer.height == kHeight);
-  CHECK(view.color.space == kMwStreamerColorSpaceBt709);
-  CHECK(view.timestamp.pts == 1234);
-  REQUIRE(view.buffer.storage.linear.plane_count == 2);
-  for (std::uint32_t index = 0; index < 2; ++index) {
-    const auto& plane = view.buffer.storage.linear.planes[index];
-    CHECK(plane.stride_bytes == static_cast<std::int32_t>(plane.row_bytes));
+  auto pinned = HostFrame::AllocatePinned(source.view(), cuda.context());
+  HostFrame::Copy(source.view(), pinned.view().buffer);
+  CheckNv12Values(pinned.view(), 0x31, 0x72);
+  for (std::uint32_t index = 0;
+       index < pinned.view().buffer.storage.linear.plane_count; ++index) {
+    CUmemorytype memory_type = CU_MEMORYTYPE_DEVICE;
+    REQUIRE(
+        cuPointerGetAttribute(
+            &memory_type, CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
+            static_cast<CUdeviceptr>(
+                pinned.view().buffer.storage.linear.planes[index].address)) ==
+        CUDA_SUCCESS);
+    CHECK(memory_type == CU_MEMORYTYPE_HOST);
   }
 
-  const auto* copied_y = reinterpret_cast<const std::uint8_t*>(
-      view.buffer.storage.linear.planes[0].address);
-  const auto* copied_uv = reinterpret_cast<const std::uint8_t*>(
-      view.buffer.storage.linear.planes[1].address);
-  CHECK(copied_y[0] == 0);
-  CHECK(copied_y[3 * kWidth + 3] == 33);
-  CHECK(copied_uv[0] == 100);
-  CHECK(copied_uv[kWidth + 3] == 113);
-
-  std::vector<std::uint8_t> output_y(kStride * kHeight, 0xff);
-  std::vector<std::uint8_t> output_uv(kStride * (kHeight / 2), 0xff);
-  const std::array<MwStreamerVideoPlaneView, 2> output_planes = {{
-      {reinterpret_cast<std::uintptr_t>(output_y.data() +
-                                        (kHeight - 1) * kStride),
-       -kStride, kWidth, kHeight},
-      {reinterpret_cast<std::uintptr_t>(output_uv.data()), kStride, kWidth,
-       kHeight / 2},
-  }};
-  auto host_output = source.buffer;
-  host_output.storage.linear = {
-      output_planes.data(), static_cast<std::uint32_t>(output_planes.size())};
-  frame.CopyTo(host_output);
-  CHECK(output_y[(kHeight - 1) * kStride] == 0);
-  CHECK(output_y[3] == 33);
-  CHECK(output_uv[0] == 100);
-  CHECK(output_uv[kStride + 3] == 113);
-
-  auto cuda_output = CudaFrame::CopyFrom(source);
-  frame.CopyTo(cuda_output.view().buffer);
-  const auto copied_back = cuda_output.ToHost();
-  const auto& copied_back_linear = copied_back.view().buffer.storage.linear;
-  const auto* cuda_y = reinterpret_cast<const std::uint8_t*>(
-      copied_back_linear.planes[0].address);
-  const auto* cuda_uv = reinterpret_cast<const std::uint8_t*>(
-      copied_back_linear.planes[1].address);
-  CHECK(cuda_y[0] == 0);
-  CHECK(cuda_y[3 * kWidth + 3] == 33);
-  CHECK(cuda_uv[0] == 100);
-  CHECK(cuda_uv[kWidth + 3] == 113);
+  auto destination = empty.view().buffer;
+  frame.CopyTo(destination);
+  MwStreamerVideoFrameView copied = empty.view();
+  copied.buffer = destination;
+  CheckNv12Values(copied, 0x31, 0x72);
 
   auto moved = std::move(frame);
-  CHECK(moved.view().buffer.storage.linear.planes[0].address ==
-        reinterpret_cast<std::uintptr_t>(copied_y));
+  CheckNv12Values(moved.view(), 0x31, 0x72);
 }
 
-TEST_CASE("HostFrame等待非阻塞流写入后下载并脱离源帧生命周期") {
-  constexpr int kWidth = 64;
-  constexpr int kHeight = 64;
-  auto cached = [&]() {
-    const auto hardware_context = HardwareContext::CreateCuda(0);
-    AVBufferRef* frames_ref =
-        av_hwframe_ctx_alloc(const_cast<AVBufferRef*>(hardware_context.get()));
-    REQUIRE(frames_ref != nullptr);
-
-    auto* frames_context =
-        reinterpret_cast<AVHWFramesContext*>(frames_ref->data);
-    frames_context->format = AV_PIX_FMT_CUDA;
-    frames_context->sw_format = AV_PIX_FMT_NV12;
-    frames_context->width = kWidth;
-    frames_context->height = kHeight;
-    frames_context->initial_pool_size = 1;
-    ThrowIfError(av_hwframe_ctx_init(frames_ref), "初始化测试CUDA帧池");
-
-    Frame source;
-    source->format = AV_PIX_FMT_NV12;
-    source->width = kWidth;
-    source->height = kHeight;
-    ThrowIfError(av_frame_get_buffer(source.get(), 32), "分配测试Host源帧");
-    std::memset(source->data[0], 0,
-                static_cast<std::size_t>(source->linesize[0]) * kHeight);
-    std::memset(source->data[1], 0,
-                static_cast<std::size_t>(source->linesize[1]) * (kHeight / 2));
-
-    Frame cuda;
-    ThrowIfError(av_hwframe_get_buffer(frames_ref, cuda.get(), 0),
-                 "分配测试CUDA帧");
-    av_buffer_unref(&frames_ref);
-    ThrowIfError(av_hwframe_transfer_data(cuda.get(), source.get(), 0),
-                 "上传测试CUDA帧");
-    cuda->time_base = {1, 25};
-    cuda->pts = 7;
-    cuda->duration = 1;
-    cuda->colorspace = AVCOL_SPC_BT709;
-
-    const auto* device = reinterpret_cast<const AVHWDeviceContext*>(
-        hardware_context.get()->data);
-    const auto* cuda_device =
-        static_cast<const AVCUDADeviceContext*>(device->hwctx);
-    REQUIRE(cuCtxPushCurrent(cuda_device->cuda_ctx) == CUDA_SUCCESS);
-    CUstream stream = nullptr;
-    const auto create_result = cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING);
-    if (create_result != CUDA_SUCCESS) {
-      CUcontext popped = nullptr;
-      cuCtxPopCurrent(&popped);
-      REQUIRE(create_result == CUDA_SUCCESS);
-    }
-    const auto destroy_stream = [context =
-                                     cuda_device->cuda_ctx](CUstream value) {
-      cuCtxPushCurrent(context);
-      cuStreamDestroy(value);
-      CUcontext popped = nullptr;
-      cuCtxPopCurrent(&popped);
-    };
-    const std::unique_ptr<std::remove_pointer_t<CUstream>,
-                          decltype(destroy_stream)>
-        producer(stream, destroy_stream);
-    // Delay the producer so downloading on the default stream without waiting
-    // for this non-blocking stream can observe the old zero-filled pixels.
-    const auto delay_result = cuLaunchHostFunc(
-        stream,
-        [](void*) {
-          std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        },
-        nullptr);
-    const auto y_result =
-        cuMemsetD2D8Async(reinterpret_cast<CUdeviceptr>(cuda->data[0]),
-                          cuda->linesize[0], 0x5a, kWidth, kHeight, stream);
-    const auto uv_result =
-        cuMemsetD2D8Async(reinterpret_cast<CUdeviceptr>(cuda->data[1]),
-                          cuda->linesize[1], 0xa5, kWidth, kHeight / 2, stream);
-    CUcontext popped = nullptr;
-    const auto pop_result = cuCtxPopCurrent(&popped);
-    REQUIRE(delay_result == CUDA_SUCCESS);
-    REQUIRE(y_result == CUDA_SUCCESS);
-    REQUIRE(uv_result == CUDA_SUCCESS);
-    REQUIRE(pop_result == CUDA_SUCCESS);
-
-    const VideoFrameAdapter adapter(cuda);
-    REQUIRE(adapter.view().buffer.memory_type == kMwStreamerMemoryCuda);
-    return HostFrame::CopyFrom(adapter.view());
-  }();
-
-  const auto& view = cached.view();
-  CHECK(view.buffer.memory_type == kMwStreamerMemoryHost);
-  CHECK(view.buffer.pixel_format == kMwStreamerVideoPixelFormatNv12);
-  CHECK(view.timestamp.pts == 7);
-  REQUIRE(view.buffer.storage.linear.plane_count == 2);
-  const auto* y = reinterpret_cast<const std::uint8_t*>(
-      view.buffer.storage.linear.planes[0].address);
-  const auto* uv = reinterpret_cast<const std::uint8_t*>(
-      view.buffer.storage.linear.planes[1].address);
-  CHECK(y[0] == 0x5a);
-  CHECK(y[kWidth * kHeight - 1] == 0x5a);
-  CHECK(uv[0] == 0xa5);
-  CHECK(uv[kWidth * (kHeight / 2) - 1] == 0xa5);
-}
-
-TEST_CASE("HostFrame拒绝非linear和无效平面") {
-  MwStreamerVideoFrameView source{};
-  source.buffer.memory_type = kMwStreamerMemoryHost;
-  source.buffer.storage_type = kMwStreamerVideoStorageNativeSurface;
-  source.buffer.pixel_format = kMwStreamerVideoPixelFormatNv12;
-  source.buffer.width = 4;
-  source.buffer.height = 4;
-  CHECK_THROWS_AS(HostFrame::CopyFrom(source), std::invalid_argument);
-
-  source.buffer.storage_type = kMwStreamerVideoStorageLinear;
-  source.buffer.storage.linear = {nullptr, 0};
-  CHECK_THROWS_AS(HostFrame::CopyFrom(source), std::invalid_argument);
-}
-
-TEST_CASE("HostFrame CopyTo校验目标格式和全部平面布局") {
-  constexpr std::uint32_t kWidth = 4;
+TEST_CASE("HostFrame拒绝padding和负stride") {
+  constexpr std::uint32_t kWidth = 8;
   constexpr std::uint32_t kHeight = 4;
-  std::vector<std::uint8_t> y(kWidth * kHeight, 0x31);
-  std::vector<std::uint8_t> uv(kWidth * kHeight / 2, 0x72);
-  const std::array<MwStreamerVideoPlaneView, 2> source_planes = {{
-      {reinterpret_cast<std::uintptr_t>(y.data()), kWidth, kWidth, kHeight},
-      {reinterpret_cast<std::uintptr_t>(uv.data()), kWidth, kWidth,
-       kHeight / 2},
-  }};
-  const MwStreamerVideoFrameView source = {
-      {kMwStreamerMemoryHost,
-       kMwStreamerVideoStorageLinear,
-       kMwStreamerVideoPixelFormatNv12,
-       kWidth,
-       kHeight,
-       {{source_planes.data(),
-         static_cast<std::uint32_t>(source_planes.size())}}},
-      MakeColorInfo(),
-      MakeTimestamp(),
-  };
-  const auto frame = HostFrame::CopyFrom(source);
+  CudaEnvironment cuda;
+  ScopedCudaContext scoped_context(cuda.context());
+  HostNv12Frame source(kWidth, kHeight, 0x31, 0x72);
 
-  std::vector<std::uint8_t> output_y((kWidth + 2) * kHeight, 0xff);
-  std::vector<std::uint8_t> output_uv((kWidth + 2) * (kHeight / 2), 0xff);
-  std::array<MwStreamerVideoPlaneView, 2> output_planes = {{
-      {reinterpret_cast<std::uintptr_t>(output_y.data()), kWidth + 2, kWidth,
-       kHeight},
-      {reinterpret_cast<std::uintptr_t>(output_uv.data()), kWidth + 2, kWidth,
-       kHeight / 2},
-  }};
-  auto destination = source.buffer;
-  destination.storage.linear = {
-      output_planes.data(), static_cast<std::uint32_t>(output_planes.size())};
-  CHECK_NOTHROW(frame.CopyTo(destination));
-  CHECK(output_y[0] == 0x31);
-  CHECK(output_y[kWidth] == 0xff);
-  CHECK(output_uv[0] == 0x72);
-  CHECK(output_uv[kWidth] == 0xff);
+  auto invalid_source = source.view();
+  std::array<MwStreamerVideoPlaneView, 2> invalid_source_planes = {
+      invalid_source.buffer.storage.linear.planes[0],
+      invalid_source.buffer.storage.linear.planes[1]};
+  invalid_source_planes[0].stride_bytes += 1;
+  invalid_source.buffer.storage.linear = {
+      invalid_source_planes.data(),
+      static_cast<std::uint32_t>(invalid_source_planes.size())};
+  CHECK_THROWS_AS(HostFrame::CopyFrom(invalid_source), std::invalid_argument);
 
-  const auto check_rejected = [&](const MwStreamerVideoBufferView& invalid) {
-    CHECK_THROWS_AS(frame.CopyTo(invalid), std::invalid_argument);
-  };
-  auto invalid = destination;
-  invalid.memory_type = static_cast<MwStreamerMemoryType>(999);
-  check_rejected(invalid);
-  invalid = destination;
-  invalid.storage_type = kMwStreamerVideoStorageNativeSurface;
-  check_rejected(invalid);
-  invalid = destination;
-  invalid.pixel_format = kMwStreamerVideoPixelFormatP010;
-  check_rejected(invalid);
-  invalid = destination;
-  invalid.width -= 1;
-  check_rejected(invalid);
-  invalid = destination;
-  invalid.height -= 1;
-  check_rejected(invalid);
-  invalid = destination;
-  invalid.storage.linear = {nullptr, 0};
-  check_rejected(invalid);
-  invalid = destination;
-  invalid.storage.linear.plane_count = 1;
-  check_rejected(invalid);
+  invalid_source_planes[0] = source.view().buffer.storage.linear.planes[0];
+  invalid_source_planes[0].stride_bytes =
+      -invalid_source_planes[0].stride_bytes;
+  CHECK_THROWS_AS(HostFrame::CopyFrom(invalid_source), std::invalid_argument);
 
-  invalid = destination;
-  output_planes[0].address = 0;
-  check_rejected(invalid);
-  output_planes[0] = source_planes[0];
-  output_planes[0].stride_bytes = 0;
-  check_rejected(invalid);
-  output_planes[0] = source_planes[0];
-  output_planes[0].row_bytes -= 1;
-  check_rejected(invalid);
-  output_planes[0] = source_planes[0];
-  output_planes[0].row_count -= 1;
-  check_rejected(invalid);
-  output_planes[0] = source_planes[0];
-  invalid.memory_type = kMwStreamerMemoryCuda;
-  output_planes[0].stride_bytes = -output_planes[0].stride_bytes;
-  check_rejected(invalid);
+  auto frame = HostFrame::CopyFrom(source.view());
+  HostNv12Frame output(kWidth, kHeight, 0, 0);
+  auto invalid_destination = output.view().buffer;
+  std::array<MwStreamerVideoPlaneView, 2> invalid_destination_planes = {
+      invalid_destination.storage.linear.planes[0],
+      invalid_destination.storage.linear.planes[1]};
+  invalid_destination_planes[0].stride_bytes += 1;
+  invalid_destination.storage.linear = {
+      invalid_destination_planes.data(),
+      static_cast<std::uint32_t>(invalid_destination_planes.size())};
+  CHECK_THROWS_AS(frame.CopyTo(invalid_destination), std::invalid_argument);
+
+  invalid_destination_planes[0] = output.view().buffer.storage.linear.planes[0];
+  invalid_destination_planes[0].stride_bytes =
+      -invalid_destination_planes[0].stride_bytes;
+  CHECK_THROWS_AS(frame.CopyTo(invalid_destination), std::invalid_argument);
+}
+
+TEST_CASE("HostFrame拒绝CUDA和无效布局") {
+  constexpr std::uint32_t kWidth = 8;
+  constexpr std::uint32_t kHeight = 4;
+  CudaEnvironment cuda;
+  ScopedCudaContext scoped_context(cuda.context());
+  HostNv12Frame source(kWidth, kHeight, 0x31, 0x72);
+
+  auto invalid_source = source.view();
+  invalid_source.buffer.memory_type = kMwStreamerMemoryCuda;
+  CHECK_THROWS_AS(HostFrame::CopyFrom(invalid_source), std::invalid_argument);
+  invalid_source = source.view();
+  invalid_source.buffer.storage_type = kMwStreamerVideoStorageNativeSurface;
+  CHECK_THROWS_AS(HostFrame::CopyFrom(invalid_source), std::invalid_argument);
+  invalid_source = source.view();
+  invalid_source.buffer.storage.linear = {nullptr, 0};
+  CHECK_THROWS_AS(HostFrame::CopyFrom(invalid_source), std::invalid_argument);
+
+  auto frame = HostFrame::CopyFrom(source.view());
+  HostNv12Frame output(kWidth, kHeight, 0, 0);
+  auto invalid_destination = output.view().buffer;
+  invalid_destination.pixel_format = kMwStreamerVideoPixelFormatP010;
+  CHECK_THROWS_AS(frame.CopyTo(invalid_destination), std::invalid_argument);
+  invalid_destination = output.view().buffer;
+  invalid_destination.width -= 1;
+  CHECK_THROWS_AS(frame.CopyTo(invalid_destination), std::invalid_argument);
+  invalid_destination = output.view().buffer;
+  invalid_destination.storage.linear.plane_count = 1;
+  CHECK_THROWS_AS(frame.CopyTo(invalid_destination), std::invalid_argument);
 }
 
 }  // namespace

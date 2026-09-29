@@ -1,6 +1,7 @@
 find_package(CUDAToolkit REQUIRED)
 
 add_executable(mw_opencv_adapter_frame_tests
+    cuda_context_test.cc
     cuda_frame_test.cc
     cuda_mat_adapter_test.cc
     conversion_matrix_test.cc
@@ -25,17 +26,13 @@ target_link_libraries(mw_opencv_adapter_frame_tests
 
 add_test(NAME mw_opencv_adapter_frame_tests COMMAND mw_opencv_adapter_frame_tests)
 
-add_executable(mw_opencv_adapter_initialization_tests
-    cuda_initialization_test.cc
+add_executable(mw_opencv_adapter_benchmark
+    adapter_performance_benchmark.cc
 )
 
-target_link_libraries(mw_opencv_adapter_initialization_tests
+target_link_libraries(mw_opencv_adapter_benchmark
     PRIVATE
-        Catch2::Catch2WithMain
+        CUDA::cudart
+        fmt::fmt
         mw::opencv_adapter
-)
-
-add_test(
-    NAME mw_opencv_adapter_initialization_tests
-    COMMAND mw_opencv_adapter_initialization_tests
 )

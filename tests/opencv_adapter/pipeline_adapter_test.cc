@@ -8,6 +8,7 @@
 #include <mutex>
 #include <opencv2/core.hpp>
 #include <opencv2/core/cuda.hpp>
+#include <opencv2/core/cuda_stream_accessor.hpp>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -19,6 +20,7 @@ extern "C" {
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "mw/opencv_adapter/cuda_context.h"
 #include "mw/opencv_adapter/cuda_mat_adapter.h"
 #include "mw/opencv_adapter/host_mat_adapter.h"
 #include "mw/streamer/decoder/video_decoder.h"
@@ -33,6 +35,7 @@ namespace {
 
 using namespace std::chrono_literals;
 using mw::opencv_adapter::CudaMatAdapter;
+using mw::opencv_adapter::GetCudaContext;
 using mw::opencv_adapter::HostMatAdapter;
 using mw::streamer::BuildPipeline;
 using mw::streamer::CodecParameters;
@@ -71,17 +74,12 @@ struct PipelineCase {
   MwStreamerExecutionType expected_execution;
 };
 
-constexpr std::array<PipelineCase, 5> kPipelineCases = {{
+constexpr std::array<PipelineCase, 3> kPipelineCases = {{
     {"软件解码到Mat再由软件编码", VideoDecoderBackend::kSoftware,
      MatBackend::kHost, "libx264", kMwStreamerMemoryHost,
      kMwStreamerExecutionCpu},
     {"软件解码到Mat再由硬件编码", VideoDecoderBackend::kSoftware,
      MatBackend::kHost, "h264_nvenc", kMwStreamerMemoryHost,
-     kMwStreamerExecutionCpu},
-    {"硬件解码到Mat再由硬件编码", VideoDecoderBackend::kCuda, MatBackend::kHost,
-     "h264_nvenc", kMwStreamerMemoryCuda, kMwStreamerExecutionCuda},
-    {"软件解码到GpuMat再由软件编码", VideoDecoderBackend::kSoftware,
-     MatBackend::kCuda, "libx264", kMwStreamerMemoryHost,
      kMwStreamerExecutionCpu},
     {"硬件解码到GpuMat再由硬件编码", VideoDecoderBackend::kCuda,
      MatBackend::kCuda, "h264_nvenc", kMwStreamerMemoryCuda,
@@ -111,6 +109,9 @@ class TestDirectory final {
 
 struct ProcessorState {
   const PipelineCase* test_case = nullptr;
+  CUcontext cuda_context = nullptr;
+  CUstream cuda_stream = nullptr;
+  std::unique_ptr<cv::cuda::GpuMat> cuda_bgr;
   std::atomic_uint64_t processed_frames{0};
   std::condition_variable condition;
   std::mutex mutex;
@@ -193,16 +194,16 @@ void DrawOsd(cv::Mat* image) {
   (*image)(bars[2]).setTo(cv::Scalar(0, 0, 255));
 }
 
-void DrawOsd(cv::cuda::GpuMat* image) {
+void DrawOsd(cv::cuda::GpuMat* image, cv::cuda::Stream& stream) {
   if (!image || image->type() != CV_8UC3) {
     throw std::invalid_argument("测试OSD要求CV_8UC3 GpuMat");
   }
   const auto background = OsdBackground(image->rows, image->cols);
   const auto bars = OsdBars(background);
-  (*image)(background).setTo(cv::Scalar(0, 0, 0));
-  (*image)(bars[0]).setTo(cv::Scalar(255, 0, 0));
-  (*image)(bars[1]).setTo(cv::Scalar(0, 255, 0));
-  (*image)(bars[2]).setTo(cv::Scalar(0, 0, 255));
+  (*image)(background).setTo(cv::Scalar(0, 0, 0), stream);
+  (*image)(bars[0]).setTo(cv::Scalar(255, 0, 0), stream);
+  (*image)(bars[1]).setTo(cv::Scalar(0, 255, 0), stream);
+  (*image)(bars[2]).setTo(cv::Scalar(0, 0, 255), stream);
 }
 
 bool HasOsd(const cv::Mat& image) {
@@ -228,7 +229,7 @@ bool HasOsd(const cv::Mat& image) {
 MwStreamerProcessorStartResult OnProcessorStart(
     const MwStreamerTransformProcessorStartRequest* request,
     void* user_context) {
-  const auto* state = static_cast<const ProcessorState*>(user_context);
+  auto* state = static_cast<ProcessorState*>(user_context);
   if (!request || !request->source_info || !request->execution || !state ||
       !state->test_case ||
       request->execution->type != state->test_case->expected_execution) {
@@ -241,7 +242,49 @@ MwStreamerProcessorStartResult OnProcessorStart(
     request->video_output_size->width = kWidth;
     request->video_output_size->height = kHeight;
   }
+  if (state->test_case->mat == MatBackend::kCuda) {
+    try {
+      state->cuda_context = GetCudaContext(*request->execution);
+      if (cuCtxPushCurrent(state->cuda_context) != CUDA_SUCCESS) {
+        return kMwStreamerProcessorStartFailed;
+      }
+      const CUresult stream_result =
+          cuStreamCreate(&state->cuda_stream, CU_STREAM_NON_BLOCKING);
+      if (stream_result == CUDA_SUCCESS) {
+        state->cuda_bgr =
+            std::make_unique<cv::cuda::GpuMat>(kHeight, kWidth, CV_8UC3);
+      }
+      CUcontext popped_context = nullptr;
+      cuCtxPopCurrent(&popped_context);
+      if (stream_result != CUDA_SUCCESS) {
+        return kMwStreamerProcessorStartFailed;
+      }
+    } catch (...) {
+      return kMwStreamerProcessorStartFailed;
+    }
+  }
   return kMwStreamerProcessorStartSuccess;
+}
+
+void OnProcessorStop(void* user_context) {
+  auto* state = static_cast<ProcessorState*>(user_context);
+  if (!state || !state->cuda_context) {
+    return;
+  }
+  if (cuCtxPushCurrent(state->cuda_context) != CUDA_SUCCESS) {
+    return;
+  }
+  if (state->cuda_stream) {
+    cuStreamSynchronize(state->cuda_stream);
+  }
+  state->cuda_bgr.reset();
+  if (state->cuda_stream) {
+    cuStreamDestroy(state->cuda_stream);
+    state->cuda_stream = nullptr;
+  }
+  CUcontext popped_context = nullptr;
+  cuCtxPopCurrent(&popped_context);
+  state->cuda_context = nullptr;
 }
 
 void ProcessVideo(const MwStreamerTransformVideoProcessRequest* request,
@@ -260,11 +303,33 @@ void ProcessVideo(const MwStreamerTransformVideoProcessRequest* request,
   if (state->test_case->mat == MatBackend::kHost) {
     auto bgr = HostMatAdapter::ToBgr(input_prototype);
     DrawOsd(&bgr);
-    HostMatAdapter::FromBgr(bgr, output_prototype).CopyTo(*request->output);
+    HostMatAdapter::ConvertFromBgr(bgr, output_prototype.color,
+                                   *request->output);
   } else {
-    auto bgr = CudaMatAdapter::ToBgr(input_prototype);
-    DrawOsd(&bgr);
-    CudaMatAdapter::FromBgr(bgr, output_prototype).CopyTo(*request->output);
+    if (!state->cuda_context || !state->cuda_stream || !state->cuda_bgr) {
+      throw std::runtime_error("Pipeline Adapter CUDA状态未初始化");
+    }
+    CUcontext current_context = nullptr;
+    if (cuCtxPushCurrent(state->cuda_context) != CUDA_SUCCESS) {
+      throw std::runtime_error("Pipeline Adapter设置CUDA context失败");
+    }
+    try {
+      CudaMatAdapter::ToBgr(input_prototype, state->cuda_bgr.get(),
+                            state->cuda_context, state->cuda_stream);
+      auto stream = cv::cuda::StreamAccessor::wrapStream(
+          reinterpret_cast<cudaStream_t>(state->cuda_stream));
+      DrawOsd(state->cuda_bgr.get(), stream);
+      CudaMatAdapter::FromBgr(*state->cuda_bgr, output_prototype.color,
+                              *request->output, state->cuda_context,
+                              state->cuda_stream);
+      if (cuStreamSynchronize(state->cuda_stream) != CUDA_SUCCESS) {
+        throw std::runtime_error("Pipeline Adapter等待CUDA输出失败");
+      }
+    } catch (...) {
+      cuCtxPopCurrent(&current_context);
+      throw;
+    }
+    cuCtxPopCurrent(&current_context);
   }
 
   state->processed_frames.fetch_add(1, std::memory_order_release);
@@ -357,6 +422,7 @@ TEST_CASE("OpenCV Adapter通过Pipeline叠加OSD并写回软硬件输出") {
       callbacks.user_context = &state;
       callbacks.on_start = OnProcessorStart;
       callbacks.process_video = ProcessVideo;
+      callbacks.on_stop = OnProcessorStop;
       ProcessorBindings bindings;
       bindings.transform["process"] = callbacks;
       auto chain = BuildPipeline(

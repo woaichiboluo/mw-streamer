@@ -1,7 +1,6 @@
 #include "mw/opencv_adapter/host_mat_adapter.h"
 
 extern "C" {
-#include <libavutil/frame.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
@@ -10,10 +9,8 @@ extern "C" {
 
 #include <array>
 #include <cstdint>
-#include <cstring>
 #include <limits>
 #include <memory>
-#include <new>
 #include <stdexcept>
 #include <string>
 
@@ -28,72 +25,6 @@ struct PixelFormatInfo {
 };
 
 using SwsContextPtr = std::unique_ptr<SwsContext, decltype(&sws_freeContext)>;
-
-struct AvFrameDeleter {
-  void operator()(AVFrame* frame) const noexcept { av_frame_free(&frame); }
-};
-
-using AvFramePtr = std::unique_ptr<AVFrame, AvFrameDeleter>;
-
-AvFramePtr AllocateFrame(AVPixelFormat format, int width, int height) {
-  AvFramePtr frame(av_frame_alloc());
-  if (!frame) {
-    throw std::bad_alloc();
-  }
-  frame->format = format;
-  frame->width = width;
-  frame->height = height;
-  // swscale may read beyond a plane's logical end. Keep all data passed to it
-  // in FFmpeg-owned storage and let FFmpeg choose the current CPU's SIMD
-  // alignment and padding requirements.
-  if (av_frame_get_buffer(frame.get(), 0) < 0) {
-    throw std::runtime_error("分配FFmpeg视频帧失败");
-  }
-  return frame;
-}
-
-void CopyViewToFrame(const MwStreamerVideoFrameView& source,
-                     AVFrame& destination) {
-  const auto& linear = source.buffer.storage.linear;
-  for (std::uint32_t index = 0; index < linear.plane_count; ++index) {
-    const auto& plane = linear.planes[index];
-    const auto* source_base =
-        reinterpret_cast<const std::uint8_t*>(plane.address);
-    for (std::uint32_t row = 0; row < plane.row_count; ++row) {
-      std::memcpy(
-          destination.data[index] +
-              static_cast<std::ptrdiff_t>(row) * destination.linesize[index],
-          source_base + static_cast<std::ptrdiff_t>(row) * plane.stride_bytes,
-          plane.row_bytes);
-    }
-  }
-}
-
-void CopyMatToFrame(const cv::Mat& source, AVFrame& destination) {
-  const auto row_bytes =
-      static_cast<std::size_t>(source.cols) * source.elemSize();
-  for (int row = 0; row < source.rows; ++row) {
-    std::memcpy(destination.data[0] +
-                    static_cast<std::ptrdiff_t>(row) * destination.linesize[0],
-                source.ptr(row), row_bytes);
-  }
-}
-
-void CopyFrameToView(const AVFrame& source,
-                     const MwStreamerVideoFrameView& destination) {
-  const auto& linear = destination.buffer.storage.linear;
-  for (std::uint32_t index = 0; index < linear.plane_count; ++index) {
-    const auto& plane = linear.planes[index];
-    auto* destination_base = reinterpret_cast<std::uint8_t*>(plane.address);
-    for (std::uint32_t row = 0; row < plane.row_count; ++row) {
-      std::memcpy(destination_base +
-                      static_cast<std::ptrdiff_t>(row) * plane.stride_bytes,
-                  source.data[index] +
-                      static_cast<std::ptrdiff_t>(row) * source.linesize[index],
-                  plane.row_bytes);
-    }
-  }
-}
 
 PixelFormatInfo GetPixelFormatInfo(MwStreamerVideoPixelFormat pixel_format) {
   switch (pixel_format) {
@@ -164,9 +95,8 @@ void ValidateTransfer(MwStreamerColorTransfer transfer) {
 PixelFormatInfo ValidatePrototype(const MwStreamerVideoFrameView& prototype) {
   const auto& buffer = prototype.buffer;
   const auto format = GetPixelFormatInfo(buffer.pixel_format);
-  if (buffer.memory_type != kMwStreamerMemoryHost &&
-      buffer.memory_type != kMwStreamerMemoryCuda) {
-    throw std::invalid_argument("HostMatAdapter收到未知视频内存类型");
+  if (buffer.memory_type != kMwStreamerMemoryHost) {
+    throw std::invalid_argument("HostMatAdapter只接受Host视频帧");
   }
   if (buffer.storage_type != kMwStreamerVideoStorageLinear) {
     throw std::invalid_argument("HostMatAdapter只接受linear视频存储");
@@ -251,40 +181,9 @@ void CheckConvertedRows(int converted_rows, std::uint32_t height) {
   }
 }
 
-}  // namespace
-
-cv::Mat HostMatAdapter::ToBgr(const MwStreamerVideoFrameView& source) {
-  const auto format = ValidatePrototype(source);
-  std::unique_ptr<HostFrame> host_source;
-  const MwStreamerVideoFrameView* source_view = &source;
-  if (source.buffer.memory_type == kMwStreamerMemoryCuda) {
-    host_source = std::make_unique<HostFrame>(HostFrame::CopyFrom(source));
-    source_view = &host_source->view();
-  }
-
-  const int width = static_cast<int>(source.buffer.width);
-  const int height = static_cast<int>(source.buffer.height);
-  auto source_frame = AllocateFrame(format.yuv_format, width, height);
-  auto destination_frame = AllocateFrame(format.bgr_format, width, height);
-  CopyViewToFrame(*source_view, *source_frame);
-  std::array<const std::uint8_t*, 4> source_data{};
-  for (std::size_t index = 0; index < source_data.size(); ++index) {
-    source_data[index] = source_frame->data[index];
-  }
-  auto context = MakeContext(source, format.yuv_format, format.bgr_format,
-                             GetRange(source.color.range), 1);
-  CheckConvertedRows(
-      sws_scale(context.get(), source_data.data(), source_frame->linesize, 0,
-                height, destination_frame->data, destination_frame->linesize),
-      source.buffer.height);
-  return cv::Mat(height, width, format.mat_type, destination_frame->data[0],
-                 static_cast<std::size_t>(destination_frame->linesize[0]))
-      .clone();
-}
-
-HostFrame HostMatAdapter::FromBgr(const cv::Mat& source,
-                                  const MwStreamerVideoFrameView& prototype) {
-  const auto format = ValidatePrototype(prototype);
+void ValidateBgr(const cv::Mat& source,
+                 const MwStreamerVideoFrameView& prototype,
+                 const PixelFormatInfo& format) {
   if (source.empty() || source.dims != 2 || source.cols < 0 ||
       source.rows < 0 ||
       static_cast<std::uint32_t>(source.cols) != prototype.buffer.width ||
@@ -293,26 +192,77 @@ HostFrame HostMatAdapter::FromBgr(const cv::Mat& source,
       source.step > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     throw std::invalid_argument("OpenCV BGR Mat与视频原型不匹配");
   }
+}
 
-  const int width = static_cast<int>(prototype.buffer.width);
-  const int height = static_cast<int>(prototype.buffer.height);
-  auto source_frame = AllocateFrame(format.bgr_format, width, height);
-  auto destination_frame = AllocateFrame(format.yuv_format, width, height);
-  CopyMatToFrame(source, *source_frame);
+}  // namespace
+
+cv::Mat HostMatAdapter::ToBgr(const MwStreamerVideoFrameView& source) {
+  const auto format = ValidatePrototype(source);
+  const int width = static_cast<int>(source.buffer.width);
+  const int height = static_cast<int>(source.buffer.height);
   std::array<const std::uint8_t*, 4> source_data{};
-  for (std::size_t index = 0; index < source_data.size(); ++index) {
-    source_data[index] = source_frame->data[index];
+  std::array<int, 4> source_linesize{};
+  const auto& linear = source.buffer.storage.linear;
+  for (std::uint32_t index = 0; index < linear.plane_count; ++index) {
+    source_data[index] =
+        reinterpret_cast<const std::uint8_t*>(linear.planes[index].address);
+    source_linesize[index] = linear.planes[index].stride_bytes;
   }
-  auto context = MakeContext(prototype, format.bgr_format, format.yuv_format, 1,
-                             GetRange(prototype.color.range));
+  cv::Mat destination(height, width, format.mat_type);
+  std::array<std::uint8_t*, 4> destination_data{};
+  std::array<int, 4> destination_linesize{};
+  destination_data[0] = destination.data;
+  destination_linesize[0] = static_cast<int>(destination.step);
+  auto context = MakeContext(source, format.yuv_format, format.bgr_format,
+                             GetRange(source.color.range), 1);
   CheckConvertedRows(
-      sws_scale(context.get(), source_data.data(), source_frame->linesize, 0,
-                source.rows, destination_frame->data,
-                destination_frame->linesize),
-      prototype.buffer.height);
-  auto destination = HostFrame::AllocateLike(prototype);
-  CopyFrameToView(*destination_frame, destination.view());
+      sws_scale(context.get(), source_data.data(), source_linesize.data(), 0,
+                height, destination_data.data(), destination_linesize.data()),
+      source.buffer.height);
   return destination;
+}
+
+HostFrame HostMatAdapter::FromBgr(const cv::Mat& source,
+                                  const MwStreamerVideoFrameView& prototype) {
+  const auto format = ValidatePrototype(prototype);
+  ValidateBgr(source, prototype, format);
+  auto destination = HostFrame::AllocateLike(prototype);
+  ConvertFromBgr(source, prototype.color, destination.view().buffer);
+  return destination;
+}
+
+void HostMatAdapter::ConvertFromBgr(
+    const cv::Mat& source, const MwStreamerVideoColorInfo& destination_color,
+    const MwStreamerVideoBufferView& destination) {
+  MwStreamerVideoFrameView destination_frame{};
+  destination_frame.buffer = destination;
+  destination_frame.color = destination_color;
+  const auto format = ValidatePrototype(destination_frame);
+  ValidateBgr(source, destination_frame, format);
+
+  std::array<const std::uint8_t*, 4> source_data{};
+  std::array<int, 4> source_linesize{};
+  source_data[0] = source.data;
+  source_linesize[0] = static_cast<int>(source.step);
+  std::array<std::uint8_t*, 4> destination_data{};
+  std::array<int, 4> destination_linesize{};
+  const auto& linear = destination.storage.linear;
+  for (std::uint32_t index = 0; index < linear.plane_count; ++index) {
+    if (linear.planes[index].stride_bytes <= 0) {
+      throw std::invalid_argument("HostMatAdapter直接输出要求正stride视频平面");
+    }
+    destination_data[index] =
+        reinterpret_cast<std::uint8_t*>(linear.planes[index].address);
+    destination_linesize[index] = linear.planes[index].stride_bytes;
+  }
+  auto context =
+      MakeContext(destination_frame, format.bgr_format, format.yuv_format, 1,
+                  GetRange(destination_color.range));
+  CheckConvertedRows(
+      sws_scale(context.get(), source_data.data(), source_linesize.data(), 0,
+                source.rows, destination_data.data(),
+                destination_linesize.data()),
+      destination.height);
 }
 
 }  // namespace mw::opencv_adapter

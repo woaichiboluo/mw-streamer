@@ -31,8 +31,7 @@ target_link_libraries(app PRIVATE
     mw::streamer
 )
 
-# OpenCV adapter 是 mw_streamer 的可选组件，仅在请求时查找 OpenCV；
-# 静态安装还会查找 CUDA。
+# OpenCV adapter 是 mw_streamer 的可选组件，仅在请求时查找 OpenCV 和 CUDA。
 find_package(mw_streamer 0.1 CONFIG REQUIRED
     COMPONENTS streamer adapter
 )
@@ -41,8 +40,8 @@ target_link_libraries(app PRIVATE mw::opencv_adapter)
 
 未指定组件时默认加载 `streamer`。安装前缀不在 CMake 默认搜索路径时，可以设置
 `mw_streamer_ROOT`。动态 `streamer` 不查找 FFmpeg、SRT 或 OpenSSL；请求动态
-`adapter` 时只查找其公开 OpenCV 依赖。静态包仍要求系统能够找到其链接依赖；
-项目自带的 fmt 及其他私有静态实现依赖会随包安装。
+`adapter` 时查找其公开 OpenCV 和 CUDA Driver 依赖。静态包仍要求系统能够找到其
+链接依赖；项目自带的 fmt 及其他私有静态实现依赖会随包安装。
 
 项目交付供 C++ 宿主使用的静态库，公开接口位于 `include/mw/`，按模块组织。
 Processor 的 callback、context 和 frame view 保留纯 C 兼容结构体与函数指针；
@@ -304,8 +303,10 @@ DecoderSink 的外层接口接收入队，内部消费者处理到期包；队�
 
 音频在 DecoderSink 内解码并重采样，输出固定为 48 kHz、float32 交错格式，
 保持源声道布局，时间基为 `1/48000`。视频保持所选解码器的原始帧格式，CUDA
-解码输出仍在 GPU 上；投递前等待源 CUDA 流完成写入，业务可在自己的 context 和
-stream 中读取。`DecoderSinkConfig` 复用已有软解/CUDA 配置，不自动切换后端。
+解码输出仍在 GPU 上；投递前等待源 CUDA 流完成写入。Processor 通过 execution
+取得 FFmpeg 拥有的设备 context，并在该 context 下创建自己的 stream；输入、OpenCV
+GpuMat、TensorRT 和输出必须保持在同一 context，adapter 不做隐式跨 context 拷贝。
+`DecoderSinkConfig` 复用已有软解/CUDA 配置，不自动切换后端。
 解码工作队列统一使用 `BlockingQueue`，按条件限流只计算 Packet，
 重置和结束等控制消息不占限额。实时输入队列满时，音频丢弃当前包；视频清除
 排队的 Packet，等待下一个关键帧并刷新解码器后恢复。生命周期控制消息不会随

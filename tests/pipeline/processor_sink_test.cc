@@ -147,6 +147,7 @@ struct CallbackState {
   bool fail_start = false;
   bool independent_video = true;
   bool independent_audio = true;
+  MwStreamerExecutionContext execution{};
   MwStreamerProcessorSourceInfo source{};
   MwStreamerVideoOutputSize video_output_size{64, 32};
 };
@@ -172,6 +173,7 @@ MwStreamerAnalysisProcessorCallbacks AnalysisCallbacks(CallbackState& state) {
          void* context) {
         auto& state = *static_cast<CallbackState*>(context);
         ++state.starts;
+        state.execution = *request->execution;
         state.source = *request->source_info;
         return state.fail_start ? kMwStreamerProcessorStartFailed
                                 : kMwStreamerProcessorStartSuccess;
@@ -195,6 +197,7 @@ MwStreamerTransformProcessorCallbacks TransformCallbacks(CallbackState& state) {
          void* context) {
         auto& state = *static_cast<CallbackState*>(context);
         ++state.starts;
+        state.execution = *request->execution;
         state.source = *request->source_info;
         if (request->video_output_size) {
           *request->video_output_size = state.video_output_size;
@@ -337,6 +340,8 @@ TEST_CASE("AnalysisProcessorSink只消费输入并保留跨代处理上下文") 
   CHECK(state.resets == 1);
   CHECK(state.ends == 1);
   CHECK(state.stops == 1);
+  CHECK(state.execution.type == kMwStreamerExecutionCpu);
+  CHECK(state.execution.ffmpeg_device_context == nullptr);
   CHECK(state.source.video.width == 64);
   CHECK(state.source.audio.sample_rate == 44100);
 }

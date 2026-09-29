@@ -7,11 +7,8 @@
 #include <opencv2/core/mat.hpp>
 #include <vector>
 
-#include "mw/opencv_adapter/cuda_frame.h"
-
 namespace {
 
-using mw::opencv_adapter::CudaFrame;
 using mw::opencv_adapter::HostMatAdapter;
 
 MwStreamerVideoColorInfo MakeColorInfo() {
@@ -50,12 +47,7 @@ void CheckBlackAndWhite(const MwStreamerVideoFrameView& source,
 
   const cv::Mat host_bgr = HostMatAdapter::ToBgr(source);
   check_mat(host_bgr);
-
-  const auto cuda_source = CudaFrame::CopyFrom(source);
-  const cv::Mat cuda_bgr = HostMatAdapter::ToBgr(cuda_source.view());
-  check_mat(cuda_bgr);
-
-  const auto converted = HostMatAdapter::FromBgr(cuda_bgr, cuda_source.view());
+  const auto converted = HostMatAdapter::FromBgr(host_bgr, source);
   CHECK(converted.view().buffer.memory_type == kMwStreamerMemoryHost);
   CHECK(converted.view().buffer.pixel_format == source.buffer.pixel_format);
   CHECK(converted.view().buffer.storage.linear.plane_count ==
@@ -269,49 +261,6 @@ TEST_CASE("HostMatAdapter转换YUV444P") {
       MakeTimestamp(),
   };
   CheckBlackAndWhite(source, CV_8UC3);
-}
-
-TEST_CASE("HostMatAdapter接受CUDA View和prototype") {
-  constexpr std::uint32_t kWidth = 4;
-  constexpr std::uint32_t kHeight = 4;
-  std::vector<std::uint8_t> y(kWidth * kHeight);
-  std::vector<std::uint8_t> uv(kWidth * kHeight / 2, 128);
-  for (std::uint32_t row = 0; row < kHeight; ++row) {
-    const std::uint8_t value = row < kHeight / 2 ? 16 : 235;
-    std::fill_n(y.data() + row * kWidth, kWidth, value);
-  }
-  const std::array<MwStreamerVideoPlaneView, 2> planes = {{
-      {reinterpret_cast<std::uintptr_t>(y.data()), kWidth, kWidth, kHeight},
-      {reinterpret_cast<std::uintptr_t>(uv.data()), kWidth, kWidth,
-       kHeight / 2},
-  }};
-  const MwStreamerVideoFrameView source = {
-      {kMwStreamerMemoryHost,
-       kMwStreamerVideoStorageLinear,
-       kMwStreamerVideoPixelFormatNv12,
-       kWidth,
-       kHeight,
-       {{planes.data(), static_cast<std::uint32_t>(planes.size())}}},
-      MakeColorInfo(),
-      MakeTimestamp(),
-  };
-  const auto cuda_source = CudaFrame::CopyFrom(source);
-
-  const cv::Mat bgr = HostMatAdapter::ToBgr(cuda_source.view());
-  REQUIRE(bgr.type() == CV_8UC3);
-  const auto black = bgr.at<cv::Vec3b>(0, 0);
-  const auto white = bgr.at<cv::Vec3b>(kHeight - 1, kWidth - 1);
-  for (int channel = 0; channel < 3; ++channel) {
-    CHECK(black[channel] <= 1);
-    CHECK(white[channel] >= 250);
-  }
-
-  const auto converted = HostMatAdapter::FromBgr(bgr, cuda_source.view());
-  CHECK(converted.view().buffer.memory_type == kMwStreamerMemoryHost);
-  CHECK(converted.view().buffer.pixel_format ==
-        kMwStreamerVideoPixelFormatNv12);
-  CHECK(converted.view().color.space == kMwStreamerColorSpaceBt709);
-  CHECK(converted.view().timestamp.pts == 1234);
 }
 
 TEST_CASE("HostMatAdapter拒绝HDR和不匹配的Mat") {

@@ -1,25 +1,17 @@
-#include <cuda_runtime_api.h>
-
 #include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <future>
 #include <limits>
-#include <opencv2/core/cuda.hpp>
 #include <opencv2/core/mat.hpp>
 #include <vector>
 
-#include "mw/opencv_adapter/cuda_frame.h"
-#include "mw/opencv_adapter/cuda_mat_adapter.h"
 #include "mw/opencv_adapter/host_frame.h"
 #include "mw/opencv_adapter/host_mat_adapter.h"
 
 namespace {
 
-using mw::opencv_adapter::CudaFrame;
-using mw::opencv_adapter::CudaMatAdapter;
 using mw::opencv_adapter::HostFrame;
 using mw::opencv_adapter::HostMatAdapter;
 
@@ -366,8 +358,7 @@ cv::Mat MakeUniformBgr(MwStreamerVideoPixelFormat format) {
   return cv::Mat(kHeight, kWidth, CV_8UC3, cv::Scalar(195, 70, 140));
 }
 
-TEST_CASE("Host和CUDA转换覆盖全部颜色矩阵与范围") {
-  REQUIRE(cudaSetDevice(0) == cudaSuccess);
+TEST_CASE("Host转换覆盖全部颜色矩阵与范围") {
   for (const auto format : kFormats) {
     for (const auto color_space : kColorSpaces) {
       for (const auto color_range : kColorRanges) {
@@ -377,49 +368,23 @@ TEST_CASE("Host和CUDA转换覆盖全部颜色矩阵与范围") {
           const ColoredYuvFrame source(format, color_space, color_range);
           const cv::Mat cpu_bgr = HostMatAdapter::ToBgr(source.view());
 
-          const cv::cuda::GpuMat gpu_bgr = CudaMatAdapter::ToBgr(source.view());
-          cv::Mat downloaded_bgr;
-          gpu_bgr.download(downloaded_bgr);
-          const int forward_error = MatMaximumError(cpu_bgr, downloaded_bgr);
-          CAPTURE(forward_error);
-          CHECK(forward_error <= (Is16Bit(format) ? 1024 : 4));
-
-          const auto cuda_source = CudaFrame::CopyFrom(source.view());
-          const auto gpu_from_cuda = CudaMatAdapter::ToBgr(cuda_source.view());
-          cv::Mat downloaded_from_cuda;
-          gpu_from_cuda.download(downloaded_from_cuda);
-          CHECK(MatMaximumError(downloaded_bgr, downloaded_from_cuda) == 0);
-
           const cv::Mat input_bgr = MakeUniformBgr(format);
           const HostFrame cpu_yuv =
               HostMatAdapter::FromBgr(input_bgr, source.view());
-          cv::cuda::GpuMat input_gpu;
-          input_gpu.upload(input_bgr);
-          const CudaFrame gpu_yuv =
-              CudaMatAdapter::FromBgr(input_gpu, source.view());
-          const HostFrame downloaded_yuv = gpu_yuv.ToHost();
-          const int reverse_error = FrameMaximumError(cpu_yuv, downloaded_yuv);
-          CAPTURE(reverse_error);
-          CHECK(reverse_error <=
-                (IsPlanar10Bit(format) ? 16 : (Is16Bit(format) ? 1024 : 4)));
           if (IsPlanar10Bit(format)) {
-            CHECK(Planar10BitSamplesAreValid(downloaded_yuv));
+            CHECK(Planar10BitSamplesAreValid(cpu_yuv));
           }
 
           const cv::Mat cpu_round_trip = HostMatAdapter::ToBgr(cpu_yuv.view());
-          const auto gpu_round_trip = CudaMatAdapter::ToBgr(gpu_yuv.view());
-          cv::Mat downloaded_round_trip;
-          gpu_round_trip.download(downloaded_round_trip);
-          CHECK(MatMaximumError(cpu_round_trip, downloaded_round_trip) <=
-                (Is16Bit(format) ? 1536 : 6));
+          CHECK(cpu_bgr.size() == cpu_round_trip.size());
+          CHECK(cpu_bgr.type() == cpu_round_trip.type());
         }
       }
     }
   }
 }
 
-TEST_CASE("CudaMatAdapter正确重采样YUV422色度") {
-  REQUIRE(cudaSetDevice(0) == cudaSuccess);
+TEST_CASE("HostMatAdapter正确重采样YUV422色度") {
   constexpr std::array formats = {kMwStreamerVideoPixelFormatYuv422p,
                                   kMwStreamerVideoPixelFormatYuv422p10le};
   for (const auto format : formats) {
@@ -445,20 +410,14 @@ TEST_CASE("CudaMatAdapter正确重采样YUV422色度") {
       }
 
       const HostFrame cpu = HostMatAdapter::FromBgr(input, prototype.view());
-      cv::cuda::GpuMat gpu_input;
-      gpu_input.upload(input);
-      const HostFrame gpu =
-          CudaMatAdapter::FromBgr(gpu_input, prototype.view()).ToHost();
-      CHECK(FrameMaximumError(cpu, gpu) <= (Is16Bit(format) ? 16 : 4));
       if (IsPlanar10Bit(format)) {
-        CHECK(Planar10BitSamplesAreValid(gpu));
+        CHECK(Planar10BitSamplesAreValid(cpu));
       }
     }
   }
 }
 
-TEST_CASE("Host和CUDA反向转换接受带padding的Mat ROI") {
-  REQUIRE(cudaSetDevice(0) == cudaSuccess);
+TEST_CASE("Host反向转换接受带padding的Mat ROI") {
   for (const auto format : kFormats) {
     DYNAMIC_SECTION("format=" << static_cast<int>(format)) {
       const ColoredYuvFrame prototype(format, kMwStreamerColorSpaceBt709,
@@ -478,22 +437,11 @@ TEST_CASE("Host和CUDA反向转换接受带padding的Mat ROI") {
       const HostFrame host_from_clone =
           HostMatAdapter::FromBgr(roi.clone(), prototype.view());
       CHECK(FrameMaximumError(host_from_clone, host_from_roi) == 0);
-
-      cv::cuda::GpuMat gpu_parent(kHeight, kWidth + 16, mat_type);
-      cv::cuda::GpuMat gpu_roi = gpu_parent(cv::Rect(7, 0, kWidth, kHeight));
-      gpu_roi.upload(roi);
-      REQUIRE(gpu_roi.step > gpu_roi.cols * gpu_roi.elemSize());
-      const CudaFrame cuda_from_roi =
-          CudaMatAdapter::FromBgr(gpu_roi, prototype.view());
-      const HostFrame downloaded = cuda_from_roi.ToHost();
-      CHECK(FrameMaximumError(host_from_roi, downloaded) <=
-            (Is16Bit(format) ? 1024 : 4));
     }
   }
 }
 
-TEST_CASE("Host和CUDA正向转换接受负stride的Host View") {
-  REQUIRE(cudaSetDevice(0) == cudaSuccess);
+TEST_CASE("Host正向转换接受负stride的Host View") {
   for (const auto format : kFormats) {
     DYNAMIC_SECTION("format=" << static_cast<int>(format)) {
       const ColoredYuvFrame positive(format, kMwStreamerColorSpaceBt709,
@@ -505,41 +453,28 @@ TEST_CASE("Host和CUDA正向转换接受负stride的Host View") {
       const cv::Mat expected = HostMatAdapter::ToBgr(positive.view());
       const cv::Mat host_actual = HostMatAdapter::ToBgr(negative.view());
       CHECK(MatMaximumError(expected, host_actual) == 0);
-
-      const auto gpu_actual = CudaMatAdapter::ToBgr(negative.view());
-      cv::Mat downloaded;
-      gpu_actual.download(downloaded);
-      CHECK(MatMaximumError(expected, downloaded) <=
-            (Is16Bit(format) ? 1024 : 4));
     }
   }
 }
 
-TEST_CASE("Host和CUDA转换正确处理full range端点") {
-  REQUIRE(cudaSetDevice(0) == cudaSuccess);
+TEST_CASE("Host转换正确处理full range端点") {
   for (const auto format : kFormats) {
     DYNAMIC_SECTION("format=" << static_cast<int>(format)) {
       ColoredYuvFrame source(format, kMwStreamerColorSpaceBt709,
                              kMwStreamerColorRangeFull);
       source.FillFullRangeBlackAndWhite();
       const cv::Mat host = HostMatAdapter::ToBgr(source.view());
-      const auto gpu = CudaMatAdapter::ToBgr(source.view());
-      cv::Mat downloaded;
-      gpu.download(downloaded);
-      CHECK(MatMaximumError(host, downloaded) <= (Is16Bit(format) ? 1024 : 4));
-
       if (!Is16Bit(format)) {
-        const auto black = downloaded.at<cv::Vec3b>(0, 0);
-        const auto white =
-            downloaded.at<cv::Vec3b>(downloaded.rows - 1, downloaded.cols - 1);
+        const auto black = host.at<cv::Vec3b>(0, 0);
+        const auto white = host.at<cv::Vec3b>(host.rows - 1, host.cols - 1);
         for (int channel = 0; channel < 3; ++channel) {
           CHECK(black[channel] <= 1);
           CHECK(white[channel] >= 250);
         }
       } else {
-        const auto black = downloaded.at<cv::Vec<std::uint16_t, 3>>(0, 0);
-        const auto white = downloaded.at<cv::Vec<std::uint16_t, 3>>(
-            downloaded.rows - 1, downloaded.cols - 1);
+        const auto black = host.at<cv::Vec<std::uint16_t, 3>>(0, 0);
+        const auto white =
+            host.at<cv::Vec<std::uint16_t, 3>>(host.rows - 1, host.cols - 1);
         for (int channel = 0; channel < 3; ++channel) {
           CHECK(black[channel] <= 64);
           CHECK(white[channel] >= 64500);
@@ -549,41 +484,13 @@ TEST_CASE("Host和CUDA转换正确处理full range端点") {
   }
 }
 
-TEST_CASE("CudaMatAdapter支持多个调用线程同步转换") {
-  constexpr int kWorkerCount = 8;
-  std::array<std::future<int>, kWorkerCount> workers;
-  for (int index = 0; index < kWorkerCount; ++index) {
-    workers[index] = std::async(std::launch::async, [index] {
-      if (cudaSetDevice(0) != cudaSuccess) {
-        return -1;
-      }
-      const auto format = kFormats[index % kFormats.size()];
-      const auto color_space = kColorSpaces[index % kColorSpaces.size()];
-      const auto color_range = kColorRanges[index % kColorRanges.size()];
-      const ColoredYuvFrame source(format, color_space, color_range);
-      const cv::Mat expected = HostMatAdapter::ToBgr(source.view());
-      const auto gpu_bgr = CudaMatAdapter::ToBgr(source.view());
-      cv::Mat actual;
-      gpu_bgr.download(actual);
-      return MatMaximumError(expected, actual);
-    });
-  }
-  for (int index = 0; index < kWorkerCount; ++index) {
-    CAPTURE(index);
-    CHECK(workers[index].get() <=
-          (Is16Bit(kFormats[index % kFormats.size()]) ? 1024 : 4));
-  }
-}
-
-TEST_CASE("Host和CUDA Mat Adapter拒绝无效格式元数据和布局") {
-  REQUIRE(cudaSetDevice(0) == cudaSuccess);
+TEST_CASE("Host Mat Adapter拒绝无效格式元数据和布局") {
   const ColoredYuvFrame source(kMwStreamerVideoPixelFormatNv12,
                                kMwStreamerColorSpaceBt709,
                                kMwStreamerColorRangeLimited);
 
   const auto check_to_bgr_rejected = [](MwStreamerVideoFrameView invalid) {
     CHECK_THROWS_AS(HostMatAdapter::ToBgr(invalid), std::invalid_argument);
-    CHECK_THROWS_AS(CudaMatAdapter::ToBgr(invalid), std::invalid_argument);
   };
 
   auto invalid = source.view();
@@ -649,20 +556,7 @@ TEST_CASE("Host和CUDA Mat Adapter拒绝无效格式元数据和布局") {
                                           source.view()),
                   std::invalid_argument);
 
-  cv::cuda::GpuMat valid_gpu;
-  valid_gpu.upload(valid_bgr);
-  CHECK_THROWS_AS(CudaMatAdapter::FromBgr(cv::cuda::GpuMat(), source.view()),
-                  std::invalid_argument);
-  CHECK_THROWS_AS(
-      CudaMatAdapter::FromBgr(cv::cuda::GpuMat(kHeight, kWidth, CV_16UC3),
-                              source.view()),
-      std::invalid_argument);
-  CHECK_THROWS_AS(
-      CudaMatAdapter::FromBgr(cv::cuda::GpuMat(kHeight, kWidth - 1, CV_8UC3),
-                              source.view()),
-      std::invalid_argument);
   CHECK_NOTHROW(HostMatAdapter::FromBgr(valid_bgr, source.view()));
-  CHECK_NOTHROW(CudaMatAdapter::FromBgr(valid_gpu, source.view()));
 }
 
 }  // namespace

@@ -123,6 +123,11 @@ typedef enum MwStreamerProcessorBoundaryReason {
 
 typedef struct MwStreamerExecutionContext {
   MwStreamerExecutionType type;
+  // Borrowed read-only FFmpeg AVHWDeviceContext. Null for CPU execution.
+  // Backend-specific integrations must inspect it through the corresponding
+  // FFmpeg hwcontext API. It remains valid through on_stop after a successful
+  // start, or until on_start returns when startup fails. Do not free it.
+  const void* ffmpeg_device_context;
 } MwStreamerExecutionContext;
 
 typedef struct MwStreamerVideoPlaneView {
@@ -268,9 +273,9 @@ typedef MwStreamerProcessorStartResult (
 // Every Transform callback must completely produce one output for one input.
 // All writes to output must be complete when the callback returns. A Processor
 // using an asynchronous backend must establish input readiness before reading
-// GPU memory and finish its output writes before returning. The core does not
-// wait for GPU work before invoking callbacks; the provided adapters handle
-// synchronization at their copy boundaries.
+// GPU memory and synchronize its own stream after finishing output writes. The
+// core and asynchronous adapters never insert an implicit context-wide or
+// device-wide synchronization.
 typedef void (*MwStreamerTransformProcessVideoCallback)(
     const MwStreamerTransformVideoProcessRequest* request, void* user_context);
 
@@ -306,8 +311,9 @@ typedef struct MwStreamerTransformProcessorCallbacks {
 
   // on_start receives source information, execution context, and a writable
   // default video output size before the first process callback.
-  // User code that needs the backend stream must copy it into user_context
-  // here. All request views are borrowed for the callback.
+  // User code may inspect the borrowed FFmpeg device context and copy its
+  // backend-native handle into user_context here. All request views are
+  // borrowed for the callback.
   MwStreamerTransformProcessorStartCallback on_start;
   MwStreamerTransformProcessVideoCallback process_video;
   MwStreamerTransformProcessAudioCallback process_audio;

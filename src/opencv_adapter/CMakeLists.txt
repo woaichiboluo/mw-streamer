@@ -36,6 +36,7 @@ else()
 endif()
 
 set(MW_OPENCV_ADAPTER_SOURCES
+    cuda_context.cc
     cuda_driver.cc
     cuda_frame.cc
     cuda_mat_adapter.cc
@@ -65,16 +66,14 @@ target_include_directories(mw_opencv_adapter
 
 target_link_libraries(mw_opencv_adapter
     PUBLIC
+        CUDA::cuda_driver
         ${_MW_OPENCV_ADAPTER_OPENCV_LIBRARIES}
     PRIVATE
         mw::log
-        CUDA::cuda_driver
         CUDA::cudart
         CUDA::nppc
         CUDA::nppial
         CUDA::nppicc
-        CUDA::nppidei
-        CUDA::nppig
         CUDA::nppitc
         FFmpeg::swscale
         FFmpeg::avutil

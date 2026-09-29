@@ -198,6 +198,7 @@ if(TARGET mw_opencv_adapter)
     )
 
     install(FILES
+        include/mw/opencv_adapter/cuda_context.h
         include/mw/opencv_adapter/cuda_frame.h
         include/mw/opencv_adapter/cuda_mat_adapter.h
         include/mw/opencv_adapter/host_frame.h
