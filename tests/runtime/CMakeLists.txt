@@ -62,6 +62,19 @@ target_link_libraries(mw_startup_ring_tests PRIVATE
 add_test(NAME mw_startup_ring_tests COMMAND mw_startup_ring_tests)
 set_tests_properties(mw_startup_ring_tests PROPERTIES TIMEOUT 30)
 
+add_executable(mw_task_executor_close_tests task_executor_close_test.cc)
+target_link_libraries(mw_task_executor_close_tests PRIVATE
+    Catch2::Catch2WithMain ZLMediaKit::ToolKit)
+add_test(NAME mw_task_executor_close_tests COMMAND mw_task_executor_close_tests)
+set_tests_properties(mw_task_executor_close_tests PROPERTIES TIMEOUT 30)
+
+add_executable(mw_runtime_pool_shutdown_tests runtime_pool_shutdown_test.cc)
+target_link_libraries(mw_runtime_pool_shutdown_tests PRIVATE
+    Catch2::Catch2WithMain mw::streamer_test)
+add_test(NAME mw_runtime_pool_shutdown_tests
+    COMMAND mw_runtime_pool_shutdown_tests)
+set_tests_properties(mw_runtime_pool_shutdown_tests PROPERTIES TIMEOUT 30)
+
 add_executable(mw_logging_tests
     logging_test.cc
 )

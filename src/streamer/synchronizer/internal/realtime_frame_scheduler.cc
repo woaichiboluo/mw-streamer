@@ -14,6 +14,7 @@ extern "C" {
 #include <libavutil/samplefmt.h>
 }
 
+#include "mw/log.h"
 #include "mw/streamer/common/blocking_queue.h"
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/ffmpeg/hardware_context.h"
@@ -214,12 +215,28 @@ class RealtimeFrameScheduler::Impl final {
     }
     if (track.frames.size() >= config_.frame_queue_capacity) {
       track.frames.TryPop();
+      ++track.capacity_dropped_frames;
+      if (track.capacity_dropped_frames == 1) {
+        MW_LOG_WARNING("sync",
+                       "同步器调度缓存已满，开始丢弃同轨最旧帧: media={}, "
+                       "generation={}, capacity={}, pts={}",
+                       audio ? "audio" : "video", ready.generation,
+                       config_.frame_queue_capacity, ready.frame->pts);
+      }
+    } else if (track.capacity_dropped_frames != 0) {
+      MW_LOG_INFO("sync",
+                  "同步器调度缓存恢复: media={}, generation={}, "
+                  "本轮丢弃帧数={}",
+                  audio ? "audio" : "video", ready.generation,
+                  track.capacity_dropped_frames);
+      track.capacity_dropped_frames = 0;
     }
     track.frames.Push({ready.frame.Ref(), pts});
     MaybeMapSource(WallUs(now));
   }
 
   void Reset() {
+    FinishCapacityDrops("timeline_reset");
     audio_.frames.Clear();
     video_.frames.Clear();
     audio_.last_source_us.reset();
@@ -234,6 +251,7 @@ class RealtimeFrameScheduler::Impl final {
     if (!PrototypesReady()) {
       throw std::runtime_error("实时同步声明的轨道结束前没有产生原始帧");
     }
+    FinishCapacityDrops("input_end");
     finishing_ = true;
   }
 
@@ -271,8 +289,22 @@ class RealtimeFrameScheduler::Impl final {
     std::optional<Frame> prototype;
     std::optional<std::int64_t> last_source_us;
     std::int64_t next_pts = 0;
+    std::size_t capacity_dropped_frames = 0;
     bool declared = false;
   };
+
+  void FinishCapacityDrops(const char* reason) {
+    const auto finish = [&](const char* media, Track& track) {
+      if (track.capacity_dropped_frames == 0) return;
+      MW_LOG_INFO("sync",
+                  "同步器调度缓存丢帧阶段结束: media={}, reason={}, "
+                  "本轮丢弃帧数={}",
+                  media, reason, track.capacity_dropped_frames);
+      track.capacity_dropped_frames = 0;
+    };
+    finish("audio", audio_);
+    finish("video", video_);
+  }
 
   std::optional<OutputFrame> TakeNext(std::int64_t now_us) {
     const bool audio = AudioFirst();

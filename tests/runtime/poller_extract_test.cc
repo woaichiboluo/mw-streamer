@@ -223,6 +223,7 @@ TEST_CASE("Poller提取保持独占并保留可用的共享池") {
   for (auto& group : extracted) group.clear();
 
   toolkit::EventPollerPool::releasePool();
+  toolkit::EventPollerPool::releasePool();
   CHECK(pool.getExecutorSize() == 0);
   for (const auto& poller : released) CHECK(poller.expired());
   CHECK_THROWS_AS(pool.getPoller(), std::logic_error);

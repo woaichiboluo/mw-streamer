@@ -1,12 +1,20 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <system_error>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
+#include "Extension/Frame.h"
 #include "Poller/EventPoller.h"
+#include "Record/MP4Demuxer.h"
+#include "mw/streamer/converter/zlm_codec_parameters_converter.h"
+#include "mw/streamer/converter/zlm_packet_converter.h"
 #include "mw/streamer/ffmpeg/packet.h"
 #include "mw/streamer/ffmpeg/stream_info.h"
 #include "mw/streamer/output/remux_sink.h"
@@ -22,6 +30,80 @@ using namespace std::chrono_literals;
 using mw::streamer::PacketSinkState;
 using mw::streamer::RemuxSink;
 using mw::streamer::RemuxSinkConfig;
+using mw::streamer::StreamEndReason;
+
+struct Sample {
+  std::vector<mw::streamer::StreamInfo> streams;
+  std::vector<mw::streamer::Packet> packets;
+};
+
+Sample ReadSample() {
+  mediakit::MP4Demuxer input;
+  input.openMP4(std::string(MW_REMUX_SINK_TEST_DATA_DIR) + "/h264_aac.mp4");
+  Sample sample;
+  std::unordered_map<int, std::unique_ptr<mw::streamer::ZlmPacketConverter>>
+      converters;
+  for (const auto& track : input.getTracks(true)) {
+    const auto index = static_cast<int>(sample.streams.size());
+    mw::streamer::ZlmCodecParametersConverter parameters(track);
+    sample.streams.push_back(
+        {index, parameters.codec_parameters(), parameters.time_base()});
+    auto converter =
+        std::make_unique<mw::streamer::ZlmPacketConverter>(track, index);
+    converter->SetOnPacket([&sample](const auto& packet) {
+      sample.packets.push_back(packet);
+      return true;
+    });
+    converters.emplace(track->getIndex(), std::move(converter));
+  }
+  bool eof = false;
+  while (!eof) {
+    bool key = false;
+    int error = 0;
+    auto frame = input.readFrame(key, eof, &error);
+    REQUIRE(error == 0);
+    if (!frame) {
+      continue;
+    }
+    if (key && !frame->keyFrame()) {
+      frame = std::make_shared<mediakit::FrameCacheAble>(frame, true);
+    }
+    REQUIRE(converters.at(frame->getIndex())->InputFrame(frame));
+  }
+  for (const auto& entry : converters) {
+    REQUIRE(entry.second->Flush());
+  }
+  REQUIRE(sample.packets.size() > 3);
+  return sample;
+}
+
+class TemporaryFile final {
+ public:
+  TemporaryFile()
+      : path_(
+            std::filesystem::temp_directory_path() /
+            ("mw-remux-overflow-" +
+             std::to_string(
+                 std::chrono::steady_clock::now().time_since_epoch().count()) +
+             ".mp4")) {}
+  ~TemporaryFile() {
+    std::error_code error;
+    std::filesystem::remove(path_, error);
+  }
+  const std::filesystem::path& path() const { return path_; }
+
+ private:
+  std::filesystem::path path_;
+};
+
+template <typename Predicate>
+bool WaitUntil(Predicate predicate) {
+  const auto deadline = std::chrono::steady_clock::now() + 10s;
+  while (!predicate() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(1ms);
+  }
+  return predicate();
+}
 
 // The sink selects its own pool member. Pause every member to make saturation
 // deterministic without exposing a test-only Poller injection API.
@@ -79,37 +161,26 @@ class PollerPause final {
 
 }  // namespace
 
-TEST_CASE("RemuxSink包队列满时同步失败且生命周期通知不占包配额") {
+TEST_CASE("RemuxSink包队列满时淘汰最旧包并保留生命周期通知") {
+  const auto sample = ReadSample();
+  TemporaryFile target;
   RemuxSinkConfig config;
-  // The gate prevents opening the output; saturation discards the open work.
-  config.target = "unused-remux-queue-overflow.mp4";
+  config.target = target.path().string();
   config.packet_queue_capacity = 1;
   RemuxSink sink("sink", config);
-
-  mw::streamer::StreamInfo stream;
-  stream.stream_index = 0;
-  stream.time_base = {1, 1000};
-  stream.codec_parameters.get()->codec_type = AVMEDIA_TYPE_VIDEO;
-  stream.codec_parameters.get()->codec_id = AV_CODEC_ID_H264;
-  stream.codec_parameters.get()->width = 64;
-  stream.codec_parameters.get()->height = 64;
-  mw::streamer::Packet packet;
-  packet->stream_index = 0;
-  packet->pts = 0;
-  packet->dts = 0;
 
   // Declared after the sink so failure unwinding releases the Poller before
   // the sink's destructor waits for its shutdown barrier.
   PollerPause pause;
   pause.Pause();
   const bool paused = pause.WaitUntilPaused();
-  bool first_packet_accepted = false;
-  bool failed_synchronously = false;
+  bool latest_packet_retained = false;
+  bool remained_healthy = false;
   bool snapshot_did_not_process_queue = false;
   if (paused) {
-    sink.OnStreamsReady({1, {stream}});
-    sink.OnPacket({1, packet});
-    first_packet_accepted =
+    sink.OnStreamsReady({1, sample.streams});
+    sink.OnPacket({1, sample.packets[0]});
+    latest_packet_retained =
         sink.state() == PacketSinkState::kIdle && sink.queue_depth() == 2;
     // This read must not dispatch a synchronous query to the paused Poller,
     // and queued packets are not completed remux processing calls.
@@ -119,19 +190,33 @@ TEST_CASE("RemuxSink包队列满时同步失败且生命周期通知不占包配
         snapshot.operations.front().input_count == 0 &&
         snapshot.operations.front().started_calls == 0 &&
         snapshot.operations.front().output_count == 0;
-    sink.OnPacket({1, packet});
-    failed_synchronously =
-        sink.state() == PacketSinkState::kFailed && sink.queue_depth() == 0;
+    sink.OnPacket({1, sample.packets[1]});
+    sink.OnPacket({1, sample.packets[2]});
+    latest_packet_retained &= sink.queue_depth() == 2;
+    remained_healthy =
+        sink.state() == PacketSinkState::kIdle && sink.error().empty();
   }
   pause.Release();
 
   REQUIRE(paused);
-  CHECK(first_packet_accepted);
+  CHECK(latest_packet_retained);
   CHECK(snapshot_did_not_process_queue);
-  CHECK(failed_synchronously);
-  CHECK(sink.error().find("队列已满") != std::string::npos);
+  CHECK(remained_healthy);
+  REQUIRE(WaitUntil([&] { return sink.queue_depth() == 0; }));
+  for (std::size_t index = 3; index < sample.packets.size(); ++index) {
+    sink.OnPacket({1, sample.packets[index]});
+    REQUIRE(WaitUntil([&] { return sink.queue_depth() == 0; }));
+  }
+  sink.OnInputEnded({1, StreamEndReason::kEof});
+  REQUIRE(WaitUntil([&] {
+    return sink.state() == PacketSinkState::kEnded ||
+           sink.state() == PacketSinkState::kFailed;
+  }));
+  INFO(sink.error());
+  CHECK(sink.state() == PacketSinkState::kEnded);
+  CHECK(sink.error().empty());
   sink.Stop();
   sink.Stop();
-  CHECK(sink.state() == PacketSinkState::kFailed);
+  CHECK(sink.state() == PacketSinkState::kStopped);
   CHECK(sink.queue_depth() == 0);
 }

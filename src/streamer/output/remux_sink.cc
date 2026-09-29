@@ -134,6 +134,8 @@ class RemuxSink::Impl final {
     bool packet;
   };
 
+  static bool IsPacket(const Work& work) { return work.packet; }
+
   template <typename Event>
   void Submit(const Event& event, void (Impl::*action)(const Event&),
               bool packet = false) noexcept {
@@ -142,14 +144,32 @@ class RemuxSink::Impl final {
       if (stop_requested_ || Terminal()) {
         return;
       }
-      if (!queue_.TryPush(
-              {[this, event, action]() { (this->*action)(event); }, packet},
-              config_.packet_queue_capacity,
-              [](const Work& work) { return work.packet; })) {
+      Work work{[this, event, action]() { (this->*action)(event); }, packet};
+      bool replaced = false;
+      const bool accepted =
+          packet ? queue_.PushReplacingOldest(std::move(work),
+                                              config_.packet_queue_capacity,
+                                              IsPacket, IsPacket, &replaced)
+                 : queue_.Push(std::move(work));
+      if (!accepted) {
         if (queue_.closed()) {
           return;
         }
-        throw std::runtime_error("RemuxSink包队列已满");
+        throw std::runtime_error("RemuxSink无法投递输入");
+      }
+      if (replaced) {
+        ++dropped_packets_;
+        if (dropped_packets_ == 1) {
+          MW_LOG_WARNING("streamer",
+                         "RemuxSink包队列已满，开始丢弃最旧包并保留最新包: "
+                         "target={}, capacity={}",
+                         config_.target, config_.packet_queue_capacity);
+        }
+      } else if (packet && dropped_packets_ != 0) {
+        MW_LOG_INFO("streamer",
+                    "RemuxSink包队列恢复: target={}, 本轮丢弃包数={}",
+                    config_.target, dropped_packets_);
+        dropped_packets_ = 0;
       }
       ScheduleDrain();
     } catch (const std::exception& error) {
@@ -384,6 +404,7 @@ class RemuxSink::Impl final {
   toolkit::EventPoller::Ptr poller_;
   BlockingQueue<Work> queue_;
   std::mutex submit_mutex_;
+  std::size_t dropped_packets_ = 0;
   bool drain_scheduled_ = false;
   bool stop_requested_ = false;
   std::mutex stop_mutex_;

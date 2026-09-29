@@ -11,21 +11,21 @@
 #ifndef EventPoller_h
 #define EventPoller_h
 
-#include <atomic>
-#include <mutex>
-#include <thread>
-#include <string>
-#include <functional>
-#include <memory>
-#include <unordered_map>
-#include <unordered_set>
-#include "PipeWrap.h"
-#include "mw/log.h"
-#include "Util/List.h"
-#include "Thread/TaskExecutor.h"
-#include "Thread/ThreadPool.h"
 #include "Network/Buffer.h"
 #include "Network/BufferSock.h"
+#include "PipeWrap.h"
+#include "Thread/TaskExecutor.h"
+#include "Thread/ThreadPool.h"
+#include "Util/List.h"
+#include "mw/log.h"
+#include <atomic>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
 
 #if defined(__linux__) || defined(__linux)
 #define HAS_EPOLL
@@ -43,7 +43,10 @@ constexpr epoll_fd INVALID_EVENT_FD = -1;
 
 namespace toolkit {
 
-class EventPoller : public TaskExecutor, public AnyStorage, public std::enable_shared_from_this<EventPoller> {
+class EventPoller
+    : public TaskExecutor
+    , public AnyStorage
+    , public std::enable_shared_from_this<EventPoller> {
 public:
     friend class TaskExecutorGetterImp;
 
@@ -271,7 +274,7 @@ private:
     void addEventPipe();
 
 private:
-    class ExitException : public std::exception {};
+    class ExitException : public std::exception { };
 
 private:
     // 标记loop线程是否退出  [AUTO-TRANSLATED:98250f84]
@@ -332,7 +335,9 @@ private:
     std::multimap<uint64_t, DelayTask::Ptr> _delay_task_map;
 };
 
-class EventPollerPool : public std::enable_shared_from_this<EventPollerPool>, public TaskExecutorGetterImp {
+class EventPollerPool
+    : public std::enable_shared_from_this<EventPollerPool>
+    , public TaskExecutorGetterImp {
 public:
     using Ptr = std::shared_ptr<EventPollerPool>;
     static const std::string kOnStarted;
@@ -416,7 +421,6 @@ public:
      */
     void preferCurrentThread(bool flag = true);
 
-private:
     EventPollerPool();
 
 private:

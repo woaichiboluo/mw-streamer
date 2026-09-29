@@ -165,6 +165,8 @@ class DecoderSink::Impl final : public Sink {
       for (auto& track : tracks_) {
         track->queue.EraseIf(IsPacket);
         track->recovering = false;
+        track->recovery_dropped_packets = 0;
+        track->audio_dropped_packets = 0;
       }
     });
   }
@@ -202,6 +204,8 @@ class DecoderSink::Impl final : public Sink {
     std::uint64_t generation = 0;
     // Only the PacketQueue scheduling thread reads/writes recovery state.
     bool recovering = false;
+    std::size_t recovery_dropped_packets = 0;
+    std::size_t audio_dropped_packets = 0;
     BlockingQueue<Work> queue;
     std::unique_ptr<AudioDecoder> audio;
     std::unique_ptr<AudioResampler> resampler;
@@ -265,6 +269,8 @@ class DecoderSink::Impl final : public Sink {
       for (auto& track : tracks_) {
         track->queue.EraseIf(IsPacket);
         track->recovering = false;
+        track->recovery_dropped_packets = 0;
+        track->audio_dropped_packets = 0;
         track->queue.Push(work);
       }
     }
@@ -365,22 +371,61 @@ class DecoderSink::Impl final : public Sink {
                                   : config_.video_decode_queue_capacity;
         track->queue.WaitPush(std::move(work), capacity, IsPacket);
       } else if (track->audio) {
-        track->queue.TryPush(std::move(work),
-                             config_.audio_decode_queue_capacity, IsPacket);
+        bool replaced = false;
+        if (!track->queue.PushReplacingOldest(
+                std::move(work), config_.audio_decode_queue_capacity, IsPacket,
+                IsPacket, &replaced)) {
+          return;
+        }
+        if (replaced) {
+          ++track->audio_dropped_packets;
+          if (track->audio_dropped_packets == 1) {
+            MW_LOG_WARNING(
+                "decoder",
+                "音频解码队列已满，开始丢弃最旧包并保留最新包: "
+                "stream_index={}, generation={}, capacity={}, pts={}, dts={}",
+                track->stream_index, generation,
+                config_.audio_decode_queue_capacity, packet->pts, packet->dts);
+          }
+        } else if (track->audio_dropped_packets != 0) {
+          MW_LOG_INFO("decoder",
+                      "音频解码队列恢复: stream_index={}, generation={}, "
+                      "本轮丢弃包数={}",
+                      track->stream_index, generation,
+                      track->audio_dropped_packets);
+          track->audio_dropped_packets = 0;
+        }
       } else if (track->recovering) {
         if ((packet->flags & AV_PKT_FLAG_KEY) != 0) {
+          MW_LOG_INFO("decoder",
+                      "视频解码从关键帧恢复: stream_index={}, generation={}, "
+                      "等待期间丢弃包数={}, pts={}, dts={}",
+                      track->stream_index, generation,
+                      track->recovery_dropped_packets, packet->pts,
+                      packet->dts);
           Work reset;
           reset.kind = WorkKind::kDecoderReset;
           reset.generation = generation;
           track->queue.Push(std::move(reset));
           track->queue.Push(std::move(work));
           track->recovering = false;
+          track->recovery_dropped_packets = 0;
+        } else {
+          ++track->recovery_dropped_packets;
         }
       } else if (!track->queue.TryPush(std::move(work),
                                        config_.video_decode_queue_capacity,
                                        IsPacket)) {
-        track->queue.EraseIf(IsPacket);
+        const auto discarded = track->queue.EraseIf(IsPacket);
         track->recovering = true;
+        track->recovery_dropped_packets = discarded + 1;
+        MW_LOG_WARNING(
+            "decoder",
+            "视频解码队列已满，清空积压并等待关键帧: stream_index={}, "
+            "generation={}, capacity={}, 丢弃包数={}, pts={}, dts={}",
+            track->stream_index, generation,
+            config_.video_decode_queue_capacity,
+            track->recovery_dropped_packets, packet->pts, packet->dts);
       }
       return;
     }

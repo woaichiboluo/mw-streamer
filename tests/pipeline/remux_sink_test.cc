@@ -802,7 +802,7 @@ TEST_CASE("RemuxSink同步拒绝无效单目标配置") {
   CHECK(sink.state() == PacketSinkState::kStopped);
 }
 
-TEST_CASE("RemuxSink启动缓存满明确失败而不静默丢包") {
+TEST_CASE("RemuxSink启动缓存满时丢弃最旧包并继续输出") {
   TestDirectory directory;
   const auto sample = ReadSample();
   auto config = Config(directory.path() / "startup.mp4");
@@ -811,7 +811,9 @@ TEST_CASE("RemuxSink启动缓存满明确失败而不静默丢包") {
   sink.OnStreamsReady({1, sample.streams});
   REQUIRE(WaitUntil([&] { return sink.state() == PacketSinkState::kRunning; }));
   std::size_t submitted = 0;
-  for (const auto& packet : sample.packets) {
+  std::size_t next = 0;
+  for (; next < sample.packets.size(); ++next) {
+    const auto& packet = sample.packets[next];
     if (sample.streams.at(packet->stream_index)
             .codec_parameters.get()
             ->codec_type != AVMEDIA_TYPE_AUDIO) {
@@ -821,13 +823,25 @@ TEST_CASE("RemuxSink启动缓存满明确失败而不静默丢包") {
     // Drain the dispatch queue between submissions so this exercises only
     // the startup cache waiting for the declared video track.
     REQUIRE(WaitUntil([&] { return sink.queue_depth() == 0; }));
-    if (++submitted == 3) break;
+    if (++submitted == 3) {
+      ++next;
+      break;
+    }
   }
   REQUIRE(submitted == 3);
-  REQUIRE(WaitUntil([&] { return sink.state() == PacketSinkState::kFailed; }));
-  CHECK(sink.error().find("启动包缓存已满") != std::string::npos);
+  CHECK(sink.state() == PacketSinkState::kRunning);
+  CHECK(sink.error().empty());
+  for (; next < sample.packets.size(); ++next) {
+    sink.OnPacket({1, sample.packets[next]});
+    REQUIRE(WaitUntil([&] { return sink.queue_depth() == 0; }));
+  }
+  sink.OnInputEnded({1, StreamEndReason::kEof});
+  REQUIRE(WaitForEnd(sink));
+  INFO(sink.error());
+  CHECK(sink.state() == PacketSinkState::kEnded);
+  CHECK(sink.error().empty());
   sink.Stop();
-  CHECK(sink.state() == PacketSinkState::kFailed);
+  CHECK(sink.state() == PacketSinkState::kStopped);
 }
 
 TEST_CASE("RemuxSink无法转换编码Packet时明确失败") {

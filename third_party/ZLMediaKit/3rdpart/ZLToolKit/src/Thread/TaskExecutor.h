@@ -11,20 +11,20 @@
 #ifndef ZLTOOLKIT_TASKEXECUTOR_H
 #define ZLTOOLKIT_TASKEXECUTOR_H
 
-#include <mutex>
-#include <memory>
-#include <functional>
-#include <unordered_set>
-#include <vector>
 #include "Util/List.h"
 #include "Util/util.h"
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <unordered_set>
+#include <vector>
 
 namespace toolkit {
 
 /**
 * cpu负载计算器
  * CPU Load Calculator
- 
+
  * [AUTO-TRANSLATED:46dad663]
 */
 class ThreadLoadCounter {
@@ -36,7 +36,7 @@ public:
      * Constructor
      * @param max_size Number of statistical samples
      * @param max_usec Statistical time window, i.e., the CPU load rate for the most recent {max_usec}
-     
+
      * [AUTO-TRANSLATED:718cb173]
      */
     ThreadLoadCounter(uint64_t max_size, uint64_t max_usec);
@@ -45,7 +45,7 @@ public:
     /**
      * 线程进入休眠
      * Thread enters sleep
-     
+
      * [AUTO-TRANSLATED:d831fad1]
      */
     void startSleep();
@@ -53,7 +53,7 @@ public:
     /**
      * 休眠唤醒,结束休眠
      * Wake up from sleep, end sleep
-     
+
      * [AUTO-TRANSLATED:361831f8]
      */
     void sleepWakeUp();
@@ -63,7 +63,7 @@ public:
      * @return 当前线程cpu使用率
      * Returns the current thread's CPU usage rate, ranging from 0 to 100
      * @return Current thread's CPU usage rate
-     
+
      * [AUTO-TRANSLATED:c9953342]
      */
     int load();
@@ -96,10 +96,10 @@ public:
     virtual void cancel() = 0;
 };
 
-template<class R, class... ArgTypes>
+template <class R, class... ArgTypes>
 class TaskCancelableImp;
 
-template<class R, class... ArgTypes>
+template <class R, class... ArgTypes>
 class TaskCancelableImp<R(ArgTypes...)> : public TaskCancelable {
 public:
     using Ptr = std::shared_ptr<TaskCancelableImp>;
@@ -107,25 +107,19 @@ public:
 
     ~TaskCancelableImp() = default;
 
-    template<typename FUNC>
+    template <typename FUNC>
     TaskCancelableImp(FUNC &&task) {
         _strongTask = std::make_shared<func_type>(std::forward<FUNC>(task));
         _weakTask = _strongTask;
     }
 
-    void cancel() override {
-        _strongTask = nullptr;
-    }
+    void cancel() override { _strongTask = nullptr; }
 
-    operator bool() {
-        return _strongTask && *_strongTask;
-    }
+    operator bool() { return _strongTask && *_strongTask; }
 
-    void operator=(std::nullptr_t) {
-        _strongTask = nullptr;
-    }
+    void operator=(std::nullptr_t) { _strongTask = nullptr; }
 
-    R operator()(ArgTypes ...args) const {
+    R operator()(ArgTypes... args) const {
         auto strongTask = _weakTask.lock();
         if (strongTask && *strongTask) {
             return (*strongTask)(std::forward<ArgTypes>(args)...);
@@ -133,19 +127,16 @@ public:
         return defaultValue<R>();
     }
 
-    template<typename T>
-    static typename std::enable_if<std::is_void<T>::value, void>::type
-    defaultValue() {}
+    template <typename T>
+    static typename std::enable_if<std::is_void<T>::value, void>::type defaultValue() { }
 
-    template<typename T>
-    static typename std::enable_if<std::is_pointer<T>::value, T>::type
-    defaultValue() {
+    template <typename T>
+    static typename std::enable_if<std::is_pointer<T>::value, T>::type defaultValue() {
         return nullptr;
     }
 
-    template<typename T>
-    static typename std::enable_if<std::is_integral<T>::value, T>::type
-    defaultValue() {
+    template <typename T>
+    static typename std::enable_if<std::is_integral<T>::value, T>::type defaultValue() {
         return 0;
     }
 
@@ -171,7 +162,7 @@ public:
      * @param task Task
      * @param may_sync Whether to allow synchronous execution of the task
      * @return Whether the task was added successfully
-     
+
      * [AUTO-TRANSLATED:271d48a2]
      */
     virtual Task::Ptr async(TaskIn task, bool may_sync = true) = 0;
@@ -185,7 +176,7 @@ public:
      * @param task Task
      * @param may_sync Whether to allow synchronous execution of the task
      * @return Whether the task was added successfully
-     
+
      * [AUTO-TRANSLATED:d52ce80b]
      */
     virtual Task::Ptr async_first(TaskIn task, bool may_sync = true);
@@ -197,7 +188,7 @@ public:
      * Synchronously execute a task
      * @param task
      * @return
-     
+
      * [AUTO-TRANSLATED:24854b4a]
      */
     void sync(const TaskIn &task);
@@ -209,7 +200,7 @@ public:
      * Synchronously execute a task with the highest priority
      * @param task
      * @return
-     
+
      * [AUTO-TRANSLATED:3d15452d]
      */
     void sync_first(const TaskIn &task);
@@ -218,10 +209,12 @@ public:
 /**
 * 任务执行器
  * Task Executor
- 
+
  * [AUTO-TRANSLATED:630c364f]
 */
-class TaskExecutor : public ThreadLoadCounter, public TaskExecutorInterface {
+class TaskExecutor
+    : public ThreadLoadCounter
+    , public TaskExecutorInterface {
 public:
     using Ptr = std::shared_ptr<TaskExecutor>;
 
@@ -261,7 +254,7 @@ public:
 class TaskExecutorGetterImp : public TaskExecutorGetter {
 public:
     TaskExecutorGetterImp() = default;
-    ~TaskExecutorGetterImp() = default;
+    ~TaskExecutorGetterImp() override;
 
     /**
      * 根据线程负载情况，获取最空闲的任务执行器
@@ -304,6 +297,12 @@ public:
      */
     void releaseAllPollers();
 
+    /**
+     * Close this pool and release all shared and exclusive pollers.
+     * Repeated and concurrent calls from outside the pool are safe.
+     */
+    void close() noexcept;
+
 protected:
     size_t addPoller(const std::string &name, size_t size, int priority, bool register_thread, bool enable_cpu_affinity = true);
     TaskExecutor::Ptr createPoller(const std::string &name, int priority, bool register_thread, bool enable_cpu_affinity, size_t cpu_index);
@@ -317,11 +316,12 @@ protected:
 
 protected:
     mutable std::mutex _executor_mutex;
+    bool _closed = false;
     std::unordered_set<const TaskExecutor *> _issued_executors;
     size_t _thread_pos = 0;
     std::vector<TaskExecutor::Ptr> _threads;
     std::unordered_set<TaskExecutor::Ptr> _exclusive_pollers;
 };
 
-}//toolkit
-#endif //ZLTOOLKIT_TASKEXECUTOR_H
+} // namespace toolkit
+#endif // ZLTOOLKIT_TASKEXECUTOR_H

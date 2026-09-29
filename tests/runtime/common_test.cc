@@ -177,6 +177,45 @@ TEST_CASE("BlockingQueue按匹配项限流并在出队或删除后恢复额度")
   CHECK(remaining == std::vector<int>{-2, -3, 3, 4});
 }
 
+TEST_CASE("BlockingQueue饱和时优先替换最旧的指定数据项") {
+  BlockingQueue<int> queue;
+  const auto is_data = [](const int& value) { return value > 0; };
+  const auto is_even = [](const int& value) { return value % 2 == 0; };
+
+  REQUIRE(queue.Push(-1));
+  REQUIRE(queue.PushReplacingOldest(1, 3, is_data, is_even));
+  REQUIRE(queue.PushReplacingOldest(2, 3, is_data, is_even));
+  REQUIRE(queue.PushReplacingOldest(3, 3, is_data, is_even));
+  bool replaced = false;
+  REQUIRE(queue.PushReplacingOldest(4, 3, is_data, is_even, &replaced));
+  CHECK(replaced);
+  REQUIRE(queue.PushReplacingOldest(5, 3, is_data, is_even));
+  REQUIRE(queue.PushReplacingOldest(6, 3, is_data, is_even));
+  queue.Close();
+
+  std::vector<int> remaining;
+  while (auto value = queue.WaitPop()) {
+    remaining.push_back(*value);
+  }
+  CHECK(remaining == std::vector<int>{-1, 3, 5, 6});
+}
+
+TEST_CASE("BlockingQueue替换策略保留控制项并遵守关闭和零额度") {
+  BlockingQueue<int> queue;
+  const auto is_data = [](const int& value) { return value > 0; };
+  const auto never_preferred = [](const int&) { return false; };
+
+  REQUIRE(queue.PushReplacingOldest(-1, 0, is_data, never_preferred));
+  CHECK_FALSE(queue.PushReplacingOldest(1, 0, is_data, never_preferred));
+  REQUIRE(queue.PushReplacingOldest(1, 1, is_data, never_preferred));
+  REQUIRE(queue.PushReplacingOldest(2, 1, is_data, never_preferred));
+  queue.Close();
+  CHECK_FALSE(queue.PushReplacingOldest(-2, 1, is_data, never_preferred));
+  REQUIRE(queue.WaitPop() == -1);
+  REQUIRE(queue.WaitPop() == 2);
+  CHECK_FALSE(queue.WaitPop().has_value());
+}
+
 TEST_CASE("BlockingQueue零匹配额度仍允许控制项但关闭后一律拒绝") {
   BlockingQueue<int> queue;
   const auto is_data = [](const int& value) { return value > 0; };

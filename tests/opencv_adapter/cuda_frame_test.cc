@@ -1,6 +1,7 @@
 #include <cuda.h>
 #include <cuda_runtime_api.h>
 
+#include <algorithm>
 #include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <cstddef>
@@ -44,6 +45,60 @@ MwStreamerVideoColorInfo MakeColorInfo() {
 }
 
 MwStreamerMediaTimestamp MakeTimestamp() { return {1234, 40, {1, 1000}}; }
+
+TEST_CASE("CudaFrame直接复制到已有CUDA输出") {
+  REQUIRE(cudaSetDevice(0) == cudaSuccess);
+  constexpr std::uint32_t kWidth = 8;
+  constexpr std::uint32_t kHeight = 4;
+  std::vector<std::uint8_t> y(kWidth * kHeight, 0x31);
+  std::vector<std::uint8_t> uv(kWidth * kHeight / 2, 0x72);
+  const std::array<MwStreamerVideoPlaneView, 2> planes = {{
+      {reinterpret_cast<std::uintptr_t>(y.data()), kWidth, kWidth, kHeight},
+      {reinterpret_cast<std::uintptr_t>(uv.data()), kWidth, kWidth,
+       kHeight / 2},
+  }};
+  const MwStreamerVideoFrameView source = {
+      {kMwStreamerMemoryHost,
+       kMwStreamerVideoStorageLinear,
+       kMwStreamerVideoPixelFormatNv12,
+       kWidth,
+       kHeight,
+       {{planes.data(), static_cast<std::uint32_t>(planes.size())}}},
+      MakeColorInfo(),
+      MakeTimestamp(),
+  };
+  auto cuda_source = CudaFrame::CopyFrom(source);
+
+  std::fill(y.begin(), y.end(), 0);
+  std::fill(uv.begin(), uv.end(), 0);
+  auto cuda_destination = CudaFrame::CopyFrom(source);
+  REQUIRE(cuCtxSetCurrent(nullptr) == CUDA_SUCCESS);
+  CudaFrame::Copy(cuda_source.view(), cuda_destination.view().buffer);
+
+  CUcontext current_context = nullptr;
+  REQUIRE(cuCtxGetCurrent(&current_context) == CUDA_SUCCESS);
+  CHECK(current_context == nullptr);
+
+  const auto copied = cuda_destination.ToHost();
+  const auto& copied_planes = copied.view().buffer.storage.linear.planes;
+  const auto* copied_y =
+      reinterpret_cast<const std::uint8_t*>(copied_planes[0].address);
+  const auto* copied_uv =
+      reinterpret_cast<const std::uint8_t*>(copied_planes[1].address);
+  CHECK(copied_y[0] == 0x31);
+  CHECK(copied_y[kWidth * kHeight - 1] == 0x31);
+  CHECK(copied_uv[0] == 0x72);
+  CHECK(copied_uv[kWidth * kHeight / 2 - 1] == 0x72);
+
+  auto invalid = cuda_destination.view().buffer;
+  invalid.height -= 1;
+  CHECK_THROWS_AS(CudaFrame::Copy(cuda_source.view(), invalid),
+                  std::invalid_argument);
+  invalid = cuda_destination.view().buffer;
+  invalid.memory_type = static_cast<MwStreamerMemoryType>(999);
+  CHECK_THROWS_AS(CudaFrame::Copy(cuda_source.view(), invalid),
+                  std::invalid_argument);
+}
 
 TEST_CASE("CudaFrame同步上传带padding和负stride的Host帧") {
   REQUIRE(cudaSetDevice(0) == cudaSuccess);

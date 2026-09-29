@@ -17,6 +17,11 @@ class CudaMatAdapter;
 // The allocation context must outlive this object.
 class MW_OPENCV_ADAPTER_API CudaFrame final {
  public:
+  // Copies a CUDA linear frame directly into a matching Host or CUDA output
+  // buffer. No intermediate frame or CUDA allocation is created.
+  static void Copy(const MwStreamerVideoFrameView& source,
+                   const MwStreamerVideoBufferView& destination);
+
   static CudaFrame CopyFrom(const MwStreamerVideoFrameView& source);
 
   ~CudaFrame();

@@ -10,13 +10,13 @@
 
 #include <algorithm>
 
-#include "SelectWrap.h"
 #include "EventPoller.h"
+#include "Network/sockutil.h"
+#include "SelectWrap.h"
+#include "Util/NoticeCenter.h"
+#include "Util/TimeTicker.h"
 #include "Util/util.h"
 #include "Util/uv_errno.h"
-#include "Util/TimeTicker.h"
-#include "Util/NoticeCenter.h"
-#include "Network/sockutil.h"
 
 #if defined(HAS_EPOLL)
 #include <sys/epoll.h>
@@ -27,28 +27,26 @@
 
 #define EPOLL_SIZE 1024
 
-//防止epoll惊群  [AUTO-TRANSLATED:ad53c775]
-//Prevent epoll thundering
+// 防止epoll惊群  [AUTO-TRANSLATED:ad53c775]
+// Prevent epoll thundering
 #ifndef EPOLLEXCLUSIVE
 #define EPOLLEXCLUSIVE 0
 #endif
 
-#define toEpoll(event)        (((event) & Event_Read)  ? EPOLLIN : 0) \
-                            | (((event) & Event_Write) ? EPOLLOUT : 0) \
-                            | (((event) & Event_Error) ? (EPOLLHUP | EPOLLERR) : 0) \
-                            | (((event) & Event_LT)    ? 0 : EPOLLET)
+#define toEpoll(event)                                                                                                                                         \
+    (((event) & Event_Read) ? EPOLLIN : 0) | (((event) & Event_Write) ? EPOLLOUT : 0) | (((event) & Event_Error) ? (EPOLLHUP | EPOLLERR) : 0)                  \
+        | (((event) & Event_LT) ? 0 : EPOLLET)
 
-#define toPoller(epoll_event)     (((epoll_event) & (EPOLLIN | EPOLLRDNORM | EPOLLHUP)) ? Event_Read   : 0) \
-                                | (((epoll_event) & (EPOLLOUT | EPOLLWRNORM)) ? Event_Write : 0) \
-                                | (((epoll_event) & EPOLLHUP) ? Event_Error : 0) \
-                                | (((epoll_event) & EPOLLERR) ? Event_Error : 0)
+#define toPoller(epoll_event)                                                                                                                                  \
+    (((epoll_event) & (EPOLLIN | EPOLLRDNORM | EPOLLHUP)) ? Event_Read : 0) | (((epoll_event) & (EPOLLOUT | EPOLLWRNORM)) ? Event_Write : 0)                   \
+        | (((epoll_event) & EPOLLHUP) ? Event_Error : 0) | (((epoll_event) & EPOLLERR) ? Event_Error : 0)
 #define create_event() epoll_create(EPOLL_SIZE)
 #if !defined(_WIN32)
 #define close_event(fd) close(fd)
 #else
 #define close_event(fd) epoll_close(fd)
 #endif
-#endif //HAS_EPOLL
+#endif // HAS_EPOLL
 
 using namespace std;
 
@@ -63,7 +61,7 @@ void EventPoller::addEventPipe() {
     SockUtil::setNoBlocked(_pipe.writeFD());
 
     // 添加内部管道事件  [AUTO-TRANSLATED:6a72e39a]
-    //Add internal pipe event
+    // Add internal pipe event
     if (addEvent(_pipe.readFD(), EventPoller::Event_Read, [this](int event) { onPipeEvent(); }) == -1) {
         throw std::runtime_error("Add pipe fd to poller failed");
     }
@@ -85,14 +83,16 @@ EventPoller::EventPoller(std::string name) {
 }
 
 void EventPoller::shutdown() {
-    async_l([]() {
-        throw ExitException();
-    }, false, true);
+    async_l([]() { throw ExitException(); }, false, true);
 
     if (_loop_thread) {
-        //防止作为子进程时崩溃  [AUTO-TRANSLATED:68727e34]
-        //Prevent crash when running as a child process
-        try { _loop_thread->join(); } catch (...) { _loop_thread->detach(); }
+        // 防止作为子进程时崩溃  [AUTO-TRANSLATED:68727e34]
+        // Prevent crash when running as a child process
+        try {
+            _loop_thread->join();
+        } catch (...) {
+            _loop_thread->detach();
+        }
         delete _loop_thread;
         _loop_thread = nullptr;
     }
@@ -100,7 +100,7 @@ void EventPoller::shutdown() {
 
 EventPoller::~EventPoller() {
     shutdown();
-    
+
 #if defined(HAS_EPOLL)
     if (_event_fd != INVALID_EVENT_FD) {
         close_event(_event_fd);
@@ -108,8 +108,8 @@ EventPoller::~EventPoller() {
     }
 #endif
 
-    //退出前清理管道中的数据  [AUTO-TRANSLATED:60e26f9a]
-    //Clean up pipe data before exiting
+    // 退出前清理管道中的数据  [AUTO-TRANSLATED:60e26f9a]
+    // Clean up pipe data before exiting
     onPipeEvent(true);
     MW_LOG_INFO("zlm", "{}", getThreadName());
 }
@@ -123,8 +123,8 @@ int EventPoller::addEvent(int fd, int event, PollEventCB cb) {
 
     if (isCurrentThread()) {
 #if defined(HAS_EPOLL)
-        struct epoll_event ev = {0};
-        ev.events = toEpoll(event) ;
+        struct epoll_event ev = { 0 };
+        ev.events = toEpoll(event);
         ev.data.fd = fd;
         int ret = epoll_ctl(_event_fd, EPOLL_CTL_ADD, fd, &ev);
         if (ret != -1) {
@@ -135,7 +135,7 @@ int EventPoller::addEvent(int fd, int event, PollEventCB cb) {
 #else
 #ifndef _WIN32
         // win32平台，socket套接字不等于文件描述符，所以可能不适用这个限制  [AUTO-TRANSLATED:6adfc664]
-        //On the win32 platform, the socket does not equal the file descriptor, so this restriction may not apply
+        // On the win32 platform, the socket does not equal the file descriptor, so this restriction may not apply
         if (fd >= FD_SETSIZE) {
             MW_LOG_WARNING("zlm", "select() can not watch fd bigger than {}", FD_SETSIZE);
             return -1;
@@ -151,16 +151,14 @@ int EventPoller::addEvent(int fd, int event, PollEventCB cb) {
 #endif
     }
 
-    async([this, fd, event, cb]() mutable {
-        addEvent(fd, event, std::move(cb));
-    });
+    async([this, fd, event, cb]() mutable { addEvent(fd, event, std::move(cb)); });
     return 0;
 }
 
 int EventPoller::delEvent(int fd, PollCompleteCB cb) {
     TimeTicker();
     if (!cb) {
-        cb = [](bool success) {};
+        cb = [](bool success) { };
     }
 
     if (isCurrentThread()) {
@@ -182,21 +180,19 @@ int EventPoller::delEvent(int fd, PollCompleteCB cb) {
         cb(ret != -1);
         _fd_count = _event_map.size();
         return ret;
-#endif //HAS_EPOLL
+#endif // HAS_EPOLL
     }
 
-    //跨线程操作  [AUTO-TRANSLATED:4e116519]
-    //Cross-thread operation
-    async([this, fd, cb]() mutable {
-        delEvent(fd, std::move(cb));
-    });
+    // 跨线程操作  [AUTO-TRANSLATED:4e116519]
+    // Cross-thread operation
+    async([this, fd, cb]() mutable { delEvent(fd, std::move(cb)); });
     return 0;
 }
 
 int EventPoller::modifyEvent(int fd, int event, PollCompleteCB cb) {
     TimeTicker();
     if (!cb) {
-        cb = [](bool success) {};
+        cb = [](bool success) { };
     }
     if (isCurrentThread()) {
 #if defined(HAS_EPOLL)
@@ -215,9 +211,7 @@ int EventPoller::modifyEvent(int fd, int event, PollCompleteCB cb) {
         return it != _event_map.end() ? 0 : -1;
 #endif // HAS_EPOLL
     }
-    async([this, fd, event, cb]() mutable {
-        modifyEvent(fd, event, std::move(cb));
-    });
+    async([this, fd, event, cb]() mutable { modifyEvent(fd, event, std::move(cb)); });
     return 0;
 }
 
@@ -249,8 +243,8 @@ Task::Ptr EventPoller::async_l(TaskIn task, bool may_sync, bool first) {
             _list_task.emplace_back(ret);
         }
     }
-    //写数据到管道,唤醒主线程  [AUTO-TRANSLATED:2ead8182]
-    //Write data to the pipe and wake up the main thread
+    // 写数据到管道,唤醒主线程  [AUTO-TRANSLATED:2ead8182]
+    // Write data to the pipe and wake up the main thread
     _pipe.write("", 1);
     return ret;
 }
@@ -263,22 +257,22 @@ inline void EventPoller::onPipeEvent(bool flush) {
     char buf[1024];
     int err = 0;
     if (!flush) {
-       for (;;) {
-         if ((err = _pipe.read(buf, sizeof(buf))) > 0) {
-             // 读到管道数据,继续读,直到读空为止  [AUTO-TRANSLATED:47bd325c]
-             //Read data from the pipe, continue reading until it's empty
-             continue;
-         }
-         if (err == 0 || get_uv_error(true) != UV_EAGAIN) {
-             // 收到eof或非EAGAIN(无更多数据)错误,说明管道无效了,重新打开管道  [AUTO-TRANSLATED:5f7a013d]
-             //Received eof or non-EAGAIN (no more data) error, indicating that the pipe is invalid, reopen the pipe
-             MW_LOG_ERROR("zlm", "Invalid pipe fd of event poller, reopen it");
-             delEvent(_pipe.readFD());
-             _pipe.reOpen();
-             addEventPipe();
-         }
-         break;
-      }
+        for (;;) {
+            if ((err = _pipe.read(buf, sizeof(buf))) > 0) {
+                // 读到管道数据,继续读,直到读空为止  [AUTO-TRANSLATED:47bd325c]
+                // Read data from the pipe, continue reading until it's empty
+                continue;
+            }
+            if (err == 0 || get_uv_error(true) != UV_EAGAIN) {
+                // 收到eof或非EAGAIN(无更多数据)错误,说明管道无效了,重新打开管道  [AUTO-TRANSLATED:5f7a013d]
+                // Received eof or non-EAGAIN (no more data) error, indicating that the pipe is invalid, reopen the pipe
+                MW_LOG_ERROR("zlm", "Invalid pipe fd of event poller, reopen it");
+                delEvent(_pipe.readFD());
+                _pipe.reOpen();
+                addEventPipe();
+            }
+            break;
+        }
     }
 
     decltype(_list_task) _list_swap;
@@ -301,7 +295,7 @@ inline void EventPoller::onPipeEvent(bool flush) {
 SocketRecvBuffer::Ptr EventPoller::getSharedBuffer(bool is_udp) {
 #if !defined(__linux) && !defined(__linux__)
     // 非Linux平台下，tcp和udp共享recvfrom方案，使用同一个buffer  [AUTO-TRANSLATED:2d2ee7bf]
-    //On non-Linux platforms, tcp and udp share the recvfrom scheme, using the same buffer
+    // On non-Linux platforms, tcp and udp share the recvfrom scheme, using the same buffer
     is_udp = 0;
 #endif
     auto ret = _shared_buffer[is_udp].lock();
@@ -316,7 +310,7 @@ thread::id EventPoller::getThreadId() const {
     return _loop_thread ? _loop_thread->get_id() : thread::id();
 }
 
-const std::string& EventPoller::getThreadName() const {
+const std::string &EventPoller::getThreadName() const {
     return _name;
 }
 
@@ -447,7 +441,7 @@ void EventPoller::runLoop(bool blocked, bool ref_self) {
             });
             callback_list.clear();
         }
-#endif //HAS_EPOLL
+#endif // HAS_EPOLL
     } else {
         _loop_thread = new thread(&EventPoller::runLoop, this, true, ref_self);
         _sem_run_started.wait();
@@ -459,13 +453,13 @@ int64_t EventPoller::flushDelayTask(uint64_t now_time) {
     task_copy.swap(_delay_task_map);
 
     for (auto it = task_copy.begin(); it != task_copy.end() && it->first <= now_time; it = task_copy.erase(it)) {
-        //已到期的任务  [AUTO-TRANSLATED:849cdc29]
-        //Expired tasks
+        // 已到期的任务  [AUTO-TRANSLATED:849cdc29]
+        // Expired tasks
         try {
             auto next_delay = (*(it->second))();
             if (next_delay) {
-                //可重复任务,更新时间截止线  [AUTO-TRANSLATED:c7746a21]
-                //Repeatable tasks, update deadline
+                // 可重复任务,更新时间截止线  [AUTO-TRANSLATED:c7746a21]
+                // Repeatable tasks, update deadline
                 _delay_task_map.emplace(next_delay + now_time, std::move(it->second));
             }
         } catch (std::exception &ex) {
@@ -478,30 +472,30 @@ int64_t EventPoller::flushDelayTask(uint64_t now_time) {
 
     auto it = _delay_task_map.begin();
     if (it == _delay_task_map.end()) {
-        //没有剩余的定时器了  [AUTO-TRANSLATED:23b1119e]
-        //No remaining timers
+        // 没有剩余的定时器了  [AUTO-TRANSLATED:23b1119e]
+        // No remaining timers
         return -1;
     }
-    //最近一个定时器的执行延时  [AUTO-TRANSLATED:2535621b]
-    //Delay in execution of the last timer
+    // 最近一个定时器的执行延时  [AUTO-TRANSLATED:2535621b]
+    // Delay in execution of the last timer
     return it->first - now_time;
 }
 
 int64_t EventPoller::getMinDelay() {
     auto it = _delay_task_map.begin();
     if (it == _delay_task_map.end()) {
-        //没有剩余的定时器了  [AUTO-TRANSLATED:23b1119e]
-        //No remaining timers
+        // 没有剩余的定时器了  [AUTO-TRANSLATED:23b1119e]
+        // No remaining timers
         return -1;
     }
     auto now = getCurrentMillisecond();
     if (it->first > now) {
-        //所有任务尚未到期  [AUTO-TRANSLATED:8d80eabf]
-        //All tasks have not expired
+        // 所有任务尚未到期  [AUTO-TRANSLATED:8d80eabf]
+        // All tasks have not expired
         return it->first - now;
     }
-    //执行已到期的任务并刷新休眠延时  [AUTO-TRANSLATED:cd6348b7]
-    //Execute expired tasks and refresh sleep delay
+    // 执行已到期的任务并刷新休眠延时  [AUTO-TRANSLATED:cd6348b7]
+    // Execute expired tasks and refresh sleep delay
     return flushDelayTask(now);
 }
 
@@ -509,13 +503,12 @@ EventPoller::DelayTask::Ptr EventPoller::doDelayTask(uint64_t delay_ms, function
     DelayTask::Ptr ret = std::make_shared<DelayTask>(std::move(task));
     auto time_line = getCurrentMillisecond() + delay_ms;
     async_first([time_line, ret, this]() {
-        //异步执行的目的是刷新select或epoll的休眠时间  [AUTO-TRANSLATED:a6b5c8d7]
-        //The purpose of asynchronous execution is to refresh the sleep time of select or epoll
+        // 异步执行的目的是刷新select或epoll的休眠时间  [AUTO-TRANSLATED:a6b5c8d7]
+        // The purpose of asynchronous execution is to refresh the sleep time of select or epoll
         _delay_task_map.emplace(time_line, ret);
     });
     return ret;
 }
-
 
 ///////////////////////////////////////////////
 
@@ -524,7 +517,7 @@ static atomic<bool> s_enable_cpu_affinity { true };
 static atomic<EventPollerPool *> s_event_poller_pool { nullptr };
 
 EventPollerPool &EventPollerPool::Instance() {
-    static shared_ptr<EventPollerPool> instance(new EventPollerPool);
+    static auto instance = make_shared<EventPollerPool>();
     s_event_poller_pool.store(instance.get(), memory_order_release);
     return *instance;
 }
@@ -532,7 +525,7 @@ EventPollerPool &EventPollerPool::Instance() {
 void EventPollerPool::releasePool() {
     auto instance = s_event_poller_pool.load(memory_order_acquire);
     if (instance) {
-        instance->releaseAllPollers();
+        instance->close();
     }
 }
 
@@ -557,7 +550,8 @@ EventPoller::Ptr EventPollerPool::extractPoller() {
     static atomic<size_t> next_id { 0 };
     auto id = next_id.fetch_add(1);
     auto cpus = max<size_t>(1, thread::hardware_concurrency());
-    return static_pointer_cast<EventPoller>(createExclusivePoller("exclusive poller " + to_string(id), ThreadPool::PRIORITY_HIGHEST, true, s_enable_cpu_affinity.load(), id % cpus));
+    return static_pointer_cast<EventPoller>(
+        createExclusivePoller("exclusive poller " + to_string(id), ThreadPool::PRIORITY_HIGHEST, true, s_enable_cpu_affinity.load(), id % cpus));
 }
 
 void EventPollerPool::preferCurrentThread(bool flag) {
@@ -580,4 +574,4 @@ void EventPollerPool::enableCpuAffinity(bool enable) {
     s_enable_cpu_affinity = enable;
 }
 
-}  // namespace toolkit
+} // namespace toolkit

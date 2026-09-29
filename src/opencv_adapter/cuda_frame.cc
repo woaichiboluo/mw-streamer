@@ -141,6 +141,56 @@ void ValidateDestination(const MwStreamerVideoFrameView& source,
   }
 }
 
+void CopyCudaPlanes(const MwStreamerVideoFrameView& source,
+                    const MwStreamerVideoBufferView& destination) {
+  const auto& source_linear = source.buffer.storage.linear;
+  const auto& destination_linear = destination.storage.linear;
+  ScopedCudaContext context(GetPointerContext(source_linear.planes[0].address));
+  for (std::uint32_t plane_index = 0; plane_index < source_linear.plane_count;
+       ++plane_index) {
+    const auto& source_plane = source_linear.planes[plane_index];
+    const auto& destination_plane = destination_linear.planes[plane_index];
+    CUDA_MEMCPY3D_PEER copy{};
+    copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+    copy.srcDevice = static_cast<CUdeviceptr>(source_plane.address);
+    copy.srcContext = GetPointerContext(source_plane.address);
+    copy.srcPitch = static_cast<std::size_t>(source_plane.stride_bytes);
+    copy.srcHeight = source_plane.row_count;
+    copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+    copy.dstDevice = static_cast<CUdeviceptr>(destination_plane.address);
+    copy.dstContext = GetPointerContext(destination_plane.address);
+    copy.dstPitch = static_cast<std::size_t>(destination_plane.stride_bytes);
+    copy.dstHeight = destination_plane.row_count;
+    copy.WidthInBytes = source_plane.row_bytes;
+    copy.Height = source_plane.row_count;
+    copy.Depth = 1;
+    ThrowIfCudaError(cuMemcpy3DPeer(&copy), "直接复制CUDA视频平面");
+  }
+}
+
+void CopyCudaToHost(const MwStreamerVideoFrameView& source,
+                    const MwStreamerVideoBufferView& destination) {
+  const auto& source_linear = source.buffer.storage.linear;
+  const auto& destination_linear = destination.storage.linear;
+  ScopedCudaContext context(GetPointerContext(source_linear.planes[0].address));
+  ThrowIfCudaError(cuCtxSynchronize(), "等待源CUDA视频帧写入完成");
+  for (std::uint32_t plane_index = 0; plane_index < source_linear.plane_count;
+       ++plane_index) {
+    const auto& source_plane = source_linear.planes[plane_index];
+    const auto& destination_plane = destination_linear.planes[plane_index];
+    CUDA_MEMCPY2D copy{};
+    copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+    copy.srcDevice = static_cast<CUdeviceptr>(source_plane.address);
+    copy.srcPitch = static_cast<std::size_t>(source_plane.stride_bytes);
+    copy.dstMemoryType = CU_MEMORYTYPE_HOST;
+    copy.dstHost = reinterpret_cast<void*>(destination_plane.address);
+    copy.dstPitch = static_cast<std::size_t>(destination_plane.stride_bytes);
+    copy.WidthInBytes = source_plane.row_bytes;
+    copy.Height = source_plane.row_count;
+    ThrowIfCudaError(cuMemcpy2D(&copy), "直接复制CUDA视频平面到Host");
+  }
+}
+
 }  // namespace
 
 class CudaFrame::Impl final {
@@ -212,27 +262,7 @@ class CudaFrame::Impl final {
   }
 
   void CopyCuda(const MwStreamerVideoFrameView& source) {
-    const auto& source_linear = source.buffer.storage.linear;
-    for (std::uint32_t plane_index = 0; plane_index < plane_count_;
-         ++plane_index) {
-      const auto& source_plane = source_linear.planes[plane_index];
-      CUDA_MEMCPY3D_PEER copy{};
-      copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
-      copy.srcDevice = static_cast<CUdeviceptr>(source_plane.address);
-      copy.srcContext = GetPointerContext(source_plane.address);
-      copy.srcPitch = static_cast<std::size_t>(source_plane.stride_bytes);
-      copy.srcHeight = source_plane.row_count;
-      copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
-      copy.dstDevice = static_cast<CUdeviceptr>(planes_[plane_index].address);
-      copy.dstContext = context_;
-      copy.dstPitch =
-          static_cast<std::size_t>(planes_[plane_index].stride_bytes);
-      copy.dstHeight = planes_[plane_index].row_count;
-      copy.WidthInBytes = source_plane.row_bytes;
-      copy.Height = source_plane.row_count;
-      copy.Depth = 1;
-      ThrowIfCudaError(cuMemcpy3DPeer(&copy), "复制CUDA视频平面");
-    }
+    CopyCudaPlanes(source, view_.buffer);
   }
 
   const MwStreamerVideoFrameView& view() const noexcept { return view_; }
@@ -266,26 +296,7 @@ class CudaFrame::Impl final {
       return;
     }
 
-    for (std::uint32_t plane_index = 0; plane_index < plane_count_;
-         ++plane_index) {
-      const auto& source_plane = source_linear.planes[plane_index];
-      const auto& destination_plane = destination_linear.planes[plane_index];
-      CUDA_MEMCPY3D_PEER copy{};
-      copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
-      copy.srcDevice = static_cast<CUdeviceptr>(source_plane.address);
-      copy.srcContext = context_;
-      copy.srcPitch = static_cast<std::size_t>(source_plane.stride_bytes);
-      copy.srcHeight = source_plane.row_count;
-      copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
-      copy.dstDevice = static_cast<CUdeviceptr>(destination_plane.address);
-      copy.dstContext = GetPointerContext(destination_plane.address);
-      copy.dstPitch = static_cast<std::size_t>(destination_plane.stride_bytes);
-      copy.dstHeight = destination_plane.row_count;
-      copy.WidthInBytes = source_plane.row_bytes;
-      copy.Height = source_plane.row_count;
-      copy.Depth = 1;
-      ThrowIfCudaError(cuMemcpy3DPeer(&copy), "复制CudaFrame到CUDA输出");
-    }
+    CopyCudaPlanes(view_, destination);
   }
 
  private:
@@ -312,6 +323,21 @@ class CudaFrame::Impl final {
   CUcontext context_ = nullptr;
   MwStreamerVideoFrameView view_{};
 };
+
+void CudaFrame::Copy(const MwStreamerVideoFrameView& source,
+                     const MwStreamerVideoBufferView& destination) {
+  ValidateSource(source);
+  ValidateDestination(source, destination);
+  if (source.buffer.memory_type != kMwStreamerMemoryCuda) {
+    throw std::invalid_argument("CudaFrame直接复制要求CUDA输入");
+  }
+  EnsureCudaDriverInitialized();
+  if (destination.memory_type == kMwStreamerMemoryHost) {
+    CopyCudaToHost(source, destination);
+  } else {
+    CopyCudaPlanes(source, destination);
+  }
+}
 
 CudaFrame CudaFrame::CopyFrom(const MwStreamerVideoFrameView& source) {
   ValidateSource(source);

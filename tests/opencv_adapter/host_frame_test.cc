@@ -48,6 +48,69 @@ MwStreamerVideoColorInfo MakeColorInfo() {
 
 MwStreamerMediaTimestamp MakeTimestamp() { return {1234, 40, {1, 1000}}; }
 
+TEST_CASE("HostFrame直接复制到已有Host输出且保留padding") {
+  constexpr std::uint32_t kWidth = 4;
+  constexpr std::uint32_t kHeight = 4;
+  constexpr std::int32_t kSourceStride = 6;
+  constexpr std::int32_t kDestinationStride = 7;
+  std::vector<std::uint8_t> source_y(kSourceStride * kHeight, 0xee);
+  std::vector<std::uint8_t> source_uv(kSourceStride * (kHeight / 2), 0xdd);
+  for (std::uint32_t row = 0; row < kHeight; ++row) {
+    std::memset(source_y.data() + row * kSourceStride,
+                static_cast<int>(0x10 + row), kWidth);
+  }
+  for (std::uint32_t row = 0; row < kHeight / 2; ++row) {
+    std::memset(source_uv.data() + row * kSourceStride,
+                static_cast<int>(0x50 + row), kWidth);
+  }
+  const std::array<MwStreamerVideoPlaneView, 2> source_planes = {{
+      {reinterpret_cast<std::uintptr_t>(source_y.data()), kSourceStride, kWidth,
+       kHeight},
+      {reinterpret_cast<std::uintptr_t>(source_uv.data()), kSourceStride,
+       kWidth, kHeight / 2},
+  }};
+  const MwStreamerVideoFrameView source = {
+      {kMwStreamerMemoryHost,
+       kMwStreamerVideoStorageLinear,
+       kMwStreamerVideoPixelFormatNv12,
+       kWidth,
+       kHeight,
+       {{source_planes.data(),
+         static_cast<std::uint32_t>(source_planes.size())}}},
+      MakeColorInfo(),
+      MakeTimestamp(),
+  };
+
+  std::vector<std::uint8_t> output_y(kDestinationStride * kHeight, 0xff);
+  std::vector<std::uint8_t> output_uv(kDestinationStride * (kHeight / 2), 0xff);
+  const std::array<MwStreamerVideoPlaneView, 2> output_planes = {{
+      {reinterpret_cast<std::uintptr_t>(output_y.data()), kDestinationStride,
+       kWidth, kHeight},
+      {reinterpret_cast<std::uintptr_t>(output_uv.data()), kDestinationStride,
+       kWidth, kHeight / 2},
+  }};
+  auto destination = source.buffer;
+  destination.storage.linear = {
+      output_planes.data(), static_cast<std::uint32_t>(output_planes.size())};
+
+  HostFrame::Copy(source, destination);
+  for (std::uint32_t row = 0; row < kHeight; ++row) {
+    CHECK(output_y[row * kDestinationStride] == 0x10 + row);
+    CHECK(output_y[row * kDestinationStride + kWidth] == 0xff);
+  }
+  for (std::uint32_t row = 0; row < kHeight / 2; ++row) {
+    CHECK(output_uv[row * kDestinationStride] == 0x50 + row);
+    CHECK(output_uv[row * kDestinationStride + kWidth] == 0xff);
+  }
+
+  auto invalid = destination;
+  invalid.width -= 1;
+  CHECK_THROWS_AS(HostFrame::Copy(source, invalid), std::invalid_argument);
+  invalid = destination;
+  invalid.memory_type = static_cast<MwStreamerMemoryType>(999);
+  CHECK_THROWS_AS(HostFrame::Copy(source, invalid), std::invalid_argument);
+}
+
 TEST_CASE("HostFrame深拷贝带padding和负stride的Host帧") {
   constexpr std::uint32_t kWidth = 4;
   constexpr std::uint32_t kHeight = 4;

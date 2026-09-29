@@ -10,6 +10,7 @@
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -76,19 +77,17 @@ class RtspPublishSink::Impl final {
   ~Impl() { Stop(); }
 
   void OnStreamsReady(const StreamsReady& streams) noexcept {
-    Submit(streams, &Impl::OpenStreams);
+    SubmitStreams(streams);
   }
 
-  void OnPacket(const PacketReady& packet) noexcept {
-    Submit(packet, &Impl::WritePacket, true);
-  }
+  void OnPacket(const PacketReady& packet) noexcept { SubmitPacket(packet); }
 
   void OnTimelineReset(const TimelineReset& reset) noexcept {
-    Submit(reset, &Impl::ResetTimeline);
+    SubmitControl(reset, &Impl::ResetTimeline);
   }
 
   void OnInputEnded(const StreamEnded& end) noexcept {
-    Submit(end, &Impl::EndInput);
+    SubmitControl(end, &Impl::EndInput);
   }
 
   void Stop() noexcept {
@@ -135,27 +134,27 @@ class RtspPublishSink::Impl final {
   }
 
  private:
+  enum class WorkKind { kControl, kAudioPacket, kVideoPacket };
+
   struct Work {
     std::function<void()> run;
-    bool packet;
+    WorkKind kind = WorkKind::kControl;
   };
 
+  static bool IsPacket(const Work& work) {
+    return work.kind != WorkKind::kControl;
+  }
+
   template <typename Event>
-  void Submit(const Event& event, void (Impl::*action)(const Event&),
-              bool packet = false) noexcept {
+  void SubmitControl(const Event& event,
+                     void (Impl::*action)(const Event&)) noexcept {
     try {
       std::lock_guard<std::mutex> lock(submit_mutex_);
       if (stop_requested_ || Terminal()) {
         return;
       }
-      if (!queue_.TryPush(
-              {[this, event, action]() { (this->*action)(event); }, packet},
-              config_.packet_queue_capacity,
-              [](const Work& work) { return work.packet; })) {
-        if (queue_.closed()) {
-          return;
-        }
-        throw std::runtime_error("RtspPublishSink包队列已满");
+      if (!queue_.Push({[this, event, action]() { (this->*action)(event); }})) {
+        return;
       }
       ScheduleDrain();
     } catch (const std::exception& error) {
@@ -163,6 +162,106 @@ class RtspPublishSink::Impl final {
     } catch (...) {
       Fail("投递RtspPublishSink失败：未知异常");
     }
+  }
+
+  void SubmitStreams(const StreamsReady& streams) noexcept {
+    try {
+      std::lock_guard<std::mutex> lock(submit_mutex_);
+      if (stop_requested_ || Terminal()) {
+        return;
+      }
+      FinishQueueRecovery("streams_ready");
+      video_stream_indices_.clear();
+      for (const auto& stream : streams.streams) {
+        const auto* parameters = stream.codec_parameters.get();
+        if (parameters && parameters->codec_type == AVMEDIA_TYPE_VIDEO) {
+          video_stream_indices_.insert(stream.stream_index);
+        }
+      }
+      dropping_video_until_keyframe_ = false;
+      queue_overflow_active_ = false;
+      dropped_packets_ = 0;
+      dropped_video_packets_ = 0;
+      if (!queue_.Push({[this, streams]() { OpenStreams(streams); }})) {
+        return;
+      }
+      ScheduleDrain();
+    } catch (const std::exception& error) {
+      Fail(error.what());
+    } catch (...) {
+      Fail("投递RtspPublishSink轨道信息失败：未知异常");
+    }
+  }
+
+  void SubmitPacket(const PacketReady& packet) noexcept {
+    try {
+      std::lock_guard<std::mutex> lock(submit_mutex_);
+      if (stop_requested_ || Terminal()) {
+        return;
+      }
+      const auto* raw = packet.packet.get();
+      const bool video =
+          raw && video_stream_indices_.count(raw->stream_index) != 0;
+      const bool key_frame = video && (raw->flags & AV_PKT_FLAG_KEY) != 0;
+      if (dropping_video_until_keyframe_ && video && !key_frame) {
+        ++dropped_packets_;
+        ++dropped_video_packets_;
+        return;
+      }
+
+      Work work{[this, packet]() { WritePacket(packet); },
+                video ? WorkKind::kVideoPacket : WorkKind::kAudioPacket};
+      if (queue_.TryPush(work, config_.packet_queue_capacity, IsPacket)) {
+        if (dropping_video_until_keyframe_ && key_frame) {
+          FinishQueueRecovery("video_keyframe");
+        } else if (queue_overflow_active_ && video_stream_indices_.empty()) {
+          FinishQueueRecovery("queue_available");
+        }
+        ScheduleDrain();
+        return;
+      }
+      if (queue_.closed()) {
+        return;
+      }
+
+      const auto discarded = queue_.EraseIf(IsPacket);
+      dropped_packets_ += discarded + (video && !key_frame ? 1 : 0);
+      dropped_video_packets_ += video && !key_frame ? 1 : 0;
+      dropping_video_until_keyframe_ = !video_stream_indices_.empty();
+      const bool first_overflow = !queue_overflow_active_;
+      queue_overflow_active_ = true;
+      if (!video || key_frame) {
+        queue_.Push(std::move(work));
+      }
+      if (first_overflow) {
+        MW_LOG_WARNING("streamer",
+                       "RtspPublishSink包队列已满，开始丢弃积压: target={}, "
+                       "capacity={}, recovery={}",
+                       target_, config_.packet_queue_capacity,
+                       video_stream_indices_.empty() ? "queue_available"
+                                                     : "video_keyframe");
+      }
+      if (key_frame) {
+        FinishQueueRecovery("video_keyframe");
+      }
+      ScheduleDrain();
+    } catch (const std::exception& error) {
+      Fail(error.what());
+    } catch (...) {
+      Fail("投递RtspPublishSink数据包失败：未知异常");
+    }
+  }
+
+  void FinishQueueRecovery(const char* reason) {
+    if (!queue_overflow_active_) return;
+    dropping_video_until_keyframe_ = false;
+    MW_LOG_INFO("streamer",
+                "RtspPublishSink包队列恢复: target={}, reason={}, "
+                "本轮丢弃包数={}, 等待期间丢弃视频包数={}",
+                target_, reason, dropped_packets_, dropped_video_packets_);
+    queue_overflow_active_ = false;
+    dropped_packets_ = 0;
+    dropped_video_packets_ = 0;
   }
 
   // submit_mutex_ is held by every caller; async must never execute inline.
@@ -396,6 +495,11 @@ class RtspPublishSink::Impl final {
   toolkit::EventPoller::Ptr poller_;
   BlockingQueue<Work> queue_;
   std::mutex submit_mutex_;
+  std::unordered_set<int> video_stream_indices_;
+  bool dropping_video_until_keyframe_ = false;
+  bool queue_overflow_active_ = false;
+  std::size_t dropped_packets_ = 0;
+  std::size_t dropped_video_packets_ = 0;
   bool drain_scheduled_ = false;
   bool stop_requested_ = false;
   std::mutex stop_mutex_;

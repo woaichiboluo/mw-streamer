@@ -15,6 +15,11 @@ class HostMatAdapter;
 // callback or its storage lifetime.
 class MW_OPENCV_ADAPTER_API HostFrame final {
  public:
+  // Copies a Host linear frame directly into a matching Host or CUDA output
+  // buffer. No intermediate frame allocation is created.
+  static void Copy(const MwStreamerVideoFrameView& source,
+                   const MwStreamerVideoBufferView& destination);
+
   // CUDA downloads wait for pending work in the source context before reading
   // its pixels. The caller must not submit concurrent writes during this copy.
   static HostFrame CopyFrom(const MwStreamerVideoFrameView& source);

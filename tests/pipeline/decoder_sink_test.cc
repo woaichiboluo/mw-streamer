@@ -106,6 +106,9 @@ struct Recording {
   bool ordered_generations = true;
   bool parallel_media = false;
   bool rendezvous = false;
+  bool block_audio = false;
+  bool release_audio = false;
+  bool audio_entered = false;
   bool block_video = false;
   bool release_video = false;
   bool video_entered = false;
@@ -191,6 +194,11 @@ class FrameRecorder final : public Sink {
     if (recording_->rendezvous && frames.empty()) {
       recording_->changed.wait_for(lock, 2s,
                                    [&] { return recording_->parallel_media; });
+    }
+    if (audio && recording_->block_audio && !recording_->audio_entered) {
+      recording_->audio_entered = true;
+      recording_->changed.notify_all();
+      recording_->changed.wait(lock, [&] { return recording_->release_audio; });
     }
     if (!audio && recording_->block_video && !recording_->video_entered) {
       recording_->video_entered = true;
@@ -431,6 +439,79 @@ TEST_CASE("DecoderSink drains delayed 44.1 kHz resampler samples at EOF") {
   CHECK(sink.GetPerformance().operations.at(0).output_count == 480);
   CHECK(recording->audio.size() >= 2);
   CHECK(recording->exclusive_boundaries);
+}
+
+TEST_CASE("DecoderSink实时音频队列满时淘汰最旧包并保留最新包") {
+  CodecParameters parameters;
+  parameters.get()->codec_type = AVMEDIA_TYPE_AUDIO;
+  parameters.get()->codec_id = AV_CODEC_ID_PCM_F32LE;
+  parameters.get()->format = AV_SAMPLE_FMT_FLT;
+  parameters.get()->sample_rate = 48000;
+  av_channel_layout_default(&parameters.get()->ch_layout, 2);
+  StreamInfo stream{0, std::move(parameters), {1, 48000}};
+
+  std::vector<Packet> packets;
+  for (std::int64_t index = 0; index < 6; ++index) {
+    Packet packet;
+    REQUIRE(av_new_packet(packet.get(), 480 * 2 * sizeof(float)) == 0);
+    std::memset(packet->data, static_cast<int>(index), packet->size);
+    packet->stream_index = 0;
+    packet->pts = index * 480;
+    packet->dts = packet->pts;
+    packet->duration = 480;
+    packets.push_back(std::move(packet));
+  }
+
+  auto recording = std::make_shared<Recording>();
+  recording->block_audio = true;
+  auto config = SoftwareConfig();
+  config.audio_decode_queue_capacity = 2;
+  DecoderSink sink("sink", config);
+  sink.AddSink(std::make_unique<FrameRecorder>("recording", recording));
+  sink.OnStreamsReady({1, {stream}});
+  sink.OnPacket({1, packets.front()});
+
+  bool entered = false;
+  {
+    std::unique_lock<std::mutex> lock(recording->mutex);
+    entered = recording->changed.wait_for(
+        lock, 5s, [&] { return recording->audio_entered; });
+  }
+  bool draining = false;
+  if (entered) {
+    for (std::size_t index = 1; index < packets.size(); ++index) {
+      sink.OnPacket({1, packets[index]});
+    }
+    sink.OnInputEnded({1, StreamEndReason::kEof});
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (sink.state() != PacketSinkState::kDraining &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(1ms);
+    }
+    draining = sink.state() == PacketSinkState::kDraining;
+  }
+  {
+    std::lock_guard<std::mutex> lock(recording->mutex);
+    recording->release_audio = true;
+    recording->changed.notify_all();
+  }
+
+  const bool ended = recording->WaitForEnds(1);
+  sink.Stop();
+  REQUIRE(entered);
+  REQUIRE(draining);
+  INFO(sink.error());
+  REQUIRE(ended);
+  CHECK(sink.error().empty());
+  REQUIRE(recording->ends.size() == 1);
+  CHECK(recording->ends.front().reason == StreamEndReason::kEof);
+  REQUIRE(recording->audio.size() == 3);
+  CHECK(recording->audio[0].frame->pts == 0);
+  CHECK(recording->audio[1].frame->pts == 4 * 480);
+  CHECK(recording->audio[2].frame->pts == 5 * 480);
+  const auto& audio = sink.GetPerformance().operations.at(0);
+  CHECK(audio.input_count == 3);
+  CHECK(audio.failed_calls == 0);
 }
 
 TEST_CASE("DecoderSink feeds analysis and passthrough processor branches") {

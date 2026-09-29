@@ -29,7 +29,8 @@ struct VideoEncoderConfig {
 struct EncoderSinkConfig {
   AudioEncoderConfig audio_encoder;
   VideoEncoderConfig video_encoder;
-  // Positive limits. Lifecycle notifications do not consume frame quota.
+  // Positive per-track limit. Audio and video have independent quotas;
+  // lifecycle notifications do not consume either quota.
   std::size_t frame_queue_capacity = 256;
   // Encoded packets retained until all declared tracks have opened encoders.
   std::size_t startup_packet_capacity = 256;

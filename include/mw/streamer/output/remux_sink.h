@@ -23,12 +23,13 @@ namespace mw::streamer {
 // timestamp intervals (at millisecond resolution), using one common AV origin.
 // Startup packets wait for each track's first packet and codec parameters;
 // EOF also writes a partial set of tracks if their codec parameters are known.
-// An unconvertible packet or a full startup cache fails this sink explicitly.
+// An unconvertible packet fails this sink explicitly. A full delivery queue or
+// startup cache drops its oldest packet and retains the newest packet.
 // Network delivery retains ZLM's live GOP cache and reconnection semantics;
 // it does not guarantee replay of all packets submitted before a connection.
 // PTS reordering is allowed. Temporary network failures retain ZLM retry;
-// permanent target errors and queue overflow fail only this sink. Explicit
-// FatalError additionally requests Pipeline shutdown through Sink.
+// permanent target errors fail only this sink. Explicit FatalError additionally
+// requests Pipeline shutdown through Sink.
 class RemuxSink final : public Sink {
  public:
   explicit RemuxSink(std::string id, RemuxSinkConfig config);

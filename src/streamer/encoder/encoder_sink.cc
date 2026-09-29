@@ -54,6 +54,7 @@ class EncoderSink::Impl final {
 
   void OnTimelineReset(const TimelineReset& reset) {
     Submit([&]() {
+      FinishFrameDrops("timeline_reset");
       queue_.EraseIf([&](const Work& work) {
         return IsFrame(work) && work.generation < reset.generation;
       });
@@ -67,6 +68,7 @@ class EncoderSink::Impl final {
 
   void OnInputEnded(const StreamEnded& end) {
     Submit([&]() {
+      FinishFrameDrops("input_end");
       Work work;
       work.kind = WorkKind::kEnd;
       work.generation = end.generation;
@@ -85,6 +87,7 @@ class EncoderSink::Impl final {
         return;
       }
       stopping_.store(true);
+      FinishFrameDrops("stop");
       queue_.Close();
       queue_.Clear();
     }
@@ -133,6 +136,19 @@ class EncoderSink::Impl final {
     return work.kind == WorkKind::kAudio || work.kind == WorkKind::kVideo;
   }
 
+  void FinishFrameDrops(const char* reason) {
+    const auto finish = [&](const char* media, std::size_t& dropped) {
+      if (dropped == 0) return;
+      MW_LOG_INFO("encoder",
+                  "EncoderSink编码帧队列丢帧阶段结束: media={}, reason={}, "
+                  "本轮丢弃帧数={}",
+                  media, reason, dropped);
+      dropped = 0;
+    };
+    finish("audio", dropped_audio_frames_);
+    finish("video", dropped_video_frames_);
+  }
+
   bool CanProcess() const { return !stopping_.load() && !failed_.load(); }
 
   template <typename MakeWork>
@@ -145,9 +161,41 @@ class EncoderSink::Impl final {
       if (!worker_) {
         worker_ = std::make_unique<Thread>("mw-encoder", [this]() { Run(); });
       }
-      if (!queue_.TryPush(make_work(), config_.frame_queue_capacity, IsFrame) &&
-          !queue_.closed()) {
+      auto work = make_work();
+      const auto kind = work.kind;
+      const auto generation = work.generation;
+      const bool frame = IsFrame(work);
+      const auto same_track = [kind](const Work& queued) {
+        return queued.kind == kind;
+      };
+      bool replaced = false;
+      const bool accepted =
+          frame ? queue_.PushReplacingOldest(std::move(work),
+                                             config_.frame_queue_capacity,
+                                             same_track, same_track, &replaced)
+                : queue_.Push(std::move(work));
+      if (!accepted && !queue_.closed()) {
         throw std::runtime_error("EncoderSink编码帧队列已满");
+      }
+      if (frame) {
+        auto& dropped = kind == WorkKind::kAudio ? dropped_audio_frames_
+                                                 : dropped_video_frames_;
+        const char* media = kind == WorkKind::kAudio ? "audio" : "video";
+        if (replaced) {
+          ++dropped;
+          if (dropped == 1) {
+            MW_LOG_WARNING("encoder",
+                           "EncoderSink编码帧队列已满，开始丢弃同轨最旧帧: "
+                           "media={}, generation={}, capacity={}",
+                           media, generation, config_.frame_queue_capacity);
+          }
+        } else if (dropped != 0) {
+          MW_LOG_INFO("encoder",
+                      "EncoderSink编码帧队列恢复: media={}, generation={}, "
+                      "本轮丢弃帧数={}",
+                      media, generation, dropped);
+          dropped = 0;
+        }
       }
     } catch (const FatalError& error) {
       Fail(error.what(), true);
@@ -481,6 +529,8 @@ class EncoderSink::Impl final {
   BlockingQueue<Work> queue_;
   std::unique_ptr<Thread> worker_;
   std::mutex input_mutex_;
+  std::size_t dropped_audio_frames_ = 0;
+  std::size_t dropped_video_frames_ = 0;
   std::mutex stop_mutex_;
   mutable std::mutex status_mutex_;
   std::atomic<EncoderSinkState> state_{EncoderSinkState::kIdle};

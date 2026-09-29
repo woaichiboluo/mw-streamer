@@ -14,6 +14,7 @@ struct RemuxSinkConfig {
   std::string target;
   OutputConfig zlm;
   // Positive limit for the delivery queue and, separately, the startup cache.
+  // When either is full, the oldest packet is dropped for the newest one.
   // Ordered lifecycle notifications use no quota.
   std::size_t packet_queue_capacity = 384;
 };

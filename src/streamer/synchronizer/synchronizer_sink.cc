@@ -69,11 +69,29 @@ class SynchronizerSink::Impl final {
       const auto same_track = [kind = work.kind](const Work& queued) {
         return queued.kind == kind;
       };
-      if (!queue_.TryPush(work, config_.frame_queue_capacity, same_track)) {
-        // Admission is serialized, while the consumer remains free to pop.
-        // Keep boundaries and the other track; replace this track's backlog.
-        queue_.EraseIf(same_track);
-        queue_.Push(std::move(work));
+      bool replaced = false;
+      if (!queue_.PushReplacingOldest(std::move(work),
+                                      config_.frame_queue_capacity, same_track,
+                                      same_track, &replaced)) {
+        throw std::runtime_error("SynchronizerSink无法投递输入帧");
+      }
+      auto& dropped = audio ? dropped_audio_frames_ : dropped_video_frames_;
+      const char* media = audio ? "audio" : "video";
+      if (replaced) {
+        ++dropped;
+        if (dropped == 1) {
+          MW_LOG_WARNING("sync",
+                         "同步器输入队列已满，开始丢弃同轨最旧帧: media={}, "
+                         "generation={}, capacity={}, pts={}",
+                         media, frame.generation, config_.frame_queue_capacity,
+                         frame.frame->pts);
+        }
+      } else if (dropped != 0) {
+        MW_LOG_INFO("sync",
+                    "同步器输入队列恢复: media={}, generation={}, "
+                    "本轮丢弃帧数={}",
+                    media, frame.generation, dropped);
+        dropped = 0;
       }
     });
   }
@@ -87,6 +105,7 @@ class SynchronizerSink::Impl final {
         throw std::invalid_argument("SynchronizerSink重置代次必须大于零");
       }
       if (reset.generation <= input_generation_) return;
+      FinishIngressDrops("timeline_reset");
       queue_.EraseIf(IsFrame);
       input_generation_ = reset.generation;
       pending_reset_ = true;
@@ -103,6 +122,7 @@ class SynchronizerSink::Impl final {
       if (!CurrentGeneration(end.generation)) return;
       input_ended_ = true;
       final_input_end_ = end.reason != StreamEndReason::kInterrupted;
+      FinishIngressDrops("input_end");
       if (end.reason != StreamEndReason::kEof) queue_.EraseIf(IsFrame);
       Work work;
       work.kind = Kind::kEnd;
@@ -118,6 +138,7 @@ class SynchronizerSink::Impl final {
     queue_.Close();
     {
       std::lock_guard<std::mutex> input_lock(input_mutex_);
+      FinishIngressDrops("stop");
       queue_.Clear();
     }
     if (worker_) worker_->Join();
@@ -163,6 +184,19 @@ class SynchronizerSink::Impl final {
 
   static bool IsFrame(const Work& work) {
     return work.kind == Kind::kAudio || work.kind == Kind::kVideo;
+  }
+
+  void FinishIngressDrops(const char* reason) {
+    const auto finish = [&](const char* media, std::size_t& dropped) {
+      if (dropped == 0) return;
+      MW_LOG_INFO("sync",
+                  "同步器输入队列丢帧阶段结束: media={}, generation={}, "
+                  "reason={}, 本轮丢弃帧数={}",
+                  media, input_generation_, reason, dropped);
+      dropped = 0;
+    };
+    finish("audio", dropped_audio_frames_);
+    finish("video", dropped_video_frames_);
   }
 
   template <typename Action>
@@ -240,10 +274,24 @@ class SynchronizerSink::Impl final {
           SetState(SynchronizerSinkState::kEnded);
           queue_.Close();
         } else {
+          const bool standby = scheduler_->standby();
+          if (!last_standby_ || *last_standby_ != standby) {
+            if (standby) {
+              MW_LOG_WARNING(
+                  "sync",
+                  "同步器进入备播: generation={}, scheduled_queue_depth={}",
+                  output_generation_, scheduler_->queue_depth());
+            } else {
+              MW_LOG_INFO(
+                  "sync",
+                  "同步器恢复真实画面: generation={}, scheduled_queue_depth={}",
+                  output_generation_, scheduler_->queue_depth());
+            }
+            last_standby_ = standby;
+          }
           SetState(finishing_ ? SynchronizerSinkState::kDraining
-                              : (scheduler_->standby()
-                                     ? SynchronizerSinkState::kStandby
-                                     : SynchronizerSinkState::kRunning));
+                              : (standby ? SynchronizerSinkState::kStandby
+                                         : SynchronizerSinkState::kRunning));
         }
       }
     } catch (const FatalError& error) {
@@ -388,6 +436,8 @@ class SynchronizerSink::Impl final {
   std::unique_ptr<Scheduler> scheduler_;
   std::unique_ptr<Thread> worker_;
   std::mutex input_mutex_;
+  std::size_t dropped_audio_frames_ = 0;
+  std::size_t dropped_video_frames_ = 0;
   std::mutex stop_mutex_;
   mutable std::mutex status_mutex_;
   std::string error_;
@@ -411,6 +461,7 @@ class SynchronizerSink::Impl final {
   bool finishing_ = false;
   bool poll_again_ = false;
   std::uint64_t output_generation_ = 0;
+  std::optional<bool> last_standby_;
 };
 
 SynchronizerSink::SynchronizerSink(std::string id,

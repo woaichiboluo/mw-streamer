@@ -8,14 +8,14 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
-#include <algorithm>
-#include <memory>
-#include <stdexcept>
-#include <atomic>
 #include "TaskExecutor.h"
 #include "Poller/EventPoller.h"
-#include "Util/onceToken.h"
 #include "Util/TimeTicker.h"
+#include "Util/onceToken.h"
+#include <algorithm>
+#include <atomic>
+#include <memory>
+#include <stdexcept>
 
 using namespace std;
 
@@ -83,7 +83,7 @@ int ThreadLoadCounter::load() {
     if (totalTime == 0) {
         return 0;
     }
-    return (int) (totalRunTime * 100 / totalTime);
+    return (int)(totalRunTime * 100 / totalTime);
 }
 
 ////////////////////////////////////////////////////////////////////////////
@@ -96,8 +96,8 @@ void TaskExecutorInterface::sync(const TaskIn &task) {
     semaphore sem;
     auto ret = async([&]() {
         onceToken token(nullptr, [&]() {
-            //通过RAII原理防止抛异常导致不执行这句代码  [AUTO-TRANSLATED:206bd80e]
-            //Prevent this code from not being executed due to an exception being thrown through RAII principle
+            // 通过RAII原理防止抛异常导致不执行这句代码  [AUTO-TRANSLATED:206bd80e]
+            // Prevent this code from not being executed due to an exception being thrown through RAII principle
             sem.post();
         });
         task();
@@ -111,8 +111,8 @@ void TaskExecutorInterface::sync_first(const TaskIn &task) {
     semaphore sem;
     auto ret = async_first([&]() {
         onceToken token(nullptr, [&]() {
-            //通过RAII原理防止抛异常导致不执行这句代码  [AUTO-TRANSLATED:206bd80e]
-            //Prevent this code from not being executed due to an exception being thrown through RAII principle
+            // 通过RAII原理防止抛异常导致不执行这句代码  [AUTO-TRANSLATED:206bd80e]
+            // Prevent this code from not being executed due to an exception being thrown through RAII principle
             sem.post();
         });
         task();
@@ -124,7 +124,8 @@ void TaskExecutorInterface::sync_first(const TaskIn &task) {
 
 //////////////////////////////////////////////////////////////////
 
-TaskExecutor::TaskExecutor(uint64_t max_size, uint64_t max_usec) : ThreadLoadCounter(max_size, max_usec) {}
+TaskExecutor::TaskExecutor(uint64_t max_size, uint64_t max_usec)
+    : ThreadLoadCounter(max_size, max_usec) { }
 
 //////////////////////////////////////////////////////////////////
 
@@ -175,18 +176,16 @@ vector<int> TaskExecutorGetterImp::getExecutorLoad() {
 
 void TaskExecutorGetterImp::getExecutorDelay(const function<void(const vector<int> &)> &callback) {
     auto threads = snapshotExecutors();
-    std::shared_ptr<vector<int> > delay_vec = std::make_shared<vector<int>>(threads.size());
+    std::shared_ptr<vector<int>> delay_vec = std::make_shared<vector<int>>(threads.size());
     shared_ptr<void> finished(nullptr, [callback, delay_vec](void *) {
-        //此析构回调触发时，说明已执行完毕所有async任务  [AUTO-TRANSLATED:8adf8212]
-        //When this destructor callback is triggered, it means all async tasks have been executed
+        // 此析构回调触发时，说明已执行完毕所有async任务  [AUTO-TRANSLATED:8adf8212]
+        // When this destructor callback is triggered, it means all async tasks have been executed
         callback((*delay_vec));
     });
     int index = 0;
     for (auto &th : threads) {
         std::shared_ptr<Ticker> delay_ticker = std::make_shared<Ticker>();
-        th->async([finished, delay_vec, index, delay_ticker]() {
-            (*delay_vec)[index] = (int) delay_ticker->elapsedTime();
-        }, false);
+        th->async([finished, delay_vec, index, delay_ticker]() { (*delay_vec)[index] = (int)delay_ticker->elapsedTime(); }, false);
         ++index;
     }
 }
@@ -194,7 +193,8 @@ void TaskExecutorGetterImp::getExecutorDelay(const function<void(const vector<in
 using onGetExecutor = std::function<void(const TaskExecutor::Ptr &)>;
 class onGetExecutorCB {
 public:
-    onGetExecutorCB(onGetExecutor cb): _cb(std::move(cb)) {}
+    onGetExecutorCB(onGetExecutor cb)
+        : _cb(std::move(cb)) { }
 
     void operator()(const TaskExecutor::Ptr &exe) {
         bool expected = false;
@@ -224,16 +224,28 @@ void TaskExecutorGetterImp::for_each(const function<void(const TaskExecutor::Ptr
     }
 }
 
+TaskExecutorGetterImp::~TaskExecutorGetterImp() {
+    close();
+}
+
 size_t TaskExecutorGetterImp::getExecutorSize() const {
     lock_guard<mutex> lock(_executor_mutex);
     return _threads.size();
 }
 
 void TaskExecutorGetterImp::releaseAllPollers() {
+    close();
+}
+
+void TaskExecutorGetterImp::close() noexcept {
     vector<TaskExecutor::Ptr> threads;
     unordered_set<TaskExecutor::Ptr> exclusive_pollers;
     {
         lock_guard<mutex> lock(_executor_mutex);
+        if (_closed) {
+            return;
+        }
+        _closed = true;
         threads.swap(_threads);
         exclusive_pollers.swap(_exclusive_pollers);
         _issued_executors.clear();
@@ -300,9 +312,13 @@ TaskExecutor::Ptr TaskExecutorGetterImp::createPoller(const string &name, int pr
     return poller;
 }
 
-TaskExecutor::Ptr TaskExecutorGetterImp::createExclusivePoller(const string &name, int priority, bool register_thread, bool enable_cpu_affinity, size_t cpu_index) {
+TaskExecutor::Ptr
+TaskExecutorGetterImp::createExclusivePoller(const string &name, int priority, bool register_thread, bool enable_cpu_affinity, size_t cpu_index) {
     auto poller = createPoller(name, priority, register_thread, enable_cpu_affinity, cpu_index);
     lock_guard<mutex> lock(_executor_mutex);
+    if (_closed) {
+        throw logic_error("Executor pool is closed");
+    }
     _exclusive_pollers.emplace(poller);
     return poller;
 }
@@ -311,10 +327,13 @@ size_t TaskExecutorGetterImp::addPoller(const string &name, size_t size, int pri
     auto cpus = max<size_t>(1, thread::hardware_concurrency());
     size = size > 0 ? size : cpus;
     lock_guard<mutex> lock(_executor_mutex);
+    if (_closed) {
+        throw logic_error("Executor pool is closed");
+    }
     for (size_t i = 0; i < size; ++i) {
         _threads.emplace_back(createPoller(name + " " + to_string(i), priority, register_thread, enable_cpu_affinity, i % cpus));
     }
     return size;
 }
 
-}//toolkit
+} // namespace toolkit

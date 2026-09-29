@@ -542,7 +542,9 @@ TEST_CASE("encoder sink bounds packets waiting for an unopened track") {
   CHECK(recording.stops == 1);
 }
 
-TEST_CASE("encoder sink bounds frames while a downstream call is blocked") {
+TEST_CASE(
+    "encoder sink replaces the oldest queued video while downstream is "
+    "blocked") {
   Recording recording;
   recording.block_first_packet = true;
   auto config = SoftwareConfig();
@@ -557,16 +559,72 @@ TEST_CASE("encoder sink bounds frames while a downstream call is blocked") {
     sink.OnVideoFrame({1, Video(1)});
     CHECK(sink.queue_depth() <= 1);
     sink.OnVideoFrame({1, Video(2)});
+    CHECK(sink.queue_depth() <= 1);
+    sink.OnInputEnded({1, StreamEndReason::kEof});
   }
   recording.Release();
-  const bool failed = WaitState(sink, EncoderSinkState::kFailed);
+  const bool ended = WaitState(sink, EncoderSinkState::kEnded);
   sink.Stop();
   REQUIRE(entered);
-  REQUIRE(failed);
-  CHECK_FALSE(sink.error().empty());
+  INFO(sink.error());
+  REQUIRE(ended);
+  CHECK(sink.error().empty());
+  CHECK(recording.packets.size() == 2);
+  CHECK(DecodeVideo(recording) == 2);
   CHECK(recording.stops == 1);
   REQUIRE(recording.ends.size() == 1);
-  CHECK(recording.ends.front().reason == StreamEndReason::kFailed);
+  CHECK(recording.ends.front().reason == StreamEndReason::kEof);
+}
+
+TEST_CASE("encoder sink applies frame capacity independently per media track") {
+  Recording recording;
+  recording.block_first_packet = true;
+  auto config = SoftwareConfig();
+  config.frame_queue_capacity = 2;
+  EncoderSink sink("sink", config);
+  ReleaseOnExit release{recording};
+  sink.AddSink(std::make_unique<PacketRecorder>("recording", recording));
+  sink.OnStreamsReady(Streams(true, true));
+  sink.OnAudioFrame({1, Audio(0)});
+  sink.OnVideoFrame({1, Video(0)});
+
+  const bool entered = recording.WaitEntered();
+  if (entered) {
+    sink.OnAudioFrame({1, Audio(512)});
+    sink.OnAudioFrame({1, Audio(1024)});
+    CHECK(sink.queue_depth() == 2);
+    sink.OnVideoFrame({1, Video(1)});
+    sink.OnVideoFrame({1, Video(2)});
+    CHECK(sink.queue_depth() == 4);
+    sink.OnAudioFrame({1, Audio(1536)});
+    CHECK(sink.queue_depth() == 4);
+    sink.OnVideoFrame({1, Video(3)});
+    CHECK(sink.queue_depth() == 4);
+    sink.OnInputEnded({1, StreamEndReason::kEof});
+    CHECK(sink.queue_depth() == 5);
+  }
+
+  recording.Release();
+  const bool ended = WaitState(sink, EncoderSinkState::kEnded);
+  sink.Stop();
+  REQUIRE(entered);
+  INFO(sink.error());
+  REQUIRE(ended);
+  CHECK(sink.error().empty());
+  REQUIRE(recording.streams.size() == 1);
+  REQUIRE(recording.streams.front().streams.size() == 2);
+  const auto snapshot = sink.GetPerformance();
+  REQUIRE(snapshot.operations.size() == 2);
+  CHECK(snapshot.operations.at(0).input_count == 3 * 512);
+  CHECK(snapshot.operations.at(0).failed_calls == 0);
+  CHECK(snapshot.operations.at(1).input_count == 3);
+  CHECK(snapshot.operations.at(1).failed_calls == 0);
+  CHECK(DecodeAudio(recording) >= 3 * 512);
+  CHECK(DecodeVideo(recording) == 3);
+  REQUIRE(recording.ends.size() == 1);
+  CHECK(recording.ends.front().reason == StreamEndReason::kEof);
+  CHECK(recording.stops == 1);
+  CheckOrdered(recording);
 }
 
 TEST_CASE(

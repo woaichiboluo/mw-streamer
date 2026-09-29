@@ -4,6 +4,10 @@
 #include <stdexcept>
 #include <string>
 
+#if defined(_WIN32)
+#include <Windows.h>
+#endif
+
 #include "Network/sockutil.h"
 #include "Poller/EventPoller.h"
 #include "Thread/WorkThreadPool.h"
@@ -14,6 +18,16 @@
 
 namespace mw::streamer::internal {
 namespace {
+
+#if defined(_WIN32)
+bool ConfigureConsoleUtf8() noexcept {
+  const auto input_configured =
+      GetConsoleCP() == 0 || SetConsoleCP(CP_UTF8) != FALSE;
+  const auto output_configured =
+      GetConsoleOutputCP() == 0 || SetConsoleOutputCP(CP_UTF8) != FALSE;
+  return input_configured && output_configured;
+}
+#endif
 
 void ConfigureZlmThreadPools(const MwZlmConfig& config) {
   toolkit::EventPollerPool::setPoolSize(config.event_poller_threads);
@@ -54,10 +68,18 @@ class Initializer final {
     if (!log_config || !zlm_config) {
       throw std::invalid_argument("runtime configurations cannot be null");
     }
+#if defined(_WIN32)
+    const auto console_utf8_configured = ConfigureConsoleUtf8();
+#endif
     const auto log_result = mw_log_initialize(log_config);
     if (log_result != kMwLogSuccess) {
       throw std::invalid_argument(LogInitializationError(log_result));
     }
+#if defined(_WIN32)
+    if (!console_utf8_configured) {
+      MW_LOG_WARNING("streamer", "Windows控制台代码页设置为UTF-8失败");
+    }
+#endif
     const auto network_result = toolkit::SockUtil::initialize();
     if (network_result != 0) {
       mw_log_shutdown();

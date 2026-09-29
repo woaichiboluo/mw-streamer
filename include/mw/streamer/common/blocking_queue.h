@@ -70,6 +70,54 @@ class BlockingQueue final {
     return true;
   }
 
+  // Limits matching elements by replacing the oldest preferred match when the
+  // quota is full. If no preferred match exists, replaces the oldest quota
+  // match. Nonmatching control values remain unbounded and are never removed.
+  // Predicates receive const T& under the queue lock and must not re-enter it.
+  // If provided, replaced reports whether an existing item was removed.
+  template <typename Predicate, typename PreferredPredicate>
+  bool PushReplacingOldest(T value, std::size_t max_matching,
+                           Predicate predicate,
+                           PreferredPredicate preferred_predicate,
+                           bool* replaced = nullptr) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (replaced) {
+        *replaced = false;
+      }
+      if (closed_) {
+        return false;
+      }
+      if (predicate(std::as_const(value))) {
+        if (max_matching == 0) {
+          return false;
+        }
+        const auto matching = static_cast<std::size_t>(
+            std::count_if(queue_.cbegin(), queue_.cend(), predicate));
+        if (matching >= max_matching) {
+          auto replace =
+              std::find_if(queue_.begin(), queue_.end(), [&](const T& queued) {
+                return predicate(queued) && preferred_predicate(queued);
+              });
+          if (replace == queue_.end()) {
+            replace = std::find_if(queue_.begin(), queue_.end(), predicate);
+          }
+          if (replace == queue_.end()) {
+            return false;
+          }
+          queue_.erase(replace);
+          if (replaced) {
+            *replaced = true;
+          }
+        }
+      }
+      queue_.push_back(std::move(value));
+    }
+    condition_.notify_one();
+    space_available_.notify_all();
+    return true;
+  }
+
   // Waits for space instead of dropping the value. Control messages can still
   // use Push. Close wakes blocked producers and causes them to return false.
   // max_matching must be positive; predicate has the same contract as TryPush.

@@ -8,9 +8,13 @@
 #include <unistd.h>
 #endif
 
+#include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <iterator>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -19,6 +23,7 @@
 
 #include "Common/MediaSource.h"
 #include "Extension/Frame.h"
+#include "Poller/EventPoller.h"
 #include "Record/MP4Demuxer.h"
 #include "mw/streamer/converter/zlm_codec_parameters_converter.h"
 #include "mw/streamer/converter/zlm_packet_converter.h"
@@ -91,6 +96,58 @@ bool CanConnect(std::uint16_t port) {
   CloseSocket(socket);
   return connected;
 }
+
+// The sink selects its own pool member. Pause every member to make saturation
+// deterministic without exposing a test-only Poller injection API.
+class PollerPause final {
+ public:
+  ~PollerPause() { Release(); }
+
+  void Pause() {
+    std::vector<toolkit::TaskExecutor::Ptr> executors;
+    toolkit::EventPollerPool::Instance().for_each(
+        [&executors](const toolkit::TaskExecutor::Ptr& executor) {
+          executors.push_back(executor);
+        });
+    expected_ = executors.size();
+    for (const auto& executor : executors) {
+      executor->async(
+          [state = state_]() {
+            std::unique_lock<std::mutex> lock(state->mutex);
+            ++state->entered;
+            state->condition.notify_all();
+            state->condition.wait(lock, [&state] { return state->released; });
+          },
+          false);
+    }
+  }
+
+  bool WaitUntilPaused() {
+    std::unique_lock<std::mutex> lock(state_->mutex);
+    return expected_ != 0 && state_->condition.wait_for(lock, 10s, [this] {
+      return state_->entered == expected_;
+    });
+  }
+
+  void Release() {
+    {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      state_->released = true;
+    }
+    state_->condition.notify_all();
+  }
+
+ private:
+  struct State {
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::size_t entered = 0;
+    bool released = false;
+  };
+
+  const std::shared_ptr<State> state_ = std::make_shared<State>();
+  std::size_t expected_ = 0;
+};
 
 template <typename Predicate>
 bool WaitUntil(Predicate predicate) {
@@ -317,6 +374,75 @@ TEST_CASE("RtspPublishSink发布的编码视频可被RTSP客户端拉取") {
   CHECK(client.ReadRtp());
   INFO(sink.error());
   CHECK(sink.state() != PacketSinkState::kFailed);
+  sink.Stop();
+  REQUIRE(WaitUntil([&] { return !CanConnect(port); }));
+}
+
+TEST_CASE("RtspPublishSink包队列满时保留发布并从下一视频关键帧恢复") {
+  const auto sample = ReadSample();
+  const auto first_key = std::find_if(
+      sample.packets.begin(), sample.packets.end(), [](const Packet& packet) {
+        return (packet->flags & AV_PKT_FLAG_KEY) != 0;
+      });
+  REQUIRE(first_key != sample.packets.end());
+  const auto second_key = std::find_if(
+      std::next(first_key), sample.packets.end(), [](const Packet& packet) {
+        return (packet->flags & AV_PKT_FLAG_KEY) != 0;
+      });
+  REQUIRE(second_key != sample.packets.end());
+  REQUIRE(std::distance(first_key, second_key) >= 5);
+  const auto after_second_key = std::next(second_key);
+  REQUIRE(after_second_key != sample.packets.end());
+
+  const auto port = UnusedPort();
+  auto config = Config(port, "overflow");
+  config.packet_queue_capacity = 2;
+  RtspPublishSink sink("publish", config);
+  sink.OnStreamsReady({1, sample.streams});
+  sink.OnPacket({1, first_key->Ref()});
+  REQUIRE(WaitUntil([&] {
+    return sink.queue_depth() == 0 && HasSource("overflow") &&
+           sink.state() == PacketSinkState::kRunning;
+  }));
+  const auto source_before = mediakit::MediaSource::find(
+      "rtsp", "__defaultVhost__", "live", "overflow", false);
+  REQUIRE(source_before);
+  REQUIRE(sink.GetPerformance().operations.front().input_count == 1);
+
+  // Declared after sink so assertion unwinding releases every Poller before
+  // sink destruction waits for its shutdown barrier.
+  PollerPause pause;
+  pause.Pause();
+  REQUIRE(pause.WaitUntilPaused());
+  sink.OnPacket({1, std::next(first_key, 1)->Ref()});
+  sink.OnPacket({1, std::next(first_key, 2)->Ref()});
+  sink.OnPacket({1, std::next(first_key, 3)->Ref()});
+  sink.OnPacket({1, std::next(first_key, 4)->Ref()});
+  sink.OnPacket({1, second_key->Ref()});
+
+  CHECK(sink.state() == PacketSinkState::kRunning);
+  CHECK(sink.error().empty());
+  CHECK(sink.queue_depth() == 1);
+  const auto source_during = mediakit::MediaSource::find(
+      "rtsp", "__defaultVhost__", "live", "overflow", false);
+  REQUIRE(source_during);
+  CHECK(source_during.get() == source_before.get());
+
+  pause.Release();
+  REQUIRE(WaitUntil([&] {
+    return sink.queue_depth() == 0 &&
+           sink.GetPerformance().operations.front().input_count == 2;
+  }));
+  sink.OnPacket({1, after_second_key->Ref()});
+  REQUIRE(WaitUntil([&] {
+    return sink.GetPerformance().operations.front().input_count == 3;
+  }));
+  const auto source_after = mediakit::MediaSource::find(
+      "rtsp", "__defaultVhost__", "live", "overflow", false);
+  REQUIRE(source_after);
+  CHECK(source_after.get() == source_before.get());
+  CHECK(sink.state() == PacketSinkState::kRunning);
+  CHECK(sink.error().empty());
   sink.Stop();
   REQUIRE(WaitUntil([&] { return !CanConnect(port); }));
 }

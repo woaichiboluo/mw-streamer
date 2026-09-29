@@ -121,6 +121,66 @@ void ValidateDestination(const MwStreamerVideoFrameView& source,
   }
 }
 
+void CopyHostPlanes(const MwStreamerVideoFrameView& source,
+                    const MwStreamerVideoBufferView& destination) {
+  const auto& source_linear = source.buffer.storage.linear;
+  const auto& destination_linear = destination.storage.linear;
+  for (std::uint32_t plane_index = 0; plane_index < source_linear.plane_count;
+       ++plane_index) {
+    const auto& source_plane = source_linear.planes[plane_index];
+    const auto& destination_plane = destination_linear.planes[plane_index];
+    const auto* source_base =
+        reinterpret_cast<const std::uint8_t*>(source_plane.address);
+    auto* destination_base =
+        reinterpret_cast<std::uint8_t*>(destination_plane.address);
+    for (std::uint32_t row = 0; row < source_plane.row_count; ++row) {
+      std::memcpy(destination_base + static_cast<std::ptrdiff_t>(row) *
+                                         destination_plane.stride_bytes,
+                  source_base + static_cast<std::ptrdiff_t>(row) *
+                                    source_plane.stride_bytes,
+                  source_plane.row_bytes);
+    }
+  }
+}
+
+void CopyHostToCuda(const MwStreamerVideoFrameView& source,
+                    const MwStreamerVideoBufferView& destination) {
+  EnsureCudaDriverInitialized();
+  const auto& source_linear = source.buffer.storage.linear;
+  const auto& destination_linear = destination.storage.linear;
+  const CUcontext destination_context =
+      GetPointerContext(destination_linear.planes[0].address);
+  ThrowIfCudaError(cuCtxPushCurrent(destination_context),
+                   "设置目标CUDA context");
+  try {
+    for (std::uint32_t plane_index = 0; plane_index < source_linear.plane_count;
+         ++plane_index) {
+      const auto& source_plane = source_linear.planes[plane_index];
+      const auto& destination_plane = destination_linear.planes[plane_index];
+      if (GetPointerContext(destination_plane.address) != destination_context) {
+        throw std::invalid_argument("HostFrame目标CUDA视频平面不在同一context");
+      }
+      CUDA_MEMCPY2D copy{};
+      copy.srcMemoryType = CU_MEMORYTYPE_HOST;
+      copy.srcHost = reinterpret_cast<const void*>(source_plane.address);
+      copy.srcPitch = static_cast<std::size_t>(source_plane.stride_bytes);
+      copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+      copy.dstDevice = static_cast<CUdeviceptr>(destination_plane.address);
+      copy.dstPitch = static_cast<std::size_t>(destination_plane.stride_bytes);
+      copy.WidthInBytes = source_plane.row_bytes;
+      copy.Height = source_plane.row_count;
+      ThrowIfCudaError(cuMemcpy2D(&copy), "直接复制Host视频平面到CUDA");
+    }
+  } catch (...) {
+    CUcontext popped_context = nullptr;
+    cuCtxPopCurrent(&popped_context);
+    throw;
+  }
+  CUcontext popped_context = nullptr;
+  ThrowIfCudaError(cuCtxPopCurrent(&popped_context),
+                   "恢复调用线程CUDA context");
+}
+
 }  // namespace
 
 class HostFrame::Impl final {
@@ -146,22 +206,7 @@ class HostFrame::Impl final {
   }
 
   void CopyHost(const MwStreamerVideoFrameView& source) {
-    const auto& source_linear = source.buffer.storage.linear;
-    for (std::uint32_t plane_index = 0; plane_index < plane_count_;
-         ++plane_index) {
-      const auto& source_plane = source_linear.planes[plane_index];
-      auto* destination = storage_[plane_index].data();
-      const auto* source_base =
-          reinterpret_cast<const std::uint8_t*>(source_plane.address);
-      for (std::uint32_t row = 0; row < source_plane.row_count; ++row) {
-        const auto* source_row =
-            source_base +
-            static_cast<std::ptrdiff_t>(row) * source_plane.stride_bytes;
-        std::memcpy(destination +
-                        static_cast<std::size_t>(row) * source_plane.row_bytes,
-                    source_row, source_plane.row_bytes);
-      }
-    }
+    CopyHostPlanes(source, view_.buffer);
   }
 
   void CopyCuda(const MwStreamerVideoFrameView& source) {
@@ -214,63 +259,11 @@ class HostFrame::Impl final {
 
   void CopyTo(const MwStreamerVideoBufferView& destination) const {
     ValidateDestination(view_, destination);
-    const auto& source_linear = view_.buffer.storage.linear;
-    const auto& destination_linear = destination.storage.linear;
     if (destination.memory_type == kMwStreamerMemoryHost) {
-      for (std::uint32_t plane_index = 0; plane_index < plane_count_;
-           ++plane_index) {
-        const auto& source_plane = source_linear.planes[plane_index];
-        const auto& destination_plane = destination_linear.planes[plane_index];
-        const auto* source_base =
-            reinterpret_cast<const std::uint8_t*>(source_plane.address);
-        auto* destination_base =
-            reinterpret_cast<std::uint8_t*>(destination_plane.address);
-        for (std::uint32_t row = 0; row < source_plane.row_count; ++row) {
-          std::memcpy(destination_base + static_cast<std::ptrdiff_t>(row) *
-                                             destination_plane.stride_bytes,
-                      source_base + static_cast<std::size_t>(row) *
-                                        source_plane.stride_bytes,
-                      source_plane.row_bytes);
-        }
-      }
+      CopyHostPlanes(view_, destination);
       return;
     }
-
-    EnsureCudaDriverInitialized();
-    const CUcontext destination_context =
-        GetPointerContext(destination_linear.planes[0].address);
-    ThrowIfCudaError(cuCtxPushCurrent(destination_context),
-                     "设置目标CUDA context");
-    try {
-      for (std::uint32_t plane_index = 0; plane_index < plane_count_;
-           ++plane_index) {
-        const auto& source_plane = source_linear.planes[plane_index];
-        const auto& destination_plane = destination_linear.planes[plane_index];
-        if (GetPointerContext(destination_plane.address) !=
-            destination_context) {
-          throw std::invalid_argument(
-              "HostFrame目标CUDA视频平面不在同一context");
-        }
-        CUDA_MEMCPY2D copy{};
-        copy.srcMemoryType = CU_MEMORYTYPE_HOST;
-        copy.srcHost = reinterpret_cast<const void*>(source_plane.address);
-        copy.srcPitch = static_cast<std::size_t>(source_plane.stride_bytes);
-        copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
-        copy.dstDevice = static_cast<CUdeviceptr>(destination_plane.address);
-        copy.dstPitch =
-            static_cast<std::size_t>(destination_plane.stride_bytes);
-        copy.WidthInBytes = source_plane.row_bytes;
-        copy.Height = source_plane.row_count;
-        ThrowIfCudaError(cuMemcpy2D(&copy), "复制HostFrame到CUDA输出");
-      }
-    } catch (...) {
-      CUcontext popped_context = nullptr;
-      cuCtxPopCurrent(&popped_context);
-      throw;
-    }
-    CUcontext popped_context = nullptr;
-    ThrowIfCudaError(cuCtxPopCurrent(&popped_context),
-                     "恢复调用线程CUDA context");
+    CopyHostToCuda(view_, destination);
   }
 
  private:
@@ -279,6 +272,20 @@ class HostFrame::Impl final {
   std::uint32_t plane_count_ = 0;
   MwStreamerVideoFrameView view_{};
 };
+
+void HostFrame::Copy(const MwStreamerVideoFrameView& source,
+                     const MwStreamerVideoBufferView& destination) {
+  ValidateSource(source);
+  ValidateDestination(source, destination);
+  if (source.buffer.memory_type != kMwStreamerMemoryHost) {
+    throw std::invalid_argument("HostFrame直接复制要求Host输入");
+  }
+  if (destination.memory_type == kMwStreamerMemoryHost) {
+    CopyHostPlanes(source, destination);
+  } else {
+    CopyHostToCuda(source, destination);
+  }
+}
 
 HostFrame HostFrame::CopyFrom(const MwStreamerVideoFrameView& source) {
   ValidateSource(source);

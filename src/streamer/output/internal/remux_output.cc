@@ -245,6 +245,7 @@ class RemuxOutput::Impl final {
     bridge_.reset();
     converters_.clear();
     startup_packets_.clear();
+    startup_dropped_packets_ = 0;
     tracks_.clear();
   }
 
@@ -359,7 +360,14 @@ class RemuxOutput::Impl final {
 
   void CacheStartup(const Packet& packet) {
     if (startup_packets_.size() >= config_.startup_packet_capacity) {
-      throw std::runtime_error("Remux等待轨道信息的启动包缓存已满");
+      startup_packets_.erase(startup_packets_.begin());
+      ++startup_dropped_packets_;
+      if (startup_dropped_packets_ == 1) {
+        MW_LOG_WARNING("streamer",
+                       "Remux启动包缓存已满，开始丢弃最旧包并保留最新包: "
+                       "target={}, capacity={}",
+                       config_.target, config_.startup_packet_capacity);
+      }
     }
     const auto index = packet->stream_index;
     const auto stream = std::find_if(
@@ -395,6 +403,11 @@ class RemuxOutput::Impl final {
     startup_complete_ = true;
     for (const auto& packet : startup_packets_) WritePacket(packet);
     startup_packets_.clear();
+    if (startup_dropped_packets_ != 0) {
+      MW_LOG_INFO("streamer", "Remux启动包缓存恢复: target={}, 本轮丢弃包数={}",
+                  config_.target, startup_dropped_packets_);
+      startup_dropped_packets_ = 0;
+    }
   }
 
   void WritePacket(const Packet& packet) {
@@ -519,6 +532,7 @@ class RemuxOutput::Impl final {
   std::vector<mediakit::Track::Ptr> tracks_;
   std::unordered_set<int> seen_tracks_;
   std::vector<Packet> startup_packets_;
+  std::size_t startup_dropped_packets_ = 0;
   std::int64_t timestamp_origin_ms_ = 0;
   bool startup_complete_ = false;
 };

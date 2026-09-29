@@ -2,6 +2,10 @@
 #include <stddef.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#include <Windows.h>
+#endif
+
 #include "mw/streamer.h"
 
 static int Check(int condition) { return condition ? 0 : 1; }
@@ -32,6 +36,10 @@ static MwPerformanceSnapshot Snapshot(int64_t sampled_at_ns,
 int main(void) {
   MwLogConfig log_config;
   MwZlmConfig zlm_config;
+#if defined(_WIN32)
+  const int has_console_input = GetConsoleCP() != 0;
+  const int has_console_output = GetConsoleOutputCP() != 0;
+#endif
   mw_log_default_config(&log_config);
   mw_zlm_default_config(&zlm_config);
   if (Check(zlm_config.event_poller_threads == 0) ||
@@ -53,6 +61,12 @@ int main(void) {
       Check(strlen(mw_last_error()) != 0)) {
     return 1;
   }
+#if defined(_WIN32)
+  if ((has_console_input && Check(GetConsoleCP() == CP_UTF8)) ||
+      (has_console_output && Check(GetConsoleOutputCP() == CP_UTF8))) {
+    return 1;
+  }
+#endif
 
   MwPipeline* pipeline = (MwPipeline*)1;
   MwPipelineCreateInfo create_info = {0};

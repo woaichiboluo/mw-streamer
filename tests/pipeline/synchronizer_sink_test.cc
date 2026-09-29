@@ -1,5 +1,6 @@
 #include "mw/streamer/synchronizer/synchronizer_sink.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -474,6 +475,44 @@ TEST_CASE("SynchronizerSink EOF drains scheduled tail at playback pace once") {
   }
   CHECK(recorded.events[recorded.events.size() - 2] == "end");
   CheckClocks(recorded);
+}
+
+TEST_CASE("SynchronizerSink输入队列满时只淘汰同轨最旧一帧") {
+  Recorded recorded;
+  recorded.block_video = true;
+  auto config = Config();
+  config.frame_queue_capacity = 2;
+  SynchronizerSink sink("synchronizer", config);
+  ReleaseOnExit release{recorded};
+  AddRecorder(sink, recorded);
+  sink.OnStreamsReady(Streams(1, false, true));
+  sink.OnVideoFrame({1, Video(0, 10)});
+  const bool entered = recorded.Wait([&] { return recorded.video_entered; });
+  std::size_t saturated_depth = 0;
+  if (entered) {
+    sink.OnVideoFrame({1, Video(50, 11)});
+    sink.OnVideoFrame({1, Video(100, 12)});
+    sink.OnVideoFrame({1, Video(150, 13)});
+    saturated_depth = sink.queue_depth();
+    sink.OnInputEnded({1, StreamEndReason::kEof});
+  }
+  recorded.Release();
+  const bool ended = WaitState(sink, SynchronizerSinkState::kEnded);
+  sink.Stop();
+  REQUIRE(entered);
+  REQUIRE(ended);
+  INFO(sink.error());
+  CHECK(sink.error().empty());
+  CHECK(saturated_depth <= 2 * config.frame_queue_capacity);
+  CHECK_FALSE(std::any_of(
+      recorded.video.begin(), recorded.video.end(),
+      [](const FrameReady& frame) { return HasMarker(frame.frame, 11); }));
+  CHECK(std::any_of(
+      recorded.video.begin(), recorded.video.end(),
+      [](const FrameReady& frame) { return HasMarker(frame.frame, 12); }));
+  CHECK(std::any_of(
+      recorded.video.begin(), recorded.video.end(),
+      [](const FrameReady& frame) { return HasMarker(frame.frame, 13); }));
 }
 
 TEST_CASE(
