@@ -86,6 +86,7 @@ class HostNv12Frame final {
                   {reinterpret_cast<std::uintptr_t>(uv_.data()),
                    static_cast<std::int32_t>(width), width, height / 2}}}),
         view_({{kMwStreamerMemoryHost,
+                {kMwStreamerExecutionCpu, nullptr, nullptr},
                 kMwStreamerVideoStorageLinear,
                 kMwStreamerVideoPixelFormatNv12,
                 width,

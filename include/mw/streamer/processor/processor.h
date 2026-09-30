@@ -128,6 +128,10 @@ typedef struct MwStreamerExecutionContext {
   // FFmpeg hwcontext API. It remains valid through on_stop after a successful
   // start, or until on_start returns when startup fails. Do not free it.
   const void* ffmpeg_device_context;
+  // Borrowed backend-native execution context. For CUDA execution this is the
+  // CUcontext handle. It may be null when ffmpeg_device_context is available.
+  // Do not destroy it.
+  void* native_context;
 } MwStreamerExecutionContext;
 
 typedef struct MwStreamerVideoPlaneView {
@@ -166,6 +170,9 @@ typedef union MwStreamerVideoStorageView {
 // the active member of storage.
 typedef struct MwStreamerVideoBufferView {
   MwStreamerMemoryType memory_type;
+  // Execution context that owns this buffer. Its context handles are borrowed
+  // for the same lifetime as the buffer view.
+  MwStreamerExecutionContext execution;
   MwStreamerVideoStorageType storage_type;
   MwStreamerVideoPixelFormat pixel_format;
   uint32_t width;

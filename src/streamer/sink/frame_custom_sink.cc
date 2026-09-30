@@ -111,10 +111,12 @@ class FrameCustomSink::Impl final {
  private:
   void Start(const FrameStreamsReady& streams) {
     auto context = std::make_unique<internal::ProcessorSinkContext>(streams);
-    const auto result = callbacks_.on_start
-                            ? callbacks_.on_start(&context->source_info(),
-                                                  callbacks_.user_context)
-                            : kMwStreamerProcessorStartSuccess;
+    const MwStreamerFrameCustomSinkStartRequest request{&context->source_info(),
+                                                        &context->execution()};
+    const auto result =
+        callbacks_.on_start
+            ? callbacks_.on_start(&request, callbacks_.user_context)
+            : kMwStreamerProcessorStartSuccess;
     if (result != kMwStreamerProcessorStartSuccess) {
       throw std::runtime_error("FrameCustomSink拒绝启动");
     }

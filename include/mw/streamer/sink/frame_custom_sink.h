@@ -7,9 +7,14 @@
 extern "C" {
 #endif
 
+typedef struct MwStreamerFrameCustomSinkStartRequest {
+  const MwStreamerProcessorSourceInfo* source_info;
+  const MwStreamerExecutionContext* execution;
+} MwStreamerFrameCustomSinkStartRequest;
+
 typedef MwStreamerProcessorStartResult (
     *MwStreamerFrameCustomSinkStartCallback)(
-    const MwStreamerProcessorSourceInfo* source_info, void* user_context);
+    const MwStreamerFrameCustomSinkStartRequest* request, void* user_context);
 
 typedef void (*MwStreamerFrameCustomSinkVideoCallback)(
     const MwStreamerVideoFrameView* frame, void* user_context);
@@ -21,9 +26,9 @@ typedef struct MwStreamerFrameCustomSinkCallbacks {
   // never reads or releases it.
   void* user_context;
 
-  // Called at most once. Source information stays fixed for the Sink lifetime;
-  // a reconnect that changes it is rejected instead of calling on_start
-  // again. Source information is borrowed for the callback.
+  // Called at most once. Source information and execution context stay fixed
+  // for the Sink lifetime; a reconnect that changes either is rejected instead
+  // of calling on_start again. Request contents are borrowed for the callback.
   MwStreamerFrameCustomSinkStartCallback on_start;
 
   // Synchronously consume borrowed decoded frames. Audio and video callbacks

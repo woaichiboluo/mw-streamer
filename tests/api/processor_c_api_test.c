@@ -39,6 +39,12 @@ static void ProcessVideo(const MwStreamerTransformVideoProcessRequest* request,
   TestProcessor* processor = user_context;
   if (request->input->buffer.width == 3840 && request->output->width == 1280 &&
       request->output->height == 720 &&
+      request->input->buffer.execution.type == kMwStreamerExecutionCuda &&
+      request->output->execution.type == kMwStreamerExecutionCuda &&
+      request->input->buffer.execution.ffmpeg_device_context ==
+          processor->execution.ffmpeg_device_context &&
+      request->output->execution.ffmpeg_device_context ==
+          processor->execution.ffmpeg_device_context &&
       request->input->buffer.storage_type == kMwStreamerVideoStorageLinear &&
       request->input->buffer.storage.linear.plane_count == 2 &&
       request->input->timestamp.pts == 9000 &&
@@ -84,13 +90,18 @@ static MwStreamerProcessorStartResult OnFileStart(
       request->execution->type != kMwStreamerExecutionCuda) {
     return kMwStreamerProcessorStartFailed;
   }
+  processor->execution = *request->execution;
   ++processor->start_calls;
   return kMwStreamerProcessorStartSuccess;
 }
 
 static void ProcessFileVideo(const MwStreamerVideoFrameView* input,
                              void* user_context) {
-  if (input->buffer.width == 3840) {
+  TestProcessor* processor = user_context;
+  if (input->buffer.width == 3840 &&
+      input->buffer.execution.type == kMwStreamerExecutionCuda &&
+      input->buffer.execution.ffmpeg_device_context ==
+          processor->execution.ffmpeg_device_context) {
     ++((TestProcessor*)user_context)->video_calls;
   }
 }
@@ -108,6 +119,18 @@ static MwStreamerProcessorStartResult OnCustomStart(
     return kMwStreamerProcessorStartFailed;
   }
   ++((TestProcessor*)user_context)->start_calls;
+  return kMwStreamerProcessorStartSuccess;
+}
+
+static MwStreamerProcessorStartResult OnFrameCustomStart(
+    const MwStreamerFrameCustomSinkStartRequest* request, void* user_context) {
+  if (!request->source_info->has_video || !request->source_info->has_audio ||
+      request->execution->type != kMwStreamerExecutionCuda) {
+    return kMwStreamerProcessorStartFailed;
+  }
+  TestProcessor* processor = user_context;
+  processor->execution = *request->execution;
+  ++processor->start_calls;
   return kMwStreamerProcessorStartSuccess;
 }
 
@@ -160,10 +183,15 @@ int main(void) {
       {.address = 3, .stride_bytes = 1280, .row_bytes = 1280, .row_count = 720},
       {.address = 4, .stride_bytes = 1280, .row_bytes = 1280, .row_count = 360},
   };
+  const MwStreamerExecutionContext execution = {
+      .type = kMwStreamerExecutionCuda,
+      .ffmpeg_device_context = &processor,
+  };
   const MwStreamerVideoFrameView video_input = {
       .buffer =
           {
               .memory_type = kMwStreamerMemoryCuda,
+              .execution = execution,
               .storage_type = kMwStreamerVideoStorageLinear,
               .pixel_format = kMwStreamerVideoPixelFormatNv12,
               .width = 3840,
@@ -192,9 +220,6 @@ int main(void) {
               .time_base = {.num = 1, .den = 90000},
           },
   };
-  const MwStreamerExecutionContext execution = {
-      .type = kMwStreamerExecutionCuda,
-  };
   MwStreamerVideoOutputSize video_output_size = {.width = 1920, .height = 1080};
   const MwStreamerTransformProcessorStartRequest start_request = {
       .source_info = &source_info,
@@ -214,6 +239,7 @@ int main(void) {
       .output =
           &(MwStreamerVideoBufferView){
               .memory_type = kMwStreamerMemoryCuda,
+              .execution = execution,
               .storage_type = kMwStreamerVideoStorageLinear,
               .pixel_format = kMwStreamerVideoPixelFormatNv12,
               .width = video_output_size.width,
@@ -301,9 +327,10 @@ int main(void) {
     return 1;
   }
   TestProcessor custom = {0};
+  custom.execution = execution;
   const MwStreamerFrameCustomSinkCallbacks frame_callbacks = {
       .user_context = &custom,
-      .on_start = OnCustomStart,
+      .on_start = OnFrameCustomStart,
       .on_frame = ProcessFileVideo,
       .on_audio = ProcessFileAudio,
       .on_boundary = OnBoundary,
@@ -317,7 +344,11 @@ int main(void) {
       .on_boundary = OnBoundary,
       .on_stop = OnStop,
   };
-  if (frame_callbacks.on_start(&source_info, &custom) !=
+  const MwStreamerFrameCustomSinkStartRequest frame_start_request = {
+      .source_info = &source_info,
+      .execution = &execution,
+  };
+  if (frame_callbacks.on_start(&frame_start_request, &custom) !=
           kMwStreamerProcessorStartSuccess ||
       packet_callbacks.on_start(&source_info, &custom) !=
           kMwStreamerProcessorStartSuccess) {

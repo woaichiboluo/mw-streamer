@@ -182,6 +182,7 @@ class HostFrame::Impl final {
     }
 
     view_.buffer.memory_type = kMwStreamerMemoryHost;
+    view_.buffer.execution = {kMwStreamerExecutionCpu, nullptr, nullptr};
     view_.buffer.storage_type = kMwStreamerVideoStorageLinear;
     view_.buffer.storage.linear = {planes_.data(), plane_count_};
   }

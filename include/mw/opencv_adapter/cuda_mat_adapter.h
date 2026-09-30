@@ -13,8 +13,9 @@ namespace mw::opencv_adapter {
 class MW_OPENCV_ADAPTER_API CudaMatAdapter final {
  public:
   // Submits a CUDA YUV-to-BGR conversion without copying or owning either
-  // frame. source and destination must be linear CUDA storage allocated in
-  // context. destination must already have the required size and type.
+  // frame. source and destination must be linear CUDA storage allocated in the
+  // context carried by source. destination must already have the required size
+  // and type.
   //
   // The function temporarily makes context current when necessary and submits
   // all work to stream. A null stream selects the CUDA default stream in
@@ -26,8 +27,7 @@ class MW_OPENCV_ADAPTER_API CudaMatAdapter final {
   // YUV420P10LE, and YUV422P10LE. Planar YUV444 requires a fused,
   // allocation-free implementation before it can use this API.
   static void ToBgr(const MwStreamerVideoFrameView& source,
-                    cv::cuda::GpuMat* destination, CUcontext context,
-                    CUstream stream = nullptr);
+                    cv::cuda::GpuMat* destination, CUstream stream = nullptr);
 
   // Submits a CUDA BGR-to-YUV conversion directly into the borrowed output.
   // destination_color describes the color encoding written to destination.
@@ -39,7 +39,7 @@ class MW_OPENCV_ADAPTER_API CudaMatAdapter final {
   static void FromBgr(const cv::cuda::GpuMat& source,
                       const MwStreamerVideoColorInfo& destination_color,
                       const MwStreamerVideoBufferView& destination,
-                      CUcontext context, CUstream stream = nullptr);
+                      CUstream stream = nullptr);
 
   CudaMatAdapter() = delete;
 };

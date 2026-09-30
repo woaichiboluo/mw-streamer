@@ -111,6 +111,7 @@ class HostNv12Frame final {
                   {reinterpret_cast<std::uintptr_t>(uv_.data()),
                    static_cast<std::int32_t>(width), width, height / 2}}}),
         view_({{kMwStreamerMemoryHost,
+                {kMwStreamerExecutionCpu, nullptr, nullptr},
                 kMwStreamerVideoStorageLinear,
                 kMwStreamerVideoPixelFormatNv12,
                 width,
@@ -175,6 +176,8 @@ TEST_CASE("CudaFrame在显式context和stream中异步复制") {
 
   CHECK(cuda_source.context() == cuda.context());
   CHECK(cuda_source.view().buffer.memory_type == kMwStreamerMemoryCuda);
+  CHECK(cuda_source.view().buffer.execution.type == kMwStreamerExecutionCuda);
+  CHECK(cuda_source.view().buffer.execution.native_context == cuda.context());
   CHECK(cuda_source.view().color.space == kMwStreamerColorSpaceBt709);
   CHECK(cuda_source.view().timestamp.pts == 1234);
   CheckNv12Values(pinned_destination.view(), 0x31, 0x72);
@@ -256,12 +259,11 @@ TEST_CASE("CudaFrame拒绝跨context和不匹配stream") {
   auto second_frame = CudaFrame::Allocate(prototype.view(), second.context());
 
   CHECK(first.context() != second.context());
-  CHECK_THROWS_AS(
-      CudaFrame::Copy(first_frame.view(), second_frame.view().buffer,
-                      first.context(), first.stream()),
-      std::invalid_argument);
+  CHECK_THROWS_AS(CudaFrame::Copy(first_frame.view(),
+                                  second_frame.view().buffer, first.stream()),
+                  std::invalid_argument);
   CHECK_THROWS_AS(CudaFrame::Copy(first_frame.view(), first_frame.view().buffer,
-                                  first.context(), second.stream()),
+                                  second.stream()),
                   std::invalid_argument);
 }
 
@@ -286,14 +288,14 @@ TEST_CASE("CudaFrame校验原型和输出布局") {
   auto destination = CudaFrame::Allocate(prototype.view(), cuda.context());
   auto invalid_destination = destination.view().buffer;
   invalid_destination.width -= 1;
-  CHECK_THROWS_AS(CudaFrame::Copy(source.view(), invalid_destination,
-                                  cuda.context(), cuda.stream()),
-                  std::invalid_argument);
+  CHECK_THROWS_AS(
+      CudaFrame::Copy(source.view(), invalid_destination, cuda.stream()),
+      std::invalid_argument);
   invalid_destination = destination.view().buffer;
   invalid_destination.memory_type = static_cast<MwStreamerMemoryType>(999);
-  CHECK_THROWS_AS(CudaFrame::Copy(source.view(), invalid_destination,
-                                  cuda.context(), cuda.stream()),
-                  std::invalid_argument);
+  CHECK_THROWS_AS(
+      CudaFrame::Copy(source.view(), invalid_destination, cuda.stream()),
+      std::invalid_argument);
 }
 
 }  // namespace

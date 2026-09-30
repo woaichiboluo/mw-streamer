@@ -11,13 +11,15 @@ extern "C" {
 #include <catch2/catch_test_macros.hpp>
 
 #include "mw/streamer/ffmpeg/frame.h"
+#include "mw/streamer/ffmpeg/hardware_context.h"
 #include "mw/streamer/sink/frame_custom_sink_node.h"
 
 namespace {
 
 using namespace mw::streamer;
 
-FrameStreamsReady Streams(std::uint64_t generation = 1, int width = 64) {
+FrameStreamsReady Streams(std::uint64_t generation = 1, int width = 64,
+                          const HardwareContext* hardware_context = nullptr) {
   StreamInfo video;
   video.stream_index = 0;
   video.time_base = {1, 90000};
@@ -37,7 +39,7 @@ FrameStreamsReady Streams(std::uint64_t generation = 1, int width = 64) {
   audio_parameters->codec_id = AV_CODEC_ID_AAC;
   audio_parameters->sample_rate = 44100;
   av_channel_layout_default(&audio_parameters->ch_layout, 2);
-  return {generation, {std::move(video), std::move(audio)}, nullptr};
+  return {generation, {std::move(video), std::move(audio)}, hardware_context};
 }
 
 Frame Video() {
@@ -72,16 +74,18 @@ struct CallbackState {
   int stops = 0;
   std::vector<MwStreamerProcessorBoundaryReason> boundaries;
   MwStreamerProcessorSourceInfo source{};
+  MwStreamerExecutionContext execution{};
 };
 
 MwStreamerFrameCustomSinkCallbacks Callbacks(CallbackState& state) {
   MwStreamerFrameCustomSinkCallbacks callbacks{};
   callbacks.user_context = &state;
-  callbacks.on_start = [](const MwStreamerProcessorSourceInfo* source,
+  callbacks.on_start = [](const MwStreamerFrameCustomSinkStartRequest* request,
                           void* context) {
     auto& state = *static_cast<CallbackState*>(context);
     ++state.starts;
-    state.source = *source;
+    state.source = *request->source_info;
+    state.execution = *request->execution;
     return kMwStreamerProcessorStartSuccess;
   };
   callbacks.on_frame = [](const MwStreamerVideoFrameView* frame,
@@ -117,12 +121,28 @@ TEST_CASE("Custom Sink exposes source and frames", "[custom-sink]") {
   CHECK(state.source.has_audio == 1);
   CHECK(state.source.video.width == 64);
   CHECK(state.source.audio.sample_rate == 44100);
+  CHECK(state.execution.type == kMwStreamerExecutionCpu);
+  CHECK(state.execution.ffmpeg_device_context == nullptr);
+  CHECK(state.execution.native_context == nullptr);
   CHECK(state.videos == 1);
   CHECK(state.audios == 1);
 
   sink.Stop();
   sink.Stop();
   CHECK(state.stops == 1);
+}
+
+TEST_CASE("FrameCustomSink启动请求携带CUDA执行上下文", "[custom-sink]") {
+  const auto hardware_context = HardwareContext::CreateCuda(0);
+  CallbackState state;
+  FrameCustomSink sink("custom", Callbacks(state));
+
+  sink.OnStreamsReady(Streams(1, 64, &hardware_context));
+
+  CHECK(state.execution.type == kMwStreamerExecutionCuda);
+  CHECK(state.execution.ffmpeg_device_context == hardware_context.get()->data);
+  CHECK(state.execution.native_context == nullptr);
+  sink.Stop();
 }
 
 TEST_CASE("Custom Sink starts once across stable generations",
@@ -160,7 +180,7 @@ TEST_CASE("FrameCustomSink EOF只通知一次边界且Stop调用一次", "[custo
 TEST_CASE("FrameCustomSink启动失败不调用停止回调", "[custom-sink]") {
   CallbackState state;
   auto callbacks = Callbacks(state);
-  callbacks.on_start = [](const MwStreamerProcessorSourceInfo*, void*) {
+  callbacks.on_start = [](const MwStreamerFrameCustomSinkStartRequest*, void*) {
     return kMwStreamerProcessorStartFailed;
   };
   {

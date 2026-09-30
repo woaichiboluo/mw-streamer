@@ -70,6 +70,7 @@ TEST_CASE("HostMatAdapter在NV12和BGR8之间同步转换") {
   }};
   const MwStreamerVideoFrameView source = {
       {kMwStreamerMemoryHost,
+       {kMwStreamerExecutionCpu, nullptr, nullptr},
        kMwStreamerVideoStorageLinear,
        kMwStreamerVideoPixelFormatNv12,
        kWidth,
@@ -137,6 +138,7 @@ TEST_CASE("HostMatAdapter在P010和BGR16之间同步转换") {
   }};
   const MwStreamerVideoFrameView source = {
       {kMwStreamerMemoryHost,
+       {kMwStreamerExecutionCpu, nullptr, nullptr},
        kMwStreamerVideoStorageLinear,
        kMwStreamerVideoPixelFormatP010,
        kWidth,
@@ -194,6 +196,7 @@ TEST_CASE("HostMatAdapter转换P016和YUV444P16") {
     }};
     const MwStreamerVideoFrameView source = {
         {kMwStreamerMemoryHost,
+         {kMwStreamerExecutionCpu, nullptr, nullptr},
          kMwStreamerVideoStorageLinear,
          kMwStreamerVideoPixelFormatP016,
          kWidth,
@@ -223,6 +226,7 @@ TEST_CASE("HostMatAdapter转换P016和YUV444P16") {
     }};
     const MwStreamerVideoFrameView source = {
         {kMwStreamerMemoryHost,
+         {kMwStreamerExecutionCpu, nullptr, nullptr},
          kMwStreamerVideoStorageLinear,
          kMwStreamerVideoPixelFormatYuv444p16le,
          kWidth,
@@ -252,6 +256,7 @@ TEST_CASE("HostMatAdapter转换YUV444P") {
   }};
   const MwStreamerVideoFrameView source = {
       {kMwStreamerMemoryHost,
+       {kMwStreamerExecutionCpu, nullptr, nullptr},
        kMwStreamerVideoStorageLinear,
        kMwStreamerVideoPixelFormatYuv444p,
        kWidth,
@@ -275,6 +280,7 @@ TEST_CASE("HostMatAdapter拒绝HDR和不匹配的Mat") {
   }};
   MwStreamerVideoFrameView prototype = {
       {kMwStreamerMemoryHost,
+       {kMwStreamerExecutionCpu, nullptr, nullptr},
        kMwStreamerVideoStorageLinear,
        kMwStreamerVideoPixelFormatNv12,
        kWidth,

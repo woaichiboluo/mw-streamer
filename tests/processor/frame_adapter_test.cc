@@ -106,6 +106,8 @@ TEST_CASE("VideoFrameAdapter映射常用软件YUV格式") {
     const auto& view = adapter.view();
 
     CHECK(view.buffer.memory_type == kMwStreamerMemoryHost);
+    CHECK(view.buffer.execution.type == kMwStreamerExecutionCpu);
+    CHECK(view.buffer.execution.ffmpeg_device_context == nullptr);
     CHECK(view.buffer.storage_type == kMwStreamerVideoStorageLinear);
     CHECK(view.buffer.pixel_format == test_case.processor_format);
     CHECK(view.buffer.width == 64);
@@ -151,6 +153,8 @@ TEST_CASE("VideoBufferAdapter暴露同一软件帧的可写存储") {
   const VideoBufferAdapter adapter(frame);
   const auto& view = adapter.view();
 
+  CHECK(view.execution.type == kMwStreamerExecutionCpu);
+  CHECK(view.execution.ffmpeg_device_context == nullptr);
   REQUIRE(view.storage.linear.plane_count == 3);
   auto* first_byte =
       reinterpret_cast<std::uint8_t*>(view.storage.linear.planes[0].address);
@@ -222,8 +226,14 @@ TEST_CASE("VideoFrameAdapter映射CUDA线性硬件帧") {
 
     const VideoFrameViewAdapter adapter(frame);
     const auto& view = adapter.view();
+    const auto* mapped_frames_context =
+        HardwareContext::GetFramesContext(*frame.get());
+    REQUIRE(mapped_frames_context != nullptr);
 
     CHECK(view.buffer.memory_type == kMwStreamerMemoryCuda);
+    CHECK(view.buffer.execution.type == kMwStreamerExecutionCuda);
+    CHECK(view.buffer.execution.ffmpeg_device_context ==
+          mapped_frames_context->device_ctx);
     CHECK(view.buffer.storage_type == kMwStreamerVideoStorageLinear);
     CHECK(view.buffer.pixel_format == test_case.processor_format);
     REQUIRE(view.buffer.storage.linear.plane_count ==
@@ -238,6 +248,12 @@ TEST_CASE("VideoFrameAdapter映射CUDA线性硬件帧") {
       CHECK(view.buffer.storage.linear.planes[plane].row_count ==
             test_case.row_counts[plane]);
     }
+
+    const VideoBufferAdapter output_adapter(frame);
+    const auto& output = output_adapter.view();
+    CHECK(output.execution.type == kMwStreamerExecutionCuda);
+    CHECK(output.execution.ffmpeg_device_context ==
+          mapped_frames_context->device_ctx);
   }
 }
 

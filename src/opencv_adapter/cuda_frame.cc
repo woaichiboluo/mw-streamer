@@ -12,6 +12,7 @@
 #include <string>
 #include <utility>
 
+#include "mw/opencv_adapter/cuda_context.h"
 #include "mw/opencv_adapter/internal/cuda_driver.h"
 
 namespace mw::opencv_adapter {
@@ -29,35 +30,6 @@ void ThrowIfCudaError(CUresult result, const char* operation) {
                            (error_name ? error_name : "CUDA_ERROR_UNKNOWN"));
 }
 
-class ScopedCudaContext final {
- public:
-  explicit ScopedCudaContext(CUcontext context) {
-    if (!context) {
-      throw std::invalid_argument("CudaFrame要求有效的CUDA context");
-    }
-    CUcontext current = nullptr;
-    ThrowIfCudaError(cuCtxGetCurrent(&current), "查询当前CUDA context");
-    if (current == context) {
-      return;
-    }
-    ThrowIfCudaError(cuCtxPushCurrent(context), "设置CUDA context");
-    pushed_ = true;
-  }
-
-  ~ScopedCudaContext() {
-    if (pushed_) {
-      CUcontext popped_context = nullptr;
-      cuCtxPopCurrent(&popped_context);
-    }
-  }
-
-  ScopedCudaContext(const ScopedCudaContext&) = delete;
-  ScopedCudaContext& operator=(const ScopedCudaContext&) = delete;
-
- private:
-  bool pushed_ = false;
-};
-
 void ValidateFrame(const MwStreamerVideoFrameView& frame) {
   const auto& buffer = frame.buffer;
   if (buffer.storage_type != kMwStreamerVideoStorageLinear) {
@@ -66,6 +38,12 @@ void ValidateFrame(const MwStreamerVideoFrameView& frame) {
   if (buffer.memory_type != kMwStreamerMemoryHost &&
       buffer.memory_type != kMwStreamerMemoryCuda) {
     throw std::invalid_argument("CudaFrame收到未知视频内存类型");
+  }
+  if ((buffer.memory_type == kMwStreamerMemoryHost &&
+       buffer.execution.type != kMwStreamerExecutionCpu) ||
+      (buffer.memory_type == kMwStreamerMemoryCuda &&
+       buffer.execution.type != kMwStreamerExecutionCuda)) {
+    throw std::invalid_argument("视频内存类型与执行上下文不匹配");
   }
   if (buffer.pixel_format == kMwStreamerVideoPixelFormatUnknown ||
       buffer.width == 0 || buffer.height == 0) {
@@ -149,6 +127,25 @@ void ValidateStream(CUcontext context, CUstream stream) {
   if (stream_context != context) {
     throw std::invalid_argument("CUDA stream不属于指定context");
   }
+}
+
+CUcontext GetCopyContext(const MwStreamerVideoBufferView& source,
+                         const MwStreamerVideoBufferView& destination) {
+  CUcontext context = nullptr;
+  if (source.memory_type == kMwStreamerMemoryCuda) {
+    context = GetCudaContext(source);
+  }
+  if (destination.memory_type == kMwStreamerMemoryCuda) {
+    const CUcontext destination_context = GetCudaContext(destination);
+    if (context && destination_context != context) {
+      throw std::invalid_argument("CudaFrame不允许跨CUDA context复制视频帧");
+    }
+    context = destination_context;
+  }
+  if (!context) {
+    throw std::invalid_argument("CudaFrame异步拷贝至少需要一个CUDA端点");
+  }
+  return context;
 }
 
 bool AreAllPlanesMergeable(
@@ -247,7 +244,12 @@ void EnqueueCopies(const MwStreamerVideoFrameView& source,
 class CudaFrame::Impl final {
  public:
   Impl(const MwStreamerVideoFrameView& prototype, CUcontext context)
-      : context_(context), view_(prototype) {
+      : execution_{kMwStreamerExecutionCuda, nullptr, context},
+        context_(context),
+        view_(prototype) {
+    if (!context_) {
+      throw std::invalid_argument("CudaFrame要求有效的CUDA context");
+    }
     const auto& source_linear = prototype.buffer.storage.linear;
     plane_count_ = source_linear.plane_count;
     std::size_t total_rows = 0;
@@ -283,6 +285,7 @@ class CudaFrame::Impl final {
       row_offset += source_plane.row_count;
     }
     view_.buffer.memory_type = kMwStreamerMemoryCuda;
+    view_.buffer.execution = execution_;
     view_.buffer.storage_type = kMwStreamerVideoStorageLinear;
     view_.buffer.storage.linear = {planes_.data(), plane_count_};
   }
@@ -309,6 +312,7 @@ class CudaFrame::Impl final {
   CUdeviceptr allocation_ = 0;
   std::array<MwStreamerVideoPlaneView, kMaxPlaneCount> planes_{};
   std::uint32_t plane_count_ = 0;
+  MwStreamerExecutionContext execution_{};
   CUcontext context_ = nullptr;
   MwStreamerVideoFrameView view_{};
 };
@@ -322,14 +326,11 @@ CudaFrame CudaFrame::Allocate(const MwStreamerVideoFrameView& prototype,
 
 void CudaFrame::Copy(const MwStreamerVideoFrameView& source,
                      const MwStreamerVideoBufferView& destination,
-                     CUcontext context, CUstream stream) {
+                     CUstream stream) {
   ValidateFrame(source);
   ValidateDestination(source, destination);
-  if (source.buffer.memory_type == kMwStreamerMemoryHost &&
-      destination.memory_type == kMwStreamerMemoryHost) {
-    throw std::invalid_argument("CudaFrame异步拷贝至少需要一个CUDA端点");
-  }
   EnsureCudaDriverInitialized();
+  const CUcontext context = GetCopyContext(source.buffer, destination);
   ScopedCudaContext scoped_context(context);
   ValidateStream(context, stream);
   ValidateCudaPlanes(source.buffer, context);
@@ -348,12 +349,12 @@ CudaFrame& CudaFrame::operator=(CudaFrame&& other) noexcept = default;
 
 void CudaFrame::CopyFrom(const MwStreamerVideoFrameView& source,
                          CUstream stream) {
-  Copy(source, view().buffer, context(), stream);
+  Copy(source, view().buffer, stream);
 }
 
 void CudaFrame::CopyTo(const MwStreamerVideoBufferView& destination,
                        CUstream stream) const {
-  Copy(view(), destination, context(), stream);
+  Copy(view(), destination, stream);
 }
 
 const MwStreamerVideoFrameView& CudaFrame::view() const noexcept {

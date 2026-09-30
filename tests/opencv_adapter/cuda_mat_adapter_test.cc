@@ -96,6 +96,7 @@ class TestFrame final {
 
     view_ = {
         {kMwStreamerMemoryHost,
+         {kMwStreamerExecutionCpu, nullptr, nullptr},
          kMwStreamerVideoStorageLinear,
          format,
          width_,
@@ -215,11 +216,10 @@ TEST_CASE("CudaMatAdapter在同一context中转换YUV和BGR") {
       cv::cuda::GpuMat round_trip_gpu(kHeight, kWidth, bgr_type);
 
       cuda_source.CopyFrom(pinned_source.view(), stream);
-      CudaMatAdapter::ToBgr(cuda_source.view(), &gpu_bgr, context, stream);
+      CudaMatAdapter::ToBgr(cuda_source.view(), &gpu_bgr, stream);
       CudaMatAdapter::FromBgr(gpu_bgr, host_source.view().color,
-                              cuda_output.view().buffer, context, stream);
-      CudaMatAdapter::ToBgr(cuda_output.view(), &round_trip_gpu, context,
-                            stream);
+                              cuda_output.view().buffer, stream);
+      CudaMatAdapter::ToBgr(cuda_output.view(), &round_trip_gpu, stream);
       cuda_output.CopyTo(pinned_output.view().buffer, stream);
       REQUIRE(cuStreamSynchronize(stream) == CUDA_SUCCESS);
 
@@ -258,7 +258,7 @@ TEST_CASE("CudaMatAdapter异步直接转换不等待调用方stream") {
   REQUIRE(cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING) == CUDA_SUCCESS);
 
   cuda_source.CopyFrom(pinned_source.view(), stream);
-  CudaMatAdapter::ToBgr(source_view, &bgr, context, stream);
+  CudaMatAdapter::ToBgr(source_view, &bgr, stream);
   REQUIRE(cuStreamSynchronize(stream) == CUDA_SUCCESS);
   std::atomic<bool> preceding_work_finished = false;
   REQUIRE(cuLaunchHostFunc(
@@ -269,7 +269,7 @@ TEST_CASE("CudaMatAdapter异步直接转换不等待调用方stream") {
               },
               &preceding_work_finished) == CUDA_SUCCESS);
 
-  CudaMatAdapter::ToBgr(source_view, &bgr, context, stream);
+  CudaMatAdapter::ToBgr(source_view, &bgr, stream);
   CHECK_FALSE(preceding_work_finished.load());
   REQUIRE(cuStreamSynchronize(stream) == CUDA_SUCCESS);
   CHECK(preceding_work_finished.load());
@@ -289,9 +289,9 @@ TEST_CASE("CudaMatAdapter省略stream时使用default stream") {
   cv::cuda::GpuMat bgr(kHeight, kWidth, CV_8UC3);
 
   cuda_source.CopyFrom(pinned_source.view());
-  CudaMatAdapter::ToBgr(cuda_source.view(), &bgr, context);
+  CudaMatAdapter::ToBgr(cuda_source.view(), &bgr);
   CudaMatAdapter::FromBgr(bgr, host_source.view().color,
-                          cuda_output.view().buffer, context);
+                          cuda_output.view().buffer);
   cuda_output.CopyTo(pinned_output.view().buffer);
   REQUIRE(cuStreamSynchronize(nullptr) == CUDA_SUCCESS);
 
@@ -308,13 +308,12 @@ TEST_CASE("CudaMatAdapter异步直接转换拒绝隐式拷贝") {
   REQUIRE(context != nullptr);
   CUstream stream = nullptr;
   REQUIRE(cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING) == CUDA_SUCCESS);
-  CHECK_THROWS_AS(
-      CudaMatAdapter::ToBgr(host_source.view(), &bgr, context, stream),
-      std::invalid_argument);
+  CHECK_THROWS_AS(CudaMatAdapter::ToBgr(host_source.view(), &bgr, stream),
+                  std::invalid_argument);
 
   const TestFrame host_444(kMwStreamerVideoPixelFormatYuv444p);
   auto cuda_444 = CudaFrame::Allocate(host_444.view(), context);
-  CHECK_THROWS_AS(CudaMatAdapter::ToBgr(cuda_444.view(), &bgr, context, stream),
+  CHECK_THROWS_AS(CudaMatAdapter::ToBgr(cuda_444.view(), &bgr, stream),
                   std::invalid_argument);
   REQUIRE(cuStreamDestroy(stream) == CUDA_SUCCESS);
 }
@@ -333,14 +332,13 @@ TEST_CASE("CudaMatAdapter拒绝HDR和不匹配的GpuMat") {
   auto hdr = cuda_source.view();
   hdr.color.transfer = kMwStreamerColorTransferSmpte2084;
   cv::cuda::GpuMat valid_bgr(kHeight, kWidth, CV_8UC3);
-  CHECK_THROWS_AS(CudaMatAdapter::ToBgr(hdr, &valid_bgr, context, stream),
+  CHECK_THROWS_AS(CudaMatAdapter::ToBgr(hdr, &valid_bgr, stream),
                   std::invalid_argument);
 
   cv::cuda::GpuMat wrong_type(kHeight, kWidth, CV_16UC3);
-  CHECK_THROWS_AS(
-      CudaMatAdapter::FromBgr(wrong_type, host_source.view().color,
-                              cuda_output.view().buffer, context, stream),
-      std::invalid_argument);
+  CHECK_THROWS_AS(CudaMatAdapter::FromBgr(wrong_type, host_source.view().color,
+                                          cuda_output.view().buffer, stream),
+                  std::invalid_argument);
   REQUIRE(cuStreamDestroy(stream) == CUDA_SUCCESS);
 }
 
@@ -369,7 +367,7 @@ TEST_CASE("CudaMatAdapter使用调用方stream串联GpuMat生产") {
                             producer) == cudaSuccess);
 
   CudaMatAdapter::FromBgr(source, prototype.view().color, output.view().buffer,
-                          context, reinterpret_cast<CUstream>(producer));
+                          reinterpret_cast<CUstream>(producer));
   CHECK_FALSE(producer_finished.load());
   REQUIRE(cudaStreamSynchronize(producer) == cudaSuccess);
   CHECK(producer_finished.load());
@@ -458,19 +456,17 @@ TEST_CASE("CudaMatAdapter使用FFmpeg context并拒绝跨context转换") {
   REQUIRE(cuCtxPopCurrent(&popped_context) == CUDA_SUCCESS);
   REQUIRE(popped_context == source_context);
 
-  CudaMatAdapter::ToBgr(adapter.view(), &direct_bgr, source_context,
-                        direct_stream);
+  CudaMatAdapter::ToBgr(adapter.view(), &direct_bgr, direct_stream);
   CudaMatAdapter::FromBgr(direct_bgr, adapter.view().color,
-                          direct_output.view().buffer, source_context,
-                          direct_stream);
+                          direct_output.view().buffer, direct_stream);
   direct_output.CopyTo(direct_output_host.view().buffer, direct_stream);
-  CHECK_THROWS_AS(CudaMatAdapter::ToBgr(adapter.view(), &foreign_bgr,
-                                        source_context, direct_stream),
-                  std::invalid_argument);
-  CHECK_THROWS_AS(CudaMatAdapter::FromBgr(foreign_bgr, adapter.view().color,
-                                          direct_output.view().buffer,
-                                          source_context, direct_stream),
-                  std::invalid_argument);
+  CHECK_THROWS_AS(
+      CudaMatAdapter::ToBgr(adapter.view(), &foreign_bgr, direct_stream),
+      std::invalid_argument);
+  CHECK_THROWS_AS(
+      CudaMatAdapter::FromBgr(foreign_bgr, adapter.view().color,
+                              direct_output.view().buffer, direct_stream),
+      std::invalid_argument);
   CUcontext current_after_enqueue = nullptr;
   REQUIRE(cuCtxGetCurrent(&current_after_enqueue) == CUDA_SUCCESS);
   CHECK(current_after_enqueue == caller_context);

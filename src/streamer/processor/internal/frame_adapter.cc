@@ -72,6 +72,8 @@ void MapVideoBuffer(const AVFrame& frame,
   }
 
   auto memory_type = kMwStreamerMemoryHost;
+  MwStreamerExecutionContext execution{kMwStreamerExecutionCpu, nullptr,
+                                       nullptr};
   auto storage_format = static_cast<AVPixelFormat>(frame.format);
   if (storage_format == AV_PIX_FMT_CUDA) {
     const auto* frames_context = HardwareContext::GetFramesContext(frame);
@@ -80,6 +82,7 @@ void MapVideoBuffer(const AVFrame& frame,
       throw std::invalid_argument("视频帧不是有效的CUDA硬件帧");
     }
     memory_type = kMwStreamerMemoryCuda;
+    execution = {kMwStreamerExecutionCuda, frames_context->device_ctx, nullptr};
     storage_format = frames_context->sw_format;
   }
 
@@ -127,6 +130,7 @@ void MapVideoBuffer(const AVFrame& frame,
 
   *view = {};
   view->memory_type = memory_type;
+  view->execution = execution;
   view->storage_type = kMwStreamerVideoStorageLinear;
   view->pixel_format = pixel_format;
   view->width = static_cast<std::uint32_t>(frame.width);

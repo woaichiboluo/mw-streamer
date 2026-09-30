@@ -15,15 +15,15 @@ namespace mw::opencv_adapter {
 // allocate, stage, or synchronize.
 class MW_OPENCV_ADAPTER_API CudaFrame final {
  public:
-  // Allocates all planes in one CUDA allocation owned by context. context must
-  // be the FFmpeg device context used by the processor chain. The caller must
-  // keep context alive until the returned frame is destroyed.
+  // Allocates all planes in one CUDA allocation owned by context. The caller
+  // must keep context alive until the returned frame is destroyed.
   static CudaFrame Allocate(const MwStreamerVideoFrameView& prototype,
                             CUcontext context);
 
   // Submits a copy into stream and returns without synchronizing. A null stream
-  // selects the CUDA default stream in context. Every CUDA pointer and an
-  // explicit stream must belong to context, and all strides must be positive.
+  // selects the CUDA default stream in the CUDA endpoint's context. Every CUDA
+  // pointer and an explicit stream must belong to that context, and all strides
+  // must be positive.
   // Page-locked Host memory enables true asynchronous DMA; pageable Host memory
   // is also accepted, but the CUDA driver may stage it and block the submitting
   // thread. The adapter never allocates or registers memory during this call.
@@ -31,7 +31,7 @@ class MW_OPENCV_ADAPTER_API CudaFrame final {
   // 2D copy. Other layouts use one 2D copy per plane, never one call per row.
   static void Copy(const MwStreamerVideoFrameView& source,
                    const MwStreamerVideoBufferView& destination,
-                   CUcontext context, CUstream stream = nullptr);
+                   CUstream stream = nullptr);
 
   ~CudaFrame();
 

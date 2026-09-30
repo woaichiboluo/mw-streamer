@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "mw/opencv_adapter/cuda_context.h"
 #include "mw/opencv_adapter/internal/cuda_driver.h"
 
 namespace mw::opencv_adapter {
@@ -297,36 +298,6 @@ void ValidateGpuMat(const cv::cuda::GpuMat& source,
   }
 }
 
-class ScopedCudaContext final {
- public:
-  explicit ScopedCudaContext(CUcontext context) {
-    if (!context) {
-      throw std::invalid_argument("CudaMatAdapter要求有效的CUDA context");
-    }
-    EnsureCudaDriverInitialized();
-    CUcontext current = nullptr;
-    ThrowIfCudaDriverError(cuCtxGetCurrent(&current), "查询当前CUDA context");
-    if (current == context) {
-      return;
-    }
-    ThrowIfCudaDriverError(cuCtxPushCurrent(context), "设置CUDA context");
-    pushed_ = true;
-  }
-
-  ~ScopedCudaContext() {
-    if (pushed_) {
-      CUcontext popped_context = nullptr;
-      cuCtxPopCurrent(&popped_context);
-    }
-  }
-
-  ScopedCudaContext(const ScopedCudaContext&) = delete;
-  ScopedCudaContext& operator=(const ScopedCudaContext&) = delete;
-
- private:
-  bool pushed_ = false;
-};
-
 CUcontext GetPointerContext(const void* address) {
   EnsureCudaDriverInitialized();
   CUcontext context = nullptr;
@@ -599,8 +570,7 @@ void ConvertFromBgr(const cv::cuda::GpuMat& source,
 }  // namespace
 
 void CudaMatAdapter::ToBgr(const MwStreamerVideoFrameView& source,
-                           cv::cuda::GpuMat* destination, CUcontext context,
-                           CUstream stream) {
+                           cv::cuda::GpuMat* destination, CUstream stream) {
   const auto format = ValidatePrototype(source);
   ValidateFastToBgrFormat(format);
   if (!destination) {
@@ -608,6 +578,7 @@ void CudaMatAdapter::ToBgr(const MwStreamerVideoFrameView& source,
   }
   ValidateGpuMat(*destination, source, format);
 
+  const CUcontext context = GetCudaContext(source.buffer);
   ScopedCudaContext scoped_context(context);
   ValidateStreamContext(stream, context);
   ValidateFrameContext(source, context);
@@ -622,7 +593,7 @@ void CudaMatAdapter::ToBgr(const MwStreamerVideoFrameView& source,
 void CudaMatAdapter::FromBgr(const cv::cuda::GpuMat& source,
                              const MwStreamerVideoColorInfo& destination_color,
                              const MwStreamerVideoBufferView& destination,
-                             CUcontext context, CUstream stream) {
+                             CUstream stream) {
   MwStreamerVideoFrameView destination_frame{};
   destination_frame.buffer = destination;
   destination_frame.color = destination_color;
@@ -630,6 +601,7 @@ void CudaMatAdapter::FromBgr(const cv::cuda::GpuMat& source,
   ValidateFastFromBgrFormat(format);
   ValidateGpuMat(source, destination_frame, format);
 
+  const CUcontext context = GetCudaContext(destination);
   ScopedCudaContext scoped_context(context);
   ValidateStreamContext(stream, context);
   ValidateFrameContext(destination_frame, context);

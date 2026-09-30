@@ -37,6 +37,7 @@ using namespace std::chrono_literals;
 using mw::opencv_adapter::CudaMatAdapter;
 using mw::opencv_adapter::GetCudaContext;
 using mw::opencv_adapter::HostMatAdapter;
+using mw::opencv_adapter::ScopedCudaContext;
 using mw::streamer::BuildPipeline;
 using mw::streamer::CodecParameters;
 using mw::streamer::DecoderNodeConfig;
@@ -245,17 +246,13 @@ MwStreamerProcessorStartResult OnProcessorStart(
   if (state->test_case->mat == MatBackend::kCuda) {
     try {
       state->cuda_context = GetCudaContext(*request->execution);
-      if (cuCtxPushCurrent(state->cuda_context) != CUDA_SUCCESS) {
-        return kMwStreamerProcessorStartFailed;
-      }
+      ScopedCudaContext scope(state->cuda_context);
       const CUresult stream_result =
           cuStreamCreate(&state->cuda_stream, CU_STREAM_NON_BLOCKING);
       if (stream_result == CUDA_SUCCESS) {
         state->cuda_bgr =
             std::make_unique<cv::cuda::GpuMat>(kHeight, kWidth, CV_8UC3);
       }
-      CUcontext popped_context = nullptr;
-      cuCtxPopCurrent(&popped_context);
       if (stream_result != CUDA_SUCCESS) {
         return kMwStreamerProcessorStartFailed;
       }
@@ -271,9 +268,7 @@ void OnProcessorStop(void* user_context) {
   if (!state || !state->cuda_context) {
     return;
   }
-  if (cuCtxPushCurrent(state->cuda_context) != CUDA_SUCCESS) {
-    return;
-  }
+  ScopedCudaContext scope(state->cuda_context);
   if (state->cuda_stream) {
     cuStreamSynchronize(state->cuda_stream);
   }
@@ -282,8 +277,6 @@ void OnProcessorStop(void* user_context) {
     cuStreamDestroy(state->cuda_stream);
     state->cuda_stream = nullptr;
   }
-  CUcontext popped_context = nullptr;
-  cuCtxPopCurrent(&popped_context);
   state->cuda_context = nullptr;
 }
 
@@ -309,27 +302,17 @@ void ProcessVideo(const MwStreamerTransformVideoProcessRequest* request,
     if (!state->cuda_context || !state->cuda_stream || !state->cuda_bgr) {
       throw std::runtime_error("Pipeline Adapter CUDA状态未初始化");
     }
-    CUcontext current_context = nullptr;
-    if (cuCtxPushCurrent(state->cuda_context) != CUDA_SUCCESS) {
-      throw std::runtime_error("Pipeline Adapter设置CUDA context失败");
+    ScopedCudaContext scope(state->cuda_context);
+    CudaMatAdapter::ToBgr(input_prototype, state->cuda_bgr.get(),
+                          state->cuda_stream);
+    auto stream = cv::cuda::StreamAccessor::wrapStream(
+        reinterpret_cast<cudaStream_t>(state->cuda_stream));
+    DrawOsd(state->cuda_bgr.get(), stream);
+    CudaMatAdapter::FromBgr(*state->cuda_bgr, output_prototype.color,
+                            *request->output, state->cuda_stream);
+    if (cuStreamSynchronize(state->cuda_stream) != CUDA_SUCCESS) {
+      throw std::runtime_error("Pipeline Adapter等待CUDA输出失败");
     }
-    try {
-      CudaMatAdapter::ToBgr(input_prototype, state->cuda_bgr.get(),
-                            state->cuda_context, state->cuda_stream);
-      auto stream = cv::cuda::StreamAccessor::wrapStream(
-          reinterpret_cast<cudaStream_t>(state->cuda_stream));
-      DrawOsd(state->cuda_bgr.get(), stream);
-      CudaMatAdapter::FromBgr(*state->cuda_bgr, output_prototype.color,
-                              *request->output, state->cuda_context,
-                              state->cuda_stream);
-      if (cuStreamSynchronize(state->cuda_stream) != CUDA_SUCCESS) {
-        throw std::runtime_error("Pipeline Adapter等待CUDA输出失败");
-      }
-    } catch (...) {
-      cuCtxPopCurrent(&current_context);
-      throw;
-    }
-    cuCtxPopCurrent(&current_context);
   }
 
   state->processed_frames.fetch_add(1, std::memory_order_release);

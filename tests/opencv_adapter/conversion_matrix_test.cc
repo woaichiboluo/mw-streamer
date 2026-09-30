@@ -114,6 +114,7 @@ class ColoredYuvFrame final {
     }
     view_ = {
         {kMwStreamerMemoryHost,
+         {kMwStreamerExecutionCpu, nullptr, nullptr},
          kMwStreamerVideoStorageLinear,
          format,
          kWidth,

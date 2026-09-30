@@ -137,6 +137,7 @@ class HostVideoFrame final {
                   static_cast<std::int32_t>(row_bytes), row_bytes, kHeight / 2};
     view_ = {
         {kMwStreamerMemoryHost,
+         {kMwStreamerExecutionCpu, nullptr, nullptr},
          kMwStreamerVideoStorageLinear,
          format.format,
          kWidth,
@@ -362,8 +363,7 @@ void RunCopyBenchmarks(CUcontext context, CUstream stream) {
                                 [&] {
                                   CudaFrame::Copy(
                                       cuda_source.view(),
-                                      cuda_destination.view().buffer, context,
-                                      stream);
+                                      cuda_destination.view().buffer, stream);
                                 }),
                     pinned_source.payload_bytes());
   }
@@ -384,19 +384,19 @@ void RunColorBenchmarks(CUcontext context, CUstream stream) {
 
     PrintColorResult(
         prefix + "CUDA YUV->BGR", MeasureCuda(stream, kGpuColorIterations, [&] {
-          CudaMatAdapter::ToBgr(cuda_yuv.view(), &cuda_bgr, context, stream);
+          CudaMatAdapter::ToBgr(cuda_yuv.view(), &cuda_bgr, stream);
         }));
     PrintColorResult(
         prefix + "CUDA BGR->YUV", MeasureCuda(stream, kGpuColorIterations, [&] {
           CudaMatAdapter::FromBgr(cuda_bgr, pinned_yuv.view().color,
-                                  cuda_output.view().buffer, context, stream);
+                                  cuda_output.view().buffer, stream);
         }));
     PrintColorResult(
         prefix + "CUDA round trip",
         MeasureCuda(stream, kGpuColorIterations, [&] {
-          CudaMatAdapter::ToBgr(cuda_yuv.view(), &cuda_bgr, context, stream);
+          CudaMatAdapter::ToBgr(cuda_yuv.view(), &cuda_bgr, stream);
           CudaMatAdapter::FromBgr(cuda_bgr, pinned_yuv.view().color,
-                                  cuda_output.view().buffer, context, stream);
+                                  cuda_output.view().buffer, stream);
         }));
 
     PrintColorResult(
