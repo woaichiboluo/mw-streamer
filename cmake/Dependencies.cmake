@@ -41,26 +41,18 @@ if(NOT TARGET spdlog::spdlog)
     FetchContent_MakeAvailable(spdlog)
 endif()
 
-if(NOT TARGET tomlplusplus::tomlplusplus)
-    FetchContent_Declare(
-        tomlplusplus
-        GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
-        GIT_TAG 30172438cee64926dc41fdd9c11fb3ba5b2ba9de # v3.4.0
-        GIT_PROGRESS TRUE
-    )
-    FetchContent_MakeAvailable(tomlplusplus)
-endif()
+# Retain the pinned dependency for the future media implementation; logging
+# does not download or build it.
+FetchContent_Declare(
+    tomlplusplus
+    GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
+    GIT_TAG 30172438cee64926dc41fdd9c11fb3ba5b2ba9de # v3.4.0
+    GIT_PROGRESS TRUE
+)
 
-if(BUILD_TESTS AND NOT TARGET Catch2::Catch2WithMain)
-    set(CATCH_INSTALL_DOCS OFF CACHE BOOL "Install Catch2 documentation" FORCE)
-    set(CATCH_INSTALL_EXTRAS OFF CACHE BOOL "Install Catch2 extras" FORCE)
-    set(CATCH_DEVELOPMENT_BUILD OFF CACHE BOOL "Build Catch2 self-tests" FORCE)
-
-    FetchContent_Declare(
-        Catch2
-        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-        GIT_TAG v3.8.1
-        GIT_PROGRESS TRUE
-    )
-    FetchContent_MakeAvailable(Catch2)
-endif()
+FetchContent_Declare(
+    Catch2
+    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+    GIT_TAG v3.8.1
+    GIT_PROGRESS TRUE
+)

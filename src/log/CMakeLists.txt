@@ -10,7 +10,6 @@ add_library(mw::log ALIAS mw_log)
 target_include_directories(mw_log
     PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
-        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 
 target_link_libraries(mw_log
