@@ -11,6 +11,7 @@
 #include "WorkThreadPool.h"
 
 #include <atomic>
+#include <stdexcept>
 
 namespace toolkit {
 
@@ -19,9 +20,19 @@ static bool s_enable_cpu_affinity = true;
 static std::atomic<WorkThreadPool *> s_work_thread_pool { nullptr };
 
 WorkThreadPool &WorkThreadPool::Instance() {
-    static auto instance = std::make_shared<WorkThreadPool>();
-    s_work_thread_pool.store(instance.get(), std::memory_order_release);
+    auto instance = s_work_thread_pool.load(std::memory_order_acquire);
+    if (!instance) {
+        throw std::logic_error("WorkThreadPool is not initialized");
+    }
     return *instance;
+}
+
+std::unique_ptr<WorkThreadPool> WorkThreadPool::createPool() {
+    return std::unique_ptr<WorkThreadPool>(new WorkThreadPool());
+}
+
+void WorkThreadPool::setInstance(WorkThreadPool *instance) {
+    s_work_thread_pool.store(instance, std::memory_order_release);
 }
 
 void WorkThreadPool::releasePool() {

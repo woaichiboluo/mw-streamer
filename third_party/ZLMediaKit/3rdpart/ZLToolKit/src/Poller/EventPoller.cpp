@@ -9,6 +9,7 @@
  */
 
 #include <algorithm>
+#include <stdexcept>
 
 #include "EventPoller.h"
 #include "Network/sockutil.h"
@@ -517,9 +518,19 @@ static atomic<bool> s_enable_cpu_affinity { true };
 static atomic<EventPollerPool *> s_event_poller_pool { nullptr };
 
 EventPollerPool &EventPollerPool::Instance() {
-    static auto instance = make_shared<EventPollerPool>();
-    s_event_poller_pool.store(instance.get(), memory_order_release);
+    auto instance = s_event_poller_pool.load(memory_order_acquire);
+    if (!instance) {
+        throw logic_error("EventPollerPool is not initialized");
+    }
     return *instance;
+}
+
+std::unique_ptr<EventPollerPool> EventPollerPool::createPool() {
+    return std::unique_ptr<EventPollerPool>(new EventPollerPool());
+}
+
+void EventPollerPool::setInstance(EventPollerPool *instance) {
+    s_event_poller_pool.store(instance, memory_order_release);
 }
 
 void EventPollerPool::releasePool() {

@@ -1,0 +1,42 @@
+set(MW_STREAMER_SOURCES
+    converter/zlm_codec_parameters_converter.cc
+    converter/zlm_packet_converter.cc
+    ffmpeg/codec_context.cc
+    ffmpeg/codec_parameters.cc
+    ffmpeg/error.cc
+    ffmpeg/frame.cc
+    ffmpeg/packet.cc
+    ffmpeg/stream_info.cc
+    init/init.cc
+    input/zlm_input.cc
+)
+
+if(BUILD_SHARED)
+    add_library(mw_streamer SHARED ${MW_STREAMER_SOURCES})
+    target_compile_definitions(mw_streamer PRIVATE MW_STREAMER_BUILDING_LIBRARY)
+    set_target_properties(mw_streamer PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN YES
+    )
+else()
+    add_library(mw_streamer STATIC ${MW_STREAMER_SOURCES})
+    target_compile_definitions(mw_streamer PUBLIC MW_STREAMER_STATIC_LIBRARY)
+endif()
+add_library(mw::streamer ALIAS mw_streamer)
+
+target_include_directories(mw_streamer
+    PUBLIC
+        "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+)
+
+target_link_libraries(mw_streamer
+    PUBLIC
+        FFmpeg::avcodec
+        FFmpeg::avutil
+        ZLMediaKit::MediaKit
+    PRIVATE
+        mw::log
+        SRT::SRT
+        fmt::fmt
+        ZLMediaKit::ext-codec
+)

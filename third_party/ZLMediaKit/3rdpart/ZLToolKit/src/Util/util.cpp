@@ -16,6 +16,7 @@
 #include <string>
 #include <algorithm>
 #include <random>
+#include <stdexcept>
 
 #include "util.h"
 #include "local_time.h"
@@ -384,66 +385,110 @@ static inline uint64_t getCurrentMicrosecondOrigin() {
 #endif
 }
 
-static atomic<uint64_t> s_currentMicrosecond(0);
-static atomic<uint64_t> s_currentMillisecond(0);
-static atomic<uint64_t> s_currentMicrosecond_system(getCurrentMicrosecondOrigin());
-static atomic<uint64_t> s_currentMillisecond_system(getCurrentMicrosecondOrigin() / 1000);
+static atomic<TimestampClock *> s_timestamp_clock{nullptr};
 
-static inline bool initMillisecondThread() {
-    auto running = std::make_shared<bool>(true);
-    auto lam = [running]() {
-        setThreadName("stamp thread");
-        MW_LOG_DEBUG("zlm", "Stamp thread started");
-        uint64_t last = getCurrentMicrosecondOrigin();
-        uint64_t now;
-        uint64_t microsecond = 0;
-        while (*running) {
-            now = getCurrentMicrosecondOrigin();
-            //记录系统时间戳，可回退  [AUTO-TRANSLATED:495a0114]
-            //Record system timestamp, can be rolled back
-            s_currentMicrosecond_system.store(now, memory_order_release);
-            s_currentMillisecond_system.store(now / 1000, memory_order_release);
+TimestampClock::TimestampClock()
+    : _current_microsecond_system(getCurrentMicrosecondOrigin()),
+      _current_millisecond_system(_current_microsecond_system.load(memory_order_relaxed) / 1000) {}
 
-            //记录流逝时间戳，不可回退  [AUTO-TRANSLATED:7f3a9da3]
-            //Record elapsed timestamp, cannot be rolled back
-            int64_t expired = now - last;
-            last = now;
-            if (expired > 0 && expired < 1000 * 1000) {
-                //流逝时间处于0~1000ms之间，那么是合理的，说明没有调整系统时间  [AUTO-TRANSLATED:566e1001]
-                //If the elapsed time is between 0~1000ms, it is reasonable, indicating that the system time has not been adjusted
-                microsecond += expired;
-                s_currentMicrosecond.store(microsecond, memory_order_release);
-                s_currentMillisecond.store(microsecond / 1000, memory_order_release);
-            } else if (expired != 0) {
-                MW_LOG_WARNING("zlm", "Stamp expired is abnormal: {}", expired);
-            }
-            //休眠0.5 ms  [AUTO-TRANSLATED:5e20acdd]
-            //Sleep for 0.5 ms
-            usleep(500);
+TimestampClock::~TimestampClock() {
+    stop();
+}
+
+void TimestampClock::start() {
+    if (_running.load(memory_order_acquire)) {
+        return;
+    }
+    lock_guard<mutex> lock(_mutex);
+    if (_stopped) {
+        throw logic_error("TimestampClock has been stopped");
+    }
+    if (!_running.load(memory_order_relaxed)) {
+        _running.store(true, memory_order_release);
+        try {
+            _thread = thread(&TimestampClock::run, this);
+        } catch (...) {
+            _running.store(false, memory_order_release);
+            throw;
         }
-    };
-    static std::shared_ptr<std::thread> s_thread(new std::thread(lam), [running](std::thread *t) {
-        *running = false;
-        t->join();
-        delete t;
-    });
-    return true;
+    }
+}
+
+void TimestampClock::stop() {
+    lock_guard<mutex> lock(_mutex);
+    _stopped = true;
+    _running.store(false, memory_order_release);
+    if (_thread.joinable()) {
+        _thread.join();
+    }
+}
+
+void TimestampClock::run() {
+    setThreadName("stamp thread");
+    MW_LOG_DEBUG("zlm", "Stamp thread started");
+    uint64_t last = getCurrentMicrosecondOrigin();
+    uint64_t now;
+    uint64_t microsecond = 0;
+    while (_running.load(memory_order_acquire)) {
+        now = getCurrentMicrosecondOrigin();
+        //记录系统时间戳，可回退  [AUTO-TRANSLATED:495a0114]
+        //Record system timestamp, can be rolled back
+        _current_microsecond_system.store(now, memory_order_release);
+        _current_millisecond_system.store(now / 1000, memory_order_release);
+
+        //记录流逝时间戳，不可回退  [AUTO-TRANSLATED:7f3a9da3]
+        //Record elapsed timestamp, cannot be rolled back
+        int64_t expired = now - last;
+        last = now;
+        if (expired > 0 && expired < 1000 * 1000) {
+            //流逝时间处于0~1000ms之间，那么是合理的，说明没有调整系统时间  [AUTO-TRANSLATED:566e1001]
+            //If the elapsed time is between 0~1000ms, it is reasonable, indicating that the system time has not been adjusted
+            microsecond += expired;
+            _current_microsecond.store(microsecond, memory_order_release);
+            _current_millisecond.store(microsecond / 1000, memory_order_release);
+        } else if (expired != 0) {
+            MW_LOG_WARNING("zlm", "Stamp expired is abnormal: {}", expired);
+        }
+        //休眠0.5 ms  [AUTO-TRANSLATED:5e20acdd]
+        //Sleep for 0.5 ms
+        usleep(500);
+    }
+}
+
+uint64_t TimestampClock::getCurrentMillisecond(bool system_time) {
+    start();
+    if (system_time) {
+        return _current_millisecond_system.load(memory_order_acquire);
+    }
+    return _current_millisecond.load(memory_order_acquire);
+}
+
+uint64_t TimestampClock::getCurrentMicrosecond(bool system_time) {
+    start();
+    if (system_time) {
+        return _current_microsecond_system.load(memory_order_acquire);
+    }
+    return _current_microsecond.load(memory_order_acquire);
+}
+
+void setTimestampClock(TimestampClock *clock) noexcept {
+    s_timestamp_clock.store(clock, memory_order_release);
+}
+
+static TimestampClock &timestampClock() {
+    auto *clock = s_timestamp_clock.load(memory_order_acquire);
+    if (!clock) {
+        throw logic_error("TimestampClock is not initialized");
+    }
+    return *clock;
 }
 
 uint64_t getCurrentMillisecond(bool system_time) {
-    static bool flag = initMillisecondThread();
-    if (system_time) {
-        return s_currentMillisecond_system.load(memory_order_acquire);
-    }
-    return s_currentMillisecond.load(memory_order_acquire);
+    return timestampClock().getCurrentMillisecond(system_time);
 }
 
 uint64_t getCurrentMicrosecond(bool system_time) {
-    static bool flag = initMillisecondThread();
-    if (system_time) {
-        return s_currentMicrosecond_system.load(memory_order_acquire);
-    }
-    return s_currentMicrosecond.load(memory_order_acquire);
+    return timestampClock().getCurrentMicrosecond(system_time);
 }
 
 string getTimeStr(const char *fmt, time_t time) {

@@ -32,8 +32,14 @@ public:
      */
     static WorkThreadPool &Instance();
 
-    // Releases all pollers if the singleton has been created. The singleton
-    // itself remains alive and empty until process exit.
+    // Creates an owned pool without installing it as the global instance.
+    static std::unique_ptr<WorkThreadPool> createPool();
+
+    // Installs a non-owning instance. Initialization and shutdown are serialized
+    // by the owner; clear the instance before destroying the owned pool.
+    static void setInstance(WorkThreadPool *instance);
+
+    // Closes the installed instance without creating or destroying a pool.
     static void releasePool();
 
     /**
@@ -80,6 +86,7 @@ public:
      */
     EventPoller::Ptr getPoller();
 
+private:
     WorkThreadPool();
 };
 

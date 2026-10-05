@@ -20,4 +20,12 @@
 #define MW_LOG_API MW_IMPORT
 #endif
 
+#if defined(MW_STREAMER_STATIC_LIBRARY)
+#define MW_STREAMER_API
+#elif defined(MW_STREAMER_BUILDING_LIBRARY)
+#define MW_STREAMER_API MW_EXPORT
+#else
+#define MW_STREAMER_API MW_IMPORT
+#endif
+
 #endif  // MW_EXPORT_H_

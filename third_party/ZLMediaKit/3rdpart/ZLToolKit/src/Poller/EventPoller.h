@@ -354,8 +354,14 @@ public:
      */
     static EventPollerPool &Instance();
 
-    // Releases all pollers if the singleton has been created. The singleton
-    // itself remains alive and empty until process exit.
+    // Creates an owned pool without installing it as the global instance.
+    static std::unique_ptr<EventPollerPool> createPool();
+
+    // Installs a non-owning instance. Initialization and shutdown are serialized
+    // by the owner; clear the instance before destroying the owned pool.
+    static void setInstance(EventPollerPool *instance);
+
+    // Closes the installed instance without creating or destroying a pool.
     static void releasePool();
 
     /**
@@ -421,9 +427,9 @@ public:
      */
     void preferCurrentThread(bool flag = true);
 
+private:
     EventPollerPool();
 
-private:
     std::atomic<bool> _prefer_current_thread { true };
 };
 

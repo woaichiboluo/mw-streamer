@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -243,12 +244,25 @@ private:
 constexpr SrtEpollReactor::RegistrationToken SrtEpollReactor::kInvalidRegistrationToken;
 
 SrtEpollReactor &SrtEpollReactor::Instance() {
-    static SrtEpollReactor instance;
-    return instance;
+    auto *instance = g_reactor_instance.load(std::memory_order_acquire);
+    if (!instance) {
+        throw std::logic_error("SrtEpollReactor is not initialized");
+    }
+    instance->ensureInitialized();
+    return *instance;
+}
+
+std::unique_ptr<SrtEpollReactor> SrtEpollReactor::createReactor() {
+    return std::unique_ptr<SrtEpollReactor>(new SrtEpollReactor());
+}
+
+void SrtEpollReactor::setInstance(SrtEpollReactor *instance) {
+    g_reactor_instance.store(instance, std::memory_order_release);
 }
 
 bool SrtEpollReactor::isCreated() noexcept {
-    return g_reactor_instance.load(std::memory_order_acquire) != nullptr;
+    auto *instance = g_reactor_instance.load(std::memory_order_acquire);
+    return instance && instance->_initialized.load(std::memory_order_acquire);
 }
 
 void SrtEpollReactor::release() {
@@ -258,33 +272,44 @@ void SrtEpollReactor::release() {
     }
 }
 
-SrtEpollReactor::SrtEpollReactor()
-    : _impl(new Impl()) {
-    g_reactor_instance.store(this, std::memory_order_release);
-}
+SrtEpollReactor::SrtEpollReactor() = default;
 
-SrtEpollReactor::~SrtEpollReactor() {
-    g_reactor_instance.store(nullptr, std::memory_order_release);
+SrtEpollReactor::~SrtEpollReactor() = default;
+
+void SrtEpollReactor::ensureInitialized() {
+    if (_initialized.load(std::memory_order_acquire)) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(_init_mutex);
+    if (!_initialized.load(std::memory_order_relaxed)) {
+        _impl.reset(new Impl());
+        _initialized.store(true, std::memory_order_release);
+    }
 }
 
 SrtEpollReactor::RegistrationToken SrtEpollReactor::registerSocket(SRTSOCKET fd, int events, EventCallback callback) {
+    if (!_initialized.load(std::memory_order_acquire)) {
+        return kInvalidRegistrationToken;
+    }
     return _impl->registerSocket(fd, events, std::move(callback));
 }
 
 bool SrtEpollReactor::updateSocket(SRTSOCKET fd, RegistrationToken token, int events) {
-    return _impl->updateSocket(fd, token, events);
+    return _initialized.load(std::memory_order_acquire) && _impl->updateSocket(fd, token, events);
 }
 
 bool SrtEpollReactor::unregisterSocket(SRTSOCKET fd, RegistrationToken token) {
-    return _impl->unregisterSocket(fd, token);
+    return _initialized.load(std::memory_order_acquire) && _impl->unregisterSocket(fd, token);
 }
 
 bool SrtEpollReactor::available() const {
-    return _impl->available();
+    return _initialized.load(std::memory_order_acquire) && _impl->available();
 }
 
 void SrtEpollReactor::shutdown() {
-    _impl->shutdown();
+    if (_initialized.load(std::memory_order_acquire)) {
+        _impl->shutdown();
+    }
 }
 
 } // namespace mediakit

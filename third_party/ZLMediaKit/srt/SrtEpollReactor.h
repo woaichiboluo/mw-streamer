@@ -11,9 +11,11 @@
 #ifndef ZLMEDIAKIT_SRTEPOLLREACTOR_H
 #define ZLMEDIAKIT_SRTEPOLLREACTOR_H
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 
 #include <srt/srt.h>
 
@@ -32,9 +34,21 @@ public:
 
     static constexpr RegistrationToken kInvalidRegistrationToken = 0;
 
+    // Returns the installed instance and initializes SRT on first use.
     static SrtEpollReactor &Instance();
+
+    // Creates an owned, inactive reactor without installing it globally.
+    static std::unique_ptr<SrtEpollReactor> createReactor();
+
+    // Installs a non-owning instance; the owner serializes initialization and
+    // shutdown and clears this pointer before destroying the reactor.
+    static void setInstance(SrtEpollReactor *instance);
+
+    // True only after the installed reactor has initialized its backend.
     static bool isCreated() noexcept;
     static void release();
+
+    ~SrtEpollReactor();
 
     /**
      * Register a socket and its interested epoll events.
@@ -67,13 +81,15 @@ public:
 
 private:
     SrtEpollReactor();
-    ~SrtEpollReactor();
+    void ensureInitialized();
 
     SrtEpollReactor(const SrtEpollReactor &) = delete;
     SrtEpollReactor &operator=(const SrtEpollReactor &) = delete;
 
 private:
     class Impl;
+    std::mutex _init_mutex;
+    std::atomic<bool> _initialized { false };
     std::unique_ptr<Impl> _impl;
 };
 

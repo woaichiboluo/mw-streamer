@@ -19,6 +19,8 @@
 #include <sstream>
 #include <vector>
 #include <atomic>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
 #include "function_traits.h"
 #include "onceToken.h"
@@ -307,6 +309,33 @@ const char *strcasestr(const char *big, const char *little);
  * [AUTO-TRANSLATED:43d2403a]
  */
 long getGMTOff();
+
+// 由运行时上下文持有；构造不启动线程，首次获取时间时才启动。
+class TimestampClock : public noncopyable {
+public:
+    TimestampClock();
+    ~TimestampClock();
+
+    uint64_t getCurrentMillisecond(bool system_time = false);
+    uint64_t getCurrentMicrosecond(bool system_time = false);
+    void stop();
+
+private:
+    void start();
+    void run();
+
+    std::mutex _mutex;
+    std::thread _thread;
+    std::atomic<bool> _running{false};
+    bool _stopped = false;
+    std::atomic<uint64_t> _current_microsecond{0};
+    std::atomic<uint64_t> _current_millisecond{0};
+    std::atomic<uint64_t> _current_microsecond_system;
+    std::atomic<uint64_t> _current_millisecond_system;
+};
+
+// 不转移所有权；调用方必须在工作线程启动前安装、退出后移除。
+void setTimestampClock(TimestampClock *clock) noexcept;
 
 /**
  * 获取1970年至今的毫秒数
