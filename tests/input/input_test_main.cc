@@ -1,6 +1,8 @@
+#include <fmt/format.h>
+
 #include <catch2/catch_session.hpp>
+#include <cstdio>
 #include <exception>
-#include <iostream>
 #include <memory>
 #include <stdexcept>
 
@@ -80,7 +82,8 @@ int main(int argc, char* argv[]) {
 #endif
     return Catch::Session().run(argc, argv);
   } catch (const std::exception& error) {
-    std::cerr << "Test runtime initialization failed: " << error.what() << '\n';
+    fmt::print(stderr, "Test runtime initialization failed: {}\n",
+               error.what());
     return 2;
   }
 }

@@ -1,9 +1,10 @@
 #define WIN32_LEAN_AND_MEAN
+#include <fmt/format.h>
 #include <windows.h>
 
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <iterator>
 #include <string>
 
@@ -30,7 +31,7 @@ int Child(const wchar_t* fixture_path, const wchar_t* sample_path,
     const auto log = Utf8(iteration_log.c_str());
     const auto fixture = LoadLibraryW(fixture_path);
     if (!fixture) {
-      std::cerr << "LoadLibrary failed: " << GetLastError() << '\n';
+      fmt::print(stderr, "LoadLibrary failed: {}\n", GetLastError());
       return 1;
     }
     const auto run =
@@ -42,15 +43,15 @@ int Child(const wchar_t* fixture_path, const wchar_t* sample_path,
     if (!passed || !streamer_loaded || !unloaded ||
         GetModuleHandleW(L"mw_streamer.dll") != nullptr ||
         GetModuleHandleW(L"mw_log.dll") != nullptr) {
-      std::cerr << "DLL lifecycle/unload failed at iteration " << iteration
-                << '\n';
+      fmt::print(stderr, "DLL lifecycle/unload failed at iteration {}\n",
+                 iteration);
       return 1;
     }
     std::ifstream output(std::filesystem::path(iteration_log),
                          std::ios::binary);
     const std::string contents(std::istreambuf_iterator<char>(output), {});
     if (contents.find("DLL lifecycle completed") == std::string::npos) {
-      std::cerr << "Asynchronous log was not flushed before unload\n";
+      fmt::print(stderr, "Asynchronous log was not flushed before unload\n");
       return 1;
     }
   }
@@ -68,7 +69,7 @@ int wmain(int argc, wchar_t* argv[]) {
     return Child(argv[2], argv[3], argv[4]);
   }
   if (argc != 4) {
-    std::cerr << "Usage: unload_host FIXTURE_DLL SAMPLE_MP4 LOG_PATH\n";
+    fmt::print(stderr, "Usage: unload_host FIXTURE_DLL SAMPLE_MP4 LOG_PATH\n");
     return 2;
   }
   wchar_t executable[MAX_PATH];
@@ -82,7 +83,7 @@ int wmain(int argc, wchar_t* argv[]) {
   PROCESS_INFORMATION process{};
   if (!CreateProcessW(executable, command.data(), nullptr, nullptr, FALSE,
                       CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
-    std::cerr << "Cannot launch unload subprocess: " << GetLastError() << '\n';
+    fmt::print(stderr, "Cannot launch unload subprocess: {}\n", GetLastError());
     return 2;
   }
   const auto waited = WaitForSingleObject(process.hProcess, 40000);
@@ -92,7 +93,8 @@ int wmain(int argc, wchar_t* argv[]) {
   } else {
     TerminateProcess(process.hProcess, 1);
     WaitForSingleObject(process.hProcess, 1000);
-    std::cerr << "DLL unload subprocess did not complete within 40 seconds\n";
+    fmt::print(stderr,
+               "DLL unload subprocess did not complete within 40 seconds\n");
   }
   CloseHandle(process.hThread);
   CloseHandle(process.hProcess);

@@ -5,7 +5,7 @@ cmake_policy(SET CMP0091 NEW)
 project(mw_streamer VERSION 0.1.0 LANGUAGES C CXX)
 
 option(BUILD_SHARED "Build logging and streamer as shared libraries" OFF)
-option(BUILD_TESTS "Build adapter tests" ${PROJECT_IS_TOP_LEVEL})
+option(BUILD_TESTS "Build tests" ${PROJECT_IS_TOP_LEVEL})
 set(BUILD_SHARED_LIBS OFF)
 
 set(CMAKE_C_STANDARD 17)
@@ -25,7 +25,12 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
 include(cmake/Dependencies.cmake)
 
-find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVUTIL)
+find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVFORMAT AVUTIL)
+if(AVFORMAT_VERSION VERSION_LESS 62)
+    message(FATAL_ERROR
+        "FFmpeg 8.0 or newer (libavformat >= 62) is required for legacy HEVC RTMP CodecID 12 support")
+endif()
+find_package(Threads REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS SSL Crypto)
 find_package(SRT REQUIRED)
 

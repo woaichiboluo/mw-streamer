@@ -4,15 +4,15 @@
 #include <memory>
 #include <stdexcept>
 
-#include "mw/streamer/input/zlm_input.h"
+#include "mw/streamer/input/ffmpeg_input.h"
 
 namespace {
 
+using mw::streamer::FfmpegInput;
 using mw::streamer::Init;
 using mw::streamer::InitConfig;
 using mw::streamer::MwStreamerContext;
 using mw::streamer::Shutdown;
-using mw::streamer::ZlmInput;
 using ContextOwner = std::unique_ptr<MwStreamerContext, decltype(&Shutdown)>;
 
 InitConfig TestConfig() {
@@ -38,7 +38,7 @@ TEST_CASE("streamer initializes and shuts down with async logging") {
   ContextOwner context(Init(config), &Shutdown);
   REQUIRE(context.get() != nullptr);
   {
-    ZlmInput input;
+    FfmpegInput input;
     CHECK_NOTHROW(input.Stop());
   }
   MW_LOG_INFO_DEFAULT("Initialization lifecycle completed");
@@ -52,6 +52,6 @@ TEST_CASE(
   config.log.modules_size = 1;
   REQUIRE_THROWS_AS(Init(config), std::invalid_argument);
   ContextOwner context(Init(TestConfig()), &Shutdown);
-  CHECK_NOTHROW(ZlmInput());
+  CHECK_NOTHROW(FfmpegInput());
   Close(context);
 }

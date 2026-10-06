@@ -14,7 +14,7 @@
 #include <vector>
 
 #include "mw/streamer/init/init.h"
-#include "mw/streamer/input/zlm_input.h"
+#include "mw/streamer/input/ffmpeg_input.h"
 
 namespace {
 
@@ -156,10 +156,9 @@ class SrtSender final {
       }
       offset += static_cast<size_t>(sent);
     }
-    // Keep the transport alive while the receiver finishes track discovery.
-    std::unique_lock<std::mutex> lock(mutex_);
-    changed_.wait(lock, [this] { return stopped_; });
-    lock.unlock();
+    // Allow live-mode transport buffering to deliver the short fixture before
+    // closing. EOF lets FFmpeg finish probing without waiting for more media.
+    WaitForStop(500ms);
     srt_close(peer);
   }
 
@@ -176,11 +175,9 @@ class SrtSender final {
 
 }  // namespace
 
-TEST_CASE("streamer recreates its SRT reactor and receives real media twice") {
+TEST_CASE("FFmpeg input decodes real SRT media across two runtime lifecycles") {
   for (int iteration = 0; iteration < 2; ++iteration) {
     CAPTURE(iteration);
-    // The sender's libsrt startup reference outlives the streamer's shutdown.
-    std::unique_ptr<SrtLibrary> sender_library;
     mw::streamer::InitConfig config;
     config.event_poller_threads = 2;
     config.work_threads = 1;
@@ -189,8 +186,8 @@ TEST_CASE("streamer recreates its SRT reactor and receives real media twice") {
     std::unique_ptr<mw::streamer::MwStreamerContext,
                     decltype(&mw::streamer::Shutdown)>
         context(mw::streamer::Init(config), &mw::streamer::Shutdown);
-    sender_library = std::make_unique<SrtLibrary>();
     {
+      SrtLibrary sender_library;
       SrtSender sender;
       std::mutex mutex;
       std::condition_variable changed;
@@ -201,9 +198,9 @@ TEST_CASE("streamer recreates its SRT reactor and receives real media twice") {
       bool failed = false;
       std::string error;
       std::vector<mw::streamer::ffmpeg::StreamInfo> streams;
-      mw::streamer::ZlmInputConfig input_config;
+      mw::streamer::FfmpegInputConfig input_config;
       input_config.auto_reconnect = false;
-      mw::streamer::ZlmInput input(input_config);
+      mw::streamer::FfmpegInput input(input_config);
       input.SetOnReady([&](const auto& information) {
         {
           std::lock_guard<std::mutex> lock(mutex);
@@ -212,27 +209,30 @@ TEST_CASE("streamer recreates its SRT reactor and receives real media twice") {
         }
         changed.notify_all();
       });
-      input.SetOnPacket([&](const mw::streamer::ffmpeg::Packet& packet) {
-        {
-          std::lock_guard<std::mutex> lock(mutex);
-          valid &=
-              ready == 1 && packet->buf && packet->data && packet->size > 0;
-          const auto stream = std::find_if(
-              streams.begin(), streams.end(), [&](const auto& information) {
-                return information.stream_index == packet->stream_index;
-              });
-          if (stream == streams.end()) {
-            valid = false;
-          } else if (stream->codec_parameters.get()->codec_type ==
-                     AVMEDIA_TYPE_AUDIO) {
-            audio = true;
-          } else if (stream->codec_parameters.get()->codec_type ==
-                     AVMEDIA_TYPE_VIDEO) {
-            video = true;
-          }
-        }
-        changed.notify_all();
-      });
+      input.SetOnFrame(
+          [&](int index, const mw::streamer::ffmpeg::Frame& frame) {
+            {
+              std::lock_guard<std::mutex> lock(mutex);
+              valid &= ready == 1 && frame->buf[0] && frame->data[0] &&
+                       frame->pts != AV_NOPTS_VALUE;
+              const auto stream = std::find_if(
+                  streams.begin(), streams.end(), [&](const auto& information) {
+                    return information.stream_index == index;
+                  });
+              if (stream == streams.end()) {
+                valid = false;
+              } else if (stream->codec_parameters.get()->codec_type ==
+                         AVMEDIA_TYPE_AUDIO) {
+                valid &= frame->nb_samples > 0;
+                audio = true;
+              } else if (stream->codec_parameters.get()->codec_type ==
+                         AVMEDIA_TYPE_VIDEO) {
+                valid &= frame->width > 0 && frame->height > 0;
+                video = true;
+              }
+            }
+            changed.notify_all();
+          });
       input.SetOnStateChanged(
           [&](mw::streamer::InputState state, int, std::string_view message) {
             if (state == mw::streamer::InputState::kFailed) {
@@ -251,7 +251,9 @@ TEST_CASE("streamer recreates its SRT reactor and receives real media twice") {
         completed = changed.wait_for(
             lock, 8s, [&] { return (ready == 1 && audio && video) || failed; });
       }
+      const auto stop_started = std::chrono::steady_clock::now();
       input.Stop();
+      CHECK(std::chrono::steady_clock::now() - stop_started < 2s);
       INFO(error);
       INFO(sender.error());
       REQUIRE(completed);
@@ -262,9 +264,10 @@ TEST_CASE("streamer recreates its SRT reactor and receives real media twice") {
       CHECK(valid);
       CHECK(audio);
       CHECK(video);
+      CHECK(input.state() == mw::streamer::InputState::kStopped);
     }
-    mw::streamer::Shutdown(context.get());
-    context.release();
-    sender_library.reset();
+    const auto shutdown_started = std::chrono::steady_clock::now();
+    context.reset();
+    CHECK(std::chrono::steady_clock::now() - shutdown_started < 2s);
   }
 }

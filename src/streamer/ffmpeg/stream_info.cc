@@ -6,6 +6,42 @@
 #include "mw/streamer/ffmpeg/error.h"
 
 namespace mw::streamer::ffmpeg {
+namespace {
+
+bool SameRatio(AVRational left, AVRational right) noexcept {
+  return (left.num == 0 && right.num == 0) || av_cmp_q(left, right) == 0;
+}
+
+}  // namespace
+
+bool StreamInfo::operator==(const StreamInfo& other) const noexcept {
+  if (stream_index != other.stream_index ||
+      !SameRatio(time_base, other.time_base)) {
+    return false;
+  }
+  const auto* left = codec_parameters.get();
+  const auto* right = other.codec_parameters.get();
+  if (!left || !right) {
+    return left == right;
+  }
+  if (left->codec_type != right->codec_type ||
+      left->codec_id != right->codec_id) {
+    return false;
+  }
+  switch (left->codec_type) {
+    case AVMEDIA_TYPE_VIDEO:
+      return left->format == right->format && left->width == right->width &&
+             left->height == right->height &&
+             SameRatio(left->framerate, right->framerate);
+    case AVMEDIA_TYPE_AUDIO:
+      return left->format == right->format &&
+             left->sample_rate == right->sample_rate &&
+             av_channel_layout_compare(&left->ch_layout, &right->ch_layout) ==
+                 0;
+    default:
+      return true;
+  }
+}
 
 StreamInfo StreamInfo::FromCodecContext(const AVCodecContext& context,
                                         int stream_index) {

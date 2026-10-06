@@ -7,8 +7,9 @@ add_test(NAME mw_streamer_init_tests COMMAND mw_streamer_init_tests)
 
 if(WIN32 AND BUILD_SHARED)
     add_library(mw_streamer_unload_fixture SHARED unload_fixture.cc)
-    target_link_libraries(mw_streamer_unload_fixture PRIVATE mw::streamer mw::log)
+    target_link_libraries(mw_streamer_unload_fixture PRIVATE mw::streamer mw::log fmt::fmt)
     add_executable(mw_streamer_unload_host unload_host.cc)
+    target_link_libraries(mw_streamer_unload_host PRIVATE fmt::fmt)
     add_dependencies(mw_streamer_unload_host mw_streamer_unload_fixture)
     add_test(NAME mw_streamer_unload_tests
         COMMAND mw_streamer_unload_host

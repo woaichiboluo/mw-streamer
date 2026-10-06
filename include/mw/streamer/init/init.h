@@ -21,14 +21,14 @@ struct MW_STREAMER_API InitConfig {
 };
 
 // Creates the process-wide runtime. The caller must call Init() only once
-// and before using ZLM.
-// Initializes logging, networking, and both ZLM pools. The timestamp thread
-// starts on the first request for time. Initialization failures throw and
-// release all resources acquired by this call.
+// and before using Inputs.
+// Initializes logging, FFmpeg and ZLM networking, and both ZLM pools. The
+// timestamp thread starts on the first request for time. Initialization
+// failures throw and release all resources acquired by this call.
 MW_STREAMER_API MwStreamerContext* Init(const InitConfig& config = {});
 
 // Call after destroying all Inputs and other ZLM users, before unloading the
-// library, outside ZLM callbacks. The caller guarantees this ordering and
+// library, outside Input callbacks. The caller guarantees this ordering and
 // passes the context returned by Init() exactly once. The context is destroyed;
 // do not delete or reuse its pointer. A null context is a no-op.
 MW_STREAMER_API void Shutdown(MwStreamerContext* context);

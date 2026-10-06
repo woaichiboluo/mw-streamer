@@ -1,0 +1,17 @@
+h265_aac_codec12.flv is a legacy HEVC-in-FLV regression fixture.
+
+Source: the existing h265_aac.mp4 (64x64 HEVC, 10 fps, 20 frames,
+48 kHz mono AAC, 2 seconds). Audio/video were stream-copied with FFmpeg
+7.1.3 to Enhanced FLV. No encoding was performed.
+
+Each hvc1 video tag was converted to the legacy CodecID 12 layout:
+- SequenceStart: FrameType | 12, PacketType 0, CTS 0, original hvcC.
+- CodedFrames: FrameType | 12, PacketType 1, original CTS and NAL payload.
+- CodedFramesX: FrameType | 12, PacketType 1, CTS 0, original NAL payload.
+Tag payload lengths and PreviousTagSize fields were recomputed.
+Enhanced metadata and script metadata were omitted. The RTMP fixture sends
+its own onMetaData with videocodecid 12 and audiocodecid 10.
+
+The stream includes B-frames and nonzero CTS (100, 200, 300, 500 ms), so
+the test checks actual HEVC/AAC decode, video frame count and reordered PTS.
+FFmpeg 7.1.3 reports "Video codec (c) is not implemented" for this fixture.

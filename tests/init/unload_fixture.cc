@@ -1,15 +1,17 @@
+#include <fmt/format.h>
+
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <exception>
-#include <iostream>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 
 #include "mw/export.h"
 #include "mw/streamer/init/init.h"
-#include "mw/streamer/input/zlm_input.h"
+#include "mw/streamer/input/ffmpeg_input.h"
 
 extern "C" MW_EXPORT int RunLifecycle(const char* sample_path,
                                       const char* log_path) {
@@ -34,11 +36,12 @@ extern "C" MW_EXPORT int RunLifecycle(const char* sample_path,
       std::condition_variable changed;
       bool received = false;
       bool failed = false;
-      mw::streamer::ZlmInput input;
-      input.SetOnPacket([&](const mw::streamer::ffmpeg::Packet& packet) {
+      mw::streamer::FfmpegInput input;
+      input.SetOnFrame([&](int, const mw::streamer::ffmpeg::Frame& frame) {
         {
           std::lock_guard<std::mutex> lock(mutex);
-          received = packet->buf && packet->data && packet->size > 0;
+          received = frame->buf[0] && frame->data[0] &&
+                     (frame->width > 0 || frame->nb_samples > 0);
         }
         changed.notify_all();
       });
@@ -62,13 +65,13 @@ extern "C" MW_EXPORT int RunLifecycle(const char* sample_path,
       input.Stop();
       if (!completed || !received || failed) {
         throw std::runtime_error(
-            "Unload fixture failed to receive a file packet");
+            "Unload fixture failed to decode a file frame");
       }
     }
     MW_LOG_INFO_DEFAULT("DLL lifecycle completed");
     return 0;
   } catch (const std::exception& error) {
-    std::cerr << "Unload fixture: " << error.what() << '\n';
+    fmt::print(stderr, "Unload fixture: {}\n", error.what());
     return 1;
   }
 }

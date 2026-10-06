@@ -26,7 +26,8 @@ Frame::Frame(const Frame& other) : Frame() {
   if (!other.frame_) {
     throw std::logic_error("不能引用已移动的Frame");
   }
-  FfmpegException::throwIfError(av_frame_ref(frame_, other.frame_), "引用AVFrame");
+  FfmpegException::throwIfError(av_frame_ref(frame_, other.frame_),
+                                "引用AVFrame");
 }
 
 Frame& Frame::operator=(const Frame& other) {
@@ -70,7 +71,7 @@ void Frame::CopyPropertiesFrom(const Frame& source) {
     throw std::logic_error("不能复制已移动Frame的属性");
   }
   FfmpegException::throwIfError(av_frame_copy_props(frame_, source.frame_),
-                              "复制AVFrame属性");
+                                "复制AVFrame属性");
 }
 
 void Frame::ClearCrop() noexcept {

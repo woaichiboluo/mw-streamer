@@ -1,5 +1,9 @@
 #include "mw/streamer/init/init.h"
 
+extern "C" {
+#include <libavformat/avformat.h>
+}
+
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -8,6 +12,7 @@
 #include "Poller/EventPoller.h"
 #include "Thread/WorkThreadPool.h"
 #include "Util/util.h"
+#include "mw/streamer/ffmpeg/error.h"
 #include "srt/SrtEpollReactor.h"
 
 namespace mw::streamer {
@@ -40,10 +45,18 @@ class MwStreamerContext final {
         MW_LOG_ERROR("streamer", "释放ZLM网络失败: {}", error);
       }
     }
+    if (ffmpeg_network_initialized) {
+      const int error = avformat_network_deinit();
+      if (error < 0) {
+        MW_LOG_ERROR("streamer", "释放FFmpeg网络失败: {}",
+                     ffmpeg::AvErrorStr(error));
+      }
+    }
     logging.reset();
   }
 
   std::unique_ptr<mw::log::Logging> logging;
+  bool ffmpeg_network_initialized = false;
   bool network_initialized = false;
   std::unique_ptr<toolkit::TimestampClock> clock;
   std::unique_ptr<toolkit::EventPollerPool> event_pool;
@@ -56,6 +69,9 @@ InitConfig::InitConfig() { mw_log_default_config(&log); }
 MwStreamerContext* Init(const InitConfig& config) {
   auto context = std::make_unique<MwStreamerContext>();
   context->logging = std::make_unique<mw::log::Logging>(config.log);
+  ffmpeg::FfmpegException::throwIfError(avformat_network_init(),
+                                        "avformat_network_init");
+  context->ffmpeg_network_initialized = true;
   const int error = toolkit::SockUtil::initialize();
   if (error != 0) {
     throw std::runtime_error("初始化ZLM网络失败: " + std::to_string(error));

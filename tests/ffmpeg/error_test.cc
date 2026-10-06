@@ -29,7 +29,8 @@ TEST_CASE("FFmpeg异常保留错误码和操作描述") {
     const std::runtime_error& base = exception;
     const std::string message = base.what();
     CHECK(message.find("打开解码器") != std::string::npos);
-    CHECK(message.find(ffmpeg::AvErrorStr(AVERROR(EINVAL))) != std::string::npos);
+    CHECK(message.find(ffmpeg::AvErrorStr(AVERROR(EINVAL))) !=
+          std::string::npos);
   }
 }
 

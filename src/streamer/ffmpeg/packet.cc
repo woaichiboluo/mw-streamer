@@ -27,7 +27,7 @@ Packet::Packet(const Packet& other) : Packet() {
     throw std::logic_error("不能引用已移动的Packet");
   }
   FfmpegException::throwIfError(av_packet_ref(packet_, other.packet_),
-                              "引用AVPacket");
+                                "引用AVPacket");
 }
 
 Packet& Packet::operator=(const Packet& other) {
