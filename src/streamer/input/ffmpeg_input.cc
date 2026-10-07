@@ -1,9 +1,7 @@
 #include "mw/streamer/input/ffmpeg_input.h"
 
 #include <algorithm>
-#include <array>
 #include <cctype>
-#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <exception>
@@ -58,16 +56,6 @@ std::int64_t NowNs() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              Clock::now().time_since_epoch())
       .count();
-}
-
-std::array<char, 48> PerformanceRate(double value, bool available) noexcept {
-  std::array<char, 48> text{};
-  if (available) {
-    std::snprintf(text.data(), text.size(), "%.3f", value);
-  } else {
-    std::snprintf(text.data(), text.size(), "N/A");
-  }
-  return text;
 }
 
 template <typename Callback, typename... Args>
@@ -257,18 +245,7 @@ void FfmpegInput::Start(std::string_view url) {
     throw std::logic_error("Input已经启动");
   }
   JoinWorkers();
-  performance_enabled_ =
-      mw::log::ShouldLog("perf.input", mw::log::LogLevel::kInfo);
-  performance_trace_enabled_ =
-      mw::log::ShouldLog("perf.input", mw::log::LogLevel::kTrace);
-  if (performance_enabled_) {
-    performance_.Reset();
-    performance_session_active_ = true;
-    performance_reference_pts_ns_.reset();
-    performance_loops_ = 0;
-    performance_seeks_ = 0;
-    performance_peak_buffer_bytes_ = 0;
-  }
+  performance_.Start(this);
   ready_streams_.clear();
   generation_ = 0;
   url_ = url;
@@ -413,7 +390,7 @@ void FfmpegInput::SetIoDeadline(std::chrono::milliseconds timeout) {
 }
 
 void FfmpegInput::OpenAttempt() {
-  if (performance_enabled_) performance_reference_pts_ns_.reset();
+  performance_.SegmentReset();
   MW_LOG_DEBUG(
       "streamer", "Input[{}]开始打开输入: retry={}, open_timeout_ms={}",
       static_cast<const void*>(this), retries_, config_.open_timeout.count());
@@ -526,157 +503,31 @@ void FfmpegInput::OpenAttempt() {
   }
 }
 
-void FfmpegInput::RecordReadPerformance(const ffmpeg::Packet& packet,
-                                        int result, std::int64_t duration_ns) {
-  performance_.AddWork(duration_ns);
-  auto& counters = performance_.counters();
-  if (result == AVERROR_EOF) {
-    ++counters.eof;
-  } else if (result < 0 &&
-             !(result == AVERROR_EXIT && stop_requested_.load())) {
-    ++counters.errors;
-    if (result == AVERROR(EAGAIN)) ++counters.again;
-  } else if (result >= 0 && packet->size > 0) {
-    const auto selected =
-        std::find_if(streams_.begin(), streams_.end(), [&](const auto& stream) {
-          return stream.stream_index == packet->stream_index;
-        });
-    if (selected != streams_.end()) {
-      ++counters.packets;
-      counters.bytes += static_cast<std::uint64_t>(packet->size);
-      // The selected stream list is video-first; audio is the fallback clock.
-      // Demux payload includes both selected tracks, but media time only one.
-      if (selected == streams_.begin()) {
-        const auto pts =
-            packet->dts != AV_NOPTS_VALUE ? packet->dts : packet->pts;
-        if (pts != AV_NOPTS_VALUE) {
-          const auto media_ns =
-              av_rescale_q(pts, selected->time_base, AVRational{1, 1000000000});
-          counters.has_media = true;
-          if (performance_reference_pts_ns_ &&
-              media_ns > *performance_reference_pts_ns_) {
-            counters.media_ns += media_ns - *performance_reference_pts_ns_;
-          }
-          performance_reference_pts_ns_ = media_ns;
-        }
-      }
-    }
-  }
-  ReportPerformance();
-}
-
 void FfmpegInput::ReportPerformance(bool final) {
-  if (!performance_enabled_ || !performance_session_active_) return;
-  internal::PerformanceReport report;
-  if (!performance_.Sample(report, final)) return;
-  if (final) performance_session_active_ = false;
-  const auto& total = report.total;
-  const auto& interval = report.interval;
-  const auto& selected = final ? total : interval;
-  const auto seconds = final ? report.elapsed_seconds : report.interval_seconds;
-  const auto selected_media_seconds = selected.media_ns / 1e9;
-  const auto selected_speed = PerformanceRate(
-      internal::PerformanceReport::Rate(selected_media_seconds, seconds),
-      selected.has_media && selected_media_seconds > 0 && seconds > 0);
+  if (!performance_.Sample(final)) return;
   std::size_t buffered = 0;
   for (const auto& track : tracks_) buffered += track->queued_bytes();
-  MW_LOG_INFO(
-      "perf.input",
-      "Input[{}] report={} state={} packets_per_second={:.1f} "
-      "payload_MiB_per_second={:.2f} speed={} read_mean_ms={:.2f} "
-      "packet_buffer_MiB={:.2f} errors={}",
-      static_cast<const void*>(this), final ? "summary" : "interval",
-      StateName(state()),
-      internal::PerformanceReport::Rate(selected.packets, seconds),
-      internal::PerformanceReport::Rate(selected.bytes / 1048576.0, seconds),
-      selected_speed.data(),
-      internal::PerformanceReport::Rate(selected.work_ns / 1e6,
-                                        selected.work_calls),
-      buffered / 1048576.0, selected.errors);
-  if (!performance_trace_enabled_) return;
-  const auto interval_media_seconds = interval.media_ns / 1e9;
-  const auto total_media_seconds = total.media_ns / 1e9;
-  const auto bitrate =
-      PerformanceRate(internal::PerformanceReport::Rate(8.0 * interval.bytes,
-                                                        interval_media_seconds),
-                      interval.has_media && interval_media_seconds > 0);
-  const auto speed =
-      PerformanceRate(internal::PerformanceReport::Rate(
-                          interval_media_seconds, report.interval_seconds),
-                      interval.has_media && interval_media_seconds > 0 &&
-                          report.interval_seconds > 0);
-  const auto total_bitrate = PerformanceRate(
-      internal::PerformanceReport::Rate(8.0 * total.bytes, total_media_seconds),
-      total.has_media && total_media_seconds > 0);
-  const auto total_speed = PerformanceRate(
-      internal::PerformanceReport::Rate(total_media_seconds,
-                                        report.elapsed_seconds),
-      total.has_media && total_media_seconds > 0 && report.elapsed_seconds > 0);
-  MW_LOG_TRACE(
-      "perf.input",
-      "Input[{}] generation={} state={} report={} elapsed_since_start_s={:.3f} "
-      "window_s={:.3f} packets={} payload_bytes={} pps={:.3f} "
-      "payload_bytes_per_second={:.3f} media_bitrate_bps={} speed={} "
-      "read_calls={} read_mean_ms={:.3f} read_max_ms={:.3f} "
-      "read_eof={} read_errors={} read_again={} playback_wait_ms={:.3f} "
-      "packet_buffer_bytes={} total_packet_buffer_peak_bytes={} "
-      "total_packets={} total_payload_bytes={} total_pps={:.3f} "
-      "total_payload_bytes_per_second={:.3f} total_media_bitrate_bps={} "
-      "total_speed={} total_read_calls={} total_read_ms={:.3f} "
-      "total_read_max_ms={:.3f} total_eof={} total_read_errors={} "
-      "total_read_again={} total_playback_wait_ms={:.3f} "
-      "total_reconnects={} total_loops={} total_seeks={}",
-      static_cast<const void*>(this), generation_, StateName(state()),
-      final ? "summary" : "interval", report.elapsed_seconds,
-      report.interval_seconds, interval.packets, interval.bytes,
-      internal::PerformanceReport::Rate(interval.packets,
-                                        report.interval_seconds),
-      internal::PerformanceReport::Rate(interval.bytes,
-                                        report.interval_seconds),
-      bitrate.data(), speed.data(), interval.work_calls,
-      internal::PerformanceReport::Rate(interval.work_ns / 1e6,
-                                        interval.work_calls),
-      interval.max_work_ns / 1e6, interval.eof, interval.errors, interval.again,
-      interval.wait_ns / 1e6, buffered, performance_peak_buffer_bytes_,
-      total.packets, total.bytes,
-      internal::PerformanceReport::Rate(total.packets, report.elapsed_seconds),
-      internal::PerformanceReport::Rate(total.bytes, report.elapsed_seconds),
-      total_bitrate.data(), total_speed.data(), total.work_calls,
-      total.work_ns / 1e6, total.max_work_ns / 1e6, total.eof, total.errors,
-      total.again, total.wait_ns / 1e6, total.reconnects, performance_loops_,
-      performance_seeks_);
+  performance_.Report(generation_, state(), buffered);
 }
 
 void FfmpegInput::WaitForPlayback(std::unique_lock<std::mutex>& lock,
                                   Clock::time_point deadline) {
-  const auto started =
-      performance_trace_enabled_ ? Clock::now() : Clock::time_point{};
+  performance_.BeginWait();
   wake_.wait_until(lock, deadline, [this] {
     return stop_requested_.load() || seek_position_.has_value();
   });
-  if (performance_trace_enabled_) {
-    performance_.counters().wait_ns +=
-        std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
-                                                             started)
-            .count();
-  }
-  if (performance_enabled_) ReportPerformance();
+  performance_.EndWait();
+  ReportPerformance();
 }
 
 bool FfmpegInput::ReadPacket(ffmpeg::Packet& packet) {
   while (!stop_requested_.load()) {
     SetIoDeadline(config_.read_timeout);
-    const auto read_started =
-        performance_enabled_ ? Clock::now() : Clock::time_point{};
+    performance_.BeginRead();
     const int result = av_read_frame(format_, packet.get());
     io_deadline_ns_.store(0);
-    if (performance_enabled_) {
-      RecordReadPerformance(
-          packet, result,
-          std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
-                                                               read_started)
-              .count());
-    }
+    performance_.Read(*packet.get(), result, stop_requested_.load(), streams_);
+    ReportPerformance();
     if (result == AVERROR_EOF) {
       MW_LOG_DEBUG("streamer", "Input[{}]读到EOF: generation={}",
                    static_cast<const void*>(this), generation_);
@@ -763,11 +614,7 @@ bool FfmpegInput::PrepareFrames() {
                      buffered, packet->size, config_.max_packet_buffer_bytes);
         throw std::length_error("Input轨道Packet缓存超过字节上限");
       }
-      if (performance_trace_enabled_) {
-        performance_peak_buffer_bytes_ =
-            std::max(performance_peak_buffer_bytes_,
-                     buffered + static_cast<std::size_t>(packet->size));
-      }
+      performance_.Queued(buffered + static_cast<std::size_t>(packet->size));
       decoder->Push(std::move(packet));
       break;
     }
@@ -792,10 +639,7 @@ bool FfmpegInput::ApplySeek() {
   if (!position) {
     return false;
   }
-  if (performance_enabled_) {
-    performance_reference_pts_ns_.reset();
-    ++performance_seeks_;
-  }
+  performance_.Seek();
   // Tracks are selected video-first; audio-only input uses its audio stream.
   const int index = streams_.front().stream_index;
   MW_LOG_DEBUG("streamer", "Input[{}]执行Seek: stream={}, position_ms={}",
@@ -1003,7 +847,7 @@ void FfmpegInput::RunMedia() {
       }
       MW_LOG_DEBUG("streamer", "Input[{}]EOF循环，重新打开输入: generation={}",
                    static_cast<const void*>(this), generation_);
-      if (performance_enabled_) ++performance_loops_;
+      performance_.Loop();
       ClearAttempt();
       first_attempt = false;
     }
@@ -1109,7 +953,7 @@ void FfmpegInput::RunReconnect(int error, std::string message) {
     if (!stop_requested_.load()) {
       MW_LOG_INFO("streamer", "Input[{}]开始重连: retry={}",
                   static_cast<const void*>(this), retries_);
-      if (performance_enabled_) ++performance_.counters().reconnects;
+      performance_.Reconnect();
       media_thread_ = std::thread(&FfmpegInput::RunMedia, this);
     }
   } catch (const std::exception& exception) {

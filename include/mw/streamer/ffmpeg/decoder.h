@@ -1,8 +1,6 @@
 #ifndef MW_STREAMER_FFMPEG_DECODER_H_
 #define MW_STREAMER_FFMPEG_DECODER_H_
 
-#include <chrono>
-#include <cstdint>
 #include <string_view>
 
 #include "mw/export.h"
@@ -47,22 +45,9 @@ class MW_STREAMER_API Decoder {
   AVCodecContext* context() noexcept;
 
  private:
-  using PerformanceClock = std::chrono::steady_clock;
-  PerformanceClock::time_point BeginPerformanceWork() const noexcept;
-  void FinishPerformanceWork(PerformanceClock::time_point started,
-                             bool error = false, bool final = false) noexcept;
-  void CountPerformanceFrame(const AVFrame& frame) noexcept;
-  void ReportPerformance(bool final) noexcept;
-
   CodecContext context_;
   AVRational time_base_;
-  int stream_index_;
-  const char* performance_module_;
-  internal::PerformanceWindow performance_;
-  bool performance_enabled_ = false;
-  bool performance_trace_enabled_ = false;
-  bool performance_final_ = false;
-  std::int64_t performance_previous_pts_ = AV_NOPTS_VALUE;
+  internal::DecoderPerformance performance_;
 };
 
 class MW_STREAMER_API VideoDecoder final : public Decoder {

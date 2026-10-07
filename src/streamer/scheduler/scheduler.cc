@@ -80,17 +80,9 @@ bool Scheduler::Start(const std::vector<ffmpeg::StreamInfo>& streams) noexcept {
     ended_notified_ = false;
     video_done_ = !video;
     audio_done_ = !audio;
-    performance_enabled_ =
-        mw::log::ShouldLog("perf.scheduler", mw::log::LogLevel::kInfo);
-    performance_video_ = video;
-    performance_audio_ = audio;
-    video_performance_ = {};
-    audio_performance_ = {};
-    if (performance_enabled_) {
-      const auto now = Clock::now();
-      video_performance_.window.Reset(now);
-      audio_performance_.window.Reset(now);
-    }
+    performance_.Start(this, config_.video_frame_rate,
+                       config_.audio_sample_rate, config_.audio_block_samples,
+                       video, audio);
   }
   internal::SystemTimeBase();
   {
@@ -140,20 +132,17 @@ bool Scheduler::SubmitVideo(const ffmpeg::Frame& frame) noexcept {
     if (video_frames_.size() >= kMaxVideoFrames) {
       // Clear the video cache and reset selection when it reaches this limit.
       MW_LOG_WARNING("streamer", "Scheduler视频缓存达到30帧，清空并重新同步");
-      if (performance_enabled_) {
-        video_performance_.capacity_cleared += video_frames_.size();
-        ++video_performance_.capacity_rejected;
-      }
+      performance_.RejectVideo(video_frames_.size());
       video_frames_.clear();
       video_timing_set_ = false;
       return false;
     }
     video_frames_.push_back(frame.Ref());
-    if (performance_enabled_) ++video_performance_.window.counters().packets;
+    performance_.Accept(true);
   } catch (const std::exception& error) {
-    if (performance_enabled_) {
+    if (performance_.enabled()) {
       std::lock_guard<std::mutex> lock(mutex_);
-      ++video_performance_.window.counters().errors;
+      performance_.Error(true);
     }
     MW_LOG_ERROR("streamer", "Scheduler缓存视频失败: {}", error.what());
     return false;
@@ -248,10 +237,7 @@ bool Scheduler::QueueAudio(ffmpeg::Frame frame, bool append_tail) {
   }
   const auto end = placement + frame->nb_samples;
   if (end > kMaxAudioSamples) {
-    if (performance_enabled_) {
-      ++audio_performance_.capacity_rejected;
-      audio_performance_.capacity_rejected_samples += frame->nb_samples;
-    }
+    performance_.RejectAudio(frame->nb_samples);
     MW_LOG_WARNING("streamer", "Scheduler音频缓存超过样本上限，丢弃本次输入");
     return false;
   }
@@ -260,18 +246,14 @@ bool Scheduler::QueueAudio(ffmpeg::Frame frame, bool append_tail) {
   const auto position = audio_sample_cursor_ + placement;
   while (!audio_frames_.empty() &&
          audio_frames_.back().start_sample >= position) {
-    if (performance_enabled_) {
-      audio_performance_.dropped_source_samples += audio_frames_.back().samples;
-    }
+    performance_.DropAudio(audio_frames_.back().samples);
     audio_frames_.pop_back();
   }
   if (!audio_frames_.empty()) {
     auto& tail = audio_frames_.back();
     const auto retained = static_cast<int>(
         std::min<std::int64_t>(tail.samples, position - tail.start_sample));
-    if (performance_enabled_) {
-      audio_performance_.dropped_source_samples += tail.samples - retained;
-    }
+    performance_.DropAudio(tail.samples - retained);
     tail.samples = retained;
   }
   audio_output_template_ = frame.Ref();
@@ -298,18 +280,16 @@ bool Scheduler::SubmitAudio(const ffmpeg::Frame& frame) noexcept {
       accepted = true;
     }
   } catch (const std::exception& error) {
-    if (performance_enabled_) {
+    if (performance_.enabled()) {
       std::lock_guard<std::mutex> lock(mutex_);
-      ++audio_performance_.window.counters().errors;
+      performance_.Error(false);
     }
     MW_LOG_ERROR("streamer", "Scheduler音频处理失败: {}", error.what());
   }
   {
     std::lock_guard<std::mutex> lock(mutex_);
     --audio_calls_;
-    if (performance_enabled_ && accepted) {
-      ++audio_performance_.window.counters().packets;
-    }
+    if (accepted) performance_.Accept(false);
   }
   idle_.notify_all();
   Wake();
@@ -358,9 +338,9 @@ void Scheduler::Drain() noexcept {
   try {
     FlushResampler();
   } catch (const std::exception& error) {
-    if (performance_enabled_) {
+    if (performance_.enabled()) {
       std::lock_guard<std::mutex> lock(mutex_);
-      ++audio_performance_.window.counters().errors;
+      performance_.Error(false);
     }
     MW_LOG_ERROR("streamer", "Scheduler排空音频失败: {}", error.what());
   }
@@ -416,7 +396,7 @@ bool Scheduler::TickVideo(Clock::time_point now) {
             }
             frame_offset = next - video_media_;
             if (video_media_ <= next || video_media_ - next < 2000000) break;
-            if (performance_enabled_) ++video_performance_.late_old;
+            performance_.DropVideo();
             video_frames_.pop_front();
             pts = next;
           }
@@ -425,7 +405,7 @@ bool Scheduler::TickVideo(Clock::time_point now) {
       if (ready) {
         selected.emplace(std::move(video_frames_.front()));
         video_frames_.pop_front();
-        if (performance_enabled_) ++video_performance_.selected_new;
+        performance_.SelectVideo();
         const auto duration =
             av_rescale_q(selected->get()->duration, selected->get()->time_base,
                          kNanoseconds);
@@ -469,21 +449,13 @@ bool Scheduler::TickVideo(Clock::time_point now) {
     (*result)->duration =
         av_rescale_q(1, av_inv_q(config_.video_frame_rate), kNanoseconds);
     (*result)->pkt_dts = AV_NOPTS_VALUE;
-    DeliverVideo(*result);
-    if (performance_enabled_ && !selected) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      ++video_performance_.repeated;
-    }
+    DeliverVideo(*result, !selected);
   }
   return true;
 }
 
 void Scheduler::ResetAudio(std::int64_t timestamp) noexcept {
-  if (performance_enabled_ && initialized_ && !stopping_) {
-    for (const auto& entry : audio_frames_) {
-      audio_performance_.dropped_source_samples += entry.samples;
-    }
-  }
+  performance_.DiscardAudioQueue(audio_frames_, initialized_ && !stopping_);
   audio_frames_.clear();
   audio_timestamp_ = timestamp;
   audio_sample_cursor_ = 0;
@@ -503,14 +475,7 @@ void Scheduler::PopAudio(std::int64_t samples, bool discarded) noexcept {
     entry.start_sample += skipped;
     entry.offset += static_cast<int>(skipped);
     entry.samples -= static_cast<int>(skipped);
-    if (performance_enabled_) {
-      if (discarded) {
-        audio_performance_.dropped_source_samples += skipped;
-        audio_performance_.late_source_samples += skipped;
-      } else {
-        audio_performance_.consumed_source_samples += skipped;
-      }
-    }
+    performance_.ConsumeAudio(skipped, discarded);
     if (entry.samples) break;
     audio_frames_.pop_front();
   }
@@ -532,10 +497,10 @@ bool Scheduler::DiscardStoppedAudio() noexcept {
 
 bool Scheduler::TickAudio(Clock::time_point start, Clock::time_point end) {
   std::vector<ffmpeg::Frame> results;
-  std::vector<std::int64_t> source_samples;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (stopping_) return false;
+    performance_.BeginAudioBatch();
     const bool finite_tail = draining_ && audio_calls_ == 0;
     if (!audio_queued_samples_ && finite_tail) return false;
     const auto rate = config_.audio_sample_rate;
@@ -590,9 +555,7 @@ bool Scheduler::TickAudio(Clock::time_point start, Clock::time_point end) {
       pending = true;
     const bool mixing = !audio_output_timing_.waiting_ticks() && !pending &&
                         inside && audio_timestamp_ >= window.start;
-    if (performance_enabled_ && pending) {
-      ++audio_performance_.underload_ticks;
-    }
+    if (pending) performance_.AudioUnderload();
     MW_LOG_TRACE("streamer",
                  "Scheduler audio tick: start={}, end={}, head={}, queued={}, "
                  "pending={}, mixing={}, waiting={}, buffering={}",
@@ -631,7 +594,7 @@ bool Scheduler::TickAudio(Clock::time_point start, Clock::time_point end) {
         if (begin == finish) continue;
         const auto& source = *slices[i].second;
         ffmpeg::Frame result;
-        std::int64_t copied_samples = 0;
+        performance_.BeginAudioFrame();
         result.CopyPropertiesFrom(source);
         result->format = source->format;
         result->sample_rate = source->sample_rate;
@@ -663,7 +626,7 @@ bool Scheduler::TickAudio(Clock::time_point start, Clock::time_point end) {
                     entry.offset + static_cast<int>(copy_start - position),
                     static_cast<int>(copy_end - copy_start), channels, format),
                 "复制音频输出样本");
-            if (performance_enabled_) copied_samples += copy_end - copy_start;
+            performance_.CopyAudio(copy_end - copy_start);
           }
         }
         result->pts = window.start - SystemNs(internal::SystemTimeBase()) +
@@ -672,7 +635,7 @@ bool Scheduler::TickAudio(Clock::time_point start, Clock::time_point end) {
         result->duration = SamplesNs(result->nb_samples, rate);
         result->pkt_dts = AV_NOPTS_VALUE;
         results.push_back(std::move(result));
-        if (performance_enabled_) source_samples.push_back(copied_samples);
+        performance_.PrepareAudioFrame();
       }
     }
     // Consume against the chosen historical window even during waiting.
@@ -699,14 +662,7 @@ bool Scheduler::TickAudio(Clock::time_point start, Clock::time_point end) {
   for (std::size_t index = 0; index < results.size(); ++index) {
     if (stop_requested_.load()) break;
     const auto& result = results[index];
-    DeliverAudio(result);
-    if (performance_enabled_) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      audio_performance_.delivered_source_samples += source_samples[index];
-      if (source_samples[index]) ++audio_performance_.selected_new;
-      audio_performance_.zero_fill_samples +=
-          result->nb_samples - source_samples[index];
-    }
+    DeliverAudio(result, index);
   }
   return true;
 }
@@ -735,10 +691,9 @@ void Scheduler::NotifyEnded() noexcept {
   }
   if (notify) {
     if (!stop_requested_.load()) {
-      if (performance_enabled_) {
+      if (performance_.enabled()) {
         std::lock_guard<std::mutex> lock(mutex_);
-        LogPerformanceLocked(true, true);
-        LogPerformanceLocked(false, true);
+        performance_.Finish(video_frames_.size(), audio_queued_samples_);
       }
       MW_LOG_INFO("streamer", "Scheduler排空完成");
       if (on_ended_) on_ended_();
@@ -782,9 +737,8 @@ void Scheduler::Stop() noexcept {
     std::unique_lock<std::mutex> lock(mutex_);
     idle_.wait(lock,
                [this] { return audio_calls_ == 0 && callback_calls_ == 0; });
-    if (performance_enabled_) {
-      LogPerformanceLocked(true, true);
-      LogPerformanceLocked(false, true);
+    if (performance_.enabled()) {
+      performance_.Finish(video_frames_.size(), audio_queued_samples_);
     }
     Clear();
     initialized_ = false;
@@ -827,10 +781,9 @@ void Scheduler::RunVideo() noexcept {
   // delayed worker can render newly submitted media against a tick from before
   // the audio worker's window origin and incorrectly discard its first PCM.
   try {
-    const auto tick_started =
-        performance_enabled_ ? Clock::now() : Clock::time_point{};
+    const auto tick_started = performance_.BeginWork();
     TickVideo(started);
-    if (performance_enabled_) RecordTick(true, tick_started, started, 0);
+    if (performance_.enabled()) RecordTick(true, tick_started, started, 0);
   } catch (const std::exception& error) {
     MW_LOG_ERROR("streamer", "调度视频线程初始化失败: {}", error.what());
     RequestStop();
@@ -846,18 +799,17 @@ void Scheduler::RunVideo() noexcept {
   while (!stop_requested_.load()) {
     const auto deadline = started + std::chrono::nanoseconds(tick * interval);
     if (!WaitUntil(deadline, true)) break;
-    const auto tick_started =
-        performance_enabled_ ? Clock::now() : Clock::time_point{};
+    const auto tick_started = performance_.BeginWork();
     try {
       const bool running = TickVideo(deadline);
-      if (performance_enabled_)
+      if (performance_.enabled())
         RecordTick(true, tick_started, deadline, interval);
       if (!running) break;
     } catch (const std::exception& error) {
-      if (performance_enabled_) {
+      if (performance_.enabled()) {
         {
           std::lock_guard<std::mutex> lock(mutex_);
-          ++video_performance_.window.counters().errors;
+          performance_.Error(true);
         }
         RecordTick(true, tick_started, deadline, interval);
       }
@@ -872,9 +824,9 @@ void Scheduler::RunVideo() noexcept {
     // Skip missed output ticks instead of replaying old video output.
     const auto next = elapsed / interval;
     if (next > tick) {
-      if (performance_enabled_) {
+      if (performance_.enabled()) {
         std::lock_guard<std::mutex> lock(mutex_);
-        video_performance_.skipped_ticks += next - tick;
+        performance_.SkipVideoTicks(next - tick);
       }
       tick = next;
     }
@@ -895,21 +847,20 @@ void Scheduler::RunAudio() noexcept {
         started + std::chrono::nanoseconds(internal::AudioSamplesToNs(
                       samples, config_.audio_sample_rate));
     if (!WaitUntil(deadline)) break;
-    const auto tick_started =
-        performance_enabled_ ? Clock::now() : Clock::time_point{};
+    const auto tick_started = performance_.BeginWork();
     try {
       const bool running = TickAudio(start, deadline);
-      if (performance_enabled_) {
+      if (performance_.enabled()) {
         RecordTick(
             false, tick_started, deadline,
             SamplesNs(config_.audio_block_samples, config_.audio_sample_rate));
       }
       if (!running) break;
     } catch (const std::exception& error) {
-      if (performance_enabled_) {
+      if (performance_.enabled()) {
         {
           std::lock_guard<std::mutex> lock(mutex_);
-          ++audio_performance_.window.counters().errors;
+          performance_.Error(false);
         }
         RecordTick(
             false, tick_started, deadline,
@@ -926,179 +877,36 @@ void Scheduler::RunAudio() noexcept {
   MW_LOG_DEBUG("streamer", "音频输出线程退出");
 }
 
-void Scheduler::DeliverVideo(const ffmpeg::Frame& frame) noexcept {
-  const auto started =
-      performance_enabled_ && on_video_ ? Clock::now() : Clock::time_point{};
+void Scheduler::DeliverVideo(const ffmpeg::Frame& frame,
+                             bool repeated) noexcept {
+  const auto started = performance_.BeginWork(static_cast<bool>(on_video_));
   if (on_video_) on_video_(frame);
-  if (performance_enabled_) {
-    const auto elapsed =
-        on_video_ ? SystemNs(Clock::now()) - SystemNs(started) : 0;
+  if (performance_.enabled()) {
+    const auto elapsed = performance_.WorkTime(started);
     std::lock_guard<std::mutex> lock(mutex_);
-    ++video_performance_.window.counters().frames;
-    if (on_video_) {
-      ++video_performance_.external_callback_calls;
-      video_performance_.external_callback_ns += elapsed;
-      video_performance_.max_external_callback_ns =
-          std::max(video_performance_.max_external_callback_ns, elapsed);
-    }
+    performance_.DeliverVideo(repeated, static_cast<bool>(on_video_), elapsed);
   }
 }
 
-void Scheduler::DeliverAudio(const ffmpeg::Frame& frame) noexcept {
-  const auto started =
-      performance_enabled_ && on_audio_ ? Clock::now() : Clock::time_point{};
+void Scheduler::DeliverAudio(const ffmpeg::Frame& frame,
+                             std::size_t index) noexcept {
+  const auto started = performance_.BeginWork(static_cast<bool>(on_audio_));
   if (on_audio_) on_audio_(frame);
-  if (performance_enabled_) {
-    const auto elapsed =
-        on_audio_ ? SystemNs(Clock::now()) - SystemNs(started) : 0;
+  if (performance_.enabled()) {
+    const auto elapsed = performance_.WorkTime(started);
     std::lock_guard<std::mutex> lock(mutex_);
-    auto& counters = audio_performance_.window.counters();
-    ++counters.frames;
-    counters.samples += frame->nb_samples;
-    if (on_audio_) {
-      ++audio_performance_.external_callback_calls;
-      audio_performance_.external_callback_ns += elapsed;
-      audio_performance_.max_external_callback_ns =
-          std::max(audio_performance_.max_external_callback_ns, elapsed);
-    }
+    performance_.DeliverAudio(index, frame->nb_samples,
+                              static_cast<bool>(on_audio_), elapsed);
   }
 }
 
 void Scheduler::RecordTick(bool video, Clock::time_point started,
                            Clock::time_point deadline,
                            std::int64_t interval_ns) noexcept {
-  const auto finished = Clock::now();
+  const auto elapsed = performance_.WorkTime(started);
   std::lock_guard<std::mutex> lock(mutex_);
-  auto& performance = video ? video_performance_ : audio_performance_;
-  performance.window.AddWork(SystemNs(finished) - SystemNs(started));
-  // Normal wakeup jitter is not counted as an entire missed output tick.
-  if (interval_ns > 0 &&
-      SystemNs(started) - SystemNs(deadline) >= interval_ns) {
-    ++performance.late_ticks;
-  }
-  LogPerformanceLocked(video);
-}
-
-void Scheduler::LogPerformanceLocked(bool video, bool final) noexcept {
-  if (!performance_enabled_ ||
-      (video ? !performance_video_ : !performance_audio_)) {
-    return;
-  }
-  auto& performance = video ? video_performance_ : audio_performance_;
-  internal::PerformanceReport report;
-  if (!performance.window.Sample(report, final, Clock::now())) return;
-  const auto& total = report.total;
-  const auto current_fps = internal::PerformanceReport::Rate(
-      static_cast<double>(report.interval.frames), report.interval_seconds);
-  const auto source_fps = internal::PerformanceReport::Rate(
-      static_cast<double>(report.interval.packets), report.interval_seconds);
-  const auto callback_mean_ms = performance.external_callback_calls
-                                    ? performance.external_callback_ns / 1e6 /
-                                          performance.external_callback_calls
-                                    : 0;
-  const auto tick_mean_ms =
-      total.work_calls ? total.work_ns / 1e6 / total.work_calls : 0;
-  const auto& overview = final ? total : report.interval;
-  const auto overview_seconds =
-      final ? report.elapsed_seconds : report.interval_seconds;
-  if (video) {
-    MW_LOG_INFO("perf.scheduler",
-                "Scheduler[{}] track=video report={} fps={:.1f}/{:.1f} "
-                "queue_frames={} repeated_total={} dropped_total={} "
-                "callback_mean_ms={:.3f}",
-                static_cast<const void*>(this), final ? "summary" : "interval",
-                internal::PerformanceReport::Rate(
-                    static_cast<double>(overview.frames), overview_seconds),
-                static_cast<double>(config_.video_frame_rate.num) /
-                    config_.video_frame_rate.den,
-                video_frames_.size(), performance.repeated,
-                performance.late_old + performance.capacity_cleared +
-                    performance.capacity_rejected,
-                callback_mean_ms);
-    MW_LOG_TRACE(
-        "perf.scheduler",
-        "Scheduler[{}] track=video final={} counts=since_start "
-        "elapsed_s={:.3f} window_s={:.3f} "
-        "target_fps={:.3f} source_fps={:.3f} current_fps={:.3f} "
-        "accepted_new={} deliver_frames={} selected_new={} repeated={} "
-        "dropped_late_old={} dropped_capacity_clear={} "
-        "capacity_rejected_new={} "
-        "late_ticks={} skipped_ticks={} late_tick_threshold_ms={:.3f} "
-        "queue_frames={} "
-        "external_callback_calls={} external_callback_mean_ms={:.3f} "
-        "external_callback_max_ms={:.3f} "
-        "tick_calls={} tick_include_callback_mean_ms={:.3f} "
-        "tick_include_callback_max_ms={:.3f} errors={}",
-        static_cast<const void*>(this), final, report.elapsed_seconds,
-        report.interval_seconds,
-        static_cast<double>(config_.video_frame_rate.num) /
-            config_.video_frame_rate.den,
-        source_fps, current_fps, total.packets, total.frames,
-        performance.selected_new, performance.repeated, performance.late_old,
-        performance.capacity_cleared, performance.capacity_rejected,
-        performance.late_ticks, performance.skipped_ticks,
-        av_rescale_q_rnd(1, av_inv_q(config_.video_frame_rate), kNanoseconds,
-                         AV_ROUND_DOWN) /
-            1e6,
-        video_frames_.size(), performance.external_callback_calls,
-        callback_mean_ms, performance.max_external_callback_ns / 1e6,
-        total.work_calls, tick_mean_ms, total.max_work_ns / 1e6, total.errors);
-  } else {
-    MW_LOG_INFO(
-        "perf.scheduler",
-        "Scheduler[{}] track=audio report={} samples_per_second={:.0f}/{} "
-        "queue_ms={:.1f} silence_ms_total={:.1f} dropped_ms_total={:.1f} "
-        "callback_mean_ms={:.3f}",
-        static_cast<const void*>(this), final ? "summary" : "interval",
-        internal::PerformanceReport::Rate(static_cast<double>(overview.samples),
-                                          overview_seconds),
-        config_.audio_sample_rate,
-        static_cast<double>(audio_queued_samples_) * 1000 /
-            config_.audio_sample_rate,
-        static_cast<double>(performance.zero_fill_samples) * 1000 /
-            config_.audio_sample_rate,
-        static_cast<double>(performance.dropped_source_samples) * 1000 /
-            config_.audio_sample_rate,
-        callback_mean_ms);
-    MW_LOG_TRACE(
-        "perf.scheduler",
-        "Scheduler[{}] track=audio final={} counts=since_start "
-        "elapsed_s={:.3f} window_s={:.3f} "
-        "target_tick_fps={:.3f} sample_rate={} block_samples={} "
-        "source_fps={:.3f} current_fps={:.3f} "
-        "accepted_new={} deliver_frames={} selected_new={} "
-        "selected_unit=source_payload_frames repeated=0 "
-        "delivered_samples={} consumed_source_samples={} "
-        "delivered_source_samples={} "
-        "zero_fill_samples={} underload_ticks={} "
-        "dropped_queued_source_samples={} "
-        "dropped_late_source_samples={} capacity_rejected_new={} "
-        "capacity_rejected_samples={} "
-        "late_ticks={} late_tick_threshold_ms={:.3f} queue_samples={} "
-        "queue_ms={:.3f} "
-        "external_callback_calls={} external_callback_mean_ms={:.3f} "
-        "external_callback_max_ms={:.3f} "
-        "tick_calls={} tick_include_callback_mean_ms={:.3f} "
-        "tick_include_callback_max_ms={:.3f} errors={}",
-        static_cast<const void*>(this), final, report.elapsed_seconds,
-        report.interval_seconds,
-        static_cast<double>(config_.audio_sample_rate) /
-            config_.audio_block_samples,
-        config_.audio_sample_rate, config_.audio_block_samples, source_fps,
-        current_fps, total.packets, total.frames, performance.selected_new,
-        total.samples, performance.consumed_source_samples,
-        performance.delivered_source_samples, performance.zero_fill_samples,
-        performance.underload_ticks, performance.dropped_source_samples,
-        performance.late_source_samples, performance.capacity_rejected,
-        performance.capacity_rejected_samples, performance.late_ticks,
-        SamplesNs(config_.audio_block_samples, config_.audio_sample_rate) / 1e6,
-        audio_queued_samples_,
-        static_cast<double>(audio_queued_samples_) * 1000 /
-            config_.audio_sample_rate,
-        performance.external_callback_calls, callback_mean_ms,
-        performance.max_external_callback_ns / 1e6, total.work_calls,
-        tick_mean_ms, total.max_work_ns / 1e6, total.errors);
-  }
+  performance_.Tick(video, started, deadline, interval_ns, elapsed,
+                    video_frames_.size(), audio_queued_samples_);
 }
 
 }  // namespace mw::streamer

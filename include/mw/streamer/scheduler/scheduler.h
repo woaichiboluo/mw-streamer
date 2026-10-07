@@ -76,30 +76,6 @@ class MW_STREAMER_API Scheduler final {
     int samples = 0;
   };
 
-  // Serialized by mutex_; neither callbacks nor producers own a second lock.
-  struct TrackPerformance {
-    internal::PerformanceWindow window;
-    std::uint64_t selected_new = 0;
-    std::uint64_t repeated = 0;
-    std::uint64_t late_old = 0;
-    std::uint64_t capacity_cleared = 0;
-    std::uint64_t capacity_rejected = 0;
-    std::uint64_t late_ticks = 0;
-    std::uint64_t skipped_ticks = 0;
-    std::uint64_t underload_ticks = 0;
-    // Ordinary FIFO removal includes waiting/pending windows; output copy
-    // counts distinguish consumed source data from emitted source data.
-    std::uint64_t consumed_source_samples = 0;
-    std::uint64_t dropped_source_samples = 0;
-    std::uint64_t late_source_samples = 0;
-    std::uint64_t capacity_rejected_samples = 0;
-    std::uint64_t delivered_source_samples = 0;
-    std::uint64_t zero_fill_samples = 0;
-    std::uint64_t external_callback_calls = 0;
-    std::int64_t external_callback_ns = 0;
-    std::int64_t max_external_callback_ns = 0;
-  };
-
   bool TickVideo(Clock::time_point now);
   bool TickAudio(Clock::time_point start, Clock::time_point end);
   void RunVideo() noexcept;
@@ -111,8 +87,8 @@ class MW_STREAMER_API Scheduler final {
   void Join() noexcept;
   void Wake() noexcept;
   bool WaitUntil(Clock::time_point deadline, bool precise = false) noexcept;
-  void DeliverVideo(const ffmpeg::Frame& frame) noexcept;
-  void DeliverAudio(const ffmpeg::Frame& frame) noexcept;
+  void DeliverVideo(const ffmpeg::Frame& frame, bool repeated) noexcept;
+  void DeliverAudio(const ffmpeg::Frame& frame, std::size_t index) noexcept;
   std::int64_t OutputTime(Clock::time_point now) const noexcept;
   ffmpeg::Frame ResampleAudio(const ffmpeg::Frame& frame);
   bool QueueAudio(ffmpeg::Frame frame, bool append_tail = false);
@@ -124,8 +100,6 @@ class MW_STREAMER_API Scheduler final {
   void RecordTick(bool video, Clock::time_point started,
                   Clock::time_point deadline,
                   std::int64_t interval_ns) noexcept;
-  // Caller holds mutex_. Stop and Ended sample before clearing track queues.
-  void LogPerformanceLocked(bool video, bool final = false) noexcept;
 
   SchedulerConfig config_;
   OnFrame on_video_;
@@ -168,11 +142,7 @@ class MW_STREAMER_API Scheduler final {
   AVChannelLayout resampler_layout_{};
   std::int64_t resampler_next_pts_ = 0;
   std::int64_t resample_offset_ = 0;
-  bool performance_enabled_ = false;
-  bool performance_video_ = false;
-  bool performance_audio_ = false;
-  TrackPerformance video_performance_;
-  TrackPerformance audio_performance_;
+  internal::SchedulerPerformance performance_;
 };
 
 }  // namespace mw::streamer

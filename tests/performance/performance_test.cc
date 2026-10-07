@@ -157,13 +157,16 @@ TEST_CASE("实际Input解码调度日志匹配数据且模块可以独立关闭"
                   decltype(&mw::streamer::Shutdown)>
       runtime(mw::streamer::Init(config), &mw::streamer::Shutdown);
   std::atomic<std::uint64_t> packets{0}, bytes{0}, video_frames{0},
-      audio_frames{0}, samples{0};
+      audio_frames{0}, samples{0}, output_samples{0};
   bool ended = false;
   bool failed = false;
   std::mutex mutex;
   std::condition_variable changed;
   {
     mw::streamer::Scheduler scheduler;
+    scheduler.SetOnAudio([&](const auto& frame) noexcept {
+      output_samples += frame->nb_samples;
+    });
     mw::streamer::FfmpegInputConfig input_config;
     input_config.auto_reconnect = false;
     mw::streamer::FfmpegInput input(input_config);
@@ -250,6 +253,11 @@ TEST_CASE("实际Input解码调度日志匹配数据且模块可以独立关闭"
       CHECK(Field(text, "perf.decoder.video", "frames") == video_frames.load());
       CHECK(Field(text, "perf.decoder.audio", "frames") == audio_frames.load());
       CHECK(Field(text, "perf.decoder.audio", "samples") == samples.load());
+      CHECK(Field(text, "perf.scheduler", "delivered_samples") ==
+            output_samples.load());
+      CHECK(Field(text, "perf.scheduler", "delivered_source_samples") +
+                Field(text, "perf.scheduler", "zero_fill_samples") ==
+            output_samples.load());
     } else {
       CHECK(text.find("[trace]") == std::string::npos);
     }

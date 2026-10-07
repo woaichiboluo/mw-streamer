@@ -9,6 +9,7 @@ set(MW_STREAMER_SOURCES
     ffmpeg/stream_info.cc
     init/init.cc
     input/ffmpeg_input.cc
+    performance/performance.cc
     processor/processor.cc
     scheduler/scheduler.cc
 )

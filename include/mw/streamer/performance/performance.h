@@ -2,8 +2,27 @@
 #define MW_STREAMER_PERFORMANCE_PERFORMANCE_H_
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <vector>
+
+extern "C" {
+#include <libavutil/rational.h>
+}
+
+struct AVPacket;
+struct AVFrame;
+struct AVCodecContext;
+
+namespace mw::streamer {
+enum class InputState;
+namespace ffmpeg {
+struct StreamInfo;
+}
+}  // namespace mw::streamer
 
 namespace mw::streamer::internal {
 
@@ -114,6 +133,157 @@ class PerformanceWindow final {
   std::int64_t window_max_work_ns_ = 0;
   bool active_ = false;
   bool final_reported_ = false;
+};
+
+class InputPerformance final {
+ public:
+  void Start(const void* instance);
+  void SegmentReset() noexcept;
+  void Seek() noexcept;
+  void Loop() noexcept;
+  void Reconnect() noexcept;
+  void BeginRead() noexcept;
+  void Read(const AVPacket& packet, int result, bool stopped,
+            const std::vector<ffmpeg::StreamInfo>& streams) noexcept;
+  void BeginWait() noexcept;
+  void EndWait() noexcept;
+  void Queued(std::size_t bytes) noexcept;
+  bool Sample(bool final = false) noexcept;
+  void Report(std::uint64_t generation, InputState state,
+              std::size_t buffered) const;
+
+ private:
+  static const char* StateName(InputState state) noexcept;
+  static std::array<char, 48> RateText(double value, bool available) noexcept;
+
+  PerformanceWindow window_;
+  PerformanceReport report_;
+  PerformanceWindow::TimePoint read_started_{};
+  PerformanceWindow::TimePoint wait_started_{};
+  std::optional<std::int64_t> reference_pts_ns_;
+  const void* instance_ = nullptr;
+  std::uint64_t loops_ = 0;
+  std::uint64_t seeks_ = 0;
+  std::size_t peak_buffer_bytes_ = 0;
+  bool enabled_ = false;
+  bool trace_enabled_ = false;
+  bool active_ = false;
+  bool final_ = false;
+};
+
+// Decoder API wall-time and throughput sampling on the decoder's worker.
+class DecoderPerformance final {
+ public:
+  using Clock = PerformanceWindow::Clock;
+  using TimePoint = PerformanceWindow::TimePoint;
+
+  explicit DecoderPerformance(int stream_index) noexcept;
+  void Start(const void* instance, const AVCodecContext& context) noexcept;
+  TimePoint Begin() const noexcept;
+  void PacketSent(TimePoint started, const AVPacket* packet,
+                  int result) noexcept;
+  void FrameReceived(TimePoint started, const AVFrame* frame,
+                     int result) noexcept;
+  void Drained(TimePoint started, int result) noexcept;
+  void Flush() noexcept;
+  void Stop() noexcept;
+
+ private:
+  void Finish(TimePoint started, bool error = false,
+              bool final = false) noexcept;
+  void CountFrame(const AVFrame& frame) noexcept;
+  void Report(bool final) noexcept;
+
+  PerformanceWindow window_;
+  const void* instance_ = nullptr;
+  int stream_index_;
+  AVRational time_base_{};
+  const char* module_ = nullptr;
+  const char* codec_ = "?";
+  const char* backend_ = "cpu";
+  bool video_ = false;
+  bool enabled_ = false;
+  bool trace_enabled_ = false;
+  bool final_ = false;
+  std::int64_t previous_pts_ = 0;
+};
+
+// All mutations are serialized by the owning Scheduler's existing mutex.
+class SchedulerPerformance {
+ public:
+  using Clock = std::chrono::steady_clock;
+  void Start(const void* instance, AVRational video_frame_rate,
+             int audio_sample_rate, int audio_block_samples, bool video,
+             bool audio) noexcept;
+  bool enabled() const noexcept { return enabled_; }
+  Clock::time_point BeginWork(bool active = true) const noexcept;
+  std::int64_t WorkTime(Clock::time_point started) const noexcept;
+  void Accept(bool video) noexcept;
+  void Error(bool video) noexcept;
+  void RejectVideo(std::size_t queued_frames) noexcept;
+  void DropVideo() noexcept;
+  void SelectVideo() noexcept;
+  void SkipVideoTicks(std::uint64_t count) noexcept;
+  void RejectAudio(int samples) noexcept;
+  void DropAudio(std::int64_t samples) noexcept;
+  void ConsumeAudio(std::int64_t samples, bool discarded) noexcept;
+  void AudioUnderload() noexcept;
+  template <typename AudioQueue>
+  void DiscardAudioQueue(const AudioQueue& queue, bool active) noexcept {
+    if (!enabled_ || !active) return;
+    for (const auto& entry : queue) DropAudio(entry.samples);
+  }
+  void BeginAudioBatch() noexcept;
+  void BeginAudioFrame() noexcept;
+  void CopyAudio(std::int64_t samples) noexcept;
+  void PrepareAudioFrame();
+  void DeliverVideo(bool repeated, bool callback,
+                    std::int64_t elapsed) noexcept;
+  void DeliverAudio(std::size_t index, int samples, bool callback,
+                    std::int64_t elapsed) noexcept;
+  void Tick(bool video, Clock::time_point started, Clock::time_point deadline,
+            std::int64_t interval_ns, std::int64_t elapsed,
+            std::size_t video_queue, std::int64_t audio_queue) noexcept;
+  void Finish(std::size_t video_queue, std::int64_t audio_queue) noexcept;
+
+ private:
+  struct TrackPerformance {
+    PerformanceWindow window;
+    std::uint64_t selected_new = 0;
+    std::uint64_t repeated = 0;
+    std::uint64_t late_old = 0;
+    std::uint64_t capacity_cleared = 0;
+    std::uint64_t capacity_rejected = 0;
+    std::uint64_t late_ticks = 0;
+    std::uint64_t skipped_ticks = 0;
+    std::uint64_t underload_ticks = 0;
+    // Ordinary FIFO removal includes waiting/pending windows; output copy
+    // counts distinguish consumed source data from emitted source data.
+    std::uint64_t consumed_source_samples = 0;
+    std::uint64_t dropped_source_samples = 0;
+    std::uint64_t late_source_samples = 0;
+    std::uint64_t capacity_rejected_samples = 0;
+    std::uint64_t delivered_source_samples = 0;
+    std::uint64_t zero_fill_samples = 0;
+    std::uint64_t external_callback_calls = 0;
+    std::int64_t external_callback_ns = 0;
+    std::int64_t max_external_callback_ns = 0;
+  };
+  void RecordDelivery(bool video, int samples, bool callback,
+                      std::int64_t elapsed) noexcept;
+  void Log(bool video, std::size_t video_queue, std::int64_t audio_queue,
+           bool final = false) noexcept;
+  bool enabled_ = false;
+  bool video_ = false;
+  bool audio_ = false;
+  const void* instance_ = nullptr;
+  AVRational video_frame_rate_{};
+  int audio_sample_rate_ = 0;
+  int audio_block_samples_ = 0;
+  TrackPerformance video_performance_;
+  TrackPerformance audio_performance_;
+  std::int64_t copied_samples_ = 0;
+  std::vector<std::int64_t> source_samples_;
 };
 
 }  // namespace mw::streamer::internal

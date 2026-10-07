@@ -149,8 +149,6 @@ class MW_STREAMER_API FfmpegInput final {
   void NotifyState(InputState state, int error = 0,
                    std::string_view message = {});
   void SetIoDeadline(std::chrono::milliseconds timeout);
-  void RecordReadPerformance(const ffmpeg::Packet& packet, int result,
-                             std::int64_t duration_ns);
   void ReportPerformance(bool final = false);
   void WaitForPlayback(std::unique_lock<std::mutex>& lock,
                        std::chrono::steady_clock::time_point deadline);
@@ -185,14 +183,7 @@ class MW_STREAMER_API FfmpegInput final {
   std::vector<ffmpeg::StreamInfo> ready_streams_;
   std::vector<std::unique_ptr<Track>> tracks_;
   // Media workers serialize updates; Stop samples only after joining them.
-  bool performance_enabled_ = false;
-  bool performance_trace_enabled_ = false;
-  bool performance_session_active_ = false;
-  internal::PerformanceWindow performance_;
-  std::optional<std::int64_t> performance_reference_pts_ns_;
-  std::uint64_t performance_loops_ = 0;
-  std::uint64_t performance_seeks_ = 0;
-  std::size_t performance_peak_buffer_bytes_ = 0;
+  internal::InputPerformance performance_;
 };
 
 }  // namespace mw::streamer
