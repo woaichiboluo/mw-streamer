@@ -9,7 +9,15 @@ set(MW_STREAMER_SOURCES
     ffmpeg/stream_info.cc
     init/init.cc
     input/ffmpeg_input.cc
+    processor/processor.cc
+    scheduler/scheduler.cc
 )
+
+if(WIN32)
+    list(APPEND MW_STREAMER_SOURCES platform/platform_windows.cc)
+else()
+    list(APPEND MW_STREAMER_SOURCES platform/platform_posix.cc)
+endif()
 
 if(BUILD_SHARED)
     add_library(mw_streamer SHARED ${MW_STREAMER_SOURCES})
@@ -37,8 +45,13 @@ target_link_libraries(mw_streamer
     PRIVATE
         mw::log
         FFmpeg::avformat
+        FFmpeg::swresample
         Threads::Threads
         SRT::SRT
         fmt::fmt
         ZLMediaKit::ext-codec
 )
+
+if(WIN32)
+    target_link_libraries(mw_streamer PRIVATE winmm avrt)
+endif()

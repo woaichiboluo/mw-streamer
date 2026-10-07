@@ -5,6 +5,7 @@ extern "C" {
 }
 
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -13,6 +14,7 @@ extern "C" {
 #include "Thread/WorkThreadPool.h"
 #include "Util/util.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/platform/platform.h"
 #include "srt/SrtEpollReactor.h"
 
 namespace mw::streamer {
@@ -53,6 +55,7 @@ class MwStreamerContext final {
       }
     }
     logging.reset();
+    timer_resolution.reset();
   }
 
   std::unique_ptr<mw::log::Logging> logging;
@@ -62,6 +65,7 @@ class MwStreamerContext final {
   std::unique_ptr<toolkit::EventPollerPool> event_pool;
   std::unique_ptr<toolkit::WorkThreadPool> work_pool;
   std::unique_ptr<mediakit::SrtEpollReactor> srt_reactor;
+  std::optional<internal::ScopedTimerResolution> timer_resolution;
 };
 
 InitConfig::InitConfig() { mw_log_default_config(&log); }
@@ -69,6 +73,7 @@ InitConfig::InitConfig() { mw_log_default_config(&log); }
 MwStreamerContext* Init(const InitConfig& config) {
   auto context = std::make_unique<MwStreamerContext>();
   context->logging = std::make_unique<mw::log::Logging>(config.log);
+  context->timer_resolution.emplace();
   ffmpeg::FfmpegException::throwIfError(avformat_network_init(),
                                         "avformat_network_init");
   context->ffmpeg_network_initialized = true;

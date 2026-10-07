@@ -25,7 +25,7 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
 include(cmake/Dependencies.cmake)
 
-find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVFORMAT AVUTIL)
+find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVFORMAT AVUTIL SWRESAMPLE)
 if(AVFORMAT_VERSION VERSION_LESS 62)
     message(FATAL_ERROR
         "FFmpeg 8.0 or newer (libavformat >= 62) is required for legacy HEVC RTMP CodecID 12 support")

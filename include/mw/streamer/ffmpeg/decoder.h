@@ -1,6 +1,8 @@
 #ifndef MW_STREAMER_FFMPEG_DECODER_H_
 #define MW_STREAMER_FFMPEG_DECODER_H_
 
+#include <chrono>
+#include <cstdint>
 #include <string_view>
 
 #include "mw/export.h"
@@ -9,6 +11,7 @@
 #include "mw/streamer/ffmpeg/hw_device_context.h"
 #include "mw/streamer/ffmpeg/packet.h"
 #include "mw/streamer/ffmpeg/stream_info.h"
+#include "mw/streamer/performance/performance.h"
 
 namespace mw::streamer::ffmpeg {
 
@@ -18,7 +21,7 @@ enum class DecodeResult { kFrame, kNeedInput, kEnd };
 // Input owns packet queues, timestamp synthesis and playback scheduling.
 class MW_STREAMER_API Decoder {
  public:
-  virtual ~Decoder() = default;
+  virtual ~Decoder();
 
   Decoder(const Decoder&) = delete;
   Decoder& operator=(const Decoder&) = delete;
@@ -44,8 +47,22 @@ class MW_STREAMER_API Decoder {
   AVCodecContext* context() noexcept;
 
  private:
+  using PerformanceClock = std::chrono::steady_clock;
+  PerformanceClock::time_point BeginPerformanceWork() const noexcept;
+  void FinishPerformanceWork(PerformanceClock::time_point started,
+                             bool error = false, bool final = false) noexcept;
+  void CountPerformanceFrame(const AVFrame& frame) noexcept;
+  void ReportPerformance(bool final) noexcept;
+
   CodecContext context_;
   AVRational time_base_;
+  int stream_index_;
+  const char* performance_module_;
+  internal::PerformanceWindow performance_;
+  bool performance_enabled_ = false;
+  bool performance_trace_enabled_ = false;
+  bool performance_final_ = false;
+  std::int64_t performance_previous_pts_ = AV_NOPTS_VALUE;
 };
 
 class MW_STREAMER_API VideoDecoder final : public Decoder {

@@ -778,23 +778,22 @@ TEST_CASE("FFmpeg input seeks locally without rebasing media PTS or waiting") {
   CHECK(observer.HasNoNewCallbacks());
 }
 
-TEST_CASE("FFmpeg inputs share an output epoch before Ready callback waits") {
+TEST_CASE("FFmpeg inputs use preparation anchors on a shared epoch",
+          "[input][timing][startup]") {
   Observer first_observer;
   Observer delayed_observer;
   FfmpegInput first_input;
   FfmpegInput delayed_input;
   first_observer.Attach(first_input);
-  delayed_observer.SetReadyHook([] { std::this_thread::sleep_for(250ms); });
+  delayed_observer.SetReadyHook([] { std::this_thread::sleep_for(200ms); });
   delayed_observer.Attach(delayed_input);
   first_input.Start(SamplePath("h265_aac.mp4"));
   REQUIRE(first_observer.Wait(
       [](const auto& value) { return !value.frames.empty(); }));
-  // Deliberately distinct opening times expose an incorrectly per-input epoch.
-  std::this_thread::sleep_for(100ms);
+  first_input.Stop();
   delayed_input.Start(SamplePath("h265_aac.mp4"));
   REQUIRE(delayed_observer.Wait(
       [](const auto& value) { return !value.frames.empty(); }));
-  first_input.Stop();
   delayed_input.Stop();
   const auto first = first_observer.snapshot();
   const auto delayed = delayed_observer.snapshot();
@@ -804,20 +803,17 @@ TEST_CASE("FFmpeg inputs share an output epoch before Ready callback waits") {
   REQUIRE(delayed.ready_times.size() == 1);
   CheckTimestampMapping(first, 1);
   CheckTimestampMapping(delayed, 1);
-  const auto ready_gap =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          delayed.ready_times.front() - first.ready_times.front())
-          .count();
+  CHECK(first.frames.front().media_time == delayed.frames.front().media_time);
+  CHECK(delayed.frames.front().received - delayed.ready_times.front() >= 200ms);
   const auto timestamp_gap =
       delayed.frames.front().timestamp_ns - first.frames.front().timestamp_ns;
-  CHECK(ready_gap >= 100000000);
-  CHECK(std::abs(timestamp_gap - ready_gap) < 50000000);
-  CHECK(delayed.frames.front().received - delayed.ready_times.front() >= 250ms);
   const auto delivery_gap =
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           delayed.frames.front().received - first.frames.front().received)
           .count();
-  CHECK(delivery_gap - timestamp_gap >= 200000000);
+  // Both runs use the same epoch and media origin. Ready initialization must
+  // advance the first output timestamp along with its actual delivery time.
+  CHECK(std::abs(delivery_gap - timestamp_gap) < 100000000);
 }
 
 TEST_CASE("FFmpeg input Seek validates local active input and clears on Stop") {

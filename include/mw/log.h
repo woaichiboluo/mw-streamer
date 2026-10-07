@@ -34,7 +34,8 @@ typedef enum MwLogResult {
 
 typedef struct MwLogConfig {
   // Semicolon-separated module names with optional levels, for example
-  // "streamer;processor:debug;zlm:warn". A bare name uses info. Explicit
+  // "streamer;perf.input:info;perf.decoder.video:off". A bare name uses info.
+  // The default config enables the streamer performance summaries. Explicit
   // entries override the built-in info level for "default" and error level for
   // every other module.
   const char* modules;

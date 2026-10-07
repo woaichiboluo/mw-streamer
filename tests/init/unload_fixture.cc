@@ -12,6 +12,8 @@
 #include "mw/export.h"
 #include "mw/streamer/init/init.h"
 #include "mw/streamer/input/ffmpeg_input.h"
+#include "mw/streamer/processor/processor.h"
+#include "mw/streamer/scheduler/scheduler.h"
 
 extern "C" MW_EXPORT int RunLifecycle(const char* sample_path,
                                       const char* log_path) {
@@ -36,14 +38,43 @@ extern "C" MW_EXPORT int RunLifecycle(const char* sample_path,
       std::condition_variable changed;
       bool received = false;
       bool failed = false;
-      mw::streamer::FfmpegInput input;
-      input.SetOnFrame([&](int, const mw::streamer::ffmpeg::Frame& frame) {
+      mw::streamer::Processor processor;
+      mw::streamer::Scheduler output;
+      mw::streamer::ffmpeg::HwDeviceContext cpu(
+          mw::streamer::ffmpeg::HwDeviceType::kCpu);
+      const auto observe = [&](const mw::streamer::ffmpeg::Frame& frame) {
         {
           std::lock_guard<std::mutex> lock(mutex);
           received = frame->buf[0] && frame->data[0] &&
                      (frame->width > 0 || frame->nb_samples > 0);
         }
         changed.notify_all();
+      };
+      output.SetOnVideo([&](const mw::streamer::ffmpeg::Frame& frame) {
+        auto processed = processor.ProcessVideo(frame);
+        observe(processed);
+      });
+      output.SetOnAudio([&](const mw::streamer::ffmpeg::Frame& frame) {
+        auto processed = processor.ProcessAudio(frame);
+        observe(processed);
+      });
+      output.SetOnEnded([&] { processor.End(); });
+      mw::streamer::FfmpegInput input;
+      input.SetOnReady([&](const auto& streams) {
+        if (!processor.Start(streams, cpu) || !output.Start(streams)) {
+          {
+            std::lock_guard<std::mutex> lock(mutex);
+            failed = true;
+          }
+          changed.notify_all();
+        }
+      });
+      input.SetOnFrame([&](int, const mw::streamer::ffmpeg::Frame& frame) {
+        if (frame->nb_samples > 0) {
+          output.SubmitAudio(frame);
+        } else {
+          output.SubmitVideo(frame);
+        }
       });
       input.SetOnStateChanged(
           [&](mw::streamer::InputState state, int, std::string_view) {
@@ -54,6 +85,7 @@ extern "C" MW_EXPORT int RunLifecycle(const char* sample_path,
               }
               changed.notify_all();
             }
+            if (state == mw::streamer::InputState::kEnded) output.Drain();
           });
       input.Start(sample_path);
       bool completed;
@@ -63,6 +95,8 @@ extern "C" MW_EXPORT int RunLifecycle(const char* sample_path,
                                      [&] { return received || failed; });
       }
       input.Stop();
+      output.Stop();
+      processor.Stop();
       if (!completed || !received || failed) {
         throw std::runtime_error(
             "Unload fixture failed to decode a file frame");

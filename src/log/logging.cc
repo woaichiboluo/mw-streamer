@@ -21,7 +21,9 @@ namespace mw::log {
 namespace {
 
 constexpr std::string_view kDefaultModule = "default";
-constexpr char kDefaultModules[] = "streamer;processor;";
+constexpr char kDefaultModules[] =
+    "streamer;processor;perf.input;perf.decoder.video;perf.decoder.audio;"
+    "perf.scheduler;";
 constexpr std::string_view kLogPattern =
     "[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] %v";
 

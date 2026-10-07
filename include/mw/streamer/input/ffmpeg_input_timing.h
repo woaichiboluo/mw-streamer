@@ -11,7 +11,10 @@ extern "C" {
 
 namespace mw::streamer::internal {
 
-// Timestamp rules follow OBS Studio's media-playback media.c/decode.c.
+// Shared by input timestamp publication and output scheduling inside the
+// library.
+std::chrono::steady_clock::time_point SystemTimeBase() noexcept;
+
 // Keep estimates in nanoseconds; round only when publishing AVFrame fields.
 class FrameTiming final {
  public:
@@ -45,7 +48,7 @@ class FrameTiming final {
   void Flush() noexcept {
     pts_ns_ = 0;
     next_pts_ns_ = 0;
-    // OBS retains the last duration as the post-seek estimation fallback.
+    // Retain the last duration as the post-seek estimation fallback.
   }
 
  private:
@@ -64,7 +67,7 @@ class FrameTiming final {
       return last_duration_ns_;
     }
     // FFmpeg 8 no longer uses AVCodecContext::time_base for decoding. Use
-    // the stream's frame rate for OBS's final nominal-duration estimate.
+    // the stream's frame rate for the final nominal-duration estimate.
     return frame_rate_.num > 0 && frame_rate_.den > 0
                ? av_rescale_q(1, av_inv_q(frame_rate_), kNanoseconds)
                : 0;
@@ -79,7 +82,7 @@ class FrameTiming final {
   std::int64_t last_duration_ns_ = 0;
 };
 
-// Both tracks share OBS's scheduling clock and output timestamp mapping.
+// Both tracks share a scheduling clock and output timestamp mapping.
 // Discontinuities suppress the scheduling increment without changing the
 // output mapping or concealing accumulated lateness.
 class PlaybackClock final {
@@ -99,15 +102,15 @@ class PlaybackClock final {
            base_sys_ts_ns_;
   }
 
-  // OBS records play_sys_ts during preparation, but initializes next_ns on
-  // the first playback sleep. Keep these two wall-clock anchors separate.
+  // Preparation records the output timestamp anchor; delivery initializes
+  // the scheduling deadline. Keep these two wall-clock anchors separate.
   void StartDelivery(Clock::time_point now) noexcept { deadline_ = now; }
 
   Clock::time_point LoopDeadline(std::int64_t end_pts) const noexcept {
     return deadline_ + std::chrono::nanoseconds(end_pts - pts_ns_);
   }
 
-  // OBS accumulates absolute max(next_pts), even for a nonzero media origin.
+  // Accumulate absolute max(next_pts), even for a nonzero media origin.
   // Reopening must not establish a fresh wall clock or hide decoding delays.
   void EndLoop(std::int64_t end_pts) noexcept {
     base_ts_ns_ += end_pts;
@@ -127,12 +130,12 @@ class PlaybackClock final {
     pts_ns_ = pts;
   }
 
-  // OBS's seek_next_ts suppresses the first post-seek delta while retaining
+  // Suppress the first post-seek scheduling delta while retaining
   // the existing wall deadline. Subsequent frames advance normally.
   void Seek(std::int64_t pts) noexcept { pts_ns_ = pts; }
 
   bool CanDeliver(std::int64_t pts) const noexcept {
-    // OBS also releases a leading track with an anomalous >2s timestamp gap.
+    // Release a leading track with an anomalous >2s timestamp gap.
     return pts <= pts_ns_ || pts - pts_ns_ > 2000000000LL;
   }
 

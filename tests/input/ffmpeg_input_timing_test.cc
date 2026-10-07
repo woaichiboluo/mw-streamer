@@ -108,7 +108,7 @@ TEST_CASE("Seek changes the media anchor without moving the playback deadline",
 }
 
 TEST_CASE(
-    "OBS output timestamps share an epoch and preserve audio video offset",
+    "Output timestamps share an epoch and preserve audio video offset",
     "[input][timing][timestamp]") {
   const PlaybackClock::Clock::time_point epoch(2s);
   const PlaybackClock::Clock::time_point started(10s);
@@ -124,7 +124,7 @@ TEST_CASE(
   REQUIRE(second.Timestamp(100'100'000'000) == 8'350'000'000);
 }
 
-TEST_CASE("OBS seek preserves output mapping even when timestamps move back",
+TEST_CASE("Seek preserves output mapping even when timestamps move back",
           "[input][timing][timestamp][seek]") {
   const PlaybackClock::Clock::time_point started(10s);
   PlaybackClock clock(5'000'000'000, started,
@@ -141,7 +141,7 @@ TEST_CASE("OBS seek preserves output mapping even when timestamps move back",
   REQUIRE(clock.Timestamp(5'040'000'000) == 8'040'000'000);
 }
 
-TEST_CASE("OBS first playback sleep does not change the prepared output anchor",
+TEST_CASE("First playback sleep does not change the prepared output anchor",
           "[input][timing][timestamp]") {
   const PlaybackClock::Clock::time_point prepared(10s);
   PlaybackClock clock(5'000'000'000, prepared,
@@ -154,7 +154,7 @@ TEST_CASE("OBS first playback sleep does not change the prepared output anchor",
   REQUIRE(clock.Timestamp(5'040'000'000) == 8'040'000'000);
 }
 
-TEST_CASE("OBS loops accumulate absolute media end and retain clock debt",
+TEST_CASE("Loops accumulate absolute media end and retain clock debt",
           "[input][timing][timestamp][loop]") {
   const PlaybackClock::Clock::time_point started(10s);
   PlaybackClock clock(5'000'000'000, started,
@@ -175,7 +175,7 @@ TEST_CASE("OBS loops accumulate absolute media end and retain clock debt",
   }
 }
 
-TEST_CASE("OBS EOF offset preserves lateness and leading track timestamps",
+TEST_CASE("EOF offset preserves lateness and leading track timestamps",
           "[input][timing][timestamp][loop]") {
   const PlaybackClock::Clock::time_point started(10s);
   PlaybackClock clock(5'000'000'000, started);
@@ -192,7 +192,7 @@ TEST_CASE("OBS EOF offset preserves lateness and leading track timestamps",
   REQUIRE(clock.deadline() == started + 1040ms);
 }
 
-TEST_CASE("OBS reconnect creates a fresh mapping on the shared system epoch",
+TEST_CASE("Reconnect creates a fresh mapping on the shared system epoch",
           "[input][timing][timestamp][reconnect]") {
   const PlaybackClock::Clock::time_point epoch(2s);
   PlaybackClock old(5'000'000'000, PlaybackClock::Clock::time_point(10s),
@@ -229,13 +229,13 @@ TEST_CASE(
   REQUIRE(frame.pts == 2050);
 }
 
-TEST_CASE("Loop reopening retains OBS video duration estimation",
+TEST_CASE("Loop reopening retains video duration estimation",
           "[input][timing][loop]") {
   FrameTiming old({1, 1000}, {25, 1}, false);
   AVFrame frame = MakeFrame(1000, 100);
   old.Update(frame);
-  // Reset clears predicted media PTS but keeps last_duration in OBS. A new
-  // decoder here must carry that estimate, not fall back to nominal 40 ms.
+  // Reset clears predicted media PTS but keeps the last duration. A new
+  // decoder must carry that estimate, not fall back to nominal 40 ms.
   FrameTiming reopened({1, 90000}, {25, 1}, false, old.duration_ns());
   frame = MakeFrame(450000);
   reopened.Update(frame);

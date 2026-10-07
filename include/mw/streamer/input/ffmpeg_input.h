@@ -20,6 +20,7 @@
 #include "mw/streamer/ffmpeg/hw_device_context.h"
 #include "mw/streamer/ffmpeg/packet.h"
 #include "mw/streamer/ffmpeg/stream_info.h"
+#include "mw/streamer/performance/performance.h"
 
 struct AVFormatContext;
 
@@ -62,7 +63,7 @@ struct MW_STREAMER_API FfmpegInputConfig {
   std::size_t max_packet_buffer_bytes = 64 * 1024 * 1024;
 };
 
-// OBS media-playback-inspired, demand-driven reading, decoding and scheduling.
+// Demand-driven reading, decoding and scheduled frame delivery.
 // Requires Init(); destroy before Shutdown(). Set callbacks before Start().
 // A media worker owns each connection's reading, decoding and delivery. An
 // on-demand reconnect worker waits and creates the next media worker.
@@ -80,7 +81,7 @@ class MW_STREAMER_API FfmpegInput final {
   // The reference is callback-scoped; Packet::Ref() retains its buffers.
   using OnPacket =
       std::function<void(std::uint64_t generation, const ffmpeg::Packet&)>;
-  // Frame pts is OBS-style output time in nanoseconds, relative to the shared
+  // Frame pts is output time in nanoseconds, relative to the shared
   // monotonic epoch established by the first Input start. Frame time_base is
   // {1, 1000000000}; duration uses that same unit. StreamInfo still describes
   // the original input stream. best_effort_timestamp retains the decoder's
@@ -88,13 +89,13 @@ class MW_STREAMER_API FfmpegInput final {
   // pkt_dts is cleared because it does not belong to the output timeline.
   // Loops accumulate the previous cycle's absolute media end PTS; reconnects
   // map the new stream to current system time. Seek can move output pts back.
-  // Scheduling follows OBS: discontinuities do not rebase the clock, and a
+  // Timestamp discontinuities do not rebase the scheduling clock, and a
   // track leading by more than two seconds may be delivered early.
   // The reference is callback-scoped; Frame::Ref() retains its buffers.
   using OnFrame = std::function<void(int, const ffmpeg::Frame&)>;
   // State events run on either worker. Waiting retry runs on the reconnect
-  // worker; kStopped runs on the caller of Stop(). Ready/packet/frame callbacks
-  // run on the media worker for the current connection.
+  // worker; kStopped runs on the caller of Stop(). Ready/packet/frame
+  // callbacks run on the media worker for the current connection.
   using OnStateChanged = std::function<void(InputState, int, std::string_view)>;
 
   explicit FfmpegInput(FfmpegInputConfig config = {});
@@ -148,6 +149,11 @@ class MW_STREAMER_API FfmpegInput final {
   void NotifyState(InputState state, int error = 0,
                    std::string_view message = {});
   void SetIoDeadline(std::chrono::milliseconds timeout);
+  void RecordReadPerformance(const ffmpeg::Packet& packet, int result,
+                             std::int64_t duration_ns);
+  void ReportPerformance(bool final = false);
+  void WaitForPlayback(std::unique_lock<std::mutex>& lock,
+                       std::chrono::steady_clock::time_point deadline);
 
   FfmpegInputConfig config_;
   std::optional<ffmpeg::HwDeviceContext> video_device_;
@@ -167,7 +173,7 @@ class MW_STREAMER_API FfmpegInput final {
   std::thread reconnect_thread_;
   int retries_ = 0;
   std::uint64_t generation_ = 0;
-  // OBS retains the video duration estimate across EOF resets. Preserve it
+  // Retain the video duration estimate across EOF resets, preserving it
   // even though this Input reopens the decoder at each loop boundary.
   std::int64_t video_last_duration_ns_ = 0;
   std::string url_;
@@ -178,6 +184,15 @@ class MW_STREAMER_API FfmpegInput final {
   // First initialized tracks of the current Start() session.
   std::vector<ffmpeg::StreamInfo> ready_streams_;
   std::vector<std::unique_ptr<Track>> tracks_;
+  // Media workers serialize updates; Stop samples only after joining them.
+  bool performance_enabled_ = false;
+  bool performance_trace_enabled_ = false;
+  bool performance_session_active_ = false;
+  internal::PerformanceWindow performance_;
+  std::optional<std::int64_t> performance_reference_pts_ns_;
+  std::uint64_t performance_loops_ = 0;
+  std::uint64_t performance_seeks_ = 0;
+  std::size_t performance_peak_buffer_bytes_ = 0;
 };
 
 }  // namespace mw::streamer
