@@ -5,6 +5,7 @@
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/stdout_sinks.h>
+#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <atomic>
@@ -63,6 +64,12 @@ spdlog::level::level_enum ToSpdlogLevel(LogLevel level) noexcept {
       return spdlog::level::off;
   }
   return spdlog::level::off;
+}
+
+std::shared_ptr<spdlog::logger> DefaultLoggerFor(LogLevel level) {
+  if (level == LogLevel::kOff) return nullptr;
+  auto logger = spdlog::default_logger();
+  return logger && logger->should_log(ToSpdlogLevel(level)) ? logger : nullptr;
 }
 
 bool FromCLevel(MwLogLevel input, LogLevel* output) noexcept {
@@ -327,7 +334,11 @@ bool ShouldLog(std::string_view module, LogLevel level) noexcept {
   if (logging) {
     return logging->ShouldLog(module, level);
   }
-  return false;
+  try {
+    return DefaultLoggerFor(level) != nullptr;
+  } catch (...) {
+    return false;
+  }
 }
 
 void Write(std::string_view module, LogLevel level, const char* file,
@@ -336,6 +347,9 @@ void Write(std::string_view module, LogLevel level, const char* file,
     auto* logging = g_active_logging.load(std::memory_order_acquire);
     if (logging) {
       logging->Write(module, level, file, line, message);
+    } else if (auto logger = DefaultLoggerFor(level)) {
+      logger->log(ToSpdlogLevel(level), "[{}] {} [{}:{}]",
+                  NormalizeModule(module), message, FileName(file), line);
     }
   } catch (...) {
   }
@@ -349,6 +363,10 @@ void WriteFormattedArgs(std::string_view module, LogLevel level,
     auto* logging = g_active_logging.load(std::memory_order_acquire);
     if (logging) {
       logging->WriteFormatted(module, level, file, line, format, args);
+    } else if (auto logger = DefaultLoggerFor(level)) {
+      logger->log(ToSpdlogLevel(level), "[{}] {} [{}:{}]",
+                  NormalizeModule(module), fmt::vformat(format, args),
+                  FileName(file), line);
     }
   } catch (...) {
   }

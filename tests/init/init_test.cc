@@ -6,6 +6,12 @@
 
 #include "mw/streamer/input/ffmpeg_input.h"
 
+#ifdef MW_STREAMER_STATIC_LIBRARY
+#include "Common/MediaSource.h"
+#include "Common/Runtime.h"
+#include "Util/util.h"
+#endif
+
 namespace {
 
 using mw::streamer::FfmpegInput;
@@ -55,3 +61,43 @@ TEST_CASE(
   CHECK_NOTHROW(FfmpegInput());
   Close(context);
 }
+
+#ifdef MW_STREAMER_STATIC_LIBRARY
+TEST_CASE("streamer delegates its ZLM lifecycle and releases the null source") {
+  CHECK_THROWS_AS(mediakit::MediaSource::NullMediaSource(), std::logic_error);
+  for (int iteration = 0; iteration < 2; ++iteration) {
+    ContextOwner context(Init(TestConfig()), &Shutdown);
+    auto& source = mediakit::MediaSource::NullMediaSource();
+    std::weak_ptr<mediakit::MediaSource> lifetime = source.shared_from_this();
+    CHECK_FALSE(lifetime.expired());
+    CHECK(source.readerCount() == 0);
+    CHECK_THROWS_AS(mediakit::init(), std::logic_error);
+    Close(context);
+    CHECK(lifetime.expired());
+    CHECK_THROWS_AS(mediakit::MediaSource::NullMediaSource(), std::logic_error);
+    CHECK_THROWS_AS(toolkit::getCurrentMillisecond(), std::logic_error);
+  }
+}
+
+TEST_CASE("ZLM public lifecycle supports shutdown and reinitialization") {
+  mw::log::Logging logging(TestConfig().log);
+  mediakit::RuntimeConfig config;
+  config.event_poller_threads = 1;
+  config.work_threads = 1;
+  config.enable_cpu_affinity = false;
+  for (int iteration = 0; iteration < 2; ++iteration) {
+    std::weak_ptr<mediakit::MediaSource> lifetime;
+    {
+      const std::unique_ptr<mediakit::Runtime, decltype(&mediakit::shutdown)>
+          runtime(mediakit::init(config), &mediakit::shutdown);
+      lifetime = mediakit::MediaSource::NullMediaSource().shared_from_this();
+      CHECK_FALSE(lifetime.expired());
+      CHECK_NOTHROW(mediakit::shutdown(nullptr));
+      CHECK_THROWS_AS(mediakit::init(config), std::logic_error);
+    }
+    CHECK(lifetime.expired());
+  }
+  CHECK_THROWS_AS(mediakit::MediaSource::NullMediaSource(), std::logic_error);
+  CHECK_THROWS_AS(toolkit::getCurrentMillisecond(), std::logic_error);
+}
+#endif

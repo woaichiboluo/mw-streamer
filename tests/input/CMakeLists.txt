@@ -8,9 +8,11 @@ target_compile_definitions(mw_ffmpeg_input_tests PRIVATE
     MW_STREAMER_INPUT_TEST_DATA_DIR="${MW_STREAMER_TEST_DATA_DIR}"
 )
 target_link_libraries(mw_ffmpeg_input_tests PRIVATE
-    Catch2::Catch2 mw::streamer FFmpeg::avformat ZLMediaKit::MediaKit fmt::fmt)
+    Catch2::Catch2 FFmpeg::avformat ZLMediaKit::MediaKit fmt::fmt)
 if(BUILD_SHARED)
-    target_compile_definitions(mw_ffmpeg_input_tests PRIVATE MW_STREAMER_INPUT_TEST_SHARED)
+    target_link_libraries(mw_ffmpeg_input_tests PRIVATE mw_streamer_test_static)
+else()
+    target_link_libraries(mw_ffmpeg_input_tests PRIVATE mw::streamer)
 endif()
 add_test(NAME mw_ffmpeg_input_tests COMMAND mw_ffmpeg_input_tests)
 set_tests_properties(mw_ffmpeg_input_tests PROPERTIES TIMEOUT 60)

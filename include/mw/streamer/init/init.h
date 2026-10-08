@@ -20,12 +20,12 @@ struct MW_STREAMER_API InitConfig {
   bool enable_cpu_affinity = true;
 };
 
-// Creates the process-wide runtime. The caller must call Init() only once
-// and before using Inputs.
-// Initializes logging, FFmpeg and ZLM networking, and both ZLM pools. Requests
-// 1 ms timer resolution on Windows until Shutdown(). The
-// timestamp thread starts on the first request for time. Initialization
-// failures throw and release all resources acquired by this call.
+// Creates the process-wide runtime before using any ZLM-backed objects.
+// Only one context may be active; another Init() is allowed after Shutdown().
+// Initializes logging and FFmpeg, then delegates ZLM's owned resources to its
+// init/shutdown lifecycle. Requests 1 ms timer resolution on Windows until
+// Shutdown(). Initialization failures release resources acquired by this call
+// and propagate the exception.
 MW_STREAMER_API MwStreamerContext* Init(const InitConfig& config = {});
 
 // Call after destroying all Inputs, Schedulers, Processors and other

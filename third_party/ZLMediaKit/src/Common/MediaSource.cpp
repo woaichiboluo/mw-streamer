@@ -72,9 +72,22 @@ struct MediaSourceNull : public MediaSource {
     int readerCount() override { return 0; }
 };
 
+static atomic<MediaSource *> s_null_media_source{nullptr};
+
 MediaSource &MediaSource::NullMediaSource() {
-    static std::shared_ptr<MediaSource> s_null = std::make_shared<MediaSourceNull>();
-    return *s_null;
+    auto *source = s_null_media_source.load(memory_order_acquire);
+    if (!source) {
+        throw logic_error("NullMediaSource is not initialized");
+    }
+    return *source;
+}
+
+MediaSource::Ptr MediaSource::createNullMediaSource() {
+    return std::make_shared<MediaSourceNull>();
+}
+
+void MediaSource::setNullMediaSource(MediaSource *source) noexcept {
+    s_null_media_source.store(source, memory_order_release);
 }
 
 MediaSource::MediaSource(const string &schema, const MediaTuple& tuple): _tuple(tuple) {

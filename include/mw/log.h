@@ -56,6 +56,8 @@ MW_LOG_API void mw_log_default_config(MwLogConfig* config);
 MW_LOG_API MwLogResult mw_log_initialize(const MwLogConfig* config);
 MW_LOG_API void mw_log_shutdown(void);
 
+// Calls before initialization and after shutdown use spdlog's default logger
+// and level. Explicit configuration takes precedence, including disabled sinks.
 MW_LOG_API int mw_log_should_log(MwLogLevel level, const char* module,
                                  size_t module_size);
 MW_LOG_API void mw_log_write(MwLogLevel level, const char* module,

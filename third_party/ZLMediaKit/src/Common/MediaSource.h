@@ -408,6 +408,13 @@ public:
     static MediaSource& NullMediaSource();
     using Ptr = std::shared_ptr<MediaSource>;
 
+    // The runtime owns this source and destroys it before its timestamp clock.
+    // Installation is serialized before workers start and after they stop.
+    // NullMediaSource() borrows the installed source; references must not
+    // outlive the runtime. Access without an installed source throws.
+    static Ptr createNullMediaSource();
+    static void setNullMediaSource(MediaSource *source) noexcept;
+
     MediaSource(const std::string &schema, const MediaTuple& tuple);
     virtual ~MediaSource();
 

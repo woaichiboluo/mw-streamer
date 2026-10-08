@@ -35,26 +35,36 @@ else()
 endif()
 add_library(mw::streamer ALIAS mw_streamer)
 
-target_include_directories(mw_streamer
-    PUBLIC
-        "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
-)
-
-target_link_libraries(mw_streamer
-    PUBLIC
-        FFmpeg::avcodec
-        FFmpeg::avutil
-        ZLMediaKit::MediaKit
-    PRIVATE
-        mw::log
-        FFmpeg::avformat
-        FFmpeg::swresample
-        Threads::Threads
-        SRT::SRT
-        fmt::fmt
-        ZLMediaKit::ext-codec
-)
-
-if(WIN32)
-    target_link_libraries(mw_streamer PRIVATE winmm avrt)
+set(MW_STREAMER_TARGETS mw_streamer)
+if(BUILD_TESTS AND BUILD_SHARED)
+    # Fixtures using ZLM internals must share the SDK owned by Init/Shutdown.
+    add_library(mw_streamer_test_static STATIC EXCLUDE_FROM_ALL ${MW_STREAMER_SOURCES})
+    target_compile_definitions(mw_streamer_test_static PUBLIC MW_STREAMER_STATIC_LIBRARY)
+    list(APPEND MW_STREAMER_TARGETS mw_streamer_test_static)
 endif()
+
+foreach(streamer_target IN LISTS MW_STREAMER_TARGETS)
+    target_include_directories(${streamer_target}
+        PUBLIC
+            "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+    )
+
+    target_link_libraries(${streamer_target}
+        PUBLIC
+            FFmpeg::avcodec
+            FFmpeg::avutil
+        PRIVATE
+            ZLMediaKit::MediaKit
+            mw::log
+            FFmpeg::avformat
+            FFmpeg::swresample
+            Threads::Threads
+            SRT::SRT
+            fmt::fmt
+            ZLMediaKit::ext-codec
+    )
+
+    if(WIN32)
+        target_link_libraries(${streamer_target} PRIVATE winmm avrt)
+    endif()
+endforeach()
