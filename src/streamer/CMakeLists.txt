@@ -2,11 +2,13 @@ set(MW_STREAMER_SOURCES
     ffmpeg/codec_context.cc
     ffmpeg/codec_parameters.cc
     ffmpeg/decoder.cc
+    ffmpeg/encoder.cc
     ffmpeg/error.cc
     ffmpeg/frame.cc
     ffmpeg/hw_device_context.cc
     ffmpeg/packet.cc
     ffmpeg/stream_info.cc
+    encoder/encoder.cc
     init/init.cc
     input/ffmpeg_input.cc
     performance/performance.cc

@@ -386,6 +386,164 @@ void DecoderPerformance::Report(bool final) noexcept {
       report.total.eof, report.total.errors);
 }
 
+void EncoderPerformance::Start(const void* instance, bool video,
+                               bool audio) noexcept {
+  instance_ = instance;
+  video_ = {};
+  audio_ = {};
+  for (const bool is_video : {true, false}) {
+    auto& track = is_video ? video_ : audio_;
+    const auto* module = is_video ? "perf.encoder.video" : "perf.encoder.audio";
+    track.enabled = (is_video ? video : audio) &&
+                    mw::log::ShouldLog(module, mw::log::LogLevel::kInfo);
+    track.trace_enabled =
+        track.enabled && mw::log::ShouldLog(module, mw::log::LogLevel::kTrace);
+    track.active = track.enabled;
+    if (track.enabled) track.window.Reset();
+  }
+}
+
+void EncoderPerformance::AcceptVideo(std::size_t queued_frames,
+                                     bool skipped_picture) noexcept {
+  if (!video_.active) return;
+  ++video_.accepted;
+  ++video_.pending;
+  video_.queued_frames = queued_frames;
+  if (skipped_picture) ++video_.skipped_picture;
+}
+
+void EncoderPerformance::AcceptAudio(int samples,
+                                     std::size_t queued_frames) noexcept {
+  if (!audio_.active) return;
+  ++audio_.accepted;
+  audio_.pending += samples;
+  audio_.queued_frames = queued_frames;
+}
+
+void EncoderPerformance::VideoDiscarded(std::size_t queued_frames) noexcept {
+  if (!video_.active) return;
+  if (video_.pending) --video_.pending;
+  ++video_.discarded_start;
+  video_.queued_frames = queued_frames;
+}
+
+void EncoderPerformance::AudioDequeued(std::size_t queued_frames) noexcept {
+  if (audio_.active) audio_.queued_frames = queued_frames;
+}
+
+void EncoderPerformance::AudioDiscarded(int samples) noexcept {
+  if (!audio_.active) return;
+  audio_.pending -=
+      std::min(audio_.pending, static_cast<std::uint64_t>(samples));
+  audio_.discarded_start += samples;
+}
+
+void EncoderPerformance::Abandon(bool video) noexcept {
+  auto& track = video ? video_ : audio_;
+  if (!track.active) return;
+  track.discarded_start += track.pending;
+  track.pending = 0;
+  track.queued_frames = 0;
+}
+
+EncoderPerformance::TimePoint EncoderPerformance::Begin(
+    bool video) const noexcept {
+  return (video ? video_ : audio_).active ? PerformanceWindow::Clock::now()
+                                          : TimePoint{};
+}
+
+void EncoderPerformance::Encoded(bool video, TimePoint started, int samples,
+                                 bool repeated,
+                                 std::size_t queued_frames) noexcept {
+  auto& track = video ? video_ : audio_;
+  if (!track.active) return;
+  const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           PerformanceWindow::Clock::now() - started)
+                           .count();
+  track.window.AddWork(elapsed);
+  ++track.window.counters().frames;
+  track.window.counters().samples += samples;
+  const auto consumed = static_cast<std::uint64_t>(video ? 1 : samples);
+  track.pending -= std::min(track.pending, consumed);
+  if (video) {
+    track.queued_frames = queued_frames;
+    if (repeated) ++track.repeated;
+  }
+  Report(video);
+}
+
+void EncoderPerformance::Packet(bool video, int bytes) noexcept {
+  auto& track = video ? video_ : audio_;
+  if (!track.active) return;
+  ++track.window.counters().packets;
+  if (bytes > 0) track.window.counters().bytes += bytes;
+}
+
+void EncoderPerformance::Error(bool video) noexcept {
+  auto& track = video ? video_ : audio_;
+  if (track.active) ++track.window.counters().errors;
+}
+
+void EncoderPerformance::Finish() noexcept {
+  Report(true, true);
+  Report(false, true);
+}
+
+void EncoderPerformance::Report(bool video, bool final) noexcept {
+  auto& track = video ? video_ : audio_;
+  if (!track.active) return;
+  PerformanceReport report;
+  if (!track.window.Sample(report, final)) return;
+  const auto& overview = final ? report.total : report.interval;
+  const auto seconds = final ? report.elapsed_seconds : report.interval_seconds;
+  const auto accepted =
+      final ? track.accepted : track.accepted - track.previous_accepted;
+  track.previous_accepted = track.accepted;
+  const auto* module = video ? "perf.encoder.video" : "perf.encoder.audio";
+  const auto worker_ms =
+      PerformanceReport::Rate(overview.work_ns / 1e6, overview.work_calls);
+  if (video) {
+    MW_LOG_INFO(
+        module,
+        "Encoder[{}] report={} input_fps={:.1f} encoded_fps={:.1f} "
+        "payload_Mb_per_second={:.2f} queue_frames={} pending_frames={} "
+        "worker_mean_ms={:.2f} repeat_total={} skip_new_total={} errors={}",
+        instance_, final ? "summary" : "interval",
+        PerformanceReport::Rate(accepted, seconds),
+        PerformanceReport::Rate(overview.frames, seconds),
+        PerformanceReport::Rate(overview.bytes * 8.0 / 1e6, seconds),
+        track.queued_frames, track.pending, worker_ms, track.repeated,
+        track.skipped_picture, overview.errors);
+  } else {
+    MW_LOG_INFO(
+        module,
+        "Encoder[{}] report={} encoded_fps={:.1f} samples_per_second={:.0f} "
+        "payload_Mb_per_second={:.2f} queue_frames={} pending_samples={} "
+        "worker_mean_ms={:.2f} errors={}",
+        instance_, final ? "summary" : "interval",
+        PerformanceReport::Rate(overview.frames, seconds),
+        PerformanceReport::Rate(overview.samples, seconds),
+        PerformanceReport::Rate(overview.bytes * 8.0 / 1e6, seconds),
+        track.queued_frames, track.pending, worker_ms, overview.errors);
+  }
+  if (track.trace_enabled) {
+    const auto& total = report.total;
+    MW_LOG_TRACE(
+        module,
+        "Encoder[{}] final={} elapsed_s={:.3f} accepted={} encoded={} "
+        "samples={} packets={} payload_bytes={} repeated={} skipped_new={} "
+        "discarded_start_{}={} worker_calls={} worker_total_ms={:.3f} "
+        "worker_max_ms={:.3f} errors={} "
+        "worker_scope=frame_preparation_codec_packet_callback",
+        instance_, final, report.elapsed_seconds, track.accepted, total.frames,
+        total.samples, total.packets, total.bytes, track.repeated,
+        track.skipped_picture, video ? "frames" : "samples",
+        track.discarded_start, total.work_calls, total.work_ns / 1e6,
+        total.max_work_ns / 1e6, total.errors);
+  }
+  if (final) track.active = false;
+}
+
 void SchedulerPerformance::Start(const void* instance,
                                  AVRational video_frame_rate,
                                  int audio_sample_rate, int audio_block_samples,

@@ -208,6 +208,47 @@ class DecoderPerformance final {
   std::int64_t previous_pts_ = 0;
 };
 
+// Updates run under the owning Encoder's existing mutex. Worker time includes
+// frame allocation/transfer, codec calls and the packet callback.
+class EncoderPerformance final {
+ public:
+  using TimePoint = PerformanceWindow::TimePoint;
+
+  void Start(const void* instance, bool video, bool audio) noexcept;
+  void AcceptVideo(std::size_t queued_frames, bool skipped_picture) noexcept;
+  void AcceptAudio(int samples, std::size_t queued_frames) noexcept;
+  void VideoDiscarded(std::size_t queued_frames) noexcept;
+  void AudioDequeued(std::size_t queued_frames) noexcept;
+  void AudioDiscarded(int samples) noexcept;
+  void Abandon(bool video) noexcept;
+  TimePoint Begin(bool video) const noexcept;
+  void Encoded(bool video, TimePoint started, int samples = 0,
+               bool repeated = false, std::size_t queued_frames = 0) noexcept;
+  void Packet(bool video, int bytes) noexcept;
+  void Error(bool video) noexcept;
+  void Finish() noexcept;
+
+ private:
+  struct Track {
+    PerformanceWindow window;
+    std::uint64_t accepted = 0;
+    std::uint64_t previous_accepted = 0;
+    std::uint64_t skipped_picture = 0;
+    std::uint64_t repeated = 0;
+    std::uint64_t discarded_start = 0;
+    std::uint64_t pending = 0;
+    std::size_t queued_frames = 0;
+    bool enabled = false;
+    bool trace_enabled = false;
+    bool active = false;
+  };
+
+  void Report(bool video, bool final = false) noexcept;
+  const void* instance_ = nullptr;
+  Track video_;
+  Track audio_;
+};
+
 // All mutations are serialized by the owning Scheduler's existing mutex.
 class SchedulerPerformance {
  public:
