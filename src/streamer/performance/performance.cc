@@ -151,7 +151,8 @@ void InputPerformance::Report(std::uint64_t generation, InputState state,
   const auto& interval = report.interval;
   const auto& selected = final ? total : interval;
   const auto seconds = final ? report.elapsed_seconds : report.interval_seconds;
-  const auto selected_media_seconds = selected.media_ns / 1e9;
+  const auto selected_media_seconds =
+      static_cast<double>(selected.media_ns) / 1e9;
   const auto selected_speed =
       RateText(PerformanceReport::Rate(selected_media_seconds, seconds),
                selected.has_media && selected_media_seconds > 0 && seconds > 0);
@@ -162,22 +163,27 @@ void InputPerformance::Report(std::uint64_t generation, InputState state,
       "packet_buffer_MiB={:.2f} errors={}",
       instance_, final ? "summary" : "interval", StateName(state),
       PerformanceReport::Rate(selected.packets, seconds),
-      PerformanceReport::Rate(selected.bytes / 1048576.0, seconds),
+      PerformanceReport::Rate(static_cast<double>(selected.bytes) / 1048576.0,
+                              seconds),
       selected_speed.data(),
-      PerformanceReport::Rate(selected.work_ns / 1e6, selected.work_calls),
-      buffered / 1048576.0, selected.errors);
+      PerformanceReport::Rate(static_cast<double>(selected.work_ns) / 1e6,
+                              selected.work_calls),
+      static_cast<double>(buffered) / 1048576.0, selected.errors);
   if (!trace_enabled_) return;
-  const auto interval_media_seconds = interval.media_ns / 1e9;
-  const auto total_media_seconds = total.media_ns / 1e9;
+  const auto interval_media_seconds =
+      static_cast<double>(interval.media_ns) / 1e9;
+  const auto total_media_seconds = static_cast<double>(total.media_ns) / 1e9;
   const auto bitrate = RateText(
-      PerformanceReport::Rate(8.0 * interval.bytes, interval_media_seconds),
+      PerformanceReport::Rate(8.0 * static_cast<double>(interval.bytes),
+                              interval_media_seconds),
       interval.has_media && interval_media_seconds > 0);
   const auto speed = RateText(
       PerformanceReport::Rate(interval_media_seconds, report.interval_seconds),
       interval.has_media && interval_media_seconds > 0 &&
           report.interval_seconds > 0);
   const auto total_bitrate =
-      RateText(PerformanceReport::Rate(8.0 * total.bytes, total_media_seconds),
+      RateText(PerformanceReport::Rate(8.0 * static_cast<double>(total.bytes),
+                                       total_media_seconds),
                total.has_media && total_media_seconds > 0);
   const auto total_speed = RateText(
       PerformanceReport::Rate(total_media_seconds, report.elapsed_seconds),
@@ -202,15 +208,19 @@ void InputPerformance::Report(std::uint64_t generation, InputState state,
       PerformanceReport::Rate(interval.packets, report.interval_seconds),
       PerformanceReport::Rate(interval.bytes, report.interval_seconds),
       bitrate.data(), speed.data(), interval.work_calls,
-      PerformanceReport::Rate(interval.work_ns / 1e6, interval.work_calls),
-      interval.max_work_ns / 1e6, interval.eof, interval.errors, interval.again,
-      interval.wait_ns / 1e6, buffered, peak_buffer_bytes_, total.packets,
-      total.bytes,
+      PerformanceReport::Rate(static_cast<double>(interval.work_ns) / 1e6,
+                              interval.work_calls),
+      static_cast<double>(interval.max_work_ns) / 1e6, interval.eof,
+      interval.errors, interval.again,
+      static_cast<double>(interval.wait_ns) / 1e6, buffered, peak_buffer_bytes_,
+      total.packets, total.bytes,
       PerformanceReport::Rate(total.packets, report.elapsed_seconds),
       PerformanceReport::Rate(total.bytes, report.elapsed_seconds),
       total_bitrate.data(), total_speed.data(), total.work_calls,
-      total.work_ns / 1e6, total.max_work_ns / 1e6, total.eof, total.errors,
-      total.again, total.wait_ns / 1e6, total.reconnects, loops_, seeks_);
+      static_cast<double>(total.work_ns) / 1e6,
+      static_cast<double>(total.max_work_ns) / 1e6, total.eof, total.errors,
+      total.again, static_cast<double>(total.wait_ns) / 1e6, total.reconnects,
+      loops_, seeks_);
 }
 
 DecoderPerformance::DecoderPerformance(int stream_index) noexcept
@@ -243,7 +253,7 @@ void DecoderPerformance::PacketSent(TimePoint started, const AVPacket* packet,
     ++counters.again;
   } else if (result >= 0 && packet) {
     ++counters.packets;
-    counters.bytes += packet->size;
+    counters.bytes += static_cast<std::uint64_t>(packet->size);
   }
   Finish(started, result < 0 && result != AVERROR(EAGAIN));
 }
@@ -294,7 +304,8 @@ void DecoderPerformance::CountFrame(const AVFrame& frame) noexcept {
   ++counters.frames;
   std::int64_t media_ns = 0;
   if (!video_) {
-    if (frame.nb_samples > 0) counters.samples += frame.nb_samples;
+    if (frame.nb_samples > 0)
+      counters.samples += static_cast<std::uint64_t>(frame.nb_samples);
     if (frame.nb_samples > 0 && frame.sample_rate > 0)
       media_ns = av_rescale_q(frame.nb_samples, {1, frame.sample_rate},
                               {1, 1000000000});
@@ -328,12 +339,15 @@ void DecoderPerformance::Report(bool final) noexcept {
   const auto seconds = final ? report.elapsed_seconds : report.interval_seconds;
   char selected_speed[32] = "N/A";
   if (selected.has_media && selected.media_ns > 0 && seconds > 0) {
-    std::snprintf(selected_speed, sizeof(selected_speed), "%.3f",
-                  selected.media_ns / 1000000000.0 / seconds);
+    std::snprintf(
+        selected_speed, sizeof(selected_speed), "%.3f",
+        static_cast<double>(selected.media_ns) / 1000000000.0 / seconds);
   }
   const auto* backend = backend_;
   const auto api_ms_per_frame =
-      selected.frames ? selected.work_ns / 1000000.0 / selected.frames : 0.0;
+      selected.frames ? static_cast<double>(selected.work_ns) / 1000000.0 /
+                            static_cast<double>(selected.frames)
+                      : 0.0;
   if (video_) {
     MW_LOG_INFO(module_,
                 "Decoder instance={} report={} codec={} backend={} fps={:.1f} "
@@ -354,9 +368,9 @@ void DecoderPerformance::Report(bool final) noexcept {
   if (!trace_enabled_) return;
   char speed[32] = "N/A";
   if (report.total.has_media && report.elapsed_seconds > 0) {
-    std::snprintf(
-        speed, sizeof(speed), "%.3f",
-        report.total.media_ns / 1000000000.0 / report.elapsed_seconds);
+    std::snprintf(speed, sizeof(speed), "%.3f",
+                  static_cast<double>(report.total.media_ns) / 1000000000.0 /
+                      report.elapsed_seconds);
   }
   MW_LOG_TRACE(
       module_,
@@ -377,13 +391,15 @@ void DecoderPerformance::Report(bool final) noexcept {
       report.total.samples, rate(report.total.samples, report.elapsed_seconds),
       rate(report.interval.samples, report.interval_seconds), speed,
       report.elapsed_seconds, report.interval_seconds, report.total.work_calls,
-      report.total.work_ns / 1000000.0,
+      static_cast<double>(report.total.work_ns) / 1000000.0,
       report.total.work_calls
-          ? report.total.work_ns / 1000000.0 / report.total.work_calls
+          ? static_cast<double>(report.total.work_ns) / 1000000.0 /
+                static_cast<double>(report.total.work_calls)
           : 0.0,
-      report.interval.work_ns / 1000000.0, report.total.max_work_ns / 1000000.0,
-      report.interval.max_work_ns / 1000000.0, report.total.again,
-      report.total.eof, report.total.errors);
+      static_cast<double>(report.interval.work_ns) / 1000000.0,
+      static_cast<double>(report.total.max_work_ns) / 1000000.0,
+      static_cast<double>(report.interval.max_work_ns) / 1000000.0,
+      report.total.again, report.total.eof, report.total.errors);
 }
 
 void EncoderPerformance::Start(const void* instance, bool video,
@@ -416,7 +432,7 @@ void EncoderPerformance::AcceptAudio(int samples,
                                      std::size_t queued_frames) noexcept {
   if (!audio_.active) return;
   ++audio_.accepted;
-  audio_.pending += samples;
+  audio_.pending += static_cast<std::uint64_t>(samples);
   audio_.queued_frames = queued_frames;
 }
 
@@ -435,7 +451,7 @@ void EncoderPerformance::AudioDiscarded(int samples) noexcept {
   if (!audio_.active) return;
   audio_.pending -=
       std::min(audio_.pending, static_cast<std::uint64_t>(samples));
-  audio_.discarded_start += samples;
+  audio_.discarded_start += static_cast<std::uint64_t>(samples);
 }
 
 void EncoderPerformance::Abandon(bool video) noexcept {
@@ -462,7 +478,7 @@ void EncoderPerformance::Encoded(bool video, TimePoint started, int samples,
                            .count();
   track.window.AddWork(elapsed);
   ++track.window.counters().frames;
-  track.window.counters().samples += samples;
+  track.window.counters().samples += static_cast<std::uint64_t>(samples);
   const auto consumed = static_cast<std::uint64_t>(video ? 1 : samples);
   track.pending -= std::min(track.pending, consumed);
   if (video) {
@@ -476,7 +492,8 @@ void EncoderPerformance::Packet(bool video, int bytes) noexcept {
   auto& track = video ? video_ : audio_;
   if (!track.active) return;
   ++track.window.counters().packets;
-  if (bytes > 0) track.window.counters().bytes += bytes;
+  if (bytes > 0)
+    track.window.counters().bytes += static_cast<std::uint64_t>(bytes);
 }
 
 void EncoderPerformance::Error(bool video) noexcept {
@@ -500,8 +517,8 @@ void EncoderPerformance::Report(bool video, bool final) noexcept {
       final ? track.accepted : track.accepted - track.previous_accepted;
   track.previous_accepted = track.accepted;
   const auto* module = video ? "perf.encoder.video" : "perf.encoder.audio";
-  const auto worker_ms =
-      PerformanceReport::Rate(overview.work_ns / 1e6, overview.work_calls);
+  const auto worker_ms = PerformanceReport::Rate(
+      static_cast<double>(overview.work_ns) / 1e6, overview.work_calls);
   if (video) {
     MW_LOG_INFO(
         module,
@@ -511,7 +528,8 @@ void EncoderPerformance::Report(bool video, bool final) noexcept {
         instance_, final ? "summary" : "interval",
         PerformanceReport::Rate(accepted, seconds),
         PerformanceReport::Rate(overview.frames, seconds),
-        PerformanceReport::Rate(overview.bytes * 8.0 / 1e6, seconds),
+        PerformanceReport::Rate(static_cast<double>(overview.bytes) * 8.0 / 1e6,
+                                seconds),
         track.queued_frames, track.pending, worker_ms, track.repeated,
         track.skipped_picture, overview.errors);
   } else {
@@ -523,7 +541,8 @@ void EncoderPerformance::Report(bool video, bool final) noexcept {
         instance_, final ? "summary" : "interval",
         PerformanceReport::Rate(overview.frames, seconds),
         PerformanceReport::Rate(overview.samples, seconds),
-        PerformanceReport::Rate(overview.bytes * 8.0 / 1e6, seconds),
+        PerformanceReport::Rate(static_cast<double>(overview.bytes) * 8.0 / 1e6,
+                                seconds),
         track.queued_frames, track.pending, worker_ms, overview.errors);
   }
   if (track.trace_enabled) {
@@ -538,8 +557,9 @@ void EncoderPerformance::Report(bool video, bool final) noexcept {
         instance_, final, report.elapsed_seconds, track.accepted, total.frames,
         total.samples, total.packets, total.bytes, track.repeated,
         track.skipped_picture, video ? "frames" : "samples",
-        track.discarded_start, total.work_calls, total.work_ns / 1e6,
-        total.max_work_ns / 1e6, total.errors);
+        track.discarded_start, total.work_calls,
+        static_cast<double>(total.work_ns) / 1e6,
+        static_cast<double>(total.max_work_ns) / 1e6, total.errors);
   }
   if (final) track.active = false;
 }
@@ -614,21 +634,27 @@ void SchedulerPerformance::SkipVideoTicks(std::uint64_t count) noexcept {
 void SchedulerPerformance::RejectAudio(int samples) noexcept {
   if (!enabled_) return;
   ++audio_performance_.capacity_rejected;
-  audio_performance_.capacity_rejected_samples += samples;
+  audio_performance_.capacity_rejected_samples +=
+      static_cast<std::uint64_t>(samples);
 }
 
 void SchedulerPerformance::DropAudio(std::int64_t samples) noexcept {
-  if (enabled_) audio_performance_.dropped_source_samples += samples;
+  if (enabled_)
+    audio_performance_.dropped_source_samples +=
+        static_cast<std::uint64_t>(samples);
 }
 
 void SchedulerPerformance::ConsumeAudio(std::int64_t samples,
                                         bool discarded) noexcept {
   if (!enabled_) return;
   if (discarded) {
-    audio_performance_.dropped_source_samples += samples;
-    audio_performance_.late_source_samples += samples;
+    audio_performance_.dropped_source_samples +=
+        static_cast<std::uint64_t>(samples);
+    audio_performance_.late_source_samples +=
+        static_cast<std::uint64_t>(samples);
   } else {
-    audio_performance_.consumed_source_samples += samples;
+    audio_performance_.consumed_source_samples +=
+        static_cast<std::uint64_t>(samples);
   }
 }
 
@@ -659,7 +685,7 @@ void SchedulerPerformance::RecordDelivery(bool video, int samples,
   auto& performance = video ? video_performance_ : audio_performance_;
   auto& counters = performance.window.counters();
   ++counters.frames;
-  counters.samples += samples;
+  counters.samples += static_cast<std::uint64_t>(samples);
   if (callback) {
     ++performance.external_callback_calls;
     performance.external_callback_ns += elapsed;
@@ -681,9 +707,11 @@ void SchedulerPerformance::DeliverAudio(std::size_t index, int samples,
   if (!enabled_) return;
   RecordDelivery(false, samples, callback, elapsed);
   const auto copied = source_samples_[index];
-  audio_performance_.delivered_source_samples += copied;
+  audio_performance_.delivered_source_samples +=
+      static_cast<std::uint64_t>(copied);
   if (copied) ++audio_performance_.selected_new;
-  audio_performance_.zero_fill_samples += samples - copied;
+  audio_performance_.zero_fill_samples +=
+      static_cast<std::uint64_t>(samples - copied);
 }
 
 void SchedulerPerformance::Tick(bool video, Clock::time_point started,
@@ -721,12 +749,15 @@ void SchedulerPerformance::Log(bool video, std::size_t video_queue,
       static_cast<double>(report.interval.frames), report.interval_seconds);
   const auto source_fps = PerformanceReport::Rate(
       static_cast<double>(report.interval.packets), report.interval_seconds);
-  const auto callback_mean_ms = performance.external_callback_calls
-                                    ? performance.external_callback_ns / 1e6 /
-                                          performance.external_callback_calls
-                                    : 0;
-  const auto tick_mean_ms =
-      total.work_calls ? total.work_ns / 1e6 / total.work_calls : 0;
+  const auto callback_mean_ms =
+      performance.external_callback_calls
+          ? static_cast<double>(performance.external_callback_ns) / 1e6 /
+                static_cast<double>(performance.external_callback_calls)
+          : 0;
+  const auto tick_mean_ms = total.work_calls
+                                ? static_cast<double>(total.work_ns) / 1e6 /
+                                      static_cast<double>(total.work_calls)
+                                : 0;
   const auto& overview = final ? total : report.interval;
   const auto overview_seconds =
       final ? report.elapsed_seconds : report.interval_seconds;
@@ -764,12 +795,14 @@ void SchedulerPerformance::Log(bool video, std::size_t video_queue,
         performance.selected_new, performance.repeated, performance.late_old,
         performance.capacity_cleared, performance.capacity_rejected,
         performance.late_ticks, performance.skipped_ticks,
-        av_rescale_q_rnd(1, av_inv_q(video_frame_rate_),
-                         AVRational{1, 1000000000}, AV_ROUND_DOWN) /
+        static_cast<double>(av_rescale_q_rnd(1, av_inv_q(video_frame_rate_),
+                                             AVRational{1, 1000000000},
+                                             AV_ROUND_DOWN)) /
             1e6,
         video_queue, performance.external_callback_calls, callback_mean_ms,
-        performance.max_external_callback_ns / 1e6, total.work_calls,
-        tick_mean_ms, total.max_work_ns / 1e6, total.errors);
+        static_cast<double>(performance.max_external_callback_ns) / 1e6,
+        total.work_calls, tick_mean_ms,
+        static_cast<double>(total.max_work_ns) / 1e6, total.errors);
   } else {
     MW_LOG_INFO(
         "perf.scheduler",
@@ -815,15 +848,16 @@ void SchedulerPerformance::Log(bool video, std::size_t video_queue,
         performance.underload_ticks, performance.dropped_source_samples,
         performance.late_source_samples, performance.capacity_rejected,
         performance.capacity_rejected_samples, performance.late_ticks,
-        av_rescale_q_rnd(audio_block_samples_,
-                         AVRational{1, audio_sample_rate_},
-                         AVRational{1, 1000000000}, AV_ROUND_DOWN) /
+        static_cast<double>(av_rescale_q_rnd(
+            audio_block_samples_, AVRational{1, audio_sample_rate_},
+            AVRational{1, 1000000000}, AV_ROUND_DOWN)) /
             1e6,
         audio_queue,
         static_cast<double>(audio_queue) * 1000 / audio_sample_rate_,
         performance.external_callback_calls, callback_mean_ms,
-        performance.max_external_callback_ns / 1e6, total.work_calls,
-        tick_mean_ms, total.max_work_ns / 1e6, total.errors);
+        static_cast<double>(performance.max_external_callback_ns) / 1e6,
+        total.work_calls, tick_mean_ms,
+        static_cast<double>(total.max_work_ns) / 1e6, total.errors);
   }
 }
 

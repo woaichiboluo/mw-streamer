@@ -42,11 +42,11 @@ TEST_CASE("Scheduler音频输出线程切块后调用Processor并保留EOS尾样
     CHECK(output.sample_rate == 48000);
     CHECK(output.format == AV_SAMPLE_FMT_FLTP);
     REQUIRE(output.left.size() == static_cast<size_t>(output.samples));
-    for (int i = 0; i < output.samples; ++i) {
+    for (size_t i = 0; i < output.left.size(); ++i) {
       if (!content_started && output.left[i] == 0.0f) continue;
       content_started = true;
-      CHECK(output.left[i] == index / 4096.0f);
-      CHECK(output.right[i] == -index / 4096.0f);
+      CHECK(output.left[i] == static_cast<float>(index) / 4096.0f);
+      CHECK(output.right[i] == -static_cast<float>(index) / 4096.0f);
       ++index;
     }
   }

@@ -115,7 +115,7 @@ FrameRecord Record(const AVFrame& frame) {
     const int size =
         av_image_get_buffer_size(format, frame.width, frame.height, 1);
     ffmpeg::FfmpegException::throwIfError(size, "计算测试图像大小");
-    data.resize(size);
+    data.resize(static_cast<std::size_t>(size));
     ffmpeg::FfmpegException::throwIfError(
         av_image_copy_to_buffer(data.data(), size, frame.data, frame.linesize,
                                 format, frame.width, frame.height, 1),

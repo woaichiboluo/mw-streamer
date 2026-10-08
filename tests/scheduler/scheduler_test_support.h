@@ -151,8 +151,10 @@ inline ffmpeg::Frame Audio(int samples, int64_t pts = 0, int rate = 48000,
                                         "分配测试音频帧");
   for (int i = 0; i < samples; ++i) {
     if (format == AV_SAMPLE_FMT_FLTP) {
-      reinterpret_cast<float*>(frame->extended_data[0])[i] = i / 4096.0f;
-      reinterpret_cast<float*>(frame->extended_data[1])[i] = -i / 4096.0f;
+      reinterpret_cast<float*>(frame->extended_data[0])[i] =
+          static_cast<float>(i) / 4096.0f;
+      reinterpret_cast<float*>(frame->extended_data[1])[i] =
+          -static_cast<float>(i) / 4096.0f;
     } else if (format == AV_SAMPLE_FMT_S16) {
       auto* data = reinterpret_cast<int16_t*>(frame->extended_data[0]);
       data[i * 2] = 8192;

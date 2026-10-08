@@ -72,7 +72,7 @@ inline ffmpeg::Frame VideoFrame(int index) {
     const int value = plane == 0 ? 20 + index * 20 : 128;
     for (int row = 0; row < size; ++row) {
       std::memset(frame->data[plane] + row * frame->linesize[plane], value,
-                  size);
+                  static_cast<std::size_t>(size));
     }
   }
   return frame;

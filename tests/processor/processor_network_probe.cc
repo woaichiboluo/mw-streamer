@@ -138,9 +138,10 @@ struct Probe {
             frame->sample_rate,
             frame->format};
     if (!video && frame->format == AV_SAMPLE_FMT_FLTP) {
-      const auto* pcm = reinterpret_cast<const float*>(frame->extended_data[0]);
+      const auto* samples =
+          reinterpret_cast<const float*>(frame->extended_data[0]);
       for (int i = 0; i < frame->nb_samples; ++i) {
-        row.channel0_peak = std::max(row.channel0_peak, std::abs(pcm[i]));
+        row.channel0_peak = std::max(row.channel0_peak, std::abs(samples[i]));
       }
     }
     return row;
@@ -203,7 +204,7 @@ struct Probe {
       ++chunk;
     }
     if (chunk >= pcm.size() || sample < 0) return false;
-    value = pcm[chunk]->samples[sample];
+    value = pcm[chunk]->samples[static_cast<size_t>(sample)];
     pts = pcm[chunk]->pts + SamplesNs(sample);
     return true;
   }
@@ -305,7 +306,9 @@ struct Probe {
 double Percentile(std::vector<double> values, double percentile) {
   if (values.empty()) return 0;
   std::sort(values.begin(), values.end());
-  return values[static_cast<size_t>(std::ceil(values.size() * percentile)) - 1];
+  return values[static_cast<size_t>(std::ceil(
+                    static_cast<double>(values.size()) * percentile)) -
+                1];
 }
 
 bool Report(const Probe& probe) {
@@ -350,9 +353,10 @@ bool Report(const Probe& probe) {
       ++no_audio_pair;
       continue;
     }
-    const double difference = std::abs((video.pts - video.source_pts) -
-                                       (closest->pts - closest->source_pts)) /
-                              1e6;
+    const double difference =
+        static_cast<double>(std::abs((video.pts - video.source_pts) -
+                                     (closest->pts - closest->source_pts))) /
+        1e6;
     (video.wall < probe.started + 2'000'000'000 ? startup : skew)
         .push_back(difference);
   }

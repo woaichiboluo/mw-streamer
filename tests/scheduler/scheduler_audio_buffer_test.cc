@@ -21,7 +21,7 @@ ffmpeg::Frame SequenceAudio(int count, int first, std::int64_t pts,
                                         "分配调度回归音频");
   for (int i = 0; i < count; ++i) {
     if (format == AV_SAMPLE_FMT_FLTP) {
-      const auto sample = (first + i) / 4096.0f;
+      const auto sample = static_cast<float>(first + i) / 4096.0f;
       reinterpret_cast<float*>(frame->extended_data[0])[i] = sample;
       reinterpret_cast<float*>(frame->extended_data[1])[i] = -sample;
     } else {
@@ -171,15 +171,15 @@ TEST_CASE("窗口音频保留跨输入帧的真实样本顺序与尾样本", "[s
     const auto* left = reinterpret_cast<const float*>(frame->extended_data[0]);
     const auto* right = reinterpret_cast<const float*>(frame->extended_data[1]);
     for (int i = 0; i < frame->nb_samples; ++i) {
-      if (left[i] == 0) {
-        CHECK(right[i] == 0);
+      if (left[i] == 0.0f) {
+        CHECK(right[i] == 0.0f);
         // Source arrival may leave a real leading gap in the first window.
         CHECK_FALSE(saw_content);
         continue;
       }
       saw_content = true;
-      CHECK(left[i] == expected / 4096.0f);
-      CHECK(right[i] == -expected / 4096.0f);
+      CHECK(left[i] == static_cast<float>(expected) / 4096.0f);
+      CHECK(right[i] == -static_cast<float>(expected) / 4096.0f);
       ++expected;
     }
   }
@@ -207,13 +207,13 @@ TEST_CASE("独立Scheduler将打包音频转换后完整交付短尾帧", "[sche
     const auto* left = reinterpret_cast<const float*>(frame->extended_data[0]);
     const auto* right = reinterpret_cast<const float*>(frame->extended_data[1]);
     for (int i = 0; i < frame->nb_samples; ++i) {
-      if (!started && left[i] == 0) {
-        CHECK(right[i] == 0);
+      if (!started && left[i] == 0.0f) {
+        CHECK(right[i] == 0.0f);
         continue;
       }
       started = true;
-      CHECK(left[i] == expected / 32768.0f);
-      CHECK(right[i] == -expected / 32768.0f);
+      CHECK(left[i] == static_cast<float>(expected) / 32768.0f);
+      CHECK(right[i] == -static_cast<float>(expected) / 32768.0f);
       ++expected;
     }
   }
@@ -238,12 +238,13 @@ TEST_CASE("音频输入格式切换后归一输出且样本与PTS连续", "[sche
     const auto* left = reinterpret_cast<const float*>(frame->extended_data[0]);
     const auto* right = reinterpret_cast<const float*>(frame->extended_data[1]);
     for (int i = 0; i < frame->nb_samples; ++i) {
-      if (!started && left[i] == 0) {
-        CHECK(right[i] == 0);
+      if (!started && left[i] == 0.0f) {
+        CHECK(right[i] == 0.0f);
         continue;
       }
       started = true;
-      const float value = expected / (expected <= 480 ? 4096.0f : 32768.0f);
+      const float value =
+          static_cast<float>(expected) / (expected <= 480 ? 4096.0f : 32768.0f);
       CHECK(left[i] == value);
       CHECK(right[i] == -value);
       ++expected;
@@ -316,11 +317,11 @@ TEST_CASE("慢音频输出回调恢复后按历史窗口真正消费PCM", "[sche
     for (int i = 0; i < frame->nb_samples; ++i) {
       if (!left[i]) {
         CHECK(expected == 1);
-        CHECK(right[i] == 0);
+        CHECK(right[i] == 0.0f);
         continue;
       }
-      CHECK(left[i] == expected / 4096.0f);
-      CHECK(right[i] == -expected / 4096.0f);
+      CHECK(left[i] == static_cast<float>(expected) / 4096.0f);
+      CHECK(right[i] == -static_cast<float>(expected) / 4096.0f);
       ++expected;
     }
     if (index) {

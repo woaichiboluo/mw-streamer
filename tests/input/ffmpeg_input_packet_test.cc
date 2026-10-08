@@ -505,7 +505,7 @@ TEST_CASE("Packet-only loops keep original packets and advance generation",
   input.Stop();
   if (collector.error) std::rethrow_exception(collector.error);
   REQUIRE(collector.generations.size() == collector.packets.size());
-  for (std::uint64_t generation : {0, 1}) {
+  for (std::uint64_t generation : {0u, 1u}) {
     std::vector<ffmpeg::Packet> phase;
     for (size_t i = 0; i < collector.packets.size(); ++i) {
       if (collector.generations[i] == generation) {

@@ -107,9 +107,8 @@ TEST_CASE("Seek changes the media anchor without moving the playback deadline",
   }
 }
 
-TEST_CASE(
-    "Output timestamps share an epoch and preserve audio video offset",
-    "[input][timing][timestamp]") {
+TEST_CASE("Output timestamps share an epoch and preserve audio video offset",
+          "[input][timing][timestamp]") {
   const PlaybackClock::Clock::time_point epoch(2s);
   const PlaybackClock::Clock::time_point started(10s);
   PlaybackClock clock(5'000'000'000, started, epoch);

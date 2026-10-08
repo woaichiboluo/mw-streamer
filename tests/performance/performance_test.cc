@@ -169,7 +169,7 @@ TEST_CASE("实际Input解码调度日志匹配数据且模块可以独立关闭"
   {
     mw::streamer::Scheduler scheduler;
     scheduler.SetOnAudio([&](const auto& frame) noexcept {
-      output_samples += frame->nb_samples;
+      output_samples += static_cast<std::uint64_t>(frame->nb_samples);
     });
     mw::streamer::FfmpegInputConfig input_config;
     input_config.auto_reconnect = false;
@@ -188,7 +188,7 @@ TEST_CASE("实际Input解码调度日志匹配数据且模块可以独立关闭"
     });
     input.SetOnPacket([&](std::uint64_t, const auto& packet) noexcept {
       ++packets;
-      bytes += packet->size;
+      bytes += static_cast<std::uint64_t>(packet->size);
     });
     input.SetOnFrame([&](int, const auto& frame) noexcept {
       if (frame->width > 0) {
@@ -196,7 +196,7 @@ TEST_CASE("实际Input解码调度日志匹配数据且模块可以独立关闭"
         scheduler.SubmitVideo(frame);
       } else {
         ++audio_frames;
-        samples += frame->nb_samples;
+        samples += static_cast<std::uint64_t>(frame->nb_samples);
         scheduler.SubmitAudio(frame);
       }
     });

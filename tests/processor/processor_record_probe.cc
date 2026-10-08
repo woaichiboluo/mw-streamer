@@ -121,7 +121,8 @@ class AsyncEncoder {
         "ASYNC {}: submitted={}, encoded={}, queue_dropped={}, peak_queue={}, "
         "capacity={}, encode_work_ms={:.3f}, max_encode_ms={:.3f}\n",
         name_, submitted_, encoded_, dropped_, peak_, capacity_,
-        work_ns_ / 1000000.0, max_work_ns_ / 1000000.0);
+        static_cast<double>(work_ns_) / 1000000.0,
+        static_cast<double>(max_work_ns_) / 1000000.0);
     if (submitted_ != encoded_ + dropped_ && !errors_.failed.load())
       throw std::runtime_error("Async encoder lost unaccounted frames");
   }
@@ -575,8 +576,10 @@ int main(int argc, char* argv[]) {
         "OUTPUT VIDEO: callbacks={}, average_callback_ms={:.3f}, "
         "max_callback_ms={:.3f}, over_frame_period={}, encoding_drain_ms={}\n",
         video_callbacks,
-        video_callbacks ? callback_ns / 1000000.0 / video_callbacks : 0.0,
-        max_callback_ns / 1000000.0, late_callbacks,
+        video_callbacks ? static_cast<double>(callback_ns) / 1000000.0 /
+                              static_cast<double>(video_callbacks)
+                        : 0.0,
+        static_cast<double>(max_callback_ns) / 1000000.0, late_callbacks,
         std::chrono::duration_cast<std::chrono::milliseconds>(
             Clock::now() - encoding_drain_started)
             .count());

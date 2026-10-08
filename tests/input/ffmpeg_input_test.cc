@@ -389,7 +389,9 @@ class Observer final {
           }
           loop_offset_ = offset;
           value_.frames.push_back(
-              {index, frame->best_effort_timestamp * av_q2d(stream->time_base),
+              {index,
+               static_cast<double>(frame->best_effort_timestamp) *
+                   av_q2d(stream->time_base),
                Clock::now(), type, frame->best_effort_timestamp, generation_,
                std::this_thread::get_id(), frame->pts, frame->duration});
           if (type == AVMEDIA_TYPE_VIDEO && !retained_) {
@@ -511,7 +513,8 @@ class CallbackPause final {
 };
 
 size_t StateCount(const Observation& value, InputState state) {
-  return std::count(value.states.begin(), value.states.end(), state);
+  return static_cast<size_t>(
+      std::count(value.states.begin(), value.states.end(), state));
 }
 
 int64_t MediaPtsNs(const Observation& value, const FrameObservation& frame) {
@@ -603,14 +606,15 @@ ReferenceFrames DecodeReference(
       result.pts.push_back(frame->best_effort_timestamp);
       const double duration =
           frame->duration != 0
-              ? frame->duration * av_q2d(result.time_base)
+              ? static_cast<double>(frame->duration) * av_q2d(result.time_base)
               : (type == AVMEDIA_TYPE_AUDIO
                      ? static_cast<double>(frame->nb_samples) /
                            frame->sample_rate
                      : av_q2d(av_inv_q(raw->streams[index]->avg_frame_rate)));
       result.end_time = std::max(
-          result.end_time,
-          frame->best_effort_timestamp * av_q2d(result.time_base) + duration);
+          result.end_time, static_cast<double>(frame->best_effort_timestamp) *
+                                   av_q2d(result.time_base) +
+                               duration);
       result.drained_frames += draining;
       result.key_frames += (frame->flags & AV_FRAME_FLAG_KEY) != 0;
       frame.Unref();
@@ -725,7 +729,9 @@ TEST_CASE("FFmpeg input seeks locally without rebasing media PTS or waiting") {
     REQUIRE(delivered.size() == 1);
     CHECK(delivered.front().pts == video.pts.front());
     const auto previous = std::find_if(
-        value.frames.rbegin() + (value.frames.size() - begin),
+        value.frames.rbegin() +
+            static_cast<std::vector<FrameObservation>::difference_type>(
+                value.frames.size() - begin),
         value.frames.rend(),
         [](const auto& frame) { return frame.type == AVMEDIA_TYPE_VIDEO; });
     REQUIRE(previous != value.frames.rend());
@@ -847,7 +853,10 @@ TEST_CASE("FFmpeg input Seek validates local active input and clears on Stop") {
   input.Stop();
   const auto restarted = observer.snapshot();
   const auto first = std::find_if(
-      restarted.frames.begin() + stopped.frames.size(), restarted.frames.end(),
+      restarted.frames.begin() +
+          static_cast<std::vector<FrameObservation>::difference_type>(
+              stopped.frames.size()),
+      restarted.frames.end(),
       [](const auto& frame) { return frame.type == AVMEDIA_TYPE_VIDEO; });
   REQUIRE(first != restarted.frames.end());
   CHECK(first->media_time == 0);
@@ -902,9 +911,9 @@ TEST_CASE("FFmpeg input loops complete local audio video and B frames") {
   REQUIRE(video.has_b_frames > 0);
   REQUIRE(video.drained_frames > 0);
   REQUIRE_FALSE(audio.pts.empty());
-  const double media_begin =
-      std::min(video.pts.front() * av_q2d(video.time_base),
-               audio.pts.front() * av_q2d(audio.time_base));
+  const double media_begin = std::min(
+      static_cast<double>(video.pts.front()) * av_q2d(video.time_base),
+      static_cast<double>(audio.pts.front()) * av_q2d(audio.time_base));
   const double duration =
       std::max(video.end_time, audio.end_time) - media_begin;
   REQUIRE(duration >= 2.0);
@@ -1110,7 +1119,8 @@ TEST_CASE("FFmpeg input reports first failure and respects retry limits") {
   input.Start(server.url());
   REQUIRE(observer.WaitState(InputState::kFailed));
   const auto value = observer.snapshot();
-  const size_t retries = config.auto_reconnect ? config.max_retries : 0;
+  const size_t retries =
+      config.auto_reconnect ? static_cast<size_t>(config.max_retries) : 0;
   CHECK(value.ready == 0);
   CHECK(value.frames.empty());
   CHECK(value.error < 0);
@@ -1609,7 +1619,9 @@ TEST_CASE("FFmpeg packet-only input reconnects and checks the stream contract",
   CHECK(packets.load() == expected_packets);
   std::vector<std::uint64_t> expected_generations(expected_packets, 0);
   if (expected_retries) {
-    std::fill(expected_generations.begin() + first_cycle_packets,
+    std::fill(expected_generations.begin() +
+                  static_cast<std::vector<std::uint64_t>::difference_type>(
+                      first_cycle_packets),
               expected_generations.end(), 1);
   }
   CHECK(generations == expected_generations);
@@ -1697,7 +1709,9 @@ TEST_CASE("CUDA Input Seek keeps GPU frames and the external device",
       } else {
         const auto type = stream->codec_parameters.get()->codec_type;
         observed.frames.push_back(
-            {index, frame->best_effort_timestamp * av_q2d(stream->time_base),
+            {index,
+             static_cast<double>(frame->best_effort_timestamp) *
+                 av_q2d(stream->time_base),
              Clock::now(), type, frame->best_effort_timestamp, observed.ready,
              std::this_thread::get_id(), frame->pts, frame->duration});
         observed.valid &= frame->pts != AV_NOPTS_VALUE &&

@@ -320,7 +320,8 @@ TEST_CASE("FFmpeg RTMP input decodes legacy HEVC CodecID 12",
   CHECK(audio_frames >= 94);
   REQUIRE(video_time_base.num > 0);
   for (size_t i = 1; i < video_pts.size(); ++i) {
-    const auto elapsed = (video_pts[i] - video_pts[i - 1]) / 1000000000.0;
+    const auto elapsed =
+        static_cast<double>(video_pts[i] - video_pts[i - 1]) / 1000000000.0;
     CHECK(elapsed == Catch::Approx(0.1));
   }
   std::lock_guard<std::mutex> lock(server.state()->mutex);

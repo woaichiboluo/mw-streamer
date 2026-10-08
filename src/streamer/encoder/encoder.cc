@@ -549,9 +549,10 @@ void Encoder::RunAudio() noexcept {
                              : 1;
       const int stride = av_get_bytes_per_sample(audio_format_) *
                          (planes == 1 ? audio_layout_.nb_channels : 1);
-      std::vector<void*> data(planes);
+      std::vector<void*> data(static_cast<std::size_t>(planes));
       for (int plane = 0; plane < planes; ++plane) {
-        data[plane] = source->extended_data[plane] + offset * stride;
+        data[static_cast<std::size_t>(plane)] =
+            source->extended_data[plane] + offset * stride;
       }
       ffmpeg::FfmpegException::throwIfError(
           av_audio_fifo_realloc(fifo.get(),

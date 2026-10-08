@@ -66,7 +66,7 @@ ffmpeg::Frame VideoFrame(int index) {
     const int value = plane == 0 ? 32 + index : 128;
     for (int row = 0; row < size; ++row) {
       std::memset(frame->data[plane] + row * frame->linesize[plane], value,
-                  size);
+                  static_cast<std::size_t>(size));
     }
   }
   return frame;
@@ -86,9 +86,9 @@ ffmpeg::Frame AudioFrame(int samples, std::int64_t offset) {
   for (int channel = 0; channel < 2; ++channel) {
     auto* data = reinterpret_cast<float*>(frame->extended_data[channel]);
     for (int sample = 0; sample < samples; ++sample) {
-      data[sample] =
-          static_cast<float>(0.2 * std::sin(2 * 3.141592653589793 * 440 *
-                                            (offset + sample) / 48000));
+      data[sample] = static_cast<float>(
+          0.2 * std::sin(2 * 3.141592653589793 * 440 *
+                         static_cast<double>(offset + sample) / 48000));
     }
   }
   return frame;
@@ -161,6 +161,7 @@ std::array<double, 3> PixelError(const ffmpeg::Frame& source,
   REQUIRE(downloaded->height == decoded->height);
   std::array<double, 3> mean_squared_error{};
   for (int plane = 0; plane < 3; ++plane) {
+    const auto plane_index = static_cast<std::size_t>(plane);
     const int width = plane == 0 ? decoded->width : (decoded->width + 1) / 2;
     const int height = plane == 0 ? decoded->height : (decoded->height + 1) / 2;
     const int input_plane = plane == 0 ? 0 : 1;
@@ -172,10 +173,10 @@ std::array<double, 3> PixelError(const ffmpeg::Frame& source,
       for (int column = 0; column < width; ++column) {
         const int input_column = plane == 0 ? column : 2 * column + (plane - 1);
         const int difference = expected[input_column] - actual[column];
-        mean_squared_error[plane] += difference * difference;
+        mean_squared_error[plane_index] += difference * difference;
       }
     }
-    mean_squared_error[plane] /= width * height;
+    mean_squared_error[plane_index] /= width * height;
   }
   return mean_squared_error;
 }
@@ -281,7 +282,7 @@ TEST_CASE("视频编码背压重送与B帧排空保留图像和非零时间线",
   REQUIRE(frames.size() == kFrames);
   int b_frames = 0;
   for (int index = 0; index < kFrames; ++index) {
-    const auto& frame = frames[index];
+    const auto& frame = frames[static_cast<std::size_t>(index)];
     CHECK(frame->pts == 900000 + index * 3000);
     REQUIRE(frame->format == AV_PIX_FMT_YUV420P);
     REQUIRE(frame->width == 64);
@@ -358,7 +359,7 @@ TEST_CASE("音频编码保留共享起点偏移并排空AAC短尾及priming",
     const auto* samples =
         reinterpret_cast<const float*>(frame->extended_data[0]);
     for (int index = 0; index < frame->nb_samples; ++index) {
-      energy += samples[index] * samples[index];
+      energy += static_cast<double>(samples[index] * samples[index]);
     }
   }
   CHECK(decoded_samples >= offset);
@@ -508,11 +509,11 @@ TEST_CASE("CUDA解码编码共享外部设备且保留GPU输入帧",
                                                config.time_base));
       CHECK(output[index]->format != AV_PIX_FMT_CUDA);
       const auto error = PixelError(frames[index], output[index]);
-      for (int plane = 0; plane < 3; ++plane) {
+      for (std::size_t plane = 0; plane < maximum_mse.size(); ++plane) {
         maximum_mse[plane] = std::max(maximum_mse[plane], error[plane]);
       }
     }
-    for (int plane = 0; plane < 3; ++plane) {
+    for (std::size_t plane = 0; plane < maximum_mse.size(); ++plane) {
       CAPTURE(name, plane, maximum_mse[plane]);
       // MSE 25 corresponds to 34.15 dB PSNR for an 8-bit plane. At 2 Mbps
       // this small fixture must retain its pixels, including NV12 UV ordering.

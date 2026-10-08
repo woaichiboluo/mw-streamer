@@ -239,7 +239,7 @@ size_t MissingSeconds(const std::vector<Event>& events, int64_t first,
   }
   for (size_t i = 1; i < events.size(); ++i) {
     const auto distance = events[i].pts - events[i - 1].pts;
-    const auto seconds = std::lround(distance / 1e9);
+    const auto seconds = std::lround(static_cast<double>(distance) / 1e9);
     if (seconds > 1) missing += static_cast<size_t>(seconds - 1);
     if (seconds < 1 || events[i].id != ((events[i - 1].id + seconds) % 16))
       ++missing;
@@ -250,7 +250,9 @@ size_t MissingSeconds(const std::vector<Event>& events, int64_t first,
 double Percentile(std::vector<double> values, double percentile) {
   if (values.empty()) return 0;
   std::sort(values.begin(), values.end());
-  return values[static_cast<size_t>(std::ceil(percentile * values.size())) - 1];
+  return values[static_cast<size_t>(std::ceil(
+                    percentile * static_cast<double>(values.size()))) -
+                1];
 }
 
 Metrics Report(const char* name, const Stage& stage) {
@@ -279,8 +281,9 @@ Metrics Report(const char* name, const Stage& stage) {
     }
     used[closest] = true;
     const auto& audio = stage.audio[closest];
-    const double delta_pts = (audio.pts - video.pts) / 1e6;
-    const double delta_wall = (audio.sample_wall - video.sample_wall) / 1e6;
+    const double delta_pts = static_cast<double>(audio.pts - video.pts) / 1e6;
+    const double delta_wall =
+        static_cast<double>(audio.sample_wall - video.sample_wall) / 1e6;
     if (video.startup || audio.startup) {
       fmt::print("{} startup id={} pts_delta_ms={:.3f} wall_delta_ms={:.3f}\n",
                  name, video.id, delta_pts, delta_wall);

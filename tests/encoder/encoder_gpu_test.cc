@@ -65,11 +65,11 @@ std::vector<ffmpeg::Frame> ReadFrames(const ffmpeg::HwDeviceContext& device,
   std::unique_ptr<AVFormatContext, CloseInput> input(raw_input);
   ffmpeg::FfmpegException::throwIfError(
       avformat_find_stream_info(input.get(), nullptr), "读取编码迁移测试轨道");
-  const int index =
+  const int stream_index =
       av_find_best_stream(input.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-  ffmpeg::FfmpegException::throwIfError(index, "查找编码迁移测试视频");
-  const auto* source = input->streams[index];
-  stream = {index, ffmpeg::CodecParameters(*source->codecpar),
+  ffmpeg::FfmpegException::throwIfError(stream_index, "查找编码迁移测试视频");
+  const auto* source = input->streams[stream_index];
+  stream = {stream_index, ffmpeg::CodecParameters(*source->codecpar),
             source->time_base};
   ffmpeg::VideoDecoder decoder(stream, device, "hevc");
   std::vector<ffmpeg::Frame> frames;
@@ -78,7 +78,7 @@ std::vector<ffmpeg::Frame> ReadFrames(const ffmpeg::HwDeviceContext& device,
     const int result = av_read_frame(input.get(), packet.get());
     if (result == AVERROR_EOF) break;
     ffmpeg::FfmpegException::throwIfError(result, "读取编码迁移测试包");
-    if (packet->stream_index != index) continue;
+    if (packet->stream_index != stream_index) continue;
     while (!decoder.SendPacket(packet)) {
       AppendFrames(frames, ReceiveFrames(decoder));
     }
@@ -103,7 +103,8 @@ std::vector<ffmpeg::Frame> ReadFrames(const ffmpeg::HwDeviceContext& device,
       REQUIRE(frames[index]->hw_frames_ctx == nullptr);
     }
     frames[index]->time_base = kNanoseconds;
-    frames[index]->pts = kStartNs + index * kFrameDurationNs;
+    frames[index]->pts =
+        kStartNs + static_cast<std::int64_t>(index) * kFrameDurationNs;
     frames[index]->duration = kFrameDurationNs;
   }
   return frames;
@@ -130,6 +131,7 @@ std::array<double, 3> PixelError(const ffmpeg::Frame& source,
   REQUIRE(source->height == decoded->height);
   std::array<double, 3> errors{};
   for (int plane = 0; plane < 3; ++plane) {
+    const auto plane_index = static_cast<std::size_t>(plane);
     const int width = plane == 0 ? source->width : (source->width + 1) / 2;
     const int height = plane == 0 ? source->height : (source->height + 1) / 2;
     const bool interleaved = source->format == AV_PIX_FMT_NV12;
@@ -143,10 +145,10 @@ std::array<double, 3> PixelError(const ffmpeg::Frame& source,
         const int source_column =
             interleaved && plane > 0 ? 2 * column + plane - 1 : column;
         const int difference = expected[source_column] - actual[column];
-        errors[plane] += difference * difference;
+        errors[plane_index] += difference * difference;
       }
     }
-    errors[plane] /= width * height;
+    errors[plane_index] /= width * height;
   }
   return errors;
 }
@@ -336,8 +338,9 @@ TEST_CASE("软硬解码交叉编码机械上传下载并保留共享CUDA设备�
     const auto& packet = capture.packets[index];
     CHECK(packet->stream_index == output_stream.stream_index);
     CHECK(av_rescale_q(packet->pts, packet->time_base, kNanoseconds) ==
-          index * kFrameDurationNs);
-    CHECK(capture.dts_ns[index] == kStartNs + index * kFrameDurationNs);
+          static_cast<std::int64_t>(index) * kFrameDurationNs);
+    CHECK(capture.dts_ns[index] ==
+          kStartNs + static_cast<std::int64_t>(index) * kFrameDurationNs);
   }
   const auto decoded = DecodePackets(output_stream, capture.packets);
   REQUIRE(decoded.size() == input_frames.size());
@@ -347,10 +350,11 @@ TEST_CASE("软硬解码交叉编码机械上传下载并保留共享CUDA设备�
     CHECK(PixelHash(cpu_frames[index]) == cpu_hashes[index]);
     CHECK(PixelHash(Download(gpu_frames[index])) == hashes[index]);
     CHECK(av_rescale_q(decoded[index]->pts, decoded[index]->time_base,
-                       kNanoseconds) == index * kFrameDurationNs);
+                       kNanoseconds) ==
+          static_cast<std::int64_t>(index) * kFrameDurationNs);
     const auto errors = PixelError(
         gpu_input ? gpu_references[index] : cpu_frames[index], decoded[index]);
-    for (int plane = 0; plane < 3; ++plane) {
+    for (std::size_t plane = 0; plane < errors.size(); ++plane) {
       CAPTURE(plane, errors[plane]);
       CHECK(errors[plane] <= 25);
     }
@@ -425,10 +429,11 @@ TEST_CASE("外层CUDA编码支持CBR和带峰值上限的VBR", "[.][encoder][cud
     CHECK(packet->size > 0);
     CHECK(packet->stream_index == output.stream_index);
     CHECK(av_rescale_q(packet->pts, packet->time_base, kNanoseconds) ==
-          index * kFrameDurationNs);
+          static_cast<std::int64_t>(index) * kFrameDurationNs);
     CHECK(av_rescale_q(packet->dts, packet->time_base, kNanoseconds) ==
-          index * kFrameDurationNs);
-    CHECK(capture.dts_ns[index] == kStartNs + index * kFrameDurationNs);
+          static_cast<std::int64_t>(index) * kFrameDurationNs);
+    CHECK(capture.dts_ns[index] ==
+          kStartNs + static_cast<std::int64_t>(index) * kFrameDurationNs);
   }
   CHECK(DecodePackets(output, capture.packets).size() == kFrames);
 }

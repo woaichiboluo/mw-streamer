@@ -35,6 +35,41 @@ find_package(OpenSSL REQUIRED COMPONENTS SSL Crypto)
 find_package(SRT REQUIRED)
 
 add_subdirectory(third_party/ZLMediaKit EXCLUDE_FROM_ALL)
+
+# Keep dependency headers outside the first-party warning policy.
+foreach(dependency IN ITEMS zlmediakit ZLToolKit ext-codec)
+    get_target_property(dependency_include_dirs ${dependency} INTERFACE_INCLUDE_DIRECTORIES)
+    set_property(TARGET ${dependency} APPEND PROPERTY
+        INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${dependency_include_dirs}")
+endforeach()
+
+# Add options after dependencies so only first-party C++ targets inherit them.
+if(MSVC)
+    add_compile_options(
+        "$<$<COMPILE_LANGUAGE:CXX>:/W4;/WX;/permissive-;/Zc:__cplusplus>"
+    )
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set(MW_CXX_WARNING_OPTIONS
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Werror
+        -Wshadow
+        -Wconversion
+        -Wsign-conversion
+        -Wformat=2
+        -Wundef
+        -Wcast-qual
+        -Wcast-align
+        -Wnon-virtual-dtor
+        -Woverloaded-virtual
+        -Wold-style-cast
+        -Wnull-dereference
+        -Wdouble-promotion
+    )
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${MW_CXX_WARNING_OPTIONS}>")
+endif()
+
 add_subdirectory(src)
 target_link_libraries(ZLToolKit PUBLIC mw::log)
 

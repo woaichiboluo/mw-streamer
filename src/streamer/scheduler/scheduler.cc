@@ -826,7 +826,7 @@ void Scheduler::RunVideo() noexcept {
     if (next > tick) {
       if (performance_.enabled()) {
         std::lock_guard<std::mutex> lock(mutex_);
-        performance_.SkipVideoTicks(next - tick);
+        performance_.SkipVideoTicks(static_cast<std::uint64_t>(next - tick));
       }
       tick = next;
     }

@@ -132,7 +132,8 @@ int Probe(std::string_view url, int seconds, bool loop,
         return;
       }
       const auto now = Clock::now();
-      const auto pts = frame->pts * av_q2d(frame->time_base);
+      const auto pts =
+          static_cast<double>(frame->pts) * av_q2d(frame->time_base);
       const auto type = stream->info.codec_parameters.get()->codec_type;
       if (type == AVMEDIA_TYPE_VIDEO) {
         const bool gpu = frame->format == AV_PIX_FMT_CUDA;
@@ -161,7 +162,8 @@ int Probe(std::string_view url, int seconds, bool loop,
             std::chrono::duration<double>(now - result.started).count(), pts,
             frame->best_effort_timestamp == AV_NOPTS_VALUE
                 ? 0.0
-                : frame->best_effort_timestamp * av_q2d(stream->info.time_base),
+                : static_cast<double>(frame->best_effort_timestamp) *
+                      av_q2d(stream->info.time_base),
             static_cast<int>(type == AVMEDIA_TYPE_VIDEO &&
                              native_device != nullptr));
       }
@@ -222,7 +224,7 @@ int Probe(std::string_view url, int seconds, bool loop,
         stream.info.time_base.num, stream.info.time_base.den, parameters->width,
         parameters->height, parameters->sample_rate, stream.frames, active,
         stream.gpu_frames, frame_format ? frame_format : "none",
-        active > 0 ? (stream.frames - 1) / active : 0,
+        active > 0 ? static_cast<double>(stream.frames - 1) / active : 0,
         stream.last_pts - stream.first_pts);
     if (stream.retained && !stream.retained->get()->buf[0]) {
       result.invalid_frame = true;

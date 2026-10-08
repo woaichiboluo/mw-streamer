@@ -90,7 +90,7 @@ struct FfmpegInput::Track {
                                AVMEDIA_TYPE_VIDEO) {}
 
   void Push(ffmpeg::Packet packet) {
-    queued_bytes_ += packet->size;
+    queued_bytes_ += static_cast<std::size_t>(packet->size);
     packets_.push_back(std::move(packet));
   }
 
@@ -113,7 +113,7 @@ struct FfmpegInput::Track {
       if (!packets_.empty()) {
         // Receive returned kNeedInput, so Send cannot also return EAGAIN.
         input.SubmitPacket(packets_.front(), decoder_.get());
-        queued_bytes_ -= packets_.front()->size;
+        queued_bytes_ -= static_cast<std::size_t>(packets_.front()->size);
         packets_.pop_front();
       } else if (input_eof && !drain_sent_) {
         MW_LOG_TRACE("streamer", "Input轨道开始排空解码器: stream={}",

@@ -60,8 +60,12 @@ struct PerformanceReport {
   double elapsed_seconds = 0;
   double interval_seconds = 0;
 
-  static double Rate(double value, double seconds) noexcept {
-    return seconds > 0 ? value / seconds : 0;
+  // Keep counters integral until reporting; rates accept rounding to double.
+  template <typename Value, typename Time>
+  static double Rate(Value value, Time seconds) noexcept {
+    return seconds > 0
+               ? static_cast<double>(value) / static_cast<double>(seconds)
+               : 0;
   }
 };
 

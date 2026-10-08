@@ -32,13 +32,14 @@ TEST_CASE("满视频缓存重复最后画面并保留八个连续编码时刻",
   REQUIRE(capture.packets.size() == 8);
   REQUIRE(capture.streams.size() == 1);
   const auto& stream = capture.streams.front();
-  for (int index = 0; index < 8; ++index) {
+  for (std::size_t index = 0; index < capture.packets.size(); ++index) {
     const auto& packet = capture.packets[index];
     CHECK(packet->stream_index == stream.stream_index);
     CHECK(av_cmp_q(packet->time_base, stream.time_base) == 0);
     CHECK(av_rescale_q(packet->pts, packet->time_base, kNanoseconds) ==
-          index * kFrameInterval);
-    CHECK(capture.dts_ns[index] == kStart + index * kFrameInterval);
+          static_cast<std::int64_t>(index) * kFrameInterval);
+    CHECK(capture.dts_ns[index] ==
+          kStart + static_cast<std::int64_t>(index) * kFrameInterval);
   }
   CHECK(first->pts == kStart);
   CHECK(first->duration == kFrameInterval);
@@ -46,7 +47,7 @@ TEST_CASE("满视频缓存重复最后画面并保留八个连续编码时刻",
   const auto frames = Decode(decoder, capture.packets, stream.stream_index);
   REQUIRE(frames.size() == 8);
   constexpr int kPictures[] = {0, 1, 2, 3, 4, 5, 5, 5};
-  for (int index = 0; index < 8; ++index) {
+  for (std::size_t index = 0; index < frames.size(); ++index) {
     REQUIRE(frames[index]->format == AV_PIX_FMT_YUV420P);
     for (int plane = 0; plane < 3; ++plane) {
       const int size = plane == 0 ? 64 : 32;
@@ -85,10 +86,10 @@ TEST_CASE("纯音频按样本累计PTS并保留AAC编码延迟", "[encoder][audi
   CHECK(stream.codec_parameters.get()->ch_layout.nb_channels == 2);
   CHECK(av_cmp_q(stream.time_base, {1, 48000}) == 0);
   REQUIRE(capture.packets.size() == 4);
-  for (int index = 0; index < 4; ++index) {
+  for (std::size_t index = 0; index < capture.packets.size(); ++index) {
     const auto& packet = capture.packets[index];
     CHECK(packet->stream_index == stream.stream_index);
-    CHECK(packet->pts == (index - 1) * 1024);
+    CHECK(packet->pts == (static_cast<std::int64_t>(index) - 1) * 1024);
     CHECK(packet->dts == packet->pts);
     CHECK(capture.dts_ns[index] ==
           kStart + av_rescale_q(packet->dts, stream.time_base, kNanoseconds));
@@ -153,7 +154,7 @@ TEST_CASE("音频等待视频起点并裁剪提前二十毫秒的样本",
         reinterpret_cast<const float*>(frame->extended_data[0]);
     double mean = 0;
     for (int index = 256; index < frame->nb_samples; ++index)
-      mean += samples[index];
+      mean += static_cast<double>(samples[index]);
     mean /= frame->nb_samples - 256;
     CHECK(std::abs(mean - 0.1) < 0.05);
     checked_samples = true;
@@ -228,7 +229,7 @@ TEST_CASE("B帧延迟编码排空并保持原生DTS与同步域映射",
   CHECK(first_dts < 0);
   CHECK(capture.dts_ns.front() == kStart);
   std::vector<std::int64_t> presentation_times;
-  for (int index = 0; index < kFrames; ++index) {
+  for (std::size_t index = 0; index < capture.packets.size(); ++index) {
     const auto& packet = capture.packets[index];
     if (index > 0) CHECK(packet->dts > capture.packets[index - 1]->dts);
     CHECK(capture.dts_ns[index] ==
@@ -238,8 +239,8 @@ TEST_CASE("B帧延迟编码排空并保持原生DTS与同步域映射",
         av_rescale_q(packet->pts, packet->time_base, {1, 50}));
   }
   std::sort(presentation_times.begin(), presentation_times.end());
-  for (int index = 0; index < kFrames; ++index) {
-    CHECK(presentation_times[index] == index);
+  for (std::size_t index = 0; index < presentation_times.size(); ++index) {
+    CHECK(presentation_times[index] == static_cast<std::int64_t>(index));
   }
   const auto& stream = capture.streams.front();
   ffmpeg::VideoDecoder decoder(stream);
