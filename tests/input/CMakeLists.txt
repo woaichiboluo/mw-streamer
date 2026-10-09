@@ -18,6 +18,18 @@ endif()
 add_test(NAME mw_ffmpeg_input_tests COMMAND mw_ffmpeg_input_tests)
 set_tests_properties(mw_ffmpeg_input_tests PROPERTIES TIMEOUT 90)
 
+if(BUILD_SHARED)
+    # Exercise frame timing modes through the DLL's public Input API.
+    add_executable(mw_ffmpeg_input_public_tests
+        ffmpeg_input_speed_test.cc input_test_main.cc)
+    target_compile_definitions(mw_ffmpeg_input_public_tests PRIVATE
+        MW_STREAMER_INPUT_TEST_DATA_DIR="${MW_STREAMER_TEST_DATA_DIR}")
+    target_link_libraries(mw_ffmpeg_input_public_tests PRIVATE
+        Catch2::Catch2 FFmpeg::avformat mw::streamer fmt::fmt)
+    add_test(NAME mw_ffmpeg_input_public_tests COMMAND mw_ffmpeg_input_public_tests)
+    set_tests_properties(mw_ffmpeg_input_public_tests PROPERTIES TIMEOUT 45)
+endif()
+
 add_executable(mw_ffmpeg_input_timing_tests ffmpeg_input_timing_test.cc)
 target_include_directories(mw_ffmpeg_input_timing_tests PRIVATE
     "${PROJECT_SOURCE_DIR}/include")

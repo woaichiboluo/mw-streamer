@@ -33,6 +33,18 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+const char* ModeName(InputMode mode) {
+  switch (mode) {
+    case InputMode::kLive:
+      return "live";
+    case InputMode::kRemux:
+      return "remux";
+    case InputMode::kBatch:
+      return "batch";
+  }
+  return "unknown";
+}
+
 const char* StateName(InputState state) noexcept {
   switch (state) {
     case InputState::kIdle:
@@ -141,18 +153,24 @@ struct FfmpegInput::Track {
     return true;
   }
 
-  const ffmpeg::Frame& OutputFrame(const internal::PlaybackClock& playback) {
-    frame_->pts = playback.Timestamp(timing_.pts_ns());
-    frame_->time_base = {1, 1000000000};
-    frame_->duration = playback.ScaleTime(timing_.duration_ns());
-    if (frame_->nb_samples > 0) {
-      const auto rate =
-          av_rescale_q(frame_->sample_rate, playback.speed(), AVRational{1, 1});
-      if (rate <= 0 || rate > std::numeric_limits<int>::max()) {
-        throw std::invalid_argument("倍速音频采样率超出有效范围");
+  const ffmpeg::Frame& OutputFrame(const internal::PlaybackClock& playback,
+                                   InputMode mode) {
+    if (mode == InputMode::kLive) {
+      frame_->pts = playback.Timestamp(timing_.pts_ns());
+      frame_->duration = playback.ScaleTime(timing_.duration_ns());
+      if (frame_->nb_samples > 0) {
+        const auto rate = av_rescale_q(frame_->sample_rate, playback.speed(),
+                                       AVRational{1, 1});
+        if (rate <= 0 || rate > std::numeric_limits<int>::max()) {
+          throw std::invalid_argument("倍速音频采样率超出有效范围");
+        }
+        frame_->sample_rate = static_cast<int>(rate);
       }
-      frame_->sample_rate = static_cast<int>(rate);
+    } else {
+      frame_->pts = timing_.pts_ns();
+      frame_->duration = timing_.duration_ns();
     }
+    frame_->time_base = {1, 1000000000};
     frame_->pkt_dts = AV_NOPTS_VALUE;
     return frame_;
   }
@@ -199,18 +217,22 @@ struct FfmpegInput::Track {
 
 FfmpegInput::FfmpegInput(FfmpegInputConfig config)
     : config_(std::move(config)) {
-  if (config_.max_retries < -1 || config_.retry_interval.count() <= 0 ||
+  if ((config_.mode != InputMode::kLive && config_.mode != InputMode::kRemux &&
+       config_.mode != InputMode::kBatch) ||
+      config_.max_retries < -1 || config_.retry_interval.count() <= 0 ||
       config_.open_timeout.count() <= 0 || config_.read_timeout.count() <= 0 ||
       config_.max_packet_buffer_bytes == 0 ||
       !std::isfinite(config_.playback_speed) || config_.playback_speed < 0.5 ||
       config_.playback_speed > 8.0) {
     MW_LOG_ERROR(
         "streamer",
-        "Input配置无效: max_retries={}, retry_ms={}, open_timeout_ms={}, "
+        "Input配置无效: mode={}, max_retries={}, retry_ms={}, "
+        "open_timeout_ms={}, "
         "read_timeout_ms={}, packet_buffer_bytes={}, playback_speed={}",
-        config_.max_retries, config_.retry_interval.count(),
-        config_.open_timeout.count(), config_.read_timeout.count(),
-        config_.max_packet_buffer_bytes, config_.playback_speed);
+        static_cast<int>(config_.mode), config_.max_retries,
+        config_.retry_interval.count(), config_.open_timeout.count(),
+        config_.read_timeout.count(), config_.max_packet_buffer_bytes,
+        config_.playback_speed);
     throw std::invalid_argument("FFmpeg Input配置无效");
   }
 }
@@ -270,11 +292,11 @@ void FfmpegInput::Start(std::string_view url) {
   retries_ = 0;
   state_.store(InputState::kConnecting);
   MW_LOG_INFO("streamer",
-              "Input[{}]开始启动: protocol={}, decode={}, playback_speed={}, "
+              "Input[{}]开始启动: protocol={}, mode={}, playback_speed={}, "
               "video_device={}, loop={}, "
               "auto_reconnect={}, max_retries={}",
               static_cast<const void*>(this), protocol ? protocol : "unknown",
-              config_.decode, config_.playback_speed,
+              ModeName(config_.mode), config_.playback_speed,
               video_device_ && video_device_->get() ? "cuda" : "cpu",
               config_.loop, config_.auto_reconnect, config_.max_retries);
   try {
@@ -473,7 +495,7 @@ void FfmpegInput::OpenAttempt() {
                                   "Input没有音视频轨道");
   }
   // Compare the full selected stream set before opening any new decoder.
-  if (config_.decode) {
+  if (config_.mode != InputMode::kRemux) {
     for (const auto& info : streams_) {
       auto* stream = format_->streams[info.stream_index];
       const auto type = info.codec_parameters.get()->codec_type;
@@ -692,16 +714,17 @@ void FfmpegInput::PlayAttempt(internal::PlaybackClock& playback,
   const bool initialized = !ready_streams_.empty();
   if (initialized) {
     ++generation_;
-    MW_LOG_DEBUG("streamer", "Input[{}]恢复交付: generation={}, decode={}",
-                 static_cast<const void*>(this), generation_, config_.decode);
+    MW_LOG_DEBUG("streamer", "Input[{}]恢复交付: generation={}, mode={}",
+                 static_cast<const void*>(this), generation_,
+                 ModeName(config_.mode));
   } else {
     ready_streams_ = streams_;
-    MW_LOG_INFO("streamer", "Input[{}]轨道就绪: tracks={}, decode={}",
+    MW_LOG_INFO("streamer", "Input[{}]轨道就绪: tracks={}, mode={}",
                 static_cast<const void*>(this), ready_streams_.size(),
-                config_.decode);
+                ModeName(config_.mode));
     InvokeCallback(on_ready_, ready_streams_);
   }
-  if (!config_.decode) {
+  if (config_.mode == InputMode::kRemux) {
     PlayPackets(initialized);
     return;
   }
@@ -778,7 +801,7 @@ void FfmpegInput::PlayAttempt(internal::PlaybackClock& playback,
           // Non-key video still advances the shared media clock.
           if (decoder->ShouldDeliver()) {
             InvokeCallback(on_frame_, decoder->stream_index(),
-                           decoder->OutputFrame(playback));
+                           decoder->OutputFrame(playback, config_.mode));
           }
           decoder->Consume();
         }

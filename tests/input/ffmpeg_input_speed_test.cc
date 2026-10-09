@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <map>
@@ -15,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -22,6 +24,7 @@
 
 extern "C" {
 #include <libavformat/avformat.h>
+#include <libavutil/samplefmt.h>
 }
 
 #include "mw/streamer/ffmpeg/codec_context.h"
@@ -33,6 +36,7 @@ using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
 using mw::streamer::FfmpegInput;
 using mw::streamer::FfmpegInputConfig;
+using mw::streamer::InputMode;
 using mw::streamer::InputState;
 namespace ffmpeg = mw::streamer::ffmpeg;
 constexpr AVRational kNanoseconds{1, 1000000000};
@@ -189,6 +193,52 @@ std::int64_t MediaNs(const SpeedFrame& value,
                       reference.at(value.index).time_base, kNanoseconds);
 }
 
+void CheckBatchFrame(const SpeedFrame& value, const ReferenceTrack& track,
+                     const ffmpeg::Frame& expected) {
+  REQUIRE(expected->best_effort_timestamp != AV_NOPTS_VALUE);
+  CHECK(value.frame->best_effort_timestamp == expected->best_effort_timestamp);
+  CHECK(value.frame->pts == av_rescale_q(expected->best_effort_timestamp,
+                                         track.time_base, kNanoseconds));
+  CHECK(av_cmp_q(value.frame->time_base, kNanoseconds) == 0);
+  CHECK(value.frame->pkt_dts == AV_NOPTS_VALUE);
+  REQUIRE(expected->duration > 0);
+  CHECK(value.frame->duration ==
+        av_rescale_q(expected->duration, track.time_base, kNanoseconds));
+  REQUIRE(value.frame->nb_samples == expected->nb_samples);
+  if (expected->sample_rate <= 0) return;
+
+  CHECK(value.frame->sample_rate == expected->sample_rate);
+  REQUIRE(value.frame->format == expected->format);
+  REQUIRE(av_channel_layout_compare(&value.frame->ch_layout,
+                                    &expected->ch_layout) == 0);
+}
+
+void CheckAudioSamples(const ffmpeg::Frame& actual,
+                       const ffmpeg::Frame& expected) {
+  if (expected->sample_rate <= 0) return;
+  const auto format = static_cast<AVSampleFormat>(expected->format);
+  const bool planar = av_sample_fmt_is_planar(format) != 0;
+  const int planes = planar ? expected->ch_layout.nb_channels : 1;
+  const int bytes = expected->nb_samples * av_get_bytes_per_sample(format) *
+                    (planar ? 1 : expected->ch_layout.nb_channels);
+  REQUIRE(bytes > 0);
+  for (int plane = 0; plane < planes; ++plane) {
+    CHECK(std::memcmp(actual->extended_data[plane],
+                      expected->extended_data[plane],
+                      static_cast<std::size_t>(bytes)) == 0);
+  }
+}
+
+TEST_CASE("Input mode defaults to Live and rejects unknown values",
+          "[input][mode]") {
+  FfmpegInputConfig config;
+  CHECK(config.mode == InputMode::kLive);
+  config.mode = static_cast<InputMode>(-1);
+  CHECK_THROWS_AS(FfmpegInput{config}, std::invalid_argument);
+  config.mode = static_cast<InputMode>(3);
+  CHECK_THROWS_AS(FfmpegInput{config}, std::invalid_argument);
+}
+
 TEST_CASE("Input playback speed validates finite supported values",
           "[input][speed]") {
   FfmpegInputConfig config;
@@ -198,8 +248,141 @@ TEST_CASE("Input playback speed validates finite supported values",
                -std::numeric_limits<double>::infinity(),
                std::numeric_limits<double>::quiet_NaN());
   CHECK_THROWS_AS(FfmpegInput{config}, std::invalid_argument);
-  config.decode = false;
+  config.mode = InputMode::kRemux;
   CHECK_THROWS_AS(FfmpegInput{config}, std::invalid_argument);
+}
+
+TEST_CASE(
+    "Batch Input preserves media frames while pacing accelerated delivery",
+    "[input][mode][batch][speed]") {
+  const double speed = GENERATE(1.0, 8.0);
+  CAPTURE(speed);
+  const auto reference = DecodeSpeedReference(SpeedSamplePath());
+  REQUIRE(reference.size() == 2);
+  SpeedCollector collector;
+  FfmpegInputConfig config;
+  config.mode = InputMode::kBatch;
+  config.playback_speed = speed;
+  FfmpegInput input(config);
+  collector.Attach(input);
+  input.Start(SpeedSamplePath());
+  REQUIRE(collector.WaitForEnd());
+  input.Stop();
+  REQUIRE_FALSE(collector.failed);
+  REQUIRE_FALSE(collector.frames.empty());
+  CHECK(collector.ready == 1);
+  std::map<int, std::size_t> positions;
+  for (const auto& value : collector.frames) {
+    const auto& track = reference.at(value.index);
+    const auto position = positions[value.index]++;
+    REQUIRE(position < track.frames.size());
+    CHECK(value.generation == 0);
+    CheckBatchFrame(value, track, track.frames[position]);
+    CheckAudioSamples(value.frame, track.frames[position]);
+  }
+  // The reference drains delayed decoder frames at EOF, so these counts also
+  // detect lost tail frames when Batch delivery ends.
+  for (const auto& [index, track] : reference) {
+    CHECK(positions[index] == track.frames.size());
+  }
+  const auto& first = collector.frames.front();
+  const auto& last = collector.frames.back();
+  const double expected_elapsed =
+      static_cast<double>(MediaNs(last, reference) -
+                          MediaNs(first, reference)) /
+      speed / 1000000000.0;
+  const double elapsed =
+      std::chrono::duration<double>(last.received - first.received).count();
+  CHECK(elapsed >= expected_elapsed - 0.04);
+  CHECK(elapsed < expected_elapsed + 0.6);
+}
+
+TEST_CASE("Batch Input Seek retains source positions and audio video offsets",
+          "[input][mode][batch][seek]") {
+  const auto path = SpeedSamplePath("seek_h264_aac.mp4");
+  const auto reference = DecodeSpeedReference(path, 6s);
+  SpeedCollector collector;
+  FfmpegInputConfig config;
+  config.mode = InputMode::kBatch;
+  config.playback_speed = 8.0;
+  FfmpegInput input(config);
+  bool requested = false;
+  collector.Attach(input, [&](const auto& frame) {
+    if (frame->width > 0 && !requested) {
+      requested = true;
+      input.Seek(6s);
+    }
+  });
+  input.Start(path);
+  REQUIRE(collector.WaitForEnd());
+  input.Stop();
+  REQUIRE_FALSE(collector.failed);
+  REQUIRE(requested);
+  std::map<int, std::size_t> positions;
+  for (const auto& value : collector.frames) {
+    if (value.generation != 1) continue;
+    const auto& track = reference.at(value.index);
+    const auto position = positions[value.index]++;
+    REQUIRE(position < track.frames.size());
+    // The fresh reference decoder and Input's already-used decoder have
+    // different pre-seek histories. AAC Flush does not reset the PNS random
+    // state, so compare media positions and audio layout, not PCM bytes here.
+    CheckBatchFrame(value, track, track.frames[position]);
+  }
+  for (const auto& [index, track] : reference) {
+    CHECK(positions[index] == track.frames.size());
+  }
+  CHECK(collector.ready == 1);
+}
+
+TEST_CASE(
+    "Batch Input loops repeat media timestamps without shortening content",
+    "[input][mode][batch][loop]") {
+  SpeedCollector collector;
+  FfmpegInputConfig config;
+  config.mode = InputMode::kBatch;
+  config.playback_speed = 8.0;
+  config.loop = true;
+  FfmpegInput input(config);
+  collector.Attach(input);
+  input.Start(SpeedSamplePath("seek_tail_h264.mp4"));
+  REQUIRE(collector.WaitForFrames(2));
+  input.Stop();
+  REQUIRE_FALSE(collector.failed);
+  REQUIRE(collector.frames.size() >= 2);
+  CHECK(collector.frames[0].generation == 0);
+  CHECK(collector.frames[1].generation == 1);
+  for (const auto& value : collector.frames) {
+    CHECK(value.frame->pts == 0);
+    CHECK(value.frame->best_effort_timestamp == 0);
+    CHECK(value.frame->duration == 2000000000);
+  }
+  const auto elapsed =
+      collector.frames[1].received - collector.frames[0].received;
+  CHECK(elapsed >= 230ms);
+  CHECK(elapsed < 800ms);
+  CHECK(collector.ready == 1);
+}
+
+TEST_CASE("Batch Input slow synchronous callbacks constrain frame delivery",
+          "[input][mode][batch]") {
+  SpeedCollector collector;
+  FfmpegInputConfig config;
+  config.mode = InputMode::kBatch;
+  config.playback_speed = 8.0;
+  FfmpegInput input(config);
+  collector.Attach(input,
+                   [](const auto&) { std::this_thread::sleep_for(20ms); });
+  input.Start(SpeedSamplePath());
+  REQUIRE(collector.WaitForFrames(8));
+  input.Stop();
+  REQUIRE_FALSE(collector.failed);
+  REQUIRE(collector.frames.size() >= 8);
+  for (std::size_t index = 1; index < collector.frames.size(); ++index) {
+    CHECK(collector.frames[index].received -
+              collector.frames[index - 1].received >=
+          20ms);
+  }
 }
 
 TEST_CASE("Input playback speed scales decoded timelines and delivery",

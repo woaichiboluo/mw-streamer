@@ -298,7 +298,7 @@ TEST_CASE("SyncRemuxer原包直录保持H264 H265 AAC和单轨的解码内容",
   }
 }
 
-TEST_CASE("decode=false Input直接录制原包且不调用解码帧回调",
+TEST_CASE("Remux模式Input直接录制原包且不调用解码帧回调",
           "[remuxer][sync][input]") {
   Runtime runtime;
   OutputDirectory directory;
@@ -307,7 +307,7 @@ TEST_CASE("decode=false Input直接录制原包且不调用解码帧回调",
   mw::streamer::SyncRemuxer remuxer;
   notifications.Bind(remuxer);
   mw::streamer::FfmpegInputConfig config;
-  config.decode = false;
+  config.mode = mw::streamer::InputMode::kRemux;
   mw::streamer::FfmpegInput input(config);
   std::mutex mutex;
   std::condition_variable changed;

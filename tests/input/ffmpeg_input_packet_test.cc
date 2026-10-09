@@ -32,6 +32,7 @@ using namespace std::chrono_literals;
 namespace ffmpeg = mw::streamer::ffmpeg;
 using mw::streamer::FfmpegInput;
 using mw::streamer::FfmpegInputConfig;
+using mw::streamer::InputMode;
 using mw::streamer::InputState;
 
 std::string PacketSamplePath() {
@@ -353,16 +354,20 @@ class PacketPause final {
   std::shared_ptr<State> state_;
 };
 
-TEST_CASE("Input packet callbacks preserve native packets in both decode modes",
+TEST_CASE("Input packet callbacks preserve native packets in all input modes",
           "[input][packet]") {
-  bool decode = true;
+  auto mode = InputMode::kLive;
   double playback_speed = 1.0;
-  SECTION("decode with packet and frame delivery") {}
+  SECTION("Live mode delivers packets and frames") {}
   SECTION("accelerated decoding preserves recording packets") {
     playback_speed = 8.0;
   }
-  SECTION("packet only ignores decoder selection and playback speed") {
-    decode = false;
+  SECTION("Batch mode preserves packets alongside accelerated media frames") {
+    mode = InputMode::kBatch;
+    playback_speed = 8.0;
+  }
+  SECTION("Remux mode ignores decoder selection and playback speed") {
+    mode = InputMode::kRemux;
     playback_speed = 0.5;
   }
   const auto reference = ReadRawMedia(PacketSamplePath());
@@ -376,9 +381,9 @@ TEST_CASE("Input packet callbacks preserve native packets in both decode modes",
   const auto started = std::chrono::steady_clock::now();
   {
     FfmpegInputConfig config;
-    config.decode = decode;
+    config.mode = mode;
     config.playback_speed = playback_speed;
-    if (!decode) {
+    if (mode == InputMode::kRemux) {
       config.video_decoder_name = "missing_video_decoder";
       config.audio_decoder_name = "missing_audio_decoder";
     }
@@ -402,13 +407,13 @@ TEST_CASE("Input packet callbacks preserve native packets in both decode modes",
   CHECK(std::all_of(collector.generations.begin(), collector.generations.end(),
                     [](auto generation) { return generation == 0; }));
   size_t expected_frames = 0;
-  if (decode) {
+  if (mode != InputMode::kRemux) {
     for (const auto& stream : DecodeRawMedia(reference)) {
       expected_frames += stream.second.size();
     }
   }
   CHECK(collector.frames == expected_frames);
-  if (!decode) {
+  if (mode == InputMode::kRemux) {
     CHECK(std::chrono::steady_clock::now() - started < 1s);
   }
 }
@@ -419,7 +424,7 @@ TEST_CASE("Input packet callbacks can record a playable MP4 without decoding",
   PacketCollector collector;
   PacketRecording recording;
   FfmpegInputConfig config;
-  config.decode = false;
+  config.mode = InputMode::kRemux;
   config.playback_speed = 8.0;
   FfmpegInput input(config);
   collector.Attach(
@@ -453,7 +458,7 @@ TEST_CASE("Packet-only input executes Seek before reading subsequent packets",
   PacketCollector collector;
   PacketCollector restarted;
   FfmpegInputConfig config;
-  config.decode = false;
+  config.mode = InputMode::kRemux;
   FfmpegInput input(config);
   PacketPause pause;
   collector.Attach(input, {}, pause.hook());
@@ -503,7 +508,7 @@ TEST_CASE("Packet-only loops keep original packets and advance generation",
   REQUIRE_FALSE(source.packets.empty());
   PacketCollector collector;
   FfmpegInputConfig config;
-  config.decode = false;
+  config.mode = InputMode::kRemux;
   config.loop = true;
   FfmpegInput input(config);
   PacketPause pause(source.packets.size() * 2);

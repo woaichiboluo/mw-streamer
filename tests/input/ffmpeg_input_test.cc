@@ -38,6 +38,7 @@ using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
 using mw::streamer::FfmpegInput;
 using mw::streamer::FfmpegInputConfig;
+using mw::streamer::InputMode;
 using mw::streamer::InputState;
 namespace ffmpeg = mw::streamer::ffmpeg;
 
@@ -1582,7 +1583,7 @@ TEST_CASE("FFmpeg packet-only input reconnects and checks the stream contract",
 
   HttpServer server(ServerState::Response::kMedia);
   auto config = RetryConfig(1);
-  config.decode = false;
+  config.mode = InputMode::kRemux;
   InputState terminal = InputState::kEnded;
   std::size_t expected_retries = 1;
   SECTION("read failure resumes packets without another Ready") {

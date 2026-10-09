@@ -26,6 +26,12 @@ struct AVFormatContext;
 
 namespace mw::streamer {
 
+enum class InputMode {
+  kLive,   // Decoded frames on the speed-adjusted playback timeline.
+  kRemux,  // Original compressed packets, without decoding or playback waits.
+  kBatch,  // Decoded media frames; speed controls delivery only.
+};
+
 enum class InputState {
   kIdle,
   kConnecting,
@@ -45,10 +51,10 @@ class Decoder;
 
 struct MW_STREAMER_API FfmpegInputConfig {
   // Empty names select FFmpeg's default decoder for each track's codec_id.
+  // Decoder selection is ignored in kRemux.
   std::string video_decoder_name;
   std::string audio_decoder_name;
-  // Without decoding, deliver packets as read, without playback scheduling.
-  bool decode = true;
+  InputMode mode = InputMode::kLive;
   // EOF reopens the input while remaining connected; otherwise kEnded.
   bool loop = false;
   bool auto_reconnect = true;
@@ -61,9 +67,10 @@ struct MW_STREAMER_API FfmpegInputConfig {
   // Total queued compressed payload across the selected audio/video tracks.
   // An imbalanced or malformed source exceeding this limit fails explicitly.
   std::size_t max_packet_buffer_bytes = 64 * 1024 * 1024;
-  // Fixed decoded playback speed for this Input, in the finite range
-  // [0.5, 8.0]. Ignored when decode is false. Audio changes pitch with playback
-  // speed; its output sample rate is scaled and rounded to the nearest integer.
+  // Fixed decoded delivery speed, in the finite range [0.5, 8.0]. Ignored in
+  // kRemux. kLive scales frame timestamps and audio sample_rate (changing
+  // pitch); kBatch applies speed only to delivery waits, retaining media time
+  // and the decoded audio sample_rate. Processing can slow delivery.
   double playback_speed = 1.0;
 };
 
@@ -71,33 +78,41 @@ struct MW_STREAMER_API FfmpegInputConfig {
 // Requires Init(); destroy before Shutdown(). Set callbacks before Start().
 // A media worker owns each connection's reading, decoding and delivery. An
 // on-demand reconnect worker waits and creates the next media worker.
-// Callbacks must return promptly. Do not call Start/Stop from a callback.
+// kLive/kRemux callbacks must return promptly. kBatch frame callbacks may
+// process synchronously; Stop waits for the current callback to return.
+// Do not call Start/Stop from a callback.
 class MW_STREAMER_API FfmpegInput final {
  public:
   // Once per Start(), after stream initialization and before any packet/frame.
   // Loops/reconnects retain this contract; changed track formats fail input.
   using OnReady = std::function<void(const std::vector<ffmpeg::StreamInfo>&)>;
-  // Selected audio/video packets, once at submission, before decoding (if
-  // enabled). pts/dts/duration retain the original StreamInfo.time_base;
+  // Selected audio/video packets, once at submission, before decoding in
+  // kLive/kBatch. pts/dts/duration retain the original StreamInfo.time_base;
   // stream_index identifies the stream. Per-stream order is preserved.
   // generation starts at zero on each Start(), and increments on successful
   // loop/reconnect reopening or seeking, before submitting the next packet.
   // The reference is callback-scoped; Packet::Ref() retains its buffers.
   using OnPacket =
       std::function<void(std::uint64_t generation, const ffmpeg::Packet&)>;
-  // Frame pts is output time in nanoseconds, relative to the shared
-  // monotonic epoch established by the first Input start. Frame time_base is
-  // {1, 1000000000}; duration uses that same unit. StreamInfo still describes
-  // the original input stream. best_effort_timestamp retains the decoder's
-  // original media timestamp in StreamInfo.time_base (possibly AV_NOPTS_VALUE);
-  // pkt_dts is cleared because it does not belong to the output timeline.
-  // Playback speed scales output pts/duration and audio sample_rate, while
-  // StreamInfo, packet timestamps and best_effort_timestamp remain original.
-  // Loops accumulate the previous cycle's absolute media end PTS; reconnects
-  // map the new stream to current system time. Seek can move output pts back.
-  // Timestamp discontinuities do not rebase the scheduling clock, and a
-  // track leading by more than two seconds may be delivered early.
-  // The reference is callback-scoped; Frame::Ref() retains its buffers.
+  // No frame delivery in kRemux. Frame time_base is {1, 1000000000}; pts and
+  // duration use nanoseconds. StreamInfo still describes the original input.
+  //
+  // kLive pts is relative to the shared monotonic epoch established by the
+  // first Input start. Playback speed scales pts/duration and audio
+  // sample_rate. Loops accumulate the previous cycle's absolute media end PTS;
+  // reconnects map the new stream to current system time.
+  //
+  // kBatch pts/duration retain media time (estimated when missing), without
+  // rebasing or speed scaling; audio sample_rate and samples remain original.
+  // Loops/reconnects expose the reopened source's media time again.
+  //
+  // In both decoded modes,
+  // best_effort_timestamp retains the decoder's original timestamp in
+  // StreamInfo.time_base (possibly AV_NOPTS_VALUE), and pkt_dts is cleared.
+  // Seek can move frame pts backward. Timestamp discontinuities do not rebase
+  // the scheduling clock, and a track leading by more than two seconds may be
+  // delivered early. The reference is callback-scoped; Frame::Ref() retains its
+  // buffers.
   using OnFrame = std::function<void(int, const ffmpeg::Frame&)>;
   // State events run on either worker. Waiting retry runs on the reconnect
   // worker; kStopped runs on the caller of Stop(). Ready/packet/frame

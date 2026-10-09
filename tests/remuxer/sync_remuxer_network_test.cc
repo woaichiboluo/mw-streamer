@@ -247,7 +247,8 @@ TEST_CASE("原包同步录制器连续两代RTSP发布可接收H264或H265及AAC
     const auto port = ReservePort();
     remuxer.AddRtspPublish("sync", "original", "127.0.0.1", port);
     mw::streamer::FfmpegInputConfig config;
-    config.decode = config.auto_reconnect = false;
+    config.mode = mw::streamer::InputMode::kRemux;
+    config.auto_reconnect = false;
     config.open_timeout = 8s;
     config.read_timeout = 3s;
     mw::streamer::FfmpegInput client(config);
