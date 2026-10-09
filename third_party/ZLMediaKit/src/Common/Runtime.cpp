@@ -16,6 +16,7 @@
 #include <string>
 
 #include "Common/MediaSource.h"
+#include "Http/HttpCookieManager.h"
 #include "Network/sockutil.h"
 #include "Poller/EventPoller.h"
 #include "Thread/WorkThreadPool.h"
@@ -37,6 +38,14 @@ std::atomic<bool> s_runtime_active { false };
 class Runtime {
 public:
     ~Runtime() {
+        // Cookie attachments contain timestamp users and reader references;
+        // their expiration timer also retains a poller. Release them before
+        // closing the pools, while the timestamp clock is still installed.
+        if (_http_cookie_manager) {
+            _http_cookie_manager->shutdown();
+            HttpCookieManager::setInstance(nullptr);
+            _http_cookie_manager.reset();
+        }
 #ifdef ENABLE_SRT
         if (_srt_reactor) {
             _srt_reactor->shutdown();
@@ -93,6 +102,8 @@ public:
         toolkit::EventPollerPool::setInstance(_event_pool.get());
         _work_pool = toolkit::WorkThreadPool::createPool();
         toolkit::WorkThreadPool::setInstance(_work_pool.get());
+        _http_cookie_manager = HttpCookieManager::createManager();
+        HttpCookieManager::setInstance(_http_cookie_manager.get());
 #ifdef ENABLE_SRT
         _srt_reactor = SrtEpollReactor::createReactor();
         SrtEpollReactor::setInstance(_srt_reactor.get());
@@ -105,6 +116,7 @@ private:
     MediaSource::Ptr _null_media_source;
     std::unique_ptr<toolkit::EventPollerPool> _event_pool;
     std::unique_ptr<toolkit::WorkThreadPool> _work_pool;
+    HttpCookieManager::Ptr _http_cookie_manager;
 #ifdef ENABLE_SRT
     std::unique_ptr<SrtEpollReactor> _srt_reactor;
 #endif

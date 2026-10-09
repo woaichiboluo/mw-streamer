@@ -1,5 +1,3 @@
-#include "mw/streamer/remuxer/media_timestamp_converter.h"
-
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
 #include <cstdint>
@@ -9,6 +7,7 @@
 #include <vector>
 
 #include "../encoder/encoder_test_support.h"
+#include "mw/streamer/remuxer/media_timestamp_converter.h"
 
 namespace {
 
@@ -38,7 +37,7 @@ ffmpeg::Packet Packet(const ffmpeg::StreamInfo& stream, std::int64_t pts,
 }
 
 TEST_CASE("视频以首个PTS归零且保留负DTS和B帧展示次序",
-          "[remuxer][timestamp][video]") {
+          "[remuxer][async][timestamp][video]") {
   const auto stream = Video();
   MediaTimestampConverter converter({stream});
   auto first = Packet(stream, 100, 98);
@@ -61,7 +60,7 @@ TEST_CASE("视频以首个PTS归零且保留负DTS和B帧展示次序",
 }
 
 TEST_CASE("AAC保留负priming和零起点或平移正DTS入口",
-          "[remuxer][timestamp][audio]") {
+          "[remuxer][async][timestamp][audio]") {
   const auto stream = Audio();
   MediaTimestampConverter converter({stream});
   SECTION("负priming不作为归零偏移") {
@@ -90,7 +89,7 @@ TEST_CASE("AAC保留负priming和零起点或平移正DTS入口",
 }
 
 TEST_CASE("轨道独立初始化且接受等价完整时间基而不累计漂移",
-          "[remuxer][timestamp][timebase]") {
+          "[remuxer][async][timestamp][timebase]") {
   const auto video = Video({1001, 30000});
   const auto audio = Audio();
   MediaTimestampConverter converter({video, audio});
@@ -113,7 +112,7 @@ TEST_CASE("轨道独立初始化且接受等价完整时间基而不累计漂移
 }
 
 TEST_CASE("Reset为新会话重新确定每条轨道的首包偏移",
-          "[remuxer][timestamp][reset]") {
+          "[remuxer][async][timestamp][reset]") {
   const auto video = Video();
   const auto audio = Audio();
   MediaTimestampConverter converter({video, audio});
@@ -129,7 +128,8 @@ TEST_CASE("Reset为新会话重新确定每条轨道的首包偏移",
   CHECK(new_audio.dts_ns == -21333333);
 }
 
-TEST_CASE("拒绝非法轨道配置和重复索引", "[remuxer][timestamp][validation]") {
+TEST_CASE("拒绝非法轨道配置和重复索引",
+          "[remuxer][async][timestamp][validation]") {
   auto stream = Video();
   SECTION("负索引") { stream.stream_index = -1; }
   SECTION("零时间基") { stream.time_base = {0, 25}; }
@@ -148,7 +148,7 @@ TEST_CASE("拒绝非法轨道配置和重复索引", "[remuxer][timestamp][valid
 }
 
 TEST_CASE("非法包不建立或改变轨道偏移且原包保持不变",
-          "[remuxer][timestamp][validation]") {
+          "[remuxer][async][timestamp][validation]") {
   const auto stream = Video();
   MediaTimestampConverter converter({stream});
   auto invalid = Packet(stream, 900, 898);
@@ -174,7 +174,7 @@ TEST_CASE("非法包不建立或改变轨道偏移且原包保持不变",
 }
 
 TEST_CASE("平移或纳秒溢出不会确定失败首包的偏移",
-          "[remuxer][timestamp][overflow]") {
+          "[remuxer][async][timestamp][overflow]") {
   const auto stream = Video();
   MediaTimestampConverter converter({stream});
   constexpr auto minimum = std::numeric_limits<std::int64_t>::min();
@@ -202,7 +202,7 @@ TEST_CASE("平移或纳秒溢出不会确定失败首包的偏移",
 }
 
 TEST_CASE("音频PTS纳秒溢出不改变首次正DTS归零",
-          "[remuxer][timestamp][overflow]") {
+          "[remuxer][async][timestamp][overflow]") {
   const auto stream = Audio();
   MediaTimestampConverter converter({stream});
   CHECK_THROWS_AS(converter.Convert(Packet(
@@ -214,7 +214,7 @@ TEST_CASE("音频PTS纳秒溢出不改变首次正DTS归零",
 }
 
 TEST_CASE("真实B帧与AAC转换保持原生媒体时间并可解码",
-          "[remuxer][timestamp][encoder][integration]") {
+          "[remuxer][async][timestamp][encoder][integration]") {
   using namespace encoder_test;
   constexpr int kFrames = 40;
   Capture capture;

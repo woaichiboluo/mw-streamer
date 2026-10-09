@@ -90,15 +90,23 @@ class PlaybackClock final {
   using Clock = std::chrono::steady_clock;
 
   PlaybackClock(std::int64_t first_pts, Clock::time_point started,
-                Clock::time_point epoch = {})
+                Clock::time_point epoch = {}, AVRational speed = {1, 1})
       : pts_ns_(first_pts),
         deadline_(started),
         start_ts_ns_(first_pts),
         play_sys_ts_ns_(ToNs(started)),
-        base_sys_ts_ns_(ToNs(epoch)) {}
+        base_sys_ts_ns_(ToNs(epoch)),
+        speed_(speed) {}
+
+  // Keep prediction and discontinuity checks in the original media time base.
+  std::int64_t ScaleTime(std::int64_t media_ns) const noexcept {
+    return av_rescale_q(media_ns, av_inv_q(speed_), AVRational{1, 1});
+  }
+
+  AVRational speed() const noexcept { return speed_; }
 
   std::int64_t Timestamp(std::int64_t media_pts) const noexcept {
-    return base_ts_ns_ + media_pts - start_ts_ns_ + play_sys_ts_ns_ -
+    return ScaleTime(base_ts_ns_ + media_pts - start_ts_ns_) + play_sys_ts_ns_ -
            base_sys_ts_ns_;
   }
 
@@ -107,14 +115,17 @@ class PlaybackClock final {
   void StartDelivery(Clock::time_point now) noexcept { deadline_ = now; }
 
   Clock::time_point LoopDeadline(std::int64_t end_pts) const noexcept {
-    return deadline_ + std::chrono::nanoseconds(end_pts - pts_ns_);
+    return deadline_ + std::chrono::nanoseconds(
+                           ScaleTime(scheduled_media_ns_ + end_pts - pts_ns_) -
+                           ScaleTime(scheduled_media_ns_));
   }
 
   // Accumulate absolute max(next_pts), even for a nonzero media origin.
   // Reopening must not establish a fresh wall clock or hide decoding delays.
   void EndLoop(std::int64_t end_pts) noexcept {
-    base_ts_ns_ += end_pts;
     deadline_ = LoopDeadline(end_pts);
+    scheduled_media_ns_ += end_pts - pts_ns_;
+    base_ts_ns_ += end_pts;
   }
 
   void BeginLoop(std::int64_t first_pts) noexcept {
@@ -126,7 +137,12 @@ class PlaybackClock final {
     if (delta < 0 || delta > 3000000000LL) {
       delta = 0;
     }
-    deadline_ += std::chrono::nanoseconds(delta);
+    // Scale accumulated media time rather than each delta, avoiding drift
+    // when a frame interval cannot be represented exactly at this speed.
+    deadline_ +=
+        std::chrono::nanoseconds(ScaleTime(scheduled_media_ns_ + delta) -
+                                 ScaleTime(scheduled_media_ns_));
+    scheduled_media_ns_ += delta;
     pts_ns_ = pts;
   }
 
@@ -154,6 +170,8 @@ class PlaybackClock final {
   std::int64_t start_ts_ns_;
   std::int64_t play_sys_ts_ns_;
   std::int64_t base_sys_ts_ns_;
+  AVRational speed_;
+  std::int64_t scheduled_media_ns_ = 0;
 };
 
 }  // namespace mw::streamer::internal

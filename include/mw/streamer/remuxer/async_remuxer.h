@@ -1,5 +1,5 @@
-#ifndef MW_STREAMER_REMUXER_REMUXER_H_
-#define MW_STREAMER_REMUXER_REMUXER_H_
+#ifndef MW_STREAMER_REMUXER_ASYNC_REMUXER_H_
+#define MW_STREAMER_REMUXER_ASYNC_REMUXER_H_
 
 #include <cstdint>
 #include <functional>
@@ -18,19 +18,19 @@ namespace mw::streamer {
 // Init before Start; stop upstream delivery and destroy this before Shutdown.
 // Callbacks run on a ZLM poller, must consume their own exceptions, and must
 // not call Start, Stop or add outputs. Serialize control calls externally.
-class MW_STREAMER_API Remuxer final {
+class MW_STREAMER_API AsyncRemuxer final {
  public:
   // An empty target identifies a session error; other errors identify a URL.
   using OnError = std::function<void(std::string_view target, int error,
                                      std::string_view message)>;
   using OnEnded = std::function<void()>;
 
-  Remuxer();
-  ~Remuxer();
-  Remuxer(const Remuxer&) = delete;
-  Remuxer& operator=(const Remuxer&) = delete;
-  Remuxer(Remuxer&&) = delete;
-  Remuxer& operator=(Remuxer&&) = delete;
+  AsyncRemuxer();
+  ~AsyncRemuxer();
+  AsyncRemuxer(const AsyncRemuxer&) = delete;
+  AsyncRemuxer& operator=(const AsyncRemuxer&) = delete;
+  AsyncRemuxer(AsyncRemuxer&&) = delete;
+  AsyncRemuxer& operator=(AsyncRemuxer&&) = delete;
 
   void SetOnError(OnError callback);
   void SetOnEnded(OnEnded callback);
@@ -46,9 +46,18 @@ class MW_STREAMER_API Remuxer final {
   // Targets remain until this session ends; repeated network URLs are shared.
   std::string AddPushUrl(const std::string& url);
   // One local publishing point per session. Same IP/port shares a listener
-  // across Remuxers; app/stream must be unique within the process.
+  // across AsyncRemuxers; app/stream must be unique within the process.
   void AddRtspPublish(const std::string& app, const std::string& stream,
                       const std::string& ip, std::uint16_t port);
+  // Start first. One HTTP HLS publication per session, independent of RTSP.
+  // Returns http://IP:port/app/stream/hls.m3u8 with rolling TS segments.
+  // Same IP/port shares a listener; HLS app/stream is unique in the process.
+  // Invalid arguments or occupied paths/listeners throw synchronously.
+  // HLS uses ZLM's configured HTTP root. Live HLS files are cleaned
+  // synchronously when this session ends.
+  // app/stream must be single ASCII URI segments.
+  std::string AddHlsPublish(const std::string& app, const std::string& stream,
+                            const std::string& ip, std::uint16_t port);
   // Rejects new packets/targets, drains accepted packets and finalizes files.
   // OnEnded fires once. Live network delivery is managed by ZLM.
   void Drain() noexcept;
@@ -63,4 +72,4 @@ class MW_STREAMER_API Remuxer final {
 
 }  // namespace mw::streamer
 
-#endif  // MW_STREAMER_REMUXER_REMUXER_H_
+#endif  // MW_STREAMER_REMUXER_ASYNC_REMUXER_H_

@@ -63,6 +63,29 @@ extern const std::string kBroadcastRecordMP4;
 extern const std::string kBroadcastRecordTs;
 #define BroadcastRecordTsArgs const RecordInfo &info
 
+// 收到http api请求广播  [AUTO-TRANSLATED:c72e7c3f]
+// Broadcast for receiving http api request
+extern const std::string kBroadcastHttpRequest;
+#define BroadcastHttpRequestArgs const Parser &parser, const HttpSession::HttpResponseInvoker &invoker, bool &consumed, toolkit::SockInfo &sender
+
+// 收到http PUT/POST请求body前的广播，监听者可以设置body以接管请求体
+// Broadcast before receiving http PUT/POST request body, listener can set body to take over the request body
+extern const std::string kBroadcastBeforeHttpRequest;
+#define BroadcastBeforeHttpRequestArgs const Parser &parser, HttpBody::Ptr &body, HttpSession &sender
+
+// 在http文件服务器中,收到http访问文件或目录的广播,通过该事件控制访问http目录的权限  [AUTO-TRANSLATED:2de426b4]
+// In the http file server, broadcast for receiving http access to files or directories. Control access permissions to the http directory through this event.
+extern const std::string kBroadcastHttpAccess;
+#define BroadcastHttpAccessArgs const Parser &parser, const std::string &path, const std::string &file_path, const bool &is_dir, const HttpSession::HttpAccessPathInvoker &invoker, toolkit::SockInfo &sender
+
+// 在http文件服务器中,收到http访问文件或目录前的广播,通过该事件可以控制http url到文件路径的映射  [AUTO-TRANSLATED:0294d0c5]
+// In the http file server, broadcast before receiving http access to files or directories. Control the mapping from http url to file path through this event.
+// 在该事件中通过自行覆盖path参数，可以做到譬如根据虚拟主机或者app选择不同http根目录的目的  [AUTO-TRANSLATED:1bea3efb]
+// By overriding the path parameter in this event, you can achieve the purpose of selecting different http root directories based on virtual hosts or apps.
+extern const std::string kBroadcastHttpBeforeAccess;
+#define BroadcastHttpBeforeAccessArgs const Parser &parser, std::string &path, toolkit::SockInfo &sender
+
+
 // 推流鉴权结果回调对象  [AUTO-TRANSLATED:7e508ed1]
 // Push stream authentication result callback object
 // 如果err为空则代表鉴权成功  [AUTO-TRANSLATED:d49b0544]
@@ -296,9 +319,39 @@ namespace Http {
 // http 文件发送缓存大小  [AUTO-TRANSLATED:51fb08c0]
 // HTTP file sending cache size
 extern const std::string kSendBufSize;
+// http 最大请求字节数  [AUTO-TRANSLATED:8239eb9c]
+// HTTP maximum request byte size
+extern const std::string kMaxReqSize;
+// http keep-alive秒数  [AUTO-TRANSLATED:d4930c66]
+// HTTP keep-alive seconds
+extern const std::string kKeepAliveSecond;
 // http 字符编码  [AUTO-TRANSLATED:f7e55c83]
 // HTTP character encoding
 extern const std::string kCharSet;
+// http 服务器根目录  [AUTO-TRANSLATED:f8f55daf]
+// HTTP server root directory
+extern const std::string kRootPath;
+// http 服务器虚拟目录 虚拟目录名和文件路径使用","隔开，多个配置路径间用";"隔开，例如  path_d,d:/record;path_e,e:/record  [AUTO-TRANSLATED:fa4ee929]
+// HTTP server virtual directory. Virtual directory name and file path are separated by ",", and multiple configuration paths are separated by ";", for example, path_d,d:/record;path_e,e:/record
+extern const std::string kVirtualPath;
+// http 404错误提示内容  [AUTO-TRANSLATED:91adb026]
+// HTTP 404 error prompt content
+extern const std::string kNotFound;
+// 是否显示文件夹菜单  [AUTO-TRANSLATED:77301b85]
+// Whether to display the folder menu
+extern const std::string kDirMenu;
+// 禁止缓存文件的后缀  [AUTO-TRANSLATED:92bcb7f7]
+// Forbidden cache file suffixes
+extern const std::string kForbidCacheSuffix;
+// 可以把http代理前真实客户端ip放在http头中：https://github.com/ZLMediaKit/ZLMediaKit/issues/1388  [AUTO-TRANSLATED:afcd9556]
+// You can put the real client IP address before the HTTP proxy in the HTTP header: https://github.com/ZLMediaKit/ZLMediaKit/issues/1388
+extern const std::string kForwardedIpHeader;
+// 是否允许所有跨域请求  [AUTO-TRANSLATED:2551c096]
+// Whether to allow all cross-domain requests
+extern const std::string kAllowCrossDomains;
+// 允许访问http api和http文件索引的ip地址范围白名单，置空情况下不做限制  [AUTO-TRANSLATED:ab939863]
+// Whitelist of IP address ranges allowed to access HTTP API and HTTP file index. No restrictions are imposed when empty
+extern const std::string kAllowIPRange;
 } // namespace Http
 
 // //////////RTSP服务器配置///////////  [AUTO-TRANSLATED:950e1981]

@@ -431,4 +431,155 @@ TEST_CASE("Frames without any timing information stay at zero without throwing",
   }
 }
 
+TEST_CASE("Playback speeds scale scheduling and shared track timestamps",
+          "[input][timing][speed]") {
+  struct SpeedCase {
+    AVRational speed;
+    int64_t scaled_40_ms;
+  };
+  const PlaybackClock::Clock::time_point started(10s);
+  const PlaybackClock::Clock::time_point epoch(2s);
+  for (const auto test :
+       {SpeedCase{{1, 2}, 80'000'000}, SpeedCase{{1, 1}, 40'000'000},
+        SpeedCase{{2, 1}, 20'000'000}, SpeedCase{{4, 1}, 10'000'000},
+        SpeedCase{{8, 1}, 5'000'000}}) {
+    CAPTURE(test.speed.num, test.speed.den);
+    PlaybackClock clock(5'000'000'000, started, epoch, test.speed);
+    REQUIRE(clock.ScaleTime(40'000'000) == test.scaled_40_ms);
+    REQUIRE(clock.ScaleTime(-40'000'000) == -test.scaled_40_ms);
+    REQUIRE(clock.Timestamp(5'000'000'000) == 8'000'000'000);
+    REQUIRE(clock.Timestamp(5'020'000'000) ==
+            8'000'000'000 + test.scaled_40_ms / 2);
+    REQUIRE_FALSE(clock.CanDeliver(5'020'000'000));
+    clock.Advance(5'020'000'000);
+    REQUIRE(clock.deadline() ==
+            started + std::chrono::nanoseconds(test.scaled_40_ms / 2));
+    REQUIRE(clock.CanDeliver(5'020'000'000));
+    clock.Advance(5'040'000'000);
+    REQUIRE(clock.deadline() ==
+            started + std::chrono::nanoseconds(test.scaled_40_ms));
+    REQUIRE(clock.Timestamp(5'040'000'000) ==
+            8'000'000'000 + test.scaled_40_ms);
+  }
+}
+
+TEST_CASE(
+    "Fast playback loops scale absolute ends and preserve nonzero origins",
+    "[input][timing][speed][loop]") {
+  const PlaybackClock::Clock::time_point started(10s);
+  PlaybackClock clock(5'000'000'000, started,
+                      PlaybackClock::Clock::time_point(2s), {4, 1});
+  for (int64_t cycle = 0; cycle < 3; ++cycle) {
+    CAPTURE(cycle);
+    REQUIRE(clock.Timestamp(5'000'000'000) ==
+            8'000'000'000 + cycle * 3'750'000'000);
+    REQUIRE(clock.deadline() == started + cycle * 2500ms);
+    for (int second = 6; second <= 14; ++second) {
+      clock.Advance(second * 1'000'000'000LL);
+    }
+    clock.Advance(14'500'000'000);
+    REQUIRE(clock.LoopDeadline(15'000'000'000) ==
+            started + (cycle + 1) * 2500ms);
+    clock.EndLoop(15'000'000'000);
+    clock.BeginLoop(5'000'000'000);
+    REQUIRE(clock.deadline() == started + (cycle + 1) * 2500ms);
+  }
+}
+
+TEST_CASE(
+    "Seek at fast playback retains its deadline and scaled output mapping",
+    "[input][timing][speed][seek]") {
+  const PlaybackClock::Clock::time_point started(10s);
+  PlaybackClock clock(5'000'000'000, started,
+                      PlaybackClock::Clock::time_point(2s), {8, 1});
+  clock.Advance(6'000'000'000);
+  REQUIRE(clock.deadline() == started + 125ms);
+  clock.Seek(21'000'000'000);
+  REQUIRE(clock.deadline() == started + 125ms);
+  REQUIRE(clock.CanDeliver(21'000'000'000));
+  REQUIRE(clock.Timestamp(21'000'000'000) == 10'000'000'000);
+  clock.Seek(1'000'000'000);
+  REQUIRE(clock.deadline() == started + 125ms);
+  REQUIRE(clock.Timestamp(1'000'000'000) == 7'500'000'000);
+  clock.Advance(1'040'000'000);
+  REQUIRE(clock.deadline() == started + 130ms);
+  REQUIRE(clock.Timestamp(1'040'000'000) == 7'505'000'000);
+}
+
+TEST_CASE("Speed retains discontinuity and track lead limits in media time",
+          "[input][timing][speed]") {
+  const PlaybackClock::Clock::time_point started(10s);
+  for (const auto speed : {AVRational{1, 2}, AVRational{8, 1}}) {
+    CAPTURE(speed.num, speed.den);
+    PlaybackClock clock(0, started, {}, speed);
+    REQUIRE_FALSE(clock.CanDeliver(2'000'000'000));
+    REQUIRE(clock.CanDeliver(2'000'000'001));
+    clock.Advance(3'000'000'000);
+    const auto deadline = started + (speed.num == 8 ? 375ms : 6000ms);
+    REQUIRE(clock.deadline() == deadline);
+    clock.Advance(6'000'000'001);
+    REQUIRE(clock.deadline() == deadline);
+    REQUIRE_FALSE(clock.CanDeliver(8'000'000'001));
+    REQUIRE(clock.CanDeliver(8'000'000'002));
+    clock.Advance(6'000'000'000);
+    REQUIRE(clock.deadline() == deadline);
+    clock.Advance(6'040'000'000);
+    REQUIRE(clock.deadline() == deadline + (speed.num == 8 ? 5ms : 80ms));
+  }
+}
+
+TEST_CASE("Fractional speeds scale accumulated increments without frame drift",
+          "[input][timing][speed]") {
+  const PlaybackClock::Clock::time_point started(10s);
+  PlaybackClock clock(0, started, {}, {3, 2});
+  // Rounding each one-nanosecond increment would yield 1500 ns instead of
+  // 1000 ns. Check exact multiples throughout, not just the final deadline.
+  for (int64_t pts = 1; pts <= 1500; ++pts) {
+    clock.Advance(pts);
+    if (pts % 3 == 0) {
+      REQUIRE(clock.deadline() ==
+              started + std::chrono::nanoseconds(pts / 3 * 2));
+      REQUIRE(clock.Timestamp(pts) == 10'000'000'000 + pts / 3 * 2);
+    }
+  }
+  REQUIRE(clock.LoopDeadline(1503) == started + 1002ns);
+  clock.EndLoop(1503);
+  clock.BeginLoop(0);
+  REQUIRE(clock.deadline() == started + 1002ns);
+  REQUIRE(clock.Timestamp(0) == 10'000'001'002);
+}
+
+TEST_CASE("Speed scaling leaves missing audio PTS predictions in media time",
+          "[input][timing][speed]") {
+  FrameTiming timing({1, 1000}, {0, 1}, true);
+  const PlaybackClock::Clock::time_point started(10s);
+  PlaybackClock clock(0, started, {}, {8, 1});
+  for (int64_t index = 0; index < 1500; ++index) {
+    AVFrame frame = MakeFrame();
+    frame.nb_samples = 1024;
+    frame.sample_rate = 48000;
+    timing.Update(frame);
+    REQUIRE(timing.pts_ns() == index * 21'333'333);
+    REQUIRE(timing.duration_ns() == 21'333'333);
+    REQUIRE(frame.best_effort_timestamp == AV_NOPTS_VALUE);
+    REQUIRE(frame.sample_rate == 48000);
+    clock.Advance(timing.pts_ns());
+  }
+  REQUIRE(timing.next_pts_ns() == 31'999'999'500);
+  // Nanosecond rounding remains below 1 us over 32 seconds of media time.
+  const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           clock.deadline() - started)
+                           .count();
+  REQUIRE(elapsed == clock.ScaleTime(timing.pts_ns()));
+  REQUIRE(4'000'000'000 - clock.ScaleTime(timing.next_pts_ns()) < 1000);
+  AVFrame recovered = MakeFrame(40000);
+  recovered.nb_samples = 1024;
+  recovered.sample_rate = 48000;
+  timing.Update(recovered);
+  REQUIRE(timing.pts_ns() == 40'000'000'000);
+  REQUIRE(recovered.pts == 40000);
+  REQUIRE(recovered.best_effort_timestamp == 40000);
+  REQUIRE(clock.Timestamp(timing.pts_ns()) == 15'000'000'000);
+}
+
 }  // namespace

@@ -61,6 +61,10 @@ struct MW_STREAMER_API FfmpegInputConfig {
   // Total queued compressed payload across the selected audio/video tracks.
   // An imbalanced or malformed source exceeding this limit fails explicitly.
   std::size_t max_packet_buffer_bytes = 64 * 1024 * 1024;
+  // Fixed decoded playback speed for this Input, in the finite range
+  // [0.5, 8.0]. Ignored when decode is false. Audio changes pitch with playback
+  // speed; its output sample rate is scaled and rounded to the nearest integer.
+  double playback_speed = 1.0;
 };
 
 // Demand-driven reading, decoding and scheduled frame delivery.
@@ -87,6 +91,8 @@ class MW_STREAMER_API FfmpegInput final {
   // the original input stream. best_effort_timestamp retains the decoder's
   // original media timestamp in StreamInfo.time_base (possibly AV_NOPTS_VALUE);
   // pkt_dts is cleared because it does not belong to the output timeline.
+  // Playback speed scales output pts/duration and audio sample_rate, while
+  // StreamInfo, packet timestamps and best_effort_timestamp remain original.
   // Loops accumulate the previous cycle's absolute media end PTS; reconnects
   // map the new stream to current system time. Seek can move output pts back.
   // Timestamp discontinuities do not rebase the scheduling clock, and a
@@ -98,6 +104,7 @@ class MW_STREAMER_API FfmpegInput final {
   // callbacks run on the media worker for the current connection.
   using OnStateChanged = std::function<void(InputState, int, std::string_view)>;
 
+  // Invalid configuration throws std::invalid_argument.
   explicit FfmpegInput(FfmpegInputConfig config = {});
   // Shares the external video device across retries and loops.
   // Audio needs no device.

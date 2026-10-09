@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <deque>
 #include <exception>
@@ -143,7 +144,15 @@ struct FfmpegInput::Track {
   const ffmpeg::Frame& OutputFrame(const internal::PlaybackClock& playback) {
     frame_->pts = playback.Timestamp(timing_.pts_ns());
     frame_->time_base = {1, 1000000000};
-    frame_->duration = timing_.duration_ns();
+    frame_->duration = playback.ScaleTime(timing_.duration_ns());
+    if (frame_->nb_samples > 0) {
+      const auto rate =
+          av_rescale_q(frame_->sample_rate, playback.speed(), AVRational{1, 1});
+      if (rate <= 0 || rate > std::numeric_limits<int>::max()) {
+        throw std::invalid_argument("倍速音频采样率超出有效范围");
+      }
+      frame_->sample_rate = static_cast<int>(rate);
+    }
     frame_->pkt_dts = AV_NOPTS_VALUE;
     return frame_;
   }
@@ -192,14 +201,16 @@ FfmpegInput::FfmpegInput(FfmpegInputConfig config)
     : config_(std::move(config)) {
   if (config_.max_retries < -1 || config_.retry_interval.count() <= 0 ||
       config_.open_timeout.count() <= 0 || config_.read_timeout.count() <= 0 ||
-      config_.max_packet_buffer_bytes == 0) {
+      config_.max_packet_buffer_bytes == 0 ||
+      !std::isfinite(config_.playback_speed) || config_.playback_speed < 0.5 ||
+      config_.playback_speed > 8.0) {
     MW_LOG_ERROR(
         "streamer",
         "Input配置无效: max_retries={}, retry_ms={}, open_timeout_ms={}, "
-        "read_timeout_ms={}, packet_buffer_bytes={}",
+        "read_timeout_ms={}, packet_buffer_bytes={}, playback_speed={}",
         config_.max_retries, config_.retry_interval.count(),
         config_.open_timeout.count(), config_.read_timeout.count(),
-        config_.max_packet_buffer_bytes);
+        config_.max_packet_buffer_bytes, config_.playback_speed);
     throw std::invalid_argument("FFmpeg Input配置无效");
   }
 }
@@ -258,13 +269,14 @@ void FfmpegInput::Start(std::string_view url) {
   }
   retries_ = 0;
   state_.store(InputState::kConnecting);
-  MW_LOG_INFO(
-      "streamer",
-      "Input[{}]开始启动: protocol={}, decode={}, video_device={}, loop={}, "
-      "auto_reconnect={}, max_retries={}",
-      static_cast<const void*>(this), protocol ? protocol : "unknown",
-      config_.decode, video_device_ && video_device_->get() ? "cuda" : "cpu",
-      config_.loop, config_.auto_reconnect, config_.max_retries);
+  MW_LOG_INFO("streamer",
+              "Input[{}]开始启动: protocol={}, decode={}, playback_speed={}, "
+              "video_device={}, loop={}, "
+              "auto_reconnect={}, max_retries={}",
+              static_cast<const void*>(this), protocol ? protocol : "unknown",
+              config_.decode, config_.playback_speed,
+              video_device_ && video_device_->get() ? "cuda" : "cpu",
+              config_.loop, config_.auto_reconnect, config_.max_retries);
   try {
     std::lock_guard<std::mutex> thread_lock(thread_mutex_);
     media_thread_ = std::thread(&FfmpegInput::RunMedia, this);
@@ -715,8 +727,9 @@ void FfmpegInput::PlayAttempt(internal::PlaybackClock& playback,
   if (first_attempt) {
     // Establish the output timestamp anchor after preparing the first frames.
     // User initialization and initial decoding must not add timestamp lateness.
-    playback = internal::PlaybackClock(next_pts(), Clock::now(),
-                                       internal::SystemTimeBase());
+    playback = internal::PlaybackClock(
+        next_pts(), Clock::now(), internal::SystemTimeBase(),
+        av_d2q(config_.playback_speed, std::numeric_limits<int>::max()));
   } else {
     playback.BeginLoop(next_pts());
   }

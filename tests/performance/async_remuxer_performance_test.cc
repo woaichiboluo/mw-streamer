@@ -20,7 +20,7 @@
 
 #include "../encoder/encoder_test_support.h"
 #include "mw/streamer/init/init.h"
-#include "mw/streamer/remuxer/remuxer.h"
+#include "mw/streamer/remuxer/async_remuxer.h"
 
 namespace {
 
@@ -35,7 +35,7 @@ class LoggedRuntime final {
       : root_(fs::temp_directory_path()),
         directory_(
             root_ /
-            ("mw-remux-performance-" +
+            ("mw-async-remux-performance-" +
              std::to_string(
                  std::chrono::steady_clock::now().time_since_epoch().count()))),
         path_((directory_ / "performance.log").string()),
@@ -314,8 +314,8 @@ void CheckHandoffs(const std::string& text,
 
 }  // namespace
 
-TEST_CASE("公开Remux性能info trace off实际排空统计且日志不改变媒体包",
-          "[performance][remuxer]") {
+TEST_CASE("公开AsyncRemuxer性能info trace off实际排空统计且日志不改变媒体包",
+          "[performance][remuxer][async]") {
   const std::string level = GENERATE("info", "trace", "off");
   LoggedRuntime logging(level);
   encoder_test::Capture capture;
@@ -326,7 +326,7 @@ TEST_CASE("公开Remux性能info trace off实际排空统计且日志不改变�
   std::atomic<int> ended{0};
   std::atomic<int> errors{0};
   {
-    mw::streamer::Remuxer remuxer;
+    mw::streamer::AsyncRemuxer remuxer;
     remuxer.SetOnEnded([&]() noexcept { ++ended; });
     remuxer.SetOnError(
         [&](std::string_view, int, std::string_view) noexcept { ++errors; });
@@ -373,8 +373,8 @@ TEST_CASE("公开Remux性能info trace off实际排空统计且日志不改变�
   }
 }
 
-TEST_CASE("Remux性能复用会话累计清零且重复Stop不产生多份摘要",
-          "[performance][remuxer][lifecycle]") {
+TEST_CASE("AsyncRemuxer性能复用会话累计清零且重复Stop不产生多份摘要",
+          "[performance][remuxer][async][lifecycle]") {
   LoggedRuntime logging("trace");
   encoder_test::Capture capture;
   EncodeFixture(capture);
@@ -382,7 +382,7 @@ TEST_CASE("Remux性能复用会话累计清零且重复Stop不产生多份摘要
   std::atomic<int> ended{0};
   std::atomic<int> errors{0};
   {
-    mw::streamer::Remuxer remuxer;
+    mw::streamer::AsyncRemuxer remuxer;
     remuxer.SetOnEnded([&]() noexcept { ++ended; });
     remuxer.SetOnError(
         [&](std::string_view, int, std::string_view) noexcept { ++errors; });
@@ -413,8 +413,8 @@ TEST_CASE("Remux性能复用会话累计清零且重复Stop不产生多份摘要
   CHECK(totals[1].packets == 2);
 }
 
-TEST_CASE("Remux性能区分EOF缺轨启动淘汰和非法包拒绝",
-          "[performance][remuxer][accounting]") {
+TEST_CASE("AsyncRemuxer性能区分EOF缺轨启动淘汰和非法包拒绝",
+          "[performance][remuxer][async][accounting]") {
   LoggedRuntime logging("trace");
   encoder_test::Capture capture;
   EncodeFixture(capture);
@@ -425,7 +425,7 @@ TEST_CASE("Remux性能区分EOF缺轨启动淘汰和非法包拒绝",
   int expected_rejected = 0;
   std::atomic<int> ended{0};
   {
-    mw::streamer::Remuxer remuxer;
+    mw::streamer::AsyncRemuxer remuxer;
     remuxer.SetOnEnded([&]() noexcept { ++ended; });
     remuxer.SetOnError([](std::string_view, int, std::string_view) noexcept {});
     remuxer.Start(capture.streams);
@@ -484,8 +484,8 @@ TEST_CASE("Remux性能区分EOF缺轨启动淘汰和非法包拒绝",
                expected_errors, expected_rejected);
 }
 
-TEST_CASE("Remux转换失败将已取出的在途编码包计入中止而不冒充交付",
-          "[performance][remuxer][failure]") {
+TEST_CASE("AsyncRemuxer转换失败将已取出的在途编码包计入中止而不冒充交付",
+          "[performance][remuxer][async][failure]") {
   LoggedRuntime logging("trace");
   encoder_test::Capture capture;
   EncodeFixture(capture);
@@ -511,7 +511,7 @@ TEST_CASE("Remux转换失败将已取出的在途编码包计入中止而不冒�
   std::atomic<int> ended{0};
   std::atomic<int> errors{0};
   {
-    mw::streamer::Remuxer remuxer;
+    mw::streamer::AsyncRemuxer remuxer;
     remuxer.SetOnEnded([&]() noexcept { ++ended; });
     remuxer.SetOnError(
         [&](std::string_view, int, std::string_view) noexcept { ++errors; });

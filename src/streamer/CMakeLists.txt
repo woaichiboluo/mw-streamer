@@ -14,7 +14,9 @@ set(MW_STREAMER_SOURCES
     performance/performance.cc
     processor/processor.cc
     remuxer/packet_converter.cc
-    remuxer/remuxer.cc
+    remuxer/async_remuxer.cc
+    remuxer/remux_output.cc
+    remuxer/sync_remuxer.cc
     scheduler/scheduler.cc
 )
 

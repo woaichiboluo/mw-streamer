@@ -19,7 +19,7 @@
 #include "mw/streamer/init/init.h"
 #include "mw/streamer/input/ffmpeg_input.h"
 #include "mw/streamer/processor/processor.h"
-#include "mw/streamer/remuxer/remuxer.h"
+#include "mw/streamer/remuxer/async_remuxer.h"
 #include "mw/streamer/scheduler/scheduler.h"
 
 namespace {
@@ -79,7 +79,7 @@ class Publishing final {
         [this](const auto& packet, std::int64_t dts_ns) noexcept {
           Capture([&] {
             if (!remuxer_.SubmitPacket(packet, dts_ns))
-              throw std::runtime_error("Remuxer拒绝编码包");
+              throw std::runtime_error("AsyncRemuxer拒绝编码包");
             ++packets_;
           });
         });
@@ -94,7 +94,7 @@ class Publishing final {
     remuxer_.SetOnError([this](std::string_view target, int error,
                                std::string_view message) noexcept {
       Capture([&] {
-        throw ffmpeg::FfmpegException(error, std::string("Remuxer ") +
+        throw ffmpeg::FfmpegException(error, std::string("AsyncRemuxer ") +
                                                  std::string(target) + ": " +
                                                  std::string(message));
       });
@@ -224,7 +224,7 @@ class Publishing final {
   std::atomic<std::uint64_t> packets_{0};
   std::vector<ffmpeg::StreamInfo> streams_, encoded_streams_;
   ffmpeg::HwDeviceContext device_;
-  mw::streamer::Remuxer remuxer_;
+  mw::streamer::AsyncRemuxer remuxer_;
   mw::streamer::Encoder encoder_;
   mw::streamer::Processor processor_;
   mw::streamer::Scheduler scheduler_;

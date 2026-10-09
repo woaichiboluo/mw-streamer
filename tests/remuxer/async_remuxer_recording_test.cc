@@ -23,7 +23,7 @@ extern "C" {
 
 #include "../encoder/encoder_test_support.h"
 #include "mw/streamer/init/init.h"
-#include "mw/streamer/remuxer/remuxer.h"
+#include "mw/streamer/remuxer/async_remuxer.h"
 
 namespace {
 
@@ -50,7 +50,7 @@ class OutputDirectory final {
  public:
   OutputDirectory()
       : root_(fs::absolute(fs::current_path()).lexically_normal()),
-        path_(root_ / ("remuxer-recording-" +
+        path_(root_ / ("async-remuxer-recording-" +
                        std::to_string(std::chrono::steady_clock::now()
                                           .time_since_epoch()
                                           .count()))) {
@@ -142,7 +142,7 @@ struct Notifications final {
   std::vector<std::string> errors;
   bool callback_failed = false;
 
-  void Bind(mw::streamer::Remuxer& remuxer) {
+  void Bind(mw::streamer::AsyncRemuxer& remuxer) {
     remuxer.SetOnError([this](std::string_view target, int,
                               std::string_view message) noexcept {
       try {
@@ -226,7 +226,7 @@ Decoded DecodeFile(const std::string& path, unsigned int stream_count = 2) {
   AVFormatContext* raw = nullptr;
   ffmpeg::FfmpegException::throwIfError(
       avformat_open_input(&raw, path.c_str(), nullptr, nullptr),
-      "打开Remuxer录制成品");
+      "打开AsyncRemuxer录制成品");
   const std::unique_ptr<AVFormatContext, FormatCloser> input(raw);
   ffmpeg::FfmpegException::throwIfError(
       avformat_find_stream_info(input.get(), nullptr), "探测录制轨道");
@@ -389,8 +389,8 @@ void CheckName(const std::string& path, const std::string& stem,
 
 }  // namespace
 
-TEST_CASE("公开Remuxer多目标录制保留B帧AAC同步并完成动态录制尾部",
-          "[remuxer][recording][integration]") {
+TEST_CASE("公开AsyncRemuxer多目标录制保留B帧AAC同步并完成动态录制尾部",
+          "[remuxer][async][recording][integration]") {
   const std::unique_ptr<mw::streamer::MwStreamerContext,
                         decltype(&mw::streamer::Shutdown)>
       context(mw::streamer::Init(RuntimeConfig()), &mw::streamer::Shutdown);
@@ -398,7 +398,7 @@ TEST_CASE("公开Remuxer多目标录制保留B帧AAC同步并完成动态录制�
   encoder_test::Capture capture;
   EncodeMarkers(capture);
   Notifications notifications;
-  mw::streamer::Remuxer remuxer;
+  mw::streamer::AsyncRemuxer remuxer;
   notifications.Bind(remuxer);
   remuxer.Start(capture.streams);
   const auto first = remuxer.AddPushUrl(directory.File("single_a.mp4"));
@@ -461,14 +461,14 @@ TEST_CASE("公开Remuxer多目标录制保留B帧AAC同步并完成动态录制�
   }
 }
 
-TEST_CASE("公开Remuxer控制调用校验与空会话结束只通知一次",
-          "[remuxer][recording][lifecycle]") {
+TEST_CASE("公开AsyncRemuxer控制调用校验与空会话结束只通知一次",
+          "[remuxer][async][recording][lifecycle]") {
   const std::unique_ptr<mw::streamer::MwStreamerContext,
                         decltype(&mw::streamer::Shutdown)>
       context(mw::streamer::Init(RuntimeConfig()), &mw::streamer::Shutdown);
   OutputDirectory directory;
   Notifications notifications;
-  mw::streamer::Remuxer remuxer;
+  mw::streamer::AsyncRemuxer remuxer;
   notifications.Bind(remuxer);
   SECTION("Start前不能添加录制目标") {
     CHECK_THROWS_AS(remuxer.AddPushUrl(directory.File("early.mp4")),
@@ -501,7 +501,7 @@ TEST_CASE("公开Remuxer控制调用校验与空会话结束只通知一次",
 }
 
 TEST_CASE("声明双轨但EOF仅收到一路时录制保留超过启动缓存上限的包",
-          "[remuxer][recording][eof][integration]") {
+          "[remuxer][async][recording][eof][integration]") {
   const std::unique_ptr<mw::streamer::MwStreamerContext,
                         decltype(&mw::streamer::Shutdown)>
       context(mw::streamer::Init(RuntimeConfig()), &mw::streamer::Shutdown);
@@ -518,7 +518,7 @@ TEST_CASE("声明双轨但EOF仅收到一路时录制保留超过启动缓存上
       });
   REQUIRE(stream != capture.streams.end());
   Notifications notifications;
-  mw::streamer::Remuxer remuxer;
+  mw::streamer::AsyncRemuxer remuxer;
   notifications.Bind(remuxer);
   remuxer.Start(capture.streams);
   const auto path = remuxer.AddPushUrl(directory.File("partial_track.mp4"));
@@ -564,7 +564,7 @@ TEST_CASE("声明双轨但EOF仅收到一路时录制保留超过启动缓存上
 }
 
 TEST_CASE("零B帧与AAC负priming启动回放使用共同媒体时间起点",
-          "[remuxer][recording][startup][integration]") {
+          "[remuxer][async][recording][startup][integration]") {
   const std::unique_ptr<mw::streamer::MwStreamerContext,
                         decltype(&mw::streamer::Shutdown)>
       context(mw::streamer::Init(RuntimeConfig()), &mw::streamer::Shutdown);
@@ -572,7 +572,7 @@ TEST_CASE("零B帧与AAC负priming启动回放使用共同媒体时间起点",
   encoder_test::Capture capture;
   EncodeMarkers(capture, 0);
   Notifications notifications;
-  mw::streamer::Remuxer remuxer;
+  mw::streamer::AsyncRemuxer remuxer;
   notifications.Bind(remuxer);
   remuxer.Start(capture.streams);
   const auto path = remuxer.AddPushUrl(directory.File("zero_b_frames.mp4"));

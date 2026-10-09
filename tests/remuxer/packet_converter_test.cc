@@ -140,7 +140,7 @@ std::vector<std::string> Nals(const ffmpeg::Packet& packet) {
 }
 
 TEST_CASE("真实H264与H265配置准备参数集并保留包缓存和毫秒时间",
-          "[remuxer][packet][video]") {
+          "[remuxer][shared][packet][video]") {
   Runtime runtime;
   const char* name = "libx264";
   SECTION("H264") {}
@@ -193,7 +193,7 @@ TEST_CASE("真实H264与H265配置准备参数集并保留包缓存和毫秒时�
 }
 
 TEST_CASE("avcC与hvcC兼容一至四字节NAL长度和Annex B输入",
-          "[remuxer][packet][length-prefix]") {
+          "[remuxer][shared][packet][length-prefix]") {
   Runtime runtime;
   const char* name = "libx264";
   SECTION("avcC") {}
@@ -259,7 +259,8 @@ TEST_CASE("avcC与hvcC兼容一至四字节NAL长度和Annex B输入",
   CHECK_THROWS_AS(converter.Convert(truncated, 20, 40), std::invalid_argument);
 }
 
-TEST_CASE("AAC使用真实ASC并由Track生成一次ADTS头", "[remuxer][packet][audio]") {
+TEST_CASE("AAC使用真实ASC并由Track生成一次ADTS头",
+          "[remuxer][shared][packet][audio]") {
   Runtime runtime;
   auto encoded = Audio();
   PacketConverter converter({encoded.stream});
@@ -309,7 +310,7 @@ TEST_CASE("AAC使用真实ASC并由Track生成一次ADTS头", "[remuxer][packet]
 }
 
 TEST_CASE("包转换拒绝非法配置且不隐式替换编码格式",
-          "[remuxer][packet][validation]") {
+          "[remuxer][shared][packet][validation]") {
   Runtime runtime;
   auto encoded = Video("libx264");
   auto stream = encoded.stream;
@@ -332,7 +333,7 @@ TEST_CASE("包转换拒绝非法配置且不隐式替换编码格式",
 }
 
 TEST_CASE("AAC缺失或不匹配的ASC以及截断hvcC明确失败",
-          "[remuxer][packet][configuration]") {
+          "[remuxer][shared][packet][configuration]") {
   Runtime runtime;
   SECTION("AAC ASC截断") {
     auto encoded = Audio();
@@ -361,7 +362,7 @@ TEST_CASE("AAC缺失或不匹配的ASC以及截断hvcC明确失败",
 }
 
 TEST_CASE("包转换拒绝空包索引时间基及截断NAL且保留零PTS",
-          "[remuxer][packet][validation]") {
+          "[remuxer][shared][packet][validation]") {
   Runtime runtime;
   auto encoded = Video("libx264");
   PacketConverter converter({encoded.stream});

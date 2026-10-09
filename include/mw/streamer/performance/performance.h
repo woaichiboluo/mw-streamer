@@ -253,8 +253,9 @@ class EncoderPerformance final {
   Track audio_;
 };
 
-// The owning Remuxer serializes every update with its existing mutex. Handoff
-// means inputFrame returned normally; it does not measure network delivery.
+// The owning AsyncRemuxer serializes every update with its existing mutex.
+// Handoff means inputFrame returned normally; it does not measure network
+// delivery.
 class RemuxPerformance final {
  public:
   using Clock = PerformanceWindow::Clock;

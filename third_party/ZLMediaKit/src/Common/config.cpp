@@ -63,6 +63,10 @@ const string kBroadcastMediaPlayed = "kBroadcastMediaPlayed";
 const string kBroadcastMediaChanged = "kBroadcastMediaChanged";
 const string kBroadcastRecordMP4 = "kBroadcastRecordMP4";
 const string kBroadcastRecordTs = "kBroadcastRecordTs";
+const string kBroadcastHttpRequest = "kBroadcastHttpRequest";
+const string kBroadcastBeforeHttpRequest = "kBroadcastBeforeHttpRequest";
+const string kBroadcastHttpAccess = "kBroadcastHttpAccess";
+const string kBroadcastHttpBeforeAccess = "kBroadcastHttpBeforeAccess";
 const string kBroadcastMediaPublish = "kBroadcastMediaPublish";
 const string kBroadcastFlowReport = "kBroadcastFlowReport";
 const string kBroadcastReloadConfig = "kBroadcastReloadConfig";
@@ -179,11 +183,41 @@ static onceToken token([]() {
 namespace Http {
 #define HTTP_FIELD "http."
 const string kSendBufSize = HTTP_FIELD "sendBufSize";
+const string kMaxReqSize = HTTP_FIELD "maxReqSize";
+const string kKeepAliveSecond = HTTP_FIELD "keepAliveSecond";
 const string kCharSet = HTTP_FIELD "charSet";
+const string kRootPath = HTTP_FIELD "rootPath";
+const string kVirtualPath = HTTP_FIELD "virtualPath";
+const string kNotFound = HTTP_FIELD "notFound";
+const string kDirMenu = HTTP_FIELD "dirMenu";
+const string kForbidCacheSuffix = HTTP_FIELD "forbidCacheSuffix";
+const string kForwardedIpHeader = HTTP_FIELD "forwarded_ip_header";
+const string kAllowCrossDomains = HTTP_FIELD "allow_cross_domains";
+const string kAllowIPRange = HTTP_FIELD "allow_ip_range";
 
 static onceToken token([]() {
     mINI::Instance()[kSendBufSize] = 64 * 1024;
+    mINI::Instance()[kMaxReqSize] = 4 * 10240;
+    mINI::Instance()[kKeepAliveSecond] = 15;
+    mINI::Instance()[kDirMenu] = true;
+    mINI::Instance()[kVirtualPath] = "";
     mINI::Instance()[kCharSet] = "utf-8";
+
+    mINI::Instance()[kRootPath] = "./www";
+    mINI::Instance()[kNotFound] = StrPrinter << "<html>"
+                                                "<head><title>404 Not Found</title></head>"
+                                                "<body bgcolor=\"white\">"
+                                                "<center><h1>您访问的资源不存在！</h1></center>"
+                                                "<hr><center>"
+                                             << kServerName
+                                             << "</center>"
+                                                "</body>"
+                                                "</html>"
+                                             << endl;
+    mINI::Instance()[kForbidCacheSuffix] = "";
+    mINI::Instance()[kForwardedIpHeader] = "";
+    mINI::Instance()[kAllowCrossDomains] = 1;
+    mINI::Instance()[kAllowIPRange] = "::1,127.0.0.1,172.16.0.0-172.31.255.255,192.168.0.0-192.168.255.255,10.0.0.0-10.255.255.255";
 });
 
 } // namespace Http
@@ -310,7 +344,8 @@ static onceToken token([]() {
     mINI::Instance()[kSegmentRetain] = 5;
     mINI::Instance()[kFileBufSize] = 64 * 1024;
     mINI::Instance()[kBroadcastRecordTs] = false;
-    mINI::Instance()[kDeleteDelaySec] = 10;
+    // mw-streamer releases live HLS files synchronously when publishing stops.
+    mINI::Instance()[kDeleteDelaySec] = 0;
     mINI::Instance()[kFastRegister] = false;
     mINI::Instance()[kFmp4SegExt] = ".mp4";
 });

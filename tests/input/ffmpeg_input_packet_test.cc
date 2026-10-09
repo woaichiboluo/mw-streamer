@@ -356,8 +356,15 @@ class PacketPause final {
 TEST_CASE("Input packet callbacks preserve native packets in both decode modes",
           "[input][packet]") {
   bool decode = true;
+  double playback_speed = 1.0;
   SECTION("decode with packet and frame delivery") {}
-  SECTION("packet only ignores decoder selection") { decode = false; }
+  SECTION("accelerated decoding preserves recording packets") {
+    playback_speed = 8.0;
+  }
+  SECTION("packet only ignores decoder selection and playback speed") {
+    decode = false;
+    playback_speed = 0.5;
+  }
   const auto reference = ReadRawMedia(PacketSamplePath());
   const auto expected = GroupPackets(reference.packets);
   REQUIRE(expected.size() == 2);
@@ -370,6 +377,7 @@ TEST_CASE("Input packet callbacks preserve native packets in both decode modes",
   {
     FfmpegInputConfig config;
     config.decode = decode;
+    config.playback_speed = playback_speed;
     if (!decode) {
       config.video_decoder_name = "missing_video_decoder";
       config.audio_decoder_name = "missing_audio_decoder";
@@ -412,6 +420,7 @@ TEST_CASE("Input packet callbacks can record a playable MP4 without decoding",
   PacketRecording recording;
   FfmpegInputConfig config;
   config.decode = false;
+  config.playback_speed = 8.0;
   FfmpegInput input(config);
   collector.Attach(
       input, [&](const auto& streams) { recording.Open(streams); },

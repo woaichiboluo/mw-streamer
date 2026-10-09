@@ -1,6 +1,7 @@
 add_executable(mw_ffmpeg_input_tests
     ffmpeg_input_test.cc
     ffmpeg_input_packet_test.cc
+    ffmpeg_input_speed_test.cc
     ffmpeg_rtmp_test.cc
     input_test_main.cc
 )
@@ -15,7 +16,7 @@ else()
     target_link_libraries(mw_ffmpeg_input_tests PRIVATE mw::streamer)
 endif()
 add_test(NAME mw_ffmpeg_input_tests COMMAND mw_ffmpeg_input_tests)
-set_tests_properties(mw_ffmpeg_input_tests PROPERTIES TIMEOUT 60)
+set_tests_properties(mw_ffmpeg_input_tests PROPERTIES TIMEOUT 90)
 
 add_executable(mw_ffmpeg_input_timing_tests ffmpeg_input_timing_test.cc)
 target_include_directories(mw_ffmpeg_input_timing_tests PRIVATE

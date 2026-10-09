@@ -1,5 +1,3 @@
-#include "mw/streamer/remuxer/packet_interleaver.h"
-
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
@@ -8,6 +6,7 @@
 #include <vector>
 
 #include "../encoder/encoder_test_support.h"
+#include "mw/streamer/remuxer/packet_interleaver.h"
 
 namespace {
 
@@ -51,7 +50,7 @@ void Append(std::vector<PacketInterleaver::Item>& output,
 }
 
 TEST_CASE("交织队列统计区分启动筛选与正常出队并保留入队时刻",
-          "[remuxer][interleave][performance]") {
+          "[remuxer][async][interleave][performance]") {
   const auto video = Video();
   const auto audio = Audio();
   PacketInterleaver interleaver({video, audio});
@@ -85,7 +84,7 @@ TEST_CASE("交织队列统计区分启动筛选与正常出队并保留入队时
 // origins and frame rates. Verify selected first packets, retained counts,
 // normalized media timestamps, DTS ordering and unchanged input packets.
 TEST_CASE("交织器在不同到达顺序起点和帧率下正确选包并归一化媒体时间",
-          "[remuxer][interleave][startup]") {
+          "[remuxer][async][interleave][startup]") {
   struct Fixture {
     const char* name;
     int video_num;
@@ -208,7 +207,7 @@ TEST_CASE("交织器在不同到达顺序起点和帧率下正确选包并归一
 }
 
 TEST_CASE("首视频等待关键帧且音频覆盖起点后才初始化",
-          "[remuxer][interleave][startup]") {
+          "[remuxer][async][interleave][startup]") {
   const auto video = Video();
   const auto audio = Audio();
   PacketInterleaver interleaver({video, audio});
@@ -228,7 +227,7 @@ TEST_CASE("首视频等待关键帧且音频覆盖起点后才初始化",
 }
 
 TEST_CASE("交织同DTS视频优先并等待对侧严格更晚媒体DTS",
-          "[remuxer][interleave][ordering]") {
+          "[remuxer][async][interleave][ordering]") {
   const auto video = Video();
   const auto audio = Audio();
   PacketInterleaver interleaver({video, audio});
@@ -250,7 +249,7 @@ TEST_CASE("交织同DTS视频优先并等待对侧严格更晚媒体DTS",
 }
 
 TEST_CASE("单轨直接放行并保留原包引用和时间基",
-          "[remuxer][interleave][single]") {
+          "[remuxer][async][interleave][single]") {
   SECTION("视频") {
     const auto stream = Video();
     PacketInterleaver interleaver({stream});
@@ -277,7 +276,7 @@ TEST_CASE("单轨直接放行并保留原包引用和时间基",
 }
 
 TEST_CASE("EOF缺轨或未覆盖起点仍排空有效轨且不补时间",
-          "[remuxer][interleave][eof]") {
+          "[remuxer][async][interleave][eof]") {
   const auto video = Video();
   const auto audio = Audio();
   PacketInterleaver interleaver({video, audio});
@@ -317,7 +316,8 @@ TEST_CASE("EOF缺轨或未覆盖起点仍排空有效轨且不补时间",
   CHECK_THROWS_AS(interleaver.Push(Packet(audio, 0, 0), 0), std::logic_error);
 }
 
-TEST_CASE("对侧轨道提前结束后的积压只在EOF排空", "[remuxer][interleave][eof]") {
+TEST_CASE("对侧轨道提前结束后的积压只在EOF排空",
+          "[remuxer][async][interleave][eof]") {
   const auto video = Video();
   const auto audio = Audio();
   PacketInterleaver interleaver({video, audio});
@@ -338,7 +338,7 @@ TEST_CASE("对侧轨道提前结束后的积压只在EOF排空", "[remuxer][inte
 }
 
 TEST_CASE("真实B帧和AAC交织排空保持两轨可解码及负延迟",
-          "[remuxer][interleave][encoder]") {
+          "[remuxer][async][interleave][encoder]") {
   using namespace encoder_test;
   Capture capture;
   mw::streamer::Encoder encoder;

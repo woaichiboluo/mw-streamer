@@ -28,13 +28,13 @@
 #include "Util/NoticeCenter.h"
 #include "mw/streamer/init/init.h"
 #include "mw/streamer/input/ffmpeg_input.h"
-#include "mw/streamer/remuxer/remuxer.h"
+#include "mw/streamer/remuxer/async_remuxer.h"
 
 namespace {
 
 using namespace std::chrono_literals;
 namespace ffmpeg = mw::streamer::ffmpeg;
-using mw::streamer::Remuxer;
+using mw::streamer::AsyncRemuxer;
 
 class Runtime final {
  public:
@@ -48,7 +48,7 @@ class Runtime final {
       config.log.modules = "zlm:trace;streamer:debug";
       config.log.modules_size = std::strlen(config.log.modules);
       config.log.rotating_file_enabled = 1;
-      config.log.rotating_file_path = "remuxer-network-debug.log";
+      config.log.rotating_file_path = "async-remuxer-network-debug.log";
       config.log.rotating_file_path_size =
           std::strlen(config.log.rotating_file_path);
     }
@@ -62,7 +62,7 @@ class Runtime final {
 
 std::string Name() {
   static std::atomic<unsigned> next{0};
-  return "remux_network_" + std::to_string(++next);
+  return "async_remux_network_" + std::to_string(++next);
 }
 
 struct Encoded {
@@ -107,7 +107,7 @@ Encoded Encode() {
 // synchronized ordering clock. Condition-variable pacing is cancellable.
 class Replay final {
  public:
-  Replay(Remuxer& remuxer, const Encoded& encoded)
+  Replay(AsyncRemuxer& remuxer, const Encoded& encoded)
       : remuxer_(remuxer), encoded_(encoded), thread_([this] { Run(); }) {}
   ~Replay() { Stop(); }
   void Stop() {
@@ -155,7 +155,7 @@ class Replay final {
     }
   }
 
-  Remuxer& remuxer_;
+  AsyncRemuxer& remuxer_;
   const Encoded& encoded_;
   std::mutex mutex_;
   std::condition_variable changed_;
@@ -577,14 +577,14 @@ class DecoderInput final {
 };
 
 TEST_CASE("动态RTMP RTSP SRT推流共享编码源且断线仅重连故障目标",
-          "[remuxer][network][push]") {
+          "[remuxer][async][network][push]") {
   Runtime runtime(true);
   const auto encoded = Encode();
   RtmpReceiver rtmp;
   RtspServer rtsp;
   std::mutex errors_mutex;
   std::vector<std::string> errors;
-  Remuxer remuxer;
+  AsyncRemuxer remuxer;
   remuxer.SetOnError(
       [&](std::string_view target, int code, std::string_view message) {
         std::lock_guard<std::mutex> lock(errors_mutex);
@@ -627,7 +627,7 @@ TEST_CASE("动态RTMP RTSP SRT推流共享编码源且断线仅重连故障目�
     for (const auto& error : errors) diagnostics += error + '\n';
     INFO(diagnostics);
     INFO("RTSP target=" << rtsp.Url(rtsp_name));
-    INFO("SDK diagnostics: remuxer-network-debug.log");
+    INFO("SDK diagnostics: async-remuxer-network-debug.log");
     REQUIRE(rtsp_received);
   }
   received.Read();
@@ -654,7 +654,7 @@ TEST_CASE("动态RTMP RTSP SRT推流共享编码源且断线仅重连故障目�
 }
 
 TEST_CASE("本地RTSP发布重命名同源并共享监听且冲突不破坏已有流",
-          "[remuxer][network][rtsp][lifecycle]") {
+          "[remuxer][async][network][rtsp][lifecycle]") {
   Runtime runtime;
   const auto encoded = Encode();
   std::uint16_t port;
@@ -665,7 +665,7 @@ TEST_CASE("本地RTSP发布重命名同源并共享监听且冲突不破坏已�
   const auto app = Name();
   const auto first_name = Name();
   const auto second_name = Name();
-  Remuxer first, second;
+  AsyncRemuxer first, second;
   first.Start(encoded.streams);
   second.Start(encoded.streams);
   first.AddRtspPublish(app, first_name, "127.0.0.1", port);
@@ -700,11 +700,11 @@ TEST_CASE("本地RTSP发布重命名同源并共享监听且冲突不破坏已�
 }
 
 TEST_CASE("运行中添加本地RTSP发布保留媒体源身份和时间线",
-          "[remuxer][network][rtsp][dynamic]") {
+          "[remuxer][async][network][rtsp][dynamic]") {
   Runtime runtime;
   const auto encoded = Encode();
   RtmpReceiver rtmp;
-  Remuxer remuxer;
+  AsyncRemuxer remuxer;
   remuxer.Start(encoded.streams);
   const auto target = Name();
   remuxer.AddPushUrl(rtmp.Url(target));

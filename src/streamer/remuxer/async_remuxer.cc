@@ -1,11 +1,8 @@
-#include "mw/streamer/remuxer/remuxer.h"
+#include "mw/streamer/remuxer/async_remuxer.h"
 
 #include <algorithm>
-#include <atomic>
 #include <condition_variable>
 #include <exception>
-#include <filesystem>
-#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -17,84 +14,21 @@ extern "C" {
 #include <libavutil/mathematics.h>
 }
 
-#include "Common/MultiMediaSourceMuxer.h"
-#include "Network/TcpServer.h"
 #include "Poller/EventPoller.h"
-#include "Pusher/PusherProxy.h"
-#include "Record/RemuxRecorder.h"
-#include "Rtsp/RtspSession.h"
-#include "Util/util.h"
 #include "mw/log.h"
 #include "mw/streamer/performance/performance.h"
 #include "mw/streamer/remuxer/packet_converter.h"
 #include "mw/streamer/remuxer/packet_interleaver.h"
+#include "mw/streamer/remuxer/remux_output.h"
 
 namespace mw::streamer {
 namespace {
 
 constexpr AVRational kNanoseconds{1, 1000000000};
 constexpr AVRational kMilliseconds{1, 1000};
-std::atomic<std::uint64_t> next_source_id{0};
-std::mutex listeners_mutex;
-std::map<std::pair<std::string, std::uint16_t>,
-         std::weak_ptr<toolkit::TcpServer>>
-    listeners;
-std::set<std::pair<std::string, std::string>> published_paths;
-
-void ReservePath(const std::string& app, const std::string& stream) {
-  std::lock_guard<std::mutex> lock(listeners_mutex);
-  if (!published_paths.emplace(app, stream).second) {
-    throw std::invalid_argument("RTSP发布路径已经被占用");
-  }
-}
-
-void ReleasePath(const std::pair<std::string, std::string>& path) {
-  std::lock_guard<std::mutex> lock(listeners_mutex);
-  published_paths.erase(path);
-}
-
-toolkit::TcpServer::Ptr Listen(const std::string& ip, std::uint16_t port,
-                               const toolkit::EventPoller::Ptr& poller) {
-  std::lock_guard<std::mutex> lock(listeners_mutex);
-  for (auto iterator = listeners.begin(); iterator != listeners.end();) {
-    if (iterator->second.expired())
-      iterator = listeners.erase(iterator);
-    else
-      ++iterator;
-  }
-  auto& entry = listeners[{ip, port}];
-  if (auto server = entry.lock()) return server;
-  auto server = std::make_shared<toolkit::TcpServer>(poller);
-  server->start<mediakit::RtspSession>(port, ip);
-  entry = server;
-  return server;
-}
-
-std::string Schema(const std::string& url) {
-  if (url.rfind("rtsp://", 0) == 0) return RTSP_SCHEMA;
-  if (url.rfind("rtmp://", 0) == 0) return RTMP_SCHEMA;
-  if (url.rfind("srt://", 0) == 0) return TS_SCHEMA;
-  if (url.find("://") == std::string::npos) {
-    const auto extension = std::filesystem::u8path(url).extension().u8string();
-    if (extension == ".mp4" || extension == ".m3u8") return {};
-  }
-  throw std::invalid_argument(
-      "Remuxer目标需要RTSP、RTMP、SRT或本地MP4/M3U8路径");
-}
-
-std::string RecordingPath(const std::string& path) {
-  const auto source = std::filesystem::absolute(std::filesystem::u8path(path));
-  const auto name = source.stem().u8string() + "_" +
-                    toolkit::getTimeStr("%Y_%m_%d_%H_%M_%S") +
-                    source.extension().u8string();
-  return (source.parent_path() / std::filesystem::u8path(name))
-      .generic_u8string();
-}
-
 }  // namespace
 
-class Remuxer::Impl final : public mediakit::MediaSourceEvent,
-                            public std::enable_shared_from_this<Impl> {
+class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
  public:
   void SetOnError(OnError callback) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -109,43 +43,22 @@ class Remuxer::Impl final : public mediakit::MediaSourceEvent,
     std::lock_guard<std::mutex> control(control_);
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (running_) throw std::logic_error("Remuxer已经启动");
+      if (running_) throw std::logic_error("AsyncRemuxer已经启动");
     }
     auto poller =
         poller_ ? poller_ : toolkit::EventPollerPool::Instance().getPoller();
     Sync(poller, [&] {
       auto interleaver = std::make_unique<internal::PacketInterleaver>(streams);
       auto converter = std::make_unique<internal::PacketConverter>(streams);
-      mediakit::ProtocolOption option;
-      option.enable_rtsp = option.enable_rtmp = option.enable_ts = true;
-      option.rtsp_demand = option.rtmp_demand = option.ts_demand = true;
-      option.enable_hls = option.enable_hls_fmp4 = option.enable_mp4 = false;
-      option.enable_fmp4 = false;
-      option.enable_audio =
-          std::any_of(streams.begin(), streams.end(), [](const auto& stream) {
-            return stream.codec_parameters.get()->codec_type ==
-                   AVMEDIA_TYPE_AUDIO;
+      std::weak_ptr<Impl> weak = shared_from_this();
+      auto output = std::make_shared<internal::RemuxOutput>(
+          poller,
+          [weak](std::string_view target, int code, std::string_view message) {
+            if (auto self = weak.lock()) self->Error(target, code, message);
           });
-      option.add_mute_audio = false;
-      option.auto_close = false;
-      option.paced_sender_ms = 0;
-      option.modify_stamp = mediakit::ProtocolOption::kModifyStampOff;
-      option.preserve_startup_packets = true;
-      option.rtsp_ntp_from_source_stamp = true;
-      option.max_track = streams.size();
-      auto muxer = std::make_shared<mediakit::MultiMediaSourceMuxer>(
-          mediakit::MediaTuple(DEFAULT_VHOST, "mw_remux",
-                               std::to_string(++next_source_id)),
-          0.0f, option);
+      output->Start(converter->tracks());
       if (!poller_) poller_ = poller;
-      muxer->setMediaListener(shared_from_this());
-      muxer->setTrackReadyTimeoutMS(0);
-      for (const auto& track : converter->tracks()) {
-        if (!muxer->addTrack(track))
-          throw std::invalid_argument("ZLM拒绝编码轨道");
-      }
-      muxer->addTrackCompleted();
-      muxer_ = std::move(muxer);
+      output_ = std::move(output);
       converter_ = std::move(converter);
       std::lock_guard<std::mutex> lock(mutex_);
       interleaver_ = std::move(interleaver);
@@ -178,61 +91,36 @@ class Remuxer::Impl final : public mediakit::MediaSourceEvent,
   }
 
   std::string AddPushUrl(const std::string& url) {
-    const auto schema = Schema(url);
     std::lock_guard<std::mutex> control(control_);
     auto poller = ActivePoller();
     std::string result;
     Sync(poller, [&] {
       RequireAccepting();
-      if (!schema.empty()) {
-        const auto existing =
-            std::find_if(targets_.begin(), targets_.end(),
-                         [&](const auto& target) { return target.url == url; });
-        if (existing != targets_.end()) {
-          result = url;
-          return;
-        }
-        targets_.push_back({url, schema, nullptr});
-        result = url;
-        StartPushers();
-      } else {
-        result = RecordingPath(url);
-        auto recorder = mediakit::createRemuxRecorder(
-            result, std::filesystem::u8path(url).extension() == ".m3u8");
-        muxer_->addRecorder(recorder);
-        MW_LOG_INFO("streamer", "Remuxer recording: {}", result);
-      }
+      result = output_->AddPushUrl(url);
     });
     return result;
   }
 
   void AddRtspPublish(const std::string& app, const std::string& stream,
                       const std::string& ip, std::uint16_t port) {
-    if (app.empty() || stream.empty() || ip.empty() || port == 0 ||
-        app.find_first_of("/\\") != std::string::npos ||
-        stream.find_first_of("/\\") != std::string::npos) {
-      throw std::invalid_argument(
-          "RTSP发布需要有效app、stream、监听地址和端口");
-    }
     std::lock_guard<std::mutex> control(control_);
     auto poller = ActivePoller();
     Sync(poller, [&] {
       RequireAccepting();
-      if (server_) throw std::logic_error("Remuxer只允许一个RTSP发布点");
-      ReservePath(app, stream);
-      try {
-        auto server = Listen(ip, port, poller);
-        auto source = muxer_->getMediaSource(RTSP_SCHEMA);
-        source->setMediaTuple(mediakit::MediaTuple(DEFAULT_VHOST, app, stream));
-        server_ = std::move(server);
-        published_path_ = {app, stream};
-      } catch (...) {
-        ReleasePath({app, stream});
-        throw;
-      }
-      MW_LOG_INFO("streamer", "Remuxer RTSP publish: rtsp://{}:{}/{}/{}", ip,
-                  port, app, stream);
+      output_->AddRtspPublish(app, stream, ip, port);
     });
+  }
+
+  std::string AddHlsPublish(const std::string& app, const std::string& stream,
+                            const std::string& ip, std::uint16_t port) {
+    std::lock_guard<std::mutex> control(control_);
+    auto poller = ActivePoller();
+    std::string result;
+    Sync(poller, [&] {
+      RequireAccepting();
+      result = output_->AddHlsPublish(app, stream, ip, port);
+    });
+    return result;
   }
 
   void Drain() noexcept {
@@ -251,12 +139,6 @@ class Remuxer::Impl final : public mediakit::MediaSourceEvent,
   }
 
  private:
-  struct Target {
-    std::string url;
-    std::string schema;
-    mediakit::PusherProxy::Ptr pusher;
-  };
-
   template <typename Action>
   static void Sync(const toolkit::EventPoller::Ptr& poller, Action&& action) {
     std::exception_ptr error;
@@ -272,16 +154,12 @@ class Remuxer::Impl final : public mediakit::MediaSourceEvent,
 
   toolkit::EventPoller::Ptr ActivePoller() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!accepting_) throw std::logic_error("Remuxer未启动或已经排空");
+    if (!accepting_) throw std::logic_error("AsyncRemuxer未启动或已经排空");
     return poller_;
   }
   void RequireAccepting() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!accepting_) throw std::logic_error("Remuxer未启动或已经排空");
-  }
-  bool Active() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return running_ && !closing_;
+    if (!accepting_) throw std::logic_error("AsyncRemuxer未启动或已经排空");
   }
   void Error(std::string_view target, int code, std::string_view message,
              bool closing_error = false) {
@@ -292,49 +170,9 @@ class Remuxer::Impl final : public mediakit::MediaSourceEvent,
       performance_.Error();
       callback = on_error_;
     }
-    MW_LOG_ERROR("streamer", "Remuxer error: target={} code={} {}", target,
+    MW_LOG_ERROR("streamer", "AsyncRemuxer error: target={} code={} {}", target,
                  code, message);
     if (callback) callback(target, code, message);
-  }
-
-  toolkit::EventPoller::Ptr getOwnerPoller(mediakit::MediaSource&) override {
-    return poller_;
-  }
-  bool close(mediakit::MediaSource&) override { return false; }
-  void onRegist(mediakit::MediaSource& source, bool registered) override {
-    if (registered && Active()) {
-      registered_[source.getSchema()] = true;
-      StartPushers();
-    }
-  }
-
-  void StartPushers() {
-    for (auto& target : targets_) {
-      if (target.pusher || !registered_[target.schema]) continue;
-      try {
-        auto pusher = std::make_shared<mediakit::PusherProxy>(
-            muxer_->getMediaSource(target.schema), -1, poller_);
-        std::weak_ptr<Impl> weak = shared_from_this();
-        const auto url = target.url;
-        pusher->setPushCallbackOnce(
-            [weak, url](const toolkit::SockException& error) {
-              if (auto self = weak.lock(); self && error) {
-                self->Error(url, static_cast<int>(error.getErrCode()),
-                            error.what());
-              }
-            });
-        pusher->setOnClose([weak, url](const toolkit::SockException& error) {
-          if (auto self = weak.lock()) {
-            self->Error(url, static_cast<int>(error.getErrCode()),
-                        error.what());
-          }
-        });
-        pusher->publish(url);
-        target.pusher = std::move(pusher);
-      } catch (const std::exception& error) {
-        Error(target.url, AVERROR_EXTERNAL, error.what());
-      }
-    }
   }
 
   // Called with the admission mutex held; the same queue also serves startup
@@ -378,7 +216,7 @@ class Remuxer::Impl final : public mediakit::MediaSourceEvent,
         shift_ns_ = -minimum;
       }
       std::set<int> eof_tracks;
-      if (finish && !muxer_->isAllTrackReady()) {
+      if (finish && !output_->tracks_ready()) {
         for (const auto& packet : packets)
           eof_tracks.insert(packet.packet->stream_index);
       }
@@ -394,7 +232,7 @@ class Remuxer::Impl final : public mediakit::MediaSourceEvent,
             av_rescale_q(pts, kNanoseconds, kMilliseconds));
         auto frame = converter_->Convert(packet.packet, dts_ms, pts_ms);
         const auto mux_started = performance_.Begin();
-        muxer_->inputFrame(frame);
+        output_->InputFrame(frame);
         const auto finished = performance_.Begin();
         if (performance_.enabled()) {
           std::lock_guard<std::mutex> lock(mutex_);
@@ -407,7 +245,7 @@ class Remuxer::Impl final : public mediakit::MediaSourceEvent,
           // EOF identifies which declared tracks actually have packets.
           // Finalize them after their first frames, before ZLM's unready cache
           // fills.
-          if (eof_tracks.empty() && !muxer_->isAllTrackReady()) muxer_->flush();
+          if (eof_tracks.empty() && !output_->tracks_ready()) output_->Flush();
         }
       }
       {
@@ -427,7 +265,7 @@ class Remuxer::Impl final : public mediakit::MediaSourceEvent,
         closing_ = true;
       }
       try {
-        muxer_->flush();
+        output_->Flush();
       } catch (const std::exception& error) {
         Error({}, AVERROR_EXTERNAL, error.what(), true);
       }
@@ -439,19 +277,12 @@ class Remuxer::Impl final : public mediakit::MediaSourceEvent,
 
   void Finish() {
     try {
-      muxer_->closeRecorders();
+      output_->Close();
     } catch (const std::exception& error) {
       Error({}, AVERROR_EXTERNAL, error.what(), true);
     }
-    targets_.clear();
-    registered_.clear();
-    muxer_.reset();
+    output_.reset();
     converter_.reset();
-    server_.reset();
-    if (published_path_) {
-      ReleasePath(*published_path_);
-      published_path_.reset();
-    }
     auto self = shared_from_this();
     // Wait behind the pusher teardown tasks queued on this same poller.
     poller_->async(
@@ -485,39 +316,43 @@ class Remuxer::Impl final : public mediakit::MediaSourceEvent,
   OnError on_error_;
   OnEnded on_ended_;
   toolkit::EventPoller::Ptr poller_;
-  mediakit::MultiMediaSourceMuxer::Ptr muxer_;
+  std::shared_ptr<internal::RemuxOutput> output_;
   std::unique_ptr<internal::PacketInterleaver> interleaver_;
   internal::RemuxPerformance performance_;
   std::unique_ptr<internal::PacketConverter> converter_;
   std::optional<std::int64_t> shift_ns_;
-  std::vector<Target> targets_;
-  std::map<std::string, bool> registered_;
-  toolkit::TcpServer::Ptr server_;
-  std::optional<std::pair<std::string, std::string>> published_path_;
 };
 
-Remuxer::Remuxer() : impl_(std::make_shared<Impl>()) {}
-Remuxer::~Remuxer() { Stop(); }
-void Remuxer::SetOnError(OnError callback) {
+AsyncRemuxer::AsyncRemuxer() : impl_(std::make_shared<Impl>()) {}
+AsyncRemuxer::~AsyncRemuxer() { Stop(); }
+void AsyncRemuxer::SetOnError(OnError callback) {
   impl_->SetOnError(std::move(callback));
 }
-void Remuxer::SetOnEnded(OnEnded callback) {
+void AsyncRemuxer::SetOnEnded(OnEnded callback) {
   impl_->SetOnEnded(std::move(callback));
 }
-void Remuxer::Start(const std::vector<ffmpeg::StreamInfo>& streams) {
+void AsyncRemuxer::Start(const std::vector<ffmpeg::StreamInfo>& streams) {
   impl_->Start(streams);
 }
-bool Remuxer::SubmitPacket(const ffmpeg::Packet& packet, std::int64_t dts_ns) {
+bool AsyncRemuxer::SubmitPacket(const ffmpeg::Packet& packet,
+                                std::int64_t dts_ns) {
   return impl_->SubmitPacket(packet, dts_ns);
 }
-std::string Remuxer::AddPushUrl(const std::string& url) {
+std::string AsyncRemuxer::AddPushUrl(const std::string& url) {
   return impl_->AddPushUrl(url);
 }
-void Remuxer::AddRtspPublish(const std::string& app, const std::string& stream,
-                             const std::string& ip, std::uint16_t port) {
+void AsyncRemuxer::AddRtspPublish(const std::string& app,
+                                  const std::string& stream,
+                                  const std::string& ip, std::uint16_t port) {
   impl_->AddRtspPublish(app, stream, ip, port);
 }
-void Remuxer::Drain() noexcept { impl_->Drain(); }
-void Remuxer::Stop() noexcept { impl_->Stop(); }
+std::string AsyncRemuxer::AddHlsPublish(const std::string& app,
+                                        const std::string& stream,
+                                        const std::string& ip,
+                                        std::uint16_t port) {
+  return impl_->AddHlsPublish(app, stream, ip, port);
+}
+void AsyncRemuxer::Drain() noexcept { impl_->Drain(); }
+void AsyncRemuxer::Stop() noexcept { impl_->Stop(); }
 
 }  // namespace mw::streamer
