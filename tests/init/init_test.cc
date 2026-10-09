@@ -4,6 +4,14 @@
 #include <memory>
 #include <stdexcept>
 
+#ifdef __linux__
+#include <errno.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 #include "mw/streamer/input/ffmpeg_input.h"
 
 #ifdef MW_STREAMER_STATIC_LIBRARY
@@ -35,7 +43,87 @@ void Close(ContextOwner& context) {
   context.release();
 }
 
+#ifdef __linux__
+int CheckClosedWrites() {
+  int descriptors[2];
+  if (pipe(descriptors) != 0) {
+    return 1;
+  }
+  close(descriptors[0]);
+  const char byte = 'x';
+  const auto pipe_result = write(descriptors[1], &byte, sizeof(byte));
+  const int pipe_error = errno;
+  close(descriptors[1]);
+  if (pipe_result != -1 || pipe_error != EPIPE) {
+    return 2;
+  }
+
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, descriptors) != 0) {
+    return 3;
+  }
+  close(descriptors[0]);
+  const auto socket_result = write(descriptors[1], &byte, sizeof(byte));
+  const int socket_error = errno;
+  close(descriptors[1]);
+  if (socket_result != -1 || socket_error != EPIPE) {
+    return 4;
+  }
+  return 0;
+}
+#endif
+
 }  // namespace
+
+#ifdef __linux__
+TEST_CASE("streamer ignores SIGPIPE across shutdown and reinitialization") {
+  const pid_t child = fork();
+  if (child == 0) {
+    struct sigaction action{};
+    action.sa_handler = SIG_DFL;
+    sigemptyset(&action.sa_mask);
+    sigset_t signals;
+    sigemptyset(&signals);
+    sigaddset(&signals, SIGPIPE);
+    if (sigaction(SIGPIPE, &action, nullptr) != 0 ||
+        sigprocmask(SIG_UNBLOCK, &signals, nullptr) != 0) {
+      _exit(1);
+    }
+    try {
+      for (int iteration = 0; iteration < 2; ++iteration) {
+        ContextOwner context(Init(TestConfig()), &Shutdown);
+        const int initialized_result = CheckClosedWrites();
+        if (initialized_result != 0) {
+          _exit(10 + iteration * 20 + initialized_result);
+        }
+        Close(context);
+        const int shutdown_result = CheckClosedWrites();
+        if (shutdown_result != 0) {
+          _exit(20 + iteration * 20 + shutdown_result);
+        }
+      }
+    } catch (...) {
+      _exit(100);
+    }
+    _exit(0);
+  }
+
+  REQUIRE(child >= 0);
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = waitpid(child, &status, 0);
+  } while (waited == -1 && errno == EINTR);
+  REQUIRE(waited == child);
+  INFO("Child signal: " << (WIFSIGNALED(status) ? WTERMSIG(status) : 0));
+  REQUIRE(WIFEXITED(status));
+  INFO("Child exit code: "
+       << WEXITSTATUS(status)
+       << "; 1: signal setup, 100: exception; phase offsets "
+          "10/20/30/40: initialized/shutdown per iteration; "
+          "1/2: pipe creation/write, 3/4: socket creation/write");
+  CHECK(WEXITSTATUS(status) == 0);
+}
+#endif
 
 TEST_CASE("streamer initializes and shuts down with async logging") {
   auto config = TestConfig();

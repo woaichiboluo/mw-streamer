@@ -24,7 +24,9 @@ struct MW_STREAMER_API InitConfig {
 // Only one context may be active; another Init() is allowed after Shutdown().
 // Initializes logging and FFmpeg, then delegates ZLM's owned resources to its
 // init/shutdown lifecycle. Requests 1 ms timer resolution on Windows until
-// Shutdown(). Initialization failures release resources acquired by this call
+// Shutdown(). On POSIX, ignores SIGPIPE process-wide before initializing media
+// runtimes; this remains in effect after Shutdown() or a later initialization
+// failure. Initialization failures release resources acquired by this call
 // and propagate the exception.
 MW_STREAMER_API MwStreamerContext* Init(const InitConfig& config = {});
 

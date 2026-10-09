@@ -38,6 +38,7 @@ InitConfig::InitConfig() { mw_log_default_config(&log); }
 MwStreamerContext* Init(const InitConfig& config) {
   auto context = std::make_unique<MwStreamerContext>();
   context->logging = std::make_unique<mw::log::Logging>(config.log);
+  internal::IgnoreSigpipe();
   context->timer_resolution.emplace();
   ffmpeg::FfmpegException::throwIfError(avformat_network_init(),
                                         "avformat_network_init");

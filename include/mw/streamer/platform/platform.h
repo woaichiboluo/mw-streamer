@@ -12,6 +12,10 @@ namespace mw::streamer::internal {
 
 MW_STREAMER_API bool HasEnvironmentVariable(const char* name) noexcept;
 
+// Ignores SIGPIPE process-wide on POSIX; a no-op on Windows. Init calls this
+// before starting media workers. The signal disposition is not restored.
+void IgnoreSigpipe();
+
 // Owned by Init/Shutdown; destroy after all media workers have stopped.
 class ScopedTimerResolution final {
  public:

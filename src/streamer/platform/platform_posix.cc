@@ -1,4 +1,8 @@
+#include <signal.h>
+
+#include <cerrno>
 #include <cstdlib>
+#include <system_error>
 
 #include "mw/streamer/platform/platform.h"
 
@@ -6,6 +10,15 @@ namespace mw::streamer::internal {
 
 bool HasEnvironmentVariable(const char* name) noexcept {
   return std::getenv(name) != nullptr;
+}
+
+void IgnoreSigpipe() {
+  struct sigaction action{};
+  action.sa_handler = SIG_IGN;
+  sigemptyset(&action.sa_mask);
+  if (sigaction(SIGPIPE, &action, nullptr) != 0) {
+    throw std::system_error(errno, std::generic_category(), "忽略SIGPIPE失败");
+  }
 }
 
 // Retain the existing non-Windows scheduling behavior.

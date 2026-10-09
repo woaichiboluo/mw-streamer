@@ -15,6 +15,8 @@ bool HasEnvironmentVariable(const char* name) noexcept {
   return size != 0;
 }
 
+void IgnoreSigpipe() {}
+
 ScopedTimerResolution::ScopedTimerResolution() {
   if (timeBeginPeriod(1) != TIMERR_NOERROR) {
     throw std::runtime_error("无法申请Windows 1ms定时精度");
