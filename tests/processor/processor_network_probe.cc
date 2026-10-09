@@ -433,8 +433,8 @@ int main(int argc, char* argv[]) {
     const std::string runtime_log =
         argc > 4 ? std::string(argv[4]) + ".log" : "";
     if (!runtime_log.empty()) {
-      const bool trace_enabled =
-          mw::streamer::internal::HasEnvironmentVariable("MW_STREAMER_PROBE_TRACE");
+      const bool trace_enabled = mw::streamer::internal::HasEnvironmentVariable(
+          "MW_STREAMER_PROBE_TRACE");
       config.log.modules = trace_enabled
                                ? "streamer:trace;perf.input:trace;"
                                  "perf.decoder.video:trace;"

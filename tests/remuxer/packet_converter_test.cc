@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -131,7 +132,7 @@ std::vector<std::string> Nals(const ffmpeg::Packet& packet) {
   const auto* data = reinterpret_cast<const char*>(packet->data);
   mediakit::splitH264(
       data, static_cast<std::size_t>(packet->size),
-      mediakit::prefixSize(data, packet->size),
+      mediakit::prefixSize(data, static_cast<std::size_t>(packet->size)),
       [&](const char* nal, std::size_t size, std::size_t prefix) {
         result.emplace_back(nal + prefix, size - prefix);
       });
@@ -164,7 +165,8 @@ TEST_CASE("真实H264与H265配置准备参数集并保留包缓存和毫秒时�
 
   auto& packet = encoded.packets.front();
   const auto* data = packet->data;
-  const std::string original(reinterpret_cast<const char*>(data), packet->size);
+  const std::string original(reinterpret_cast<const char*>(data),
+                             static_cast<std::size_t>(packet->size));
   auto frame = converter.Convert(packet, 123456, 123496);
   CHECK(frame->cacheAble());
   CHECK(frame->data() == reinterpret_cast<const char*>(data));
@@ -239,7 +241,7 @@ TEST_CASE("avcC与hvcC兼容一至四字节NAL长度和Annex B输入",
     CHECK(converter.Convert(encoded.packets.front(), 20, 40)->toString() ==
           std::string(
               reinterpret_cast<const char*>(encoded.packets.front()->data),
-              encoded.packets.front()->size));
+              static_cast<std::size_t>(encoded.packets.front()->size)));
   }
   auto stream = encoded.stream;
   auto config = configuration;
@@ -268,13 +270,15 @@ TEST_CASE("AAC使用真实ASC并由Track生成一次ADTS头", "[remuxer][packet]
   REQUIRE(audio != nullptr);
   CHECK(audio->getAudioSampleRate() == 48000);
   CHECK(audio->getAudioChannel() == 2);
-  CHECK(track->getExtraData()->toString() ==
-        std::string(reinterpret_cast<const char*>(
-                        encoded.stream.codec_parameters.get()->extradata),
-                    encoded.stream.codec_parameters.get()->extradata_size));
+  CHECK(
+      track->getExtraData()->toString() ==
+      std::string(reinterpret_cast<const char*>(
+                      encoded.stream.codec_parameters.get()->extradata),
+                  static_cast<std::size_t>(
+                      encoded.stream.codec_parameters.get()->extradata_size)));
   auto& packet = encoded.packets.front();
   const std::string payload(reinterpret_cast<const char*>(packet->data),
-                            packet->size);
+                            static_cast<std::size_t>(packet->size));
   auto raw = converter.Convert(packet, 321, 321);
   CHECK(raw->prefixSize() == 0);
   CHECK(raw->data() == reinterpret_cast<const char*>(packet->data));

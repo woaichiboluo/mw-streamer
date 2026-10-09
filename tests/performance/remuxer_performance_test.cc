@@ -1,8 +1,7 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/generators/catch_generators.hpp>
-
 #include <algorithm>
 #include <atomic>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -34,10 +33,11 @@ class LoggedRuntime final {
  public:
   explicit LoggedRuntime(const std::string& level)
       : root_(fs::temp_directory_path()),
-        directory_(root_ / ("mw-remux-performance-" + std::to_string(
-                              std::chrono::steady_clock::now()
-                                  .time_since_epoch()
-                                  .count()))),
+        directory_(
+            root_ /
+            ("mw-remux-performance-" +
+             std::to_string(
+                 std::chrono::steady_clock::now().time_since_epoch().count()))),
         path_((directory_ / "performance.log").string()),
         modules_("perf.remux:" + level +
                  ";perf.encoder.video:off;perf.encoder.audio:off;streamer:off"),
@@ -91,9 +91,8 @@ void EncodeFixture(encoder_test::Capture& capture) {
   config.video_options["x264-params"] =
       "b-adapt=0:rc-lookahead=5:sync-lookahead=0";
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
-  encoder.Start(config,
-                {encoder_test::VideoStream(), encoder_test::AudioStream()},
-                cpu);
+  encoder.Start(
+      config, {encoder_test::VideoStream(), encoder_test::AudioStream()}, cpu);
   REQUIRE(encoder.SubmitAudio(encoder_test::AudioFrame(3072)));
   for (int frame = 0; frame < 10; ++frame) {
     REQUIRE(encoder.SubmitVideo(encoder_test::VideoFrame(frame)));
@@ -147,8 +146,12 @@ std::vector<PacketSnapshot> Snapshot(const encoder_test::Capture& capture) {
   std::vector<PacketSnapshot> result;
   for (const auto& packet : capture.packets) {
     REQUIRE(packet->size > 0);
-    result.push_back({packet->pts, packet->dts, packet->duration,
-                      packet->stream_index, packet->flags, packet->time_base,
+    result.push_back({packet->pts,
+                      packet->dts,
+                      packet->duration,
+                      packet->stream_index,
+                      packet->flags,
+                      packet->time_base,
                       {packet->data, packet->data + packet->size}});
   }
   return result;
@@ -167,9 +170,8 @@ void CheckUnchanged(const encoder_test::Capture& capture,
     CHECK(packet->flags == expected.flags);
     CHECK(packet->time_base.num == expected.time_base.num);
     CHECK(packet->time_base.den == expected.time_base.den);
-    CHECK(std::vector<std::uint8_t>(packet->data,
-                                   packet->data + packet->size) ==
-          expected.payload);
+    CHECK(std::vector<std::uint8_t>(
+              packet->data, packet->data + packet->size) == expected.payload);
   }
 }
 
@@ -181,8 +183,7 @@ std::vector<std::string> Lines(const std::string& text,
   std::string line;
   while (std::getline(input, line)) {
     if (line.find("[perf.remux]") == std::string::npos) continue;
-    if (!level.empty() &&
-        line.find("[" + level + "]") == std::string::npos)
+    if (!level.empty() && line.find("[" + level + "]") == std::string::npos)
       continue;
     if (!event.empty() && line.find(event) == std::string::npos) continue;
     result.push_back(line);
@@ -213,10 +214,10 @@ double Number(const std::string& line, const std::string& field) {
 }
 
 void CheckInfo(const std::string& line) {
-  for (const auto* field : {"accepted_pps", "video_pps", "audio_pps",
-                            "payload_Mb_per_second", "pending_MiB",
-                            "queue_wait_mean_ms", "work_mean_ms",
-                            "interleave_mean_ms"}) {
+  for (const auto* field :
+       {"accepted_pps", "video_pps", "audio_pps", "payload_Mb_per_second",
+        "pending_MiB", "queue_wait_mean_ms", "work_mean_ms",
+        "interleave_mean_ms"}) {
     CHECK(Number(line, field) >= 0);
   }
   CHECK(line.find("state=") != std::string::npos);
@@ -259,8 +260,8 @@ void CheckSummary(const std::string& line, const Totals& accepted,
         std::string::npos);
   CHECK(Integer(line, "interleave_calls") >=
         static_cast<std::int64_t>(accepted.packets));
-  for (const auto* field : {"interleave_total_ms", "interleave_mean_ms",
-                            "interleave_max_ms"}) {
+  for (const auto* field :
+       {"interleave_total_ms", "interleave_mean_ms", "interleave_max_ms"}) {
     CHECK(Number(line, field) >= 0);
   }
 }
@@ -271,9 +272,9 @@ void CheckHandoffs(const std::string& text,
   REQUIRE(events.size() == capture.packets.size());
   std::int64_t minimum = 0;
   for (const auto& packet : capture.packets) {
-    minimum = std::min({minimum,
-                        av_rescale_q(packet->pts, packet->time_base, kNanoseconds),
-                        av_rescale_q(packet->dts, packet->time_base, kNanoseconds)});
+    minimum = std::min(
+        {minimum, av_rescale_q(packet->pts, packet->time_base, kNanoseconds),
+         av_rescale_q(packet->dts, packet->time_base, kNanoseconds)});
   }
   std::vector<bool> seen(capture.packets.size(), false);
   auto previous = std::numeric_limits<std::int64_t>::min();
@@ -287,7 +288,8 @@ void CheckHandoffs(const std::string& text,
                  value->dts == dts;
         });
     REQUIRE(packet != capture.packets.end());
-    const auto index = static_cast<std::size_t>(packet - capture.packets.begin());
+    const auto index =
+        static_cast<std::size_t>(packet - capture.packets.begin());
     REQUIRE_FALSE(seen[index]);
     seen[index] = true;
     const auto time_base = packet->get()->time_base;
@@ -303,8 +305,8 @@ void CheckHandoffs(const std::string& text,
           av_rescale_q(media_dts - minimum, kNanoseconds, kMilliseconds));
     CHECK(media_dts >= previous);
     previous = media_dts;
-    for (const auto* field : {"queue_wait_ms", "convert_ms", "mux_ms",
-                              "work_ms"}) {
+    for (const auto* field :
+         {"queue_wait_ms", "convert_ms", "mux_ms", "work_ms"}) {
       CHECK(Number(line, field) >= 0);
     }
   }
@@ -326,15 +328,15 @@ TEST_CASE("公开Remux性能info trace off实际排空统计且日志不改变�
   {
     mw::streamer::Remuxer remuxer;
     remuxer.SetOnEnded([&]() noexcept { ++ended; });
-    remuxer.SetOnError([&](std::string_view, int, std::string_view) noexcept {
-      ++errors;
-    });
+    remuxer.SetOnError(
+        [&](std::string_view, int, std::string_view) noexcept { ++errors; });
     remuxer.Start(capture.streams);
     // There are deliberately no targets: a false SDK inputFrame return is
     // demand information, and must not be counted as a lost encoded packet.
     for (std::size_t position = 0; position < order.size(); ++position) {
       const auto index = order[position];
-      REQUIRE(remuxer.SubmitPacket(capture.packets[index], capture.dts_ns[index]));
+      REQUIRE(
+          remuxer.SubmitPacket(capture.packets[index], capture.dts_ns[index]));
       totals.Add(capture.packets[index]);
       if (level == "info" && position == 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2050));
@@ -382,18 +384,17 @@ TEST_CASE("Remux性能复用会话累计清零且重复Stop不产生多份摘要
   {
     mw::streamer::Remuxer remuxer;
     remuxer.SetOnEnded([&]() noexcept { ++ended; });
-    remuxer.SetOnError([&](std::string_view, int, std::string_view) noexcept {
-      ++errors;
-    });
+    remuxer.SetOnError(
+        [&](std::string_view, int, std::string_view) noexcept { ++errors; });
     for (std::size_t session = 0; session < totals.size(); ++session) {
       remuxer.Start(capture.streams);
       for (const auto index : Order(capture)) {
-        if (session == 1 &&
-            (capture.packets[index]->stream_index !=
-                 encoder_test::VideoStream().stream_index ||
-             totals[session].packets == 2))
+        if (session == 1 && (capture.packets[index]->stream_index !=
+                                 encoder_test::VideoStream().stream_index ||
+                             totals[session].packets == 2))
           continue;
-        REQUIRE(remuxer.SubmitPacket(capture.packets[index], capture.dts_ns[index]));
+        REQUIRE(remuxer.SubmitPacket(capture.packets[index],
+                                     capture.dts_ns[index]));
         totals[session].Add(capture.packets[index]);
       }
       remuxer.Drain();
@@ -433,7 +434,8 @@ TEST_CASE("Remux性能区分EOF缺轨启动淘汰和非法包拒绝",
         if (capture.packets[index]->stream_index !=
             encoder_test::AudioStream().stream_index)
           continue;
-        REQUIRE(remuxer.SubmitPacket(capture.packets[index], capture.dts_ns[index]));
+        REQUIRE(remuxer.SubmitPacket(capture.packets[index],
+                                     capture.dts_ns[index]));
         accepted.Add(capture.packets[index]);
         handed_off.Add(capture.packets[index]);
       }
@@ -457,7 +459,8 @@ TEST_CASE("Remux性能区分EOF缺轨启动淘汰和非法包拒绝",
                         std::invalid_argument);
       expected_errors = 1;
       for (const auto index : Order(capture)) {
-        REQUIRE(remuxer.SubmitPacket(capture.packets[index], capture.dts_ns[index]));
+        REQUIRE(remuxer.SubmitPacket(capture.packets[index],
+                                     capture.dts_ns[index]));
         accepted.Add(capture.packets[index]);
         handed_off.Add(capture.packets[index]);
       }
@@ -501,7 +504,7 @@ TEST_CASE("Remux转换失败将已取出的在途编码包计入中止而不冒�
   const auto index = static_cast<std::size_t>(key - capture.packets.begin());
   auto damaged = key->Clone();
   ffmpeg::FfmpegException::throwIfError(av_packet_make_writable(damaged.get()),
-                                       "独立损坏测试包的负载");
+                                        "独立损坏测试包的负载");
   REQUIRE(damaged->size > 0);
   std::fill_n(damaged->data, damaged->size, std::uint8_t{0});
   const auto bytes = static_cast<std::int64_t>(damaged->size);
@@ -510,9 +513,8 @@ TEST_CASE("Remux转换失败将已取出的在途编码包计入中止而不冒�
   {
     mw::streamer::Remuxer remuxer;
     remuxer.SetOnEnded([&]() noexcept { ++ended; });
-    remuxer.SetOnError([&](std::string_view, int, std::string_view) noexcept {
-      ++errors;
-    });
+    remuxer.SetOnError(
+        [&](std::string_view, int, std::string_view) noexcept { ++errors; });
     remuxer.Start({*stream});
     // Metadata passes admission. With one declared video track PopReady
     // removes this key packet before the adapter rejects its zeroed NAL data.

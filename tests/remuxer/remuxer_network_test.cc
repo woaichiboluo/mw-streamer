@@ -1,8 +1,8 @@
 #include <srt/srt.h>
 
-#include <catch2/catch_test_macros.hpp>
 #include <algorithm>
 #include <atomic>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "../encoder/encoder_test_support.h"
 #include "Common/MediaSource.h"
 #include "Common/config.h"
 #include "Network/Session.h"
@@ -28,7 +29,6 @@
 #include "mw/streamer/init/init.h"
 #include "mw/streamer/input/ffmpeg_input.h"
 #include "mw/streamer/remuxer/remuxer.h"
-#include "../encoder/encoder_test_support.h"
 
 namespace {
 
@@ -78,8 +78,8 @@ Encoded Encode() {
   auto config = encoder_test::Config();
   config.gop_size = 10;
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
-  encoder.Start(config,
-                {encoder_test::VideoStream(), encoder_test::AudioStream()}, cpu);
+  encoder.Start(
+      config, {encoder_test::VideoStream(), encoder_test::AudioStream()}, cpu);
   REQUIRE(encoder.SubmitAudio(encoder_test::AudioFrame(48000)));
   for (int index = 0; index < 50; ++index)
     REQUIRE(encoder.SubmitVideo(encoder_test::VideoFrame(index)));
@@ -130,10 +130,12 @@ class Replay final {
           if (cycle > 0 && encoded_.packets[index]->stream_index == 7 &&
               encoded_.packets[index]->dts < 0)
             continue;
-          const auto delay = encoded_.clocks[index] - encoded_.clocks.front() + shift;
+          const auto delay =
+              encoded_.clocks[index] - encoded_.clocks.front() + shift;
           {
             std::unique_lock<std::mutex> lock(mutex_);
-            if (changed_.wait_until(lock, start + std::chrono::nanoseconds(delay),
+            if (changed_.wait_until(lock,
+                                    start + std::chrono::nanoseconds(delay),
                                     [&] { return stopped_; }))
               return;
           }
@@ -177,7 +179,8 @@ struct RtmpState {
 
 // ZLM's SDK checkout has no RtmpSession. Use its real wire protocol for the
 // receiver handshake, then inspect the received FLV video messages.
-class RtmpSession final : public toolkit::Session, public mediakit::RtmpProtocol {
+class RtmpSession final : public toolkit::Session,
+                          public mediakit::RtmpProtocol {
  public:
   explicit RtmpSession(const toolkit::Socket::Ptr& socket) : Session(socket) {}
   void Configure(const std::shared_ptr<RtmpState>& state) { state_ = state; }
@@ -195,7 +198,9 @@ class RtmpSession final : public toolkit::Session, public mediakit::RtmpProtocol
   void onManager() override {}
 
  protected:
-  void onSendRawData(toolkit::Buffer::Ptr buffer) override { send(std::move(buffer)); }
+  void onSendRawData(toolkit::Buffer::Ptr buffer) override {
+    send(std::move(buffer));
+  }
   void onRtmpChunk(mediakit::RtmpPacket::Ptr packet) override {
     if (packet->type_id == MSG_CMD) {
       AMFDecoder decoder(packet->buffer, 0);
@@ -221,8 +226,9 @@ class RtmpSession final : public toolkit::Session, public mediakit::RtmpProtocol
         name_ = decoder.load<std::string>();
         {
           std::lock_guard<std::mutex> lock(state_->mutex);
-          auto stream = std::find_if(state_->streams.begin(), state_->streams.end(),
-                                     [&](const auto& value) { return value.name == name_; });
+          auto stream = std::find_if(
+              state_->streams.begin(), state_->streams.end(),
+              [&](const auto& value) { return value.name == name_; });
           if (stream == state_->streams.end()) {
             state_->streams.push_back({name_, 0, {}, {}});
             stream = state_->streams.end() - 1;
@@ -240,8 +246,9 @@ class RtmpSession final : public toolkit::Session, public mediakit::RtmpProtocol
     } else if (packet->type_id == MSG_VIDEO && !packet->isConfigFrame()) {
       {
         std::lock_guard<std::mutex> lock(state_->mutex);
-        const auto stream = std::find_if(state_->streams.begin(), state_->streams.end(),
-                                         [&](const auto& value) { return value.name == name_; });
+        const auto stream = std::find_if(
+            state_->streams.begin(), state_->streams.end(),
+            [&](const auto& value) { return value.name == name_; });
         if (stream != state_->streams.end()) {
           stream->stamps.push_back(packet->time_stamp);
           stream->video.push_back(packet->toString());
@@ -263,10 +270,10 @@ class RtmpReceiver final {
         poller_(toolkit::EventPollerPool::Instance().getPoller()),
         server_(std::make_shared<toolkit::TcpServer>(poller_)) {
     server_->start<RtmpSession>(0, "127.0.0.1", 1024,
-        [this](std::shared_ptr<RtmpSession>& session) {
-          session->Configure(state_);
-          sessions_.push_back(session);
-        });
+                                [this](std::shared_ptr<RtmpSession>& session) {
+                                  session->Configure(state_);
+                                  sessions_.push_back(session);
+                                });
   }
   ~RtmpReceiver() {
     poller_->sync([&] {
@@ -277,22 +284,28 @@ class RtmpReceiver final {
     });
   }
   std::string Url(const std::string& stream) const {
-    return "rtmp://127.0.0.1:" + std::to_string(server_->getPort()) + "/network/" + stream;
+    return "rtmp://127.0.0.1:" + std::to_string(server_->getPort()) +
+           "/network/" + stream;
   }
-  bool Wait(const std::string& name, std::size_t packets, unsigned connections = 1) {
+  bool Wait(const std::string& name, std::size_t packets,
+            unsigned connections = 1) {
     std::unique_lock<std::mutex> lock(state_->mutex);
     return state_->changed.wait_for(lock, 8s, [&] {
-      const auto stream = std::find_if(state_->streams.begin(), state_->streams.end(),
-                                      [&](const auto& value) { return value.name == name; });
-      return stream != state_->streams.end() && stream->connections >= connections &&
+      const auto stream =
+          std::find_if(state_->streams.begin(), state_->streams.end(),
+                       [&](const auto& value) { return value.name == name; });
+      return stream != state_->streams.end() &&
+             stream->connections >= connections &&
              stream->stamps.size() >= packets;
     });
   }
   RtmpState::Stream Get(const std::string& name) {
     std::lock_guard<std::mutex> lock(state_->mutex);
-    const auto stream = std::find_if(state_->streams.begin(), state_->streams.end(),
-                                    [&](const auto& value) { return value.name == name; });
-    if (stream == state_->streams.end()) throw std::runtime_error("RTMP stream absent");
+    const auto stream =
+        std::find_if(state_->streams.begin(), state_->streams.end(),
+                     [&](const auto& value) { return value.name == name; });
+    if (stream == state_->streams.end())
+      throw std::runtime_error("RTMP stream absent");
     return *stream;
   }
   void Disconnect(const std::string& name) {
@@ -321,7 +334,9 @@ class RtspServer final {
         server_(std::make_shared<toolkit::TcpServer>(poller_)) {
     server_->start<mediakit::RtspSession>(port, "127.0.0.1");
   }
-  ~RtspServer() { poller_->sync([&] { server_.reset(); }); }
+  ~RtspServer() {
+    poller_->sync([&] { server_.reset(); });
+  }
   std::uint16_t port() const { return server_->getPort(); }
   std::string Url(const std::string& stream) const {
     return "rtsp://127.0.0.1:" + std::to_string(port()) + "/network/" + stream;
@@ -340,18 +355,24 @@ class RegisteredSource final {
         this, mediakit::Broadcast::kBroadcastMediaChanged,
         [this](const bool& registered, mediakit::MediaSource& source) {
           if (!registered || source.getSchema() != RTSP_SCHEMA ||
-              source.getMediaTuple().app != app_ || source.getMediaTuple().stream != stream_)
+              source.getMediaTuple().app != app_ ||
+              source.getMediaTuple().stream != stream_)
             return;
           {
             std::lock_guard<std::mutex> lock(mutex_);
-            source_ = std::dynamic_pointer_cast<mediakit::RtspMediaSource>(source.shared_from_this());
+            source_ = std::dynamic_pointer_cast<mediakit::RtspMediaSource>(
+                source.shared_from_this());
           }
           changed_.notify_all();
         });
   }
   ~RegisteredSource() {
     toolkit::NoticeCenter::Instance().delListener(this);
-    if (poller_) poller_->sync([&] { reader_.reset(); source_.reset(); });
+    if (poller_)
+      poller_->sync([&] {
+        reader_.reset();
+        source_.reset();
+      });
   }
   bool Wait() {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -362,15 +383,16 @@ class RegisteredSource final {
     poller_ = source->getOwnerPoller();
     poller_->sync([&] {
       reader_ = source->getRing()->attach(poller_);
-      reader_->setReadCB([this](const mediakit::RtspMediaSource::RingDataType& packets) {
-        {
-          std::lock_guard<std::mutex> lock(mutex_);
-          packets->for_each([&](const auto& packet) {
-            if (packet->type == mediakit::TrackVideo) ++video_packets_;
+      reader_->setReadCB(
+          [this](const mediakit::RtspMediaSource::RingDataType& packets) {
+            {
+              std::lock_guard<std::mutex> lock(mutex_);
+              packets->for_each([&](const auto& packet) {
+                if (packet->type == mediakit::TrackVideo) ++video_packets_;
+              });
+            }
+            changed_.notify_all();
           });
-        }
-        changed_.notify_all();
-      });
     });
   }
   bool WaitPackets() {
@@ -402,11 +424,13 @@ class SrtReceiver final {
       sockaddr_in address{};
       address.sin_family = AF_INET;
       address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-      if (srt_bind(listener_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == SRT_ERROR ||
+      if (srt_bind(listener_, reinterpret_cast<sockaddr*>(&address),
+                   sizeof(address)) == SRT_ERROR ||
           srt_listen(listener_, 1) == SRT_ERROR)
         throw std::runtime_error(srt_getlasterror_str());
       int size = sizeof(address);
-      if (srt_getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &size) == SRT_ERROR)
+      if (srt_getsockname(listener_, reinterpret_cast<sockaddr*>(&address),
+                          &size) == SRT_ERROR)
         throw std::runtime_error(srt_getlasterror_str());
       port_ = ntohs(address.sin_port);
       thread_ = std::thread([this] { Receive(); });
@@ -427,11 +451,13 @@ class SrtReceiver final {
     srt_cleanup();
   }
   std::string Url() const {
-    return "srt://127.0.0.1:" + std::to_string(port_) + "?streamid=#!::r=network/srt,m=publish";
+    return "srt://127.0.0.1:" + std::to_string(port_) +
+           "?streamid=#!::r=network/srt,m=publish";
   }
   bool Wait() {
     std::unique_lock<std::mutex> lock(mutex_);
-    return changed_.wait_for(lock, 8s, [&] { return messages_ >= 5 || !error_.empty(); });
+    return changed_.wait_for(lock, 8s,
+                             [&] { return messages_ >= 5 || !error_.empty(); });
   }
   bool valid() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -439,7 +465,8 @@ class SrtReceiver final {
   }
 
  private:
-  template<class T> void Set(SRT_SOCKOPT option, const T& value) {
+  template <class T>
+  void Set(SRT_SOCKOPT option, const T& value) {
     if (srt_setsockflag(listener_, option, &value, sizeof(value)) == SRT_ERROR)
       throw std::runtime_error(srt_getlasterror_str());
   }
@@ -506,23 +533,27 @@ class DecoderInput final {
       }
       changed_.notify_all();
     });
-    input_.SetOnStateChanged([this](mw::streamer::InputState state, int, std::string_view error) {
-      if (state == mw::streamer::InputState::kFailed) {
-        {
-          std::lock_guard<std::mutex> lock(mutex_);
-          error_ = error;
-        }
-        changed_.notify_all();
-      }
-    });
+    input_.SetOnStateChanged(
+        [this](mw::streamer::InputState state, int, std::string_view error) {
+          if (state == mw::streamer::InputState::kFailed) {
+            {
+              std::lock_guard<std::mutex> lock(mutex_);
+              error_ = error;
+            }
+            changed_.notify_all();
+          }
+        });
     input_.Start(url);
   }
   ~DecoderInput() { input_.Stop(); }
   bool Wait(std::size_t videos = 3) {
     std::unique_lock<std::mutex> lock(mutex_);
-    return changed_.wait_for(lock, 8s, [&] {
-      return (videos_ >= videos && audios_ > 0) || !error_.empty();
-    }) && valid_ && error_.empty();
+    return changed_.wait_for(lock, 8s,
+                             [&] {
+                               return (videos_ >= videos && audios_ > 0) ||
+                                      !error_.empty();
+                             }) &&
+           valid_ && error_.empty();
   }
   std::size_t videos() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -554,11 +585,12 @@ TEST_CASE("动态RTMP RTSP SRT推流共享编码源且断线仅重连故障目�
   std::mutex errors_mutex;
   std::vector<std::string> errors;
   Remuxer remuxer;
-  remuxer.SetOnError([&](std::string_view target, int code, std::string_view message) {
-    std::lock_guard<std::mutex> lock(errors_mutex);
-    errors.push_back(std::string(target) + " code=" + std::to_string(code) +
-                     " " + std::string(message));
-  });
+  remuxer.SetOnError(
+      [&](std::string_view target, int code, std::string_view message) {
+        std::lock_guard<std::mutex> lock(errors_mutex);
+        errors.push_back(std::string(target) + " code=" + std::to_string(code) +
+                         " " + std::string(message));
+      });
   remuxer.Start(encoded.streams);
   const auto first_name = Name();
   const auto second_name = Name();
@@ -612,7 +644,8 @@ TEST_CASE("动态RTMP RTSP SRT推流共享编码源且断线仅重连故障目�
   REQUIRE(rtmp.Wait(first_name, disconnected_before.stamps.size() + 10, 2));
   const auto healthy_after = rtmp.Get(second_name);
   CHECK(healthy_after.connections == 1);
-  CHECK(std::is_sorted(healthy_after.stamps.begin(), healthy_after.stamps.end()));
+  CHECK(
+      std::is_sorted(healthy_after.stamps.begin(), healthy_after.stamps.end()));
   CHECK(rtmp.Get(first_name).stamps.back() > disconnected_before.stamps.back());
   CHECK(rtmp.error().empty());
   replay.Stop();
@@ -642,7 +675,8 @@ TEST_CASE("本地RTSP发布重命名同源并共享监听且冲突不破坏已�
   CHECK_THROWS(first.AddRtspPublish(app, Name(), "127.0.0.1", port));
   Replay first_replay(first, encoded);
   Replay second_replay(second, encoded);
-  const auto base = "rtsp://127.0.0.1:" + std::to_string(port) + "/" + app + "/";
+  const auto base =
+      "rtsp://127.0.0.1:" + std::to_string(port) + "/" + app + "/";
   {
     DecoderInput first_input(base + first_name);
     DecoderInput second_input(base + second_name);
@@ -690,12 +724,14 @@ TEST_CASE("运行中添加本地RTSP发布保留媒体源身份和时间线",
   const auto app = Name();
   const auto stream = Name();
   remuxer.AddRtspPublish(app, stream, "127.0.0.1", port);
-  CHECK(mediakit::MediaSource::find(RTSP_SCHEMA, DEFAULT_VHOST, app, stream).get() == source.get());
-  CHECK(mediakit::MediaSource::find(RTSP_SCHEMA, DEFAULT_VHOST,
-                                    old_tuple.app, old_tuple.stream) == nullptr);
+  CHECK(mediakit::MediaSource::find(RTSP_SCHEMA, DEFAULT_VHOST, app, stream)
+            .get() == source.get());
+  CHECK(mediakit::MediaSource::find(RTSP_SCHEMA, DEFAULT_VHOST, old_tuple.app,
+                                    old_tuple.stream) == nullptr);
   const auto rtmp_before = rtmp.Get(target);
   {
-    DecoderInput input("rtsp://127.0.0.1:" + std::to_string(port) + "/" + app + "/" + stream);
+    DecoderInput input("rtsp://127.0.0.1:" + std::to_string(port) + "/" + app +
+                       "/" + stream);
     REQUIRE(input.Wait());
     REQUIRE(rtmp.Wait(target, rtmp_before.stamps.size() + 5));
     std::uint32_t stamp = 0;
