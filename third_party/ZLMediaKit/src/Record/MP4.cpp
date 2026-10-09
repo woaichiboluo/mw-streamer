@@ -107,14 +107,23 @@ void MP4FileDisk::openFile(const char *file, const char *mode) {
 
     // 创建智能指针  [AUTO-TRANSLATED:e7920ab2]
     // Create a smart pointer
-    _file.reset(fp,[file_buf](FILE *fp) {
-        fflush(fp);
-        fclose(fp);
+    _close_result = std::make_shared<int>(0);
+    _file.reset(fp,[file_buf, result = _close_result](FILE *fp) {
+        if (fflush(fp) != 0) *result = -1;
+        if (fclose(fp) != 0) *result = -1;
     });
 }
 
 void MP4FileDisk::closeFile() {
     _file = nullptr;
+}
+
+void MP4FileDisk::closeFileChecked() {
+    auto result = _close_result;
+    closeFile();
+    if (result && *result != 0) {
+        throw std::runtime_error("Flush or close MP4 file failed");
+    }
 }
 
 int MP4FileDisk::onRead(void *data, size_t bytes) {

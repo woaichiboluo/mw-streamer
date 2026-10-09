@@ -431,6 +431,10 @@ public:
         return _tuple;
     }
 
+    // Rename on the owner poller without replacing this source or its readers.
+    // A source that is not registered remains unregistered until data is ready.
+    void setMediaTuple(const MediaTuple &tuple);
+
     std::string getUrl() const { return _schema + "://" + _tuple.shortUrl(); }
 
     // 获取对象所有权  [AUTO-TRANSLATED:84fb43cd]
@@ -583,6 +587,7 @@ private:
     toolkit::Ticker _ticker;
     std::string _schema;
     std::weak_ptr<MediaSourceEvent> _listener;
+    bool _renaming = false;
     // 对象个数统计  [AUTO-TRANSLATED:f4a012d0]
     // Object count statistics
     toolkit::ObjectStatistic<MediaSource> _statistic;

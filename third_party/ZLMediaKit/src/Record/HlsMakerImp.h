@@ -23,7 +23,8 @@ class HlsMakerImp : public HlsMaker {
 public:
     HlsMakerImp(bool is_fmp4, const std::string &m3u8_file, const std::string &params, uint32_t bufSize = 64 * 1024,
                 float seg_duration = 5, uint32_t seg_number = 3, bool seg_keep = false,
-                const std::string &fmp4_seg_ext = ".mp4");
+                const std::string &fmp4_seg_ext = ".mp4", const std::string &segment_directory = "",
+                bool strict_io = false);
     ~HlsMakerImp() override;
 
     /**
@@ -53,6 +54,9 @@ public:
       */
      void clearCache();
 
+    // Flush the last recording segment and publish a completed playlist.
+    void finish();
+
 protected:
     std::string onOpenSegment(uint64_t index) override ;
     void onDelSegment(uint64_t index) override;
@@ -74,6 +78,8 @@ private:
     std::string _path_hls_delay;
     std::string _path_init;
     std::string _path_prefix;
+    std::string _segment_uri_prefix;
+    bool _strict_io = false;
     std::string _current_dir;
     std::string _current_dir_init_file;
     RecordInfo _info;

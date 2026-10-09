@@ -46,7 +46,7 @@ endforeach()
 # Add options after dependencies so only first-party C++ targets inherit them.
 if(MSVC)
     add_compile_options(
-        "$<$<COMPILE_LANGUAGE:CXX>:/W4;/WX;/permissive-;/Zc:__cplusplus>"
+        "$<$<COMPILE_LANGUAGE:CXX>:/W4;/WX;/wd4251;/wd4275;/permissive-;/Zc:__cplusplus>"
     )
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set(MW_CXX_WARNING_OPTIONS

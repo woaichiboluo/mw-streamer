@@ -11,6 +11,9 @@
 #include "mw/log.h"
 #include <math.h>
 #include "Common/config.h"
+#include "Record/RemuxRecorder.h"
+#include <algorithm>
+#include <exception>
 #include "MultiMediaSourceMuxer.h"
 #include "Thread/WorkThreadPool.h"
 
@@ -81,6 +84,11 @@ public:
             flushCache(frame->dts());
         }
         return true;
+    }
+
+    void flush() override {
+        std::lock_guard<std::recursive_mutex> lock(_mtx);
+        flushCache(_cache.empty() ? _virtual_pos : _cache.rbegin()->first);
     }
 
 private:
@@ -176,6 +184,75 @@ std::shared_ptr<MediaSinkInterface> MultiMediaSourceMuxer::makeRecorder(Recorder
     return recorder;
 }
 
+void MultiMediaSourceMuxer::addRecorder(const MediaSinkInterface::Ptr &recorder) {
+    CHECK(getOwnerPoller(MediaSource::NullMediaSource())->isCurrentThread());
+    if (!recorder || std::find(_recorders.begin(), _recorders.end(), recorder) != _recorders.end()) {
+        throw std::invalid_argument("Invalid or duplicate recorder");
+    }
+    for (auto &track : getTracks()) {
+        if (_stamps.count(track->getIndex()) && !recorder->addTrack(track)) {
+            throw std::invalid_argument("Recorder rejected a track");
+        }
+    }
+    if (isAllTrackReady()) {
+        recorder->addTrackCompleted();
+        std::vector<Frame::Ptr> history;
+        if (_ring) _ring->flushGop([&](const Frame::Ptr &frame) { history.emplace_back(frame); });
+        if (!history.empty()) {
+            auto origin = std::min(history.front()->dts(), history.front()->pts());
+            for (const auto &frame : history) origin = std::min(origin, std::min(frame->dts(), frame->pts()));
+            if (auto remux = std::dynamic_pointer_cast<RemuxRecorder>(recorder)) remux->setTimestampOrigin(origin);
+            std::stable_sort(history.begin(), history.end(), [](const Frame::Ptr &a, const Frame::Ptr &b) { return a->dts() < b->dts(); });
+            for (const auto &frame : history) recorder->inputFrame(frame);
+        }
+    }
+    _recorders.emplace_back(recorder);
+}
+
+void MultiMediaSourceMuxer::closeRecorders() {
+    CHECK(getOwnerPoller(MediaSource::NullMediaSource())->isCurrentThread());
+    auto recorders = std::move(_recorders);
+    _recorders.clear();
+    std::exception_ptr error;
+    for (const auto &recorder : recorders) {
+        try {
+            if (auto remux = std::dynamic_pointer_cast<RemuxRecorder>(recorder)) remux->close();
+            else recorder->flush();
+        } catch (...) {
+            if (!error) error = std::current_exception();
+        }
+    }
+    if (error) std::rethrow_exception(error);
+}
+
+void MultiMediaSourceMuxer::flush() {
+    CHECK(getOwnerPoller(MediaSource::NullMediaSource())->isCurrentThread());
+    MediaSink::flush();
+    if (_paced_sender) _paced_sender->flush();
+    std::vector<MediaSinkInterface::Ptr> outputs{_rtmp, _rtsp, _ts, _fmp4, _mp4, _hls, _hls_fmp4, _delegate};
+    outputs.insert(outputs.end(), _recorders.begin(), _recorders.end());
+    std::exception_ptr error;
+    for (const auto &output : outputs) {
+        if (!output) continue;
+        try {
+            output->flush();
+        } catch (...) {
+            if (!error) error = std::current_exception();
+        }
+    }
+    if (error) std::rethrow_exception(error);
+}
+
+MediaSource::Ptr MultiMediaSourceMuxer::getMediaSource(const std::string &schema) const {
+    if (schema == RTSP_SCHEMA) return _rtsp ? _rtsp->getMediaSource() : nullptr;
+    if (schema == RTMP_SCHEMA) return _rtmp ? _rtmp->getMediaSource() : nullptr;
+    if (schema == TS_SCHEMA) return _ts ? _ts->getMediaSource() : nullptr;
+    if (schema == FMP4_SCHEMA) return _fmp4 ? _fmp4->getMediaSource() : nullptr;
+    if (schema == HLS_SCHEMA) return _hls ? _hls->getMediaSource() : nullptr;
+    if (schema == HLS_FMP4_SCHEMA) return _hls_fmp4 ? _hls_fmp4->getMediaSource() : nullptr;
+    return nullptr;
+}
+
 static string getTrackInfoStr(const TrackSource *track_src){
     _StrPrinter codec_info;
     auto tracks = track_src->getTracks(true);
@@ -242,6 +319,7 @@ MultiMediaSourceMuxer::MultiMediaSourceMuxer(const MediaTuple& tuple, float dur_
     _create_in_poller = _poller->isCurrentThread();
     _option = option;
     _dur_sec = dur_sec;
+    setPreserveStartupPackets(option.preserve_startup_packets);
     setMaxTrackCount(option.max_track);
 
     if (option.enable_rtmp) {
@@ -691,6 +769,8 @@ EventPoller::Ptr MultiMediaSourceMuxer::getOwnerPoller(MediaSource &sender) {
 }
 
 bool MultiMediaSourceMuxer::close(MediaSource &sender) {
+    flush();
+    closeRecorders();
     MediaSourceEventInterceptor::close(sender);
     _rtmp = nullptr;
     _rtsp = nullptr;
@@ -742,6 +822,10 @@ bool MultiMediaSourceMuxer::onTrackReady(const Track::Ptr &track) {
     if (_delegate) {
         _delegate->addTrack(track);
     }
+    for (const auto &recorder : _recorders) {
+        if (!recorder->addTrack(track)) throw std::invalid_argument("Recorder rejected a track");
+        ret = true;
+    }
     return ret;
 }
 
@@ -780,6 +864,7 @@ void MultiMediaSourceMuxer::onAllTrackReady() {
     if (_hls_fmp4) {
         _hls_fmp4->addTrackCompleted();
     }
+    for (const auto &recorder : _recorders) recorder->addTrackCompleted();
 
     auto listener = _track_listener.lock();
     if (listener) {
@@ -816,10 +901,11 @@ void MultiMediaSourceMuxer::createGopCacheIfNeed() {
                 strong_self->onReaderChanged(*src, strong_self->totalReaderCount());
             });
         }
-    }, std::max<size_t>(gop_cache, 1));
+    }, std::max<size_t>(gop_cache, 1), _option.preserve_startup_packets);
 }
 
 void MultiMediaSourceMuxer::resetTracks() {
+    closeRecorders();
     MediaSink::resetTracks();
 
     if (_rtmp) {
@@ -914,6 +1000,7 @@ bool MultiMediaSourceMuxer::onTrackFrame_l(const Frame::Ptr &frame_in) {
     if (_delegate) {
         _delegate->inputFrame(frame);
     }
+    for (const auto &recorder : _recorders) ret = recorder->inputFrame(frame) ? true : ret;
     if (_ring) {
         // 此场景由于直接转发，可能存在切换线程引起的数据被缓存在管道，所以需要CacheAbleFrame  [AUTO-TRANSLATED:528afbb7]
         // In this scenario, due to direct forwarding, there may be data cached in the pipeline due to thread switching, so CacheAbleFrame is needed
@@ -949,7 +1036,7 @@ bool MultiMediaSourceMuxer::isEnabled(){
                      (_ring ? (bool)_ring->readerCount() : false)  ||
                      (_hls ? _hls->isEnabled() : false) ||
                      (_hls_fmp4 ? _hls_fmp4->isEnabled() : false) ||
-                     _mp4;
+                     _mp4 || !_recorders.empty();
 
         if (_is_enable) {
             // 无人观看时，不刷新计时器,因为无人观看时每次都会检查一遍，所以刷新计数器无意义且浪费cpu  [AUTO-TRANSLATED:03ab47cf]

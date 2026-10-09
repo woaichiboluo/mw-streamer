@@ -201,8 +201,8 @@ void RtmpProtocol::sendRequest(int cmd, const string& str) {
         // If cmd belongs to Protocol Control Messages, it should be sent using chunk id 2
         sendRtmp(cmd, _stream_index, str, 0, CHUNK_NETWORK);
     } else {
-        // 否则使用 chunk id 发送(任意值3-128，参见 obs 及 ffmpeg 选取 3)  [AUTO-TRANSLATED:65f8d861]
-        // Otherwise, use chunk id to send (any value 3-128, see obs and ffmpeg select 3)
+        // 非控制消息使用独立的 chunk id。
+        // Use a separate chunk id for non-control messages.
         sendRtmp(cmd, _stream_index, str, 0, CHUNK_SYSTEM);
     }
 }

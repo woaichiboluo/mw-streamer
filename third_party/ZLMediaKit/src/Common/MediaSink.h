@@ -118,6 +118,10 @@ public:
      */
     void addTrackCompleted() override;
 
+    // Finite inputs may end before every announced track receives data.
+    // Finalize the ready, populated tracks and release their startup frames.
+    void flush() override;
+
     /**
      * 设置最大track数，取值范围>=1；该方法与addTrackCompleted类型；
      * 在设置单track时，可以加快媒体注册速度
@@ -160,6 +164,9 @@ public:
      * zero disables dropping unready Tracks inside MediaSink
      */
     void setTrackReadyTimeoutMS(uint32_t timeout_ms);
+
+    // Preserve the caller's common media timeline across startup track caches.
+    void setPreserveStartupPackets(bool preserve) { _preserve_startup_packets = preserve; }
 
     /**
      * 设置是否开启音频
@@ -264,6 +271,7 @@ private:
     MuteAudioMaker::Ptr _mute_audio_maker;
 
     std::unordered_map<int, toolkit::List<Frame::Ptr> > _frame_unread;
+    bool _preserve_startup_packets = false;
     std::unordered_map<int, std::function<void()> > _track_ready_callback;
     std::unordered_map<int, std::pair<Track::Ptr, bool/*got frame*/> > _track_map;
 };

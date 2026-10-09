@@ -2,11 +2,18 @@
 #include <avrt.h>
 #include <mmsystem.h>
 
+#include <cstdlib>
 #include <stdexcept>
 
 #include "mw/streamer/platform/platform.h"
 
 namespace mw::streamer::internal {
+
+bool HasEnvironmentVariable(const char* name) noexcept {
+  std::size_t size = 0;
+  getenv_s(&size, nullptr, 0, name);
+  return size != 0;
+}
 
 ScopedTimerResolution::ScopedTimerResolution() {
   if (timeBeginPeriod(1) != TIMERR_NOERROR) {

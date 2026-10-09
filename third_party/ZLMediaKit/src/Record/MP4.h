@@ -135,6 +135,10 @@ public:
      */
     void closeFile();
 
+    // Explicit recording finalization reports buffered write/close failures;
+    // ordinary destruction retains its non-throwing cleanup behavior.
+    void closeFileChecked();
+
 protected:
     int64_t onTell() override;
     int onSeek(int64_t offset) override;
@@ -143,6 +147,7 @@ protected:
 
 private:
     std::shared_ptr<FILE> _file;
+    std::shared_ptr<int> _close_result;
 };
 
 class MP4FileMemory : public MP4FileIO{

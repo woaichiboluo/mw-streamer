@@ -253,6 +253,73 @@ class EncoderPerformance final {
   Track audio_;
 };
 
+// The owning Remuxer serializes every update with its existing mutex. Handoff
+// means inputFrame returned normally; it does not measure network delivery.
+class RemuxPerformance final {
+ public:
+  using Clock = PerformanceWindow::Clock;
+  using TimePoint = PerformanceWindow::TimePoint;
+
+  void Start(const void* instance,
+             const std::vector<ffmpeg::StreamInfo>& streams) noexcept;
+  bool enabled() const noexcept { return enabled_; }
+  TimePoint Begin() const noexcept;
+  void Accepted(const AVPacket& packet) noexcept;
+  void Rejected() noexcept;
+  void Discarded(std::uint64_t cumulative_packets,
+                 std::uint64_t cumulative_bytes) noexcept;
+  void Error() noexcept;
+  void Interleaved(TimePoint started, TimePoint finished) noexcept;
+  void HandedOff(const AVPacket& packet, std::int64_t pts_ns,
+                 std::int64_t dts_ns, std::uint64_t pts_ms,
+                 std::uint64_t dts_ms, TimePoint queued_at,
+                 TimePoint convert_started, TimePoint mux_started,
+                 TimePoint finished) noexcept;
+  // Pending includes packets already popped by the worker. Final reporting
+  // accounts remaining packets as aborted and emits exactly one summary.
+  void Report(std::size_t queue_packets, std::size_t queue_bytes,
+              bool initialized, bool draining, bool final = false) noexcept;
+
+ private:
+  struct Counts {
+    std::uint64_t accepted_packets = 0;
+    std::uint64_t accepted_bytes = 0;
+    std::uint64_t video_packets = 0;
+    std::uint64_t audio_packets = 0;
+    std::uint64_t startup_packets = 0;
+    std::uint64_t startup_bytes = 0;
+    std::uint64_t aborted_packets = 0;
+    std::uint64_t aborted_bytes = 0;
+    std::uint64_t rejected_packets = 0;
+    std::uint64_t interleave_calls = 0;
+  };
+  struct Timing {
+    void Add(std::int64_t elapsed_ns) noexcept;
+    std::int64_t total_ns = 0;
+    std::int64_t max_ns = 0;
+    std::int64_t interval_max_ns = 0;
+  };
+  enum Stage { kQueueWait, kConvert, kMux, kInterleave, kStages };
+
+  static std::int64_t Elapsed(TimePoint begin, TimePoint end) noexcept;
+  std::uint64_t PendingPackets() const noexcept;
+  std::uint64_t PendingBytes() const noexcept;
+
+  PerformanceWindow window_;
+  Counts counts_;
+  Counts previous_;
+  std::array<Timing, kStages> timing_{};
+  std::array<std::int64_t, kStages> previous_stage_ns_{};
+  std::uint64_t peak_pending_packets_ = 0;
+  std::uint64_t peak_pending_bytes_ = 0;
+  const void* instance_ = nullptr;
+  int video_index_ = -1;
+  int audio_index_ = -1;
+  bool enabled_ = false;
+  bool trace_enabled_ = false;
+  bool active_ = false;
+};
+
 // All mutations are serialized by the owning Scheduler's existing mutex.
 class SchedulerPerformance {
  public:

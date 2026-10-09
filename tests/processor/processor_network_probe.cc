@@ -6,7 +6,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <exception>
@@ -24,6 +23,7 @@ extern "C" {
 
 #include "mw/streamer/init/init.h"
 #include "mw/streamer/input/ffmpeg_input.h"
+#include "mw/streamer/platform/platform.h"
 #include "mw/streamer/processor/processor.h"
 #include "mw/streamer/scheduler/scheduler.h"
 
@@ -433,7 +433,9 @@ int main(int argc, char* argv[]) {
     const std::string runtime_log =
         argc > 4 ? std::string(argv[4]) + ".log" : "";
     if (!runtime_log.empty()) {
-      config.log.modules = std::getenv("MW_STREAMER_PROBE_TRACE")
+      const bool trace_enabled =
+          mw::streamer::internal::HasEnvironmentVariable("MW_STREAMER_PROBE_TRACE");
+      config.log.modules = trace_enabled
                                ? "streamer:trace;perf.input:trace;"
                                  "perf.decoder.video:trace;"
                                  "perf.decoder.audio:trace;perf.scheduler:trace"

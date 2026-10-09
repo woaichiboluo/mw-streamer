@@ -45,8 +45,9 @@ struct MW_STREAMER_API EncoderConfig {
 class MW_STREAMER_API Encoder final {
  public:
   using OnReady = std::function<void(const std::vector<ffmpeg::StreamInfo>&)>;
-  // Packets use encoder time bases; dts_ns retains the source synchronized
-  // timeline for interleaving across tracks. Copy with Packet::Ref() to retain.
+  // Packets use encoder time bases. dts_ns is the synchronized
+  // ordering clock, not the packet DTS in the media timeline.
+  // Copy with Packet::Ref() to retain.
   // Audio and video callbacks may execute concurrently.
   using OnPacket =
       std::function<void(const ffmpeg::Packet&, std::int64_t dts_ns)>;

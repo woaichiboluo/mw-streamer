@@ -1,6 +1,12 @@
+#include <cstdlib>
+
 #include "mw/streamer/platform/platform.h"
 
 namespace mw::streamer::internal {
+
+bool HasEnvironmentVariable(const char* name) noexcept {
+  return std::getenv(name) != nullptr;
+}
 
 // Retain the existing non-Windows scheduling behavior.
 ScopedTimerResolution::ScopedTimerResolution() = default;

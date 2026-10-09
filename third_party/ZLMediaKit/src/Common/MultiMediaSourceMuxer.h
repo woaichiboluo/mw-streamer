@@ -51,6 +51,12 @@ public:
 
     MultiMediaSourceMuxer(const MediaTuple& tuple, float dur_sec = 0.0,const ProtocolOption &option = ProtocolOption());
 
+    // Programmatic outputs, owned and driven by this muxer's poller.
+    void addRecorder(const MediaSinkInterface::Ptr &recorder);
+    void closeRecorders();
+    void flush() override;
+    MediaSource::Ptr getMediaSource(const std::string &schema) const;
+
     /**
      * 设置事件监听器
      * @param listener 监听器
@@ -269,6 +275,7 @@ private:
     toolkit::EventPoller::Ptr _poller;
     RingType::Ptr _ring;
     MediaSinkInterface::Ptr _delegate;
+    std::vector<MediaSinkInterface::Ptr> _recorders;
     // 对象个数统计  [AUTO-TRANSLATED:3b43e8c2]
     // Object count statistics
     toolkit::ObjectStatistic<MultiMediaSourceMuxer> _statistic;

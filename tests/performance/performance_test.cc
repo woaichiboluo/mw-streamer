@@ -33,14 +33,16 @@ TEST_CASE("性能日志默认可见且各模块独立控制", "[performance][log
     mw::log::Logging logging(config);
     for (const auto* module :
          {"perf.input", "perf.decoder.video", "perf.decoder.audio",
-          "perf.scheduler", "perf.encoder.video", "perf.encoder.audio"}) {
+          "perf.scheduler", "perf.encoder.video", "perf.encoder.audio",
+          "perf.remux"}) {
       CHECK(mw::log::ShouldLog(module, mw::log::LogLevel::kInfo));
       CHECK_FALSE(mw::log::ShouldLog(module, mw::log::LogLevel::kDebug));
     }
   }
   const std::string modules =
       "perf.input:off;perf.decoder.video:info;perf.decoder.audio:off;"
-      "perf.scheduler:info;perf.encoder.video:off;perf.encoder.audio:info";
+      "perf.scheduler:info;perf.encoder.video:off;perf.encoder.audio:info;"
+      "perf.remux:off";
   config.modules = modules.c_str();
   config.modules_size = modules.size();
   mw::log::Logging logging(config);
@@ -52,6 +54,7 @@ TEST_CASE("性能日志默认可见且各模块独立控制", "[performance][log
   CHECK_FALSE(
       mw::log::ShouldLog("perf.encoder.video", mw::log::LogLevel::kInfo));
   CHECK(mw::log::ShouldLog("perf.encoder.audio", mw::log::LogLevel::kInfo));
+  CHECK_FALSE(mw::log::ShouldLog("perf.remux", mw::log::LogLevel::kInfo));
 }
 
 TEST_CASE("性能窗口准确区分累计值、区间值和最大调用耗时", "[performance]") {

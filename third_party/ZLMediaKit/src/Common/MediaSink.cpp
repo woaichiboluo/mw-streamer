@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include <algorithm>
 #include "mw/log.h"
 #include "MediaSink.h"
 #include "Common/config.h"
@@ -185,6 +186,14 @@ void MediaSink::addTrackCompleted() {
     }
 }
 
+void MediaSink::flush() {
+    if (!_all_track_ready && std::any_of(_track_map.begin(), _track_map.end(), [](const auto &entry) {
+            return entry.second.second && entry.second.first->ready();
+        })) {
+        emitAllTrackReady();
+    }
+}
+
 void MediaSink::setMaxTrackCount(size_t i) {
     if (_all_track_ready) {
         MW_LOG_WARNING("zlm", "All track is ready, set max track count ignored");
@@ -223,13 +232,25 @@ void MediaSink::emitAllTrackReady() {
 
         // 全部Track就绪，我们一次性把之前的帧输出  [AUTO-TRANSLATED:2431422b]
         // All Tracks are ready, we output all the previous frames at once
-        for (auto &pr : _frame_unread) {
-            if (_track_map.find(pr.first) == _track_map.end()) {
-                // 该Track已经被移除  [AUTO-TRANSLATED:d44bf74e]
-                // The Track has been removed
-                continue;
+        if (_preserve_startup_packets) {
+            std::vector<Frame::Ptr> frames;
+            for (auto &pr : _frame_unread) {
+                if (_track_map.count(pr.first)) {
+                    pr.second.for_each([&](const Frame::Ptr &frame) { frames.emplace_back(frame); });
+                }
             }
-            pr.second.for_each([&](const Frame::Ptr &frame) { MediaSink::inputFrame(frame); });
+            std::stable_sort(frames.begin(), frames.end(), [](const Frame::Ptr &a, const Frame::Ptr &b) {
+                if (a->dts() != b->dts()) return a->dts() < b->dts();
+                return a->getTrackType() == TrackVideo && b->getTrackType() != TrackVideo;
+            });
+            for (const auto &frame : frames) MediaSink::inputFrame(frame);
+        } else {
+            for (auto &pr : _frame_unread) {
+                if (_track_map.find(pr.first) == _track_map.end()) {
+                    continue;
+                }
+                pr.second.for_each([&](const Frame::Ptr &frame) { MediaSink::inputFrame(frame); });
+            }
         }
         _frame_unread.clear();
     } else {

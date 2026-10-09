@@ -6,7 +6,11 @@
 #include <condition_variable>
 #include <mutex>
 
+#include "mw/export.h"
+
 namespace mw::streamer::internal {
+
+MW_STREAMER_API bool HasEnvironmentVariable(const char* name) noexcept;
 
 // Owned by Init/Shutdown; destroy after all media workers have stopped.
 class ScopedTimerResolution final {

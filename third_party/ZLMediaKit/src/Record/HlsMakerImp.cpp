@@ -11,6 +11,7 @@
 #include "mw/log.h"
 #include <ctime>
 #include <iomanip> 
+#include <stdexcept>
 #include <sys/stat.h>
 #include "HlsMakerImp.h"
 #include "Util/util.h"
@@ -32,9 +33,20 @@ std::string getDelayPath(const std::string& originalPath) {
 }
 
 HlsMakerImp::HlsMakerImp(bool is_fmp4, const string &m3u8_file, const string &params, uint32_t bufSize, float seg_duration,
-                         uint32_t seg_number, bool seg_keep, const string &fmp4_seg_ext) : HlsMaker(is_fmp4, seg_duration, seg_number, seg_keep) {
+                         uint32_t seg_number, bool seg_keep, const string &fmp4_seg_ext,
+                         const string &segment_directory, bool strict_io) : HlsMaker(is_fmp4, seg_duration, seg_number, seg_keep) {
     _poller = EventPollerPool::Instance().getPoller();
     _path_prefix = m3u8_file.substr(0, m3u8_file.rfind('/'));
+    if (!segment_directory.empty()) {
+        auto slash = m3u8_file.rfind('/');
+        auto parent = slash == string::npos ? string() : m3u8_file.substr(0, slash + 1);
+        if (segment_directory.compare(0, parent.size(), parent) != 0) {
+            throw std::invalid_argument("HLS segments must be below the playlist directory");
+        }
+        _path_prefix = segment_directory;
+        _segment_uri_prefix = segment_directory.substr(parent.size()) + "/";
+    }
+    _strict_io = strict_io;
     _path_hls = m3u8_file;
     _path_hls_delay = getDelayPath(m3u8_file);
     _params = params;
@@ -44,6 +56,9 @@ HlsMakerImp::HlsMakerImp(bool is_fmp4, const string &m3u8_file, const string &pa
     _fmp4_seg_ext = fmp4_seg_ext.empty() ? ".mp4" : (fmp4_seg_ext.front() == '.' ? fmp4_seg_ext : "." + fmp4_seg_ext);
     _file_buf.reset(new char[bufSize], [](char *ptr) { delete[] ptr; });
     _info.folder = _path_prefix;
+    if (_strict_io && !makeFile(_path_hls)) {
+        throw std::runtime_error("Create HLS playlist failed: " + _path_hls);
+    }
 }
 
 HlsMakerImp::~HlsMakerImp() {
@@ -62,6 +77,11 @@ HlsMakerImp::~HlsMakerImp() {
 
 void HlsMakerImp::clearCache() {
     clearCache(true, false);
+}
+
+void HlsMakerImp::finish() {
+    clearCache(false, true);
+    if (!isLive() || isKeep()) saveCurrentDir();
 }
 
 static void clearHls(const std::list<std::string> &files) {
@@ -179,12 +199,13 @@ string HlsMakerImp::onOpenSegment(uint64_t index) {
     _info.url = _info.app + "/" + _info.stream + "/" + segment_name;
 
     if (!_file) {
+        if (_strict_io) throw std::runtime_error("Create HLS segment failed: " + segment_path);
         MW_LOG_WARNING("zlm", "Create file failed,{} {}", segment_path, get_uv_errmsg());
     }
     if (_params.empty()) {
-        return segment_name;
+        return _segment_uri_prefix + segment_name;
     }
-    return segment_name + "?" + _params;
+    return _segment_uri_prefix + segment_name + "?" + _params;
 }
 
 void HlsMakerImp::onDelSegment(uint64_t index) {
@@ -203,16 +224,22 @@ void HlsMakerImp::onWriteInitSegment(const char *data, size_t len) {
     string init_seg_path = _path_prefix + "/init.mp4";
     auto file = makeFile(init_seg_path);
     if (file) {
-        fwrite(data, len, 1, file.get());
+        if (fwrite(data, 1, len, file.get()) != len && _strict_io) {
+            throw std::runtime_error("Write HLS init segment failed: " + init_seg_path);
+        }
+        if (_strict_io && fflush(file.get()) != 0) throw std::runtime_error("Flush HLS init segment failed");
         _path_init = std::move(init_seg_path);
     } else {
+        if (_strict_io) throw std::runtime_error("Create HLS init segment failed: " + init_seg_path);
         MW_LOG_WARNING("zlm", "Create file failed,{} {}", init_seg_path, get_uv_errmsg());
     }
 }
 
 void HlsMakerImp::onWriteSegment(const char *data, size_t len) {
     if (_file) {
-        fwrite(data, len, 1, _file.get());
+        if (fwrite(data, 1, len, _file.get()) != len && _strict_io) {
+            throw std::runtime_error("Write HLS segment failed: " + _info.file_path);
+        }
     }
     if (_media_src) {
         _media_src->onSegmentSize(len);
@@ -220,20 +247,31 @@ void HlsMakerImp::onWriteSegment(const char *data, size_t len) {
 }
 
 void HlsMakerImp::onWriteHls(const std::string &data, bool include_delay) {
+    auto index = data;
+    if (!_segment_uri_prefix.empty()) {
+        const string map = "#EXT-X-MAP:URI=\"init.mp4\"";
+        auto pos = index.find(map);
+        if (pos != string::npos) index.replace(pos, map.size(), "#EXT-X-MAP:URI=\"" + _segment_uri_prefix + "init.mp4\"");
+    }
     auto path = include_delay ? _path_hls_delay : _path_hls;
     auto hls = makeFile(path);
     if (hls) {
-        fwrite(data.data(), data.size(), 1, hls.get());
+        if (fwrite(index.data(), 1, index.size(), hls.get()) != index.size() && _strict_io) {
+            throw std::runtime_error("Write HLS playlist failed: " + path);
+        }
+        if (_strict_io && fflush(hls.get()) != 0) throw std::runtime_error("Flush HLS playlist failed");
         hls.reset();
         if (_media_src && !include_delay) {
-            _media_src->setIndexFile(data);
+            _media_src->setIndexFile(index);
         }
     } else {
+        if (_strict_io) throw std::runtime_error("Create HLS playlist failed: " + path);
         MW_LOG_WARNING("zlm", "Create hls file failed,{} {}", path, get_uv_errmsg());
     }
 }
 
 void HlsMakerImp::onFlushLastSegment(uint64_t duration_ms) {
+    if (_file && _strict_io && fflush(_file.get()) != 0) throw std::runtime_error("Flush HLS segment failed");
     // 关闭并flush文件到磁盘  [AUTO-TRANSLATED:9798ec4d]
     // Close and flush file to disk
     _file = nullptr;

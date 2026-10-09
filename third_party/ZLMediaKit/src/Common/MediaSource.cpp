@@ -523,6 +523,7 @@ void MediaSource::emitEvent(bool regist){
 }
 
 void MediaSource::regist() {
+    if (_renaming) return;
     {
         // 减小互斥锁临界区  [AUTO-TRANSLATED:1309d309]
         // Reduce mutex lock critical area
@@ -581,6 +582,44 @@ bool MediaSource::unregist() {
         emitEvent(false);
     }
     return ret;
+}
+
+void MediaSource::setMediaTuple(const MediaTuple &tuple) {
+    CHECK(getOwnerPoller()->isCurrentThread());
+    if (_renaming) throw std::logic_error("Reentrant media source rename");
+    if (tuple.app.empty() || tuple.stream.empty()) throw std::invalid_argument("Empty media source name");
+    auto replacement = tuple;
+    GET_CONFIG(bool, enable_vhost, General::kEnableVhost);
+    if (!enable_vhost || replacement.vhost.empty()) replacement.vhost = DEFAULT_VHOST;
+    lock_guard<recursive_mutex> lock(s_media_source_mtx);
+    auto occupied = find_l(_schema, replacement.vhost, replacement.app, replacement.stream, false);
+    if (occupied && occupied.get() != this) throw std::invalid_argument("Media source name already in use");
+    if (replacement.vhost == _tuple.vhost && replacement.app == _tuple.app && replacement.stream == _tuple.stream) {
+        _tuple.params = std::move(replacement.params);
+        return;
+    }
+    auto registered = find_l(_schema, _tuple.vhost, _tuple.app, _tuple.stream, false);
+    if (!registered || registered.get() != this) {
+        _tuple = std::move(replacement);
+        return;
+    }
+    auto self = shared_from_this();
+    auto previous = _tuple;
+    onceToken renaming([&]() { _renaming = true; }, [&]() { _renaming = false; });
+    // Reserve the new name before callbacks; the recursive registry lock also
+    // prevents another poller registering between unregistration and rename.
+    s_media_source_map[_schema][replacement.vhost][replacement.app][replacement.stream] = self;
+    try {
+        unregist();
+        _tuple = replacement;
+        emitEvent(true);
+    } catch (...) {
+        bool erased = false;
+        erase_media_source(erased, this, s_media_source_map, _schema, replacement.vhost, replacement.app, replacement.stream);
+        _tuple = std::move(previous);
+        s_media_source_map[_schema][_tuple.vhost][_tuple.app][_tuple.stream] = self;
+        throw;
+    }
 }
 
 bool equalMediaTuple(const MediaTuple& a, const MediaTuple& b) {

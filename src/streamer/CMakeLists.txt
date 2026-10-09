@@ -13,6 +13,8 @@ set(MW_STREAMER_SOURCES
     input/ffmpeg_input.cc
     performance/performance.cc
     processor/processor.cc
+    remuxer/packet_converter.cc
+    remuxer/remuxer.cc
     scheduler/scheduler.cc
 )
 
@@ -53,9 +55,9 @@ foreach(streamer_target IN LISTS MW_STREAMER_TARGETS)
         PUBLIC
             FFmpeg::avcodec
             FFmpeg::avutil
+            mw::log
         PRIVATE
             ZLMediaKit::MediaKit
-            mw::log
             FFmpeg::avformat
             FFmpeg::swresample
             Threads::Threads

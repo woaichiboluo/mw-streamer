@@ -24,7 +24,7 @@ namespace {
 constexpr std::string_view kDefaultModule = "default";
 constexpr char kDefaultModules[] =
     "streamer;processor;perf.input;perf.decoder.video;perf.decoder.audio;"
-    "perf.scheduler;perf.encoder.video;perf.encoder.audio;";
+    "perf.scheduler;perf.encoder.video;perf.encoder.audio;perf.remux;";
 constexpr std::string_view kLogPattern =
     "[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] %v";
 
