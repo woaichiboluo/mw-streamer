@@ -283,7 +283,8 @@ inline DecodedTimes DecodeSegment(const std::string& bytes) {
     }
   };
   AVFormatContext* raw = nullptr;
-  REQUIRE(avformat_open_input(&raw, path.c_str(), nullptr, nullptr) == 0);
+  const auto path_utf8 = path.u8string();
+  REQUIRE(avformat_open_input(&raw, path_utf8.c_str(), nullptr, nullptr) == 0);
   std::unique_ptr<AVFormatContext, FormatCloser> format(raw);
   REQUIRE(avformat_find_stream_info(raw, nullptr) >= 0);
   std::vector<std::unique_ptr<ffmpeg::Decoder>> decoders(raw->nb_streams);
