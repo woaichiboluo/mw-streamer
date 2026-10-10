@@ -57,6 +57,8 @@ struct MW_STREAMER_API FfmpegInputConfig {
   InputMode mode = InputMode::kLive;
   // EOF reopens the input while remaining connected; otherwise kEnded.
   bool loop = false;
+  // Network inputs include RTSP/RTSPS demuxer URLs and the AVIO protocols
+  // supported by the linked FFmpeg (for example RTMP(S), HTTP(S), and SRT).
   bool auto_reconnect = true;
   std::chrono::milliseconds retry_interval{2000};
   // -1 retries indefinitely; successful media preparation resets the count.

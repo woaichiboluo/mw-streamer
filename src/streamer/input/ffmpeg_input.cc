@@ -33,6 +33,18 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+const char* FindInputProtocol(const char* url) {
+  // RTSP URLs are handled by a demuxer, not a standalone AVIO protocol.
+  if (std::strncmp(url, "rtsp://", 7) == 0 && av_find_input_format("rtsp")) {
+    return "rtsp";
+  }
+  if (std::strncmp(url, "rtsps://", 8) == 0 && av_find_input_format("rtsp") &&
+      avio_find_protocol_name("tls://")) {
+    return "rtsps";
+  }
+  return avio_find_protocol_name(url);
+}
+
 const char* ModeName(InputMode mode) {
   switch (mode) {
     case InputMode::kLive:
@@ -282,7 +294,7 @@ void FfmpegInput::Start(std::string_view url) {
   ready_streams_.clear();
   generation_ = 0;
   url_ = url;
-  const char* protocol = avio_find_protocol_name(url_.c_str());
+  const char* protocol = FindInputProtocol(url_.c_str());
   network_source_ = protocol && std::strcmp(protocol, "file") != 0;
   {
     std::lock_guard<std::mutex> wait_lock(wait_mutex_);
@@ -436,7 +448,7 @@ void FfmpegInput::OpenAttempt() {
   format_->interrupt_callback = {&FfmpegInput::InterruptCallback, this};
   SetIoDeadline(config_.open_timeout);
   AVDictionary* options = nullptr;
-  const char* protocol = avio_find_protocol_name(url_.c_str());
+  const char* protocol = FindInputProtocol(url_.c_str());
   // Servers can filter HEVC out unless the RTMP connect advertises hvc1.
   int result = 0;
   if (protocol && std::strncmp(protocol, "rtmp", 4) == 0) {
