@@ -50,16 +50,20 @@ class MW_STREAMER_API SyncRemuxer final {
   // Uses the original input tracks from Input::OnReady.
   void Start(const std::vector<ffmpeg::StreamInfo>& streams);
   // Retains packet buffers without modifying the source. PTS/DTS must exist,
-  // and DTS must strictly increase per track within each generation. An unset
-  // packet time_base (zero numerator, nonnegative denominator) uses its
-  // declared stream time_base; a malformed or mismatching time_base is invalid.
-  // Each increasing generation starts at the previous generation's maximum
-  // PTS/DTS end, preserving source audio/video offsets with one common origin.
-  // Startup waits for each track and a video keyframe; insufficient startup
-  // space terminates the session rather than deadlocking. Drain allows absent
-  // tracks. Exceeding the output SDK's unready-track cache also fails
-  // explicitly. Throws invalid_argument for invalid packets, length_error for
-  // an oversized packet; returns false after Drain/Stop or a session failure.
+  // and successive DTS values within a track must not repeat. A DTS rollback
+  // retains the new packets until the previously active tracks have rolled
+  // back, then joins them with one common PTS/DTS offset; generation is
+  // unchanged. An unset packet time_base (zero numerator, nonnegative
+  // denominator) uses its declared stream time_base; a malformed or mismatching
+  // time_base is invalid. Each increasing generation starts at the previous
+  // generation's maximum PTS/DTS end, preserving source audio/video offsets
+  // with one common origin. Startup waits for each track and a video keyframe.
+  // Preparation for startup or rollback is bounded by the same capacity;
+  // exhaustion terminates the session rather than deadlocking. Drain joins
+  // retained packets even when another track has not rolled back. Exceeding the
+  // output SDK's unready-track cache also fails explicitly. Throws
+  // invalid_argument for invalid packets, length_error for an oversized packet;
+  // returns false after Drain/Stop or a session failure.
   bool SubmitPacket(std::uint64_t generation, const ffmpeg::Packet& packet);
   bool SubmitPacket(std::uint64_t generation, const AVPacket& packet);
   // Before Start, registers an output without creating resources; during a

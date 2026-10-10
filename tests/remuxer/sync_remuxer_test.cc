@@ -270,6 +270,97 @@ std::string Record(mw::streamer::SyncRemuxer& remuxer, const Media& media,
   return path;
 }
 
+void CheckRepeatedOutput(const Media& source, const Media& output,
+                         const std::map<AVMediaType, int>& repetitions) {
+  std::map<AVMediaType, std::vector<const AVPacket*>> original;
+  std::map<AVMediaType, std::vector<const AVPacket*>> recorded;
+  for (const auto& packet : source.packets) {
+    original
+        [Track(source, packet->stream_index).codec_parameters.get()->codec_type]
+            .push_back(packet.get());
+  }
+  for (const auto& packet : output.packets) {
+    recorded
+        [Track(output, packet->stream_index).codec_parameters.get()->codec_type]
+            .push_back(packet.get());
+  }
+  REQUIRE(recorded.size() == original.size());
+  for (const auto& [type, packets] : original) {
+    CAPTURE(type);
+    REQUIRE_FALSE(packets.empty());
+    REQUIRE(recorded.count(type) == 1);
+    const auto& actual = recorded.at(type);
+    REQUIRE(actual.size() == packets.size() * repetitions.at(type));
+    const auto source_time_base =
+        Track(source, packets.front()->stream_index).time_base;
+    const auto output_time_base =
+        Track(output, actual.front()->stream_index).time_base;
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+      CAPTURE(index);
+      REQUIRE(actual[index]->dts != AV_NOPTS_VALUE);
+      if (index != 0) CHECK(actual[index]->dts > actual[index - 1]->dts);
+      const auto* reference = packets[index % packets.size()];
+      const auto expected_cts = av_rescale_q(reference->pts - reference->dts,
+                                             source_time_base, kMicroseconds);
+      const auto actual_cts =
+          av_rescale_q(actual[index]->pts - actual[index]->dts,
+                       output_time_base, kMicroseconds);
+      CHECK(std::abs(actual_cts - expected_cts) <= 1000);
+    }
+  }
+  if (original.count(AVMEDIA_TYPE_AUDIO) &&
+      original.count(AVMEDIA_TYPE_VIDEO)) {
+    const auto first_pts = [&](const auto& packets, const Media& media,
+                               AVMediaType type, std::size_t index) {
+      const auto* packet = packets.at(type).at(index);
+      return av_rescale_q(packet->pts,
+                          Track(media, packet->stream_index).time_base,
+                          kMicroseconds);
+    };
+    const auto expected_offset =
+        first_pts(original, source, AVMEDIA_TYPE_AUDIO, 0) -
+        first_pts(original, source, AVMEDIA_TYPE_VIDEO, 0);
+    // Partial rounds can contain only one track; compare later boundaries only
+    // when the two tracks have corresponding rounds.
+    const auto count =
+        repetitions.at(AVMEDIA_TYPE_AUDIO) == repetitions.at(AVMEDIA_TYPE_VIDEO)
+            ? repetitions.at(AVMEDIA_TYPE_AUDIO)
+            : 1;
+    for (int round = 0; round < count; ++round) {
+      CAPTURE(round);
+      const auto actual_offset =
+          first_pts(recorded, output, AVMEDIA_TYPE_AUDIO,
+                    round * original.at(AVMEDIA_TYPE_AUDIO).size()) -
+          first_pts(recorded, output, AVMEDIA_TYPE_VIDEO,
+                    round * original.at(AVMEDIA_TYPE_VIDEO).size());
+      CHECK(std::abs(actual_offset - expected_offset) <= 2000);
+    }
+  }
+  const auto expected = Decode(source);
+  const auto actual = Decode(output);
+  for (const auto& [type, frames] : expected) {
+    CAPTURE(type);
+    REQUIRE(actual.count(type) == 1);
+    CHECK(actual.at(type).hashes.size() ==
+          frames.hashes.size() * repetitions.at(type));
+    // AAC decoder history affects samples at the splice. Video must preserve
+    // every decoded frame, including delayed B frames at each boundary.
+    if (type == AVMEDIA_TYPE_VIDEO) {
+      std::vector<std::uint64_t> hashes;
+      for (int round = 0; round < repetitions.at(type); ++round)
+        hashes.insert(hashes.end(), frames.hashes.begin(), frames.hashes.end());
+      CHECK(actual.at(type).hashes == hashes);
+    }
+  }
+}
+
+void SubmitUnchanged(mw::streamer::SyncRemuxer& remuxer,
+                     const ffmpeg::Packet& packet) {
+  const auto before = Snapshot(*packet.get());
+  REQUIRE(remuxer.SubmitPacket(0, packet));
+  REQUIRE(Snapshot(*packet.get()) == before);
+}
+
 }  // namespace
 
 TEST_CASE("SyncRemuxer原包直录保持H264 H265 AAC和单轨的解码内容",
@@ -720,6 +811,213 @@ TEST_CASE("SyncRemuxer代际切换接续同文件且每轨DTS单调",
   CHECK(notifications.errors == 0);
 }
 
+TEST_CASE("SyncRemuxer同代次多次回退保持共同音视频偏移和B帧",
+          "[remuxer][sync][timeline][rollback]") {
+  Runtime runtime;
+  OutputDirectory directory;
+  auto source = ReadMedia(Fixture("h265_aac.mp4"));
+  bool has_reordered_pts = false;
+  for (auto& packet : source.packets) {
+    const auto& stream = Track(source, packet->stream_index);
+    const bool audio =
+        stream.codec_parameters.get()->codec_type == AVMEDIA_TYPE_AUDIO;
+    if (!audio && packet->pts != packet->dts) has_reordered_pts = true;
+    const auto shift = av_rescale_q(audio ? 10300000 : 10000000, kMicroseconds,
+                                    stream.time_base);
+    packet->pts += shift;
+    packet->dts += shift;
+  }
+  REQUIRE(has_reordered_pts);
+  Notifications notifications;
+  mw::streamer::SyncRemuxer remuxer;
+  notifications.Bind(remuxer);
+  const auto path = remuxer.AddPushUrl(directory.File());
+  remuxer.Start(source.streams);
+  for (int round = 0; round < 4; ++round) {
+    for (const auto& packet : source.packets) SubmitUnchanged(remuxer, packet);
+  }
+  remuxer.Drain();
+  remuxer.Stop();
+  REQUIRE(notifications.errors == 0);
+  REQUIRE(notifications.ended == 1);
+  CheckRepeatedOutput(source, ReadMedia(path),
+                      {{AVMEDIA_TYPE_VIDEO, 4}, {AVMEDIA_TYPE_AUDIO, 4}});
+}
+
+TEST_CASE("SyncRemuxer回退视频先到而旧音频尾包仍使用原偏移",
+          "[remuxer][sync][timeline][rollback][interleaving]") {
+  Runtime runtime;
+  OutputDirectory directory;
+  const auto source = ReadMedia(Fixture("h265_aac.mp4"));
+  std::vector<std::size_t> audio;
+  std::size_t first_video = source.packets.size();
+  for (std::size_t index = 0; index < source.packets.size(); ++index) {
+    const auto type = Track(source, source.packets[index]->stream_index)
+                          .codec_parameters.get()
+                          ->codec_type;
+    if (type == AVMEDIA_TYPE_AUDIO) audio.push_back(index);
+    if (type == AVMEDIA_TYPE_VIDEO && first_video == source.packets.size())
+      first_video = index;
+  }
+  REQUIRE(audio.size() > 3);
+  REQUIRE(first_video < source.packets.size());
+  REQUIRE((source.packets[first_video]->flags & AV_PKT_FLAG_KEY) != 0);
+  audio.erase(audio.begin(), audio.end() - 3);
+  Notifications notifications;
+  mw::streamer::SyncRemuxer remuxer;
+  notifications.Bind(remuxer);
+  const auto path = remuxer.AddPushUrl(directory.File());
+  remuxer.Start(source.streams);
+  for (std::size_t index = 0; index < source.packets.size(); ++index) {
+    if (std::find(audio.begin(), audio.end(), index) == audio.end())
+      SubmitUnchanged(remuxer, source.packets[index]);
+  }
+  SubmitUnchanged(remuxer, source.packets[first_video]);
+  for (const auto index : audio)
+    SubmitUnchanged(remuxer, source.packets[index]);
+  for (std::size_t index = 0; index < source.packets.size(); ++index) {
+    if (index != first_video) SubmitUnchanged(remuxer, source.packets[index]);
+  }
+  remuxer.Stop();
+  REQUIRE(notifications.errors == 0);
+  REQUIRE(notifications.ended == 1);
+  CheckRepeatedOutput(source, ReadMedia(path),
+                      {{AVMEDIA_TYPE_VIDEO, 2}, {AVMEDIA_TYPE_AUDIO, 2}});
+}
+
+TEST_CASE("SyncRemuxer单轨同代次回退可以持续录像",
+          "[remuxer][sync][timeline][rollback][single-track]") {
+  Runtime runtime;
+  OutputDirectory directory;
+  AVMediaType selected = AVMEDIA_TYPE_VIDEO;
+  SECTION("HEVC视频保留B帧") {}
+  SECTION("AAC音频") { selected = AVMEDIA_TYPE_AUDIO; }
+  const auto source = ReadMedia(Fixture("h265_aac.mp4"), selected);
+  Notifications notifications;
+  mw::streamer::SyncRemuxer remuxer;
+  notifications.Bind(remuxer);
+  const auto path = remuxer.AddPushUrl(directory.File());
+  remuxer.Start(source.streams);
+  for (int round = 0; round < 3; ++round) {
+    for (const auto& packet : source.packets) SubmitUnchanged(remuxer, packet);
+  }
+  remuxer.Stop();
+  REQUIRE(notifications.errors == 0);
+  REQUIRE(notifications.ended == 1);
+  CheckRepeatedOutput(source, ReadMedia(path), {{selected, 3}});
+}
+
+TEST_CASE("SyncRemuxer只有一轨回退时Drain和Stop排空已接收包",
+          "[remuxer][sync][timeline][rollback][lifecycle]") {
+  Runtime runtime;
+  OutputDirectory directory;
+  const auto source = ReadMedia(Fixture("h265_aac.mp4"));
+  Notifications notifications;
+  mw::streamer::SyncRemuxer remuxer;
+  notifications.Bind(remuxer);
+  const auto path = remuxer.AddPushUrl(directory.File());
+  remuxer.Start(source.streams);
+  for (const auto& packet : source.packets) SubmitUnchanged(remuxer, packet);
+  for (const auto& packet : source.packets) {
+    if (Track(source, packet->stream_index)
+            .codec_parameters.get()
+            ->codec_type == AVMEDIA_TYPE_VIDEO)
+      SubmitUnchanged(remuxer, packet);
+  }
+  SECTION("Stop直接排空") {}
+  SECTION("Drain结束等待再Stop") { remuxer.Drain(); }
+  auto stopped = std::async(std::launch::async, [&] { remuxer.Stop(); });
+  CHECK(stopped.wait_for(5s) == std::future_status::ready);
+  stopped.get();
+  REQUIRE(notifications.errors == 0);
+  REQUIRE(notifications.ended == 1);
+  CheckRepeatedOutput(source, ReadMedia(path),
+                      {{AVMEDIA_TYPE_VIDEO, 2}, {AVMEDIA_TYPE_AUDIO, 1}});
+}
+
+TEST_CASE("SyncRemuxer等待回退音频时既有代际切换排空已接收视频",
+          "[remuxer][sync][timeline][rollback][generation]") {
+  Runtime runtime;
+  OutputDirectory directory;
+  const auto source = ReadMedia(Fixture("h265_aac.mp4"));
+  Notifications notifications;
+  mw::streamer::SyncRemuxer remuxer;
+  notifications.Bind(remuxer);
+  const auto path = remuxer.AddPushUrl(directory.File());
+  remuxer.Start(source.streams);
+  for (const auto& packet : source.packets) SubmitUnchanged(remuxer, packet);
+  for (const auto& packet : source.packets) {
+    if (Track(source, packet->stream_index)
+            .codec_parameters.get()
+            ->codec_type == AVMEDIA_TYPE_VIDEO)
+      SubmitUnchanged(remuxer, packet);
+  }
+  // This models an existing seek/reopen notification while same-generation
+  // rollback packets are still awaiting the other track.
+  for (const auto& packet : source.packets) {
+    const auto before = Snapshot(*packet.get());
+    REQUIRE(remuxer.SubmitPacket(1, packet));
+    REQUIRE(Snapshot(*packet.get()) == before);
+  }
+  remuxer.Stop();
+  REQUIRE(notifications.errors == 0);
+  REQUIRE(notifications.ended == 1);
+  CheckRepeatedOutput(source, ReadMedia(path),
+                      {{AVMEDIA_TYPE_VIDEO, 3}, {AVMEDIA_TYPE_AUDIO, 2}});
+}
+
+TEST_CASE("SyncRemuxer回退缺轨缓存耗尽报告错误并解除提交阻塞",
+          "[remuxer][sync][timeline][rollback][backpressure]") {
+  Runtime runtime;
+  const auto source = ReadMedia(Fixture("h265_aac.mp4"));
+  std::vector<const ffmpeg::Packet*> video;
+  const ffmpeg::Packet* first_audio = nullptr;
+  const auto bytes = [](const ffmpeg::Packet& packet) {
+    auto result = static_cast<std::size_t>(packet->size);
+    for (int index = 0; index < packet->side_data_elems; ++index)
+      result += packet->side_data[index].size;
+    return result;
+  };
+  std::size_t max_video_bytes = 0;
+  std::size_t total_video_bytes = 0;
+  for (const auto& packet : source.packets) {
+    const auto type =
+        Track(source, packet->stream_index).codec_parameters.get()->codec_type;
+    if (type == AVMEDIA_TYPE_AUDIO && !first_audio) first_audio = &packet;
+    if (type != AVMEDIA_TYPE_VIDEO) continue;
+    video.push_back(&packet);
+    max_video_bytes = std::max(max_video_bytes, bytes(packet));
+    total_video_bytes += bytes(packet);
+  }
+  REQUIRE(first_audio != nullptr);
+  REQUIRE_FALSE(video.empty());
+  mw::streamer::SyncRemuxerConfig config;
+  config.max_pending_bytes = bytes(*first_audio) + max_video_bytes;
+  REQUIRE(total_video_bytes > config.max_pending_bytes);
+  REQUIRE(max_video_bytes <= config.max_pending_bytes);
+  Notifications notifications;
+  mw::streamer::SyncRemuxer remuxer(config);
+  notifications.Bind(remuxer);
+  remuxer.Start(source.streams);
+  SubmitUnchanged(remuxer, *first_audio);
+  for (const auto* packet : video) SubmitUnchanged(remuxer, *packet);
+  auto submit = std::async(std::launch::async, [&] {
+    for (const auto* packet : video) {
+      if (!remuxer.SubmitPacket(0, *packet)) return false;
+    }
+    return true;
+  });
+  const auto status = submit.wait_for(5s);
+  CHECK(status == std::future_status::ready);
+  if (status != std::future_status::ready) remuxer.Drain();
+  CHECK_FALSE(submit.get());
+  auto stopped = std::async(std::launch::async, [&] { remuxer.Stop(); });
+  CHECK(stopped.wait_for(5s) == std::future_status::ready);
+  stopped.get();
+  CHECK(notifications.errors == 1);
+  CHECK(notifications.ended == 1);
+}
+
 TEST_CASE("SyncRemuxer缺轨启动时切换代际仍接收后来音频",
           "[remuxer][sync][generation][startup]") {
   Runtime runtime;
@@ -802,6 +1100,8 @@ TEST_CASE("SyncRemuxer非法配置时间戳和超大包明确拒绝",
   packet = media.packets.front().Clone();
   packet->time_base = {0, 1};
   REQUIRE(remuxer.SubmitPacket(0, *packet.get()));
+  CHECK_THROWS_AS(remuxer.SubmitPacket(0, *packet.get()),
+                  std::invalid_argument);
   CHECK(packet->time_base.num == 0);
   CHECK(packet->time_base.den == 1);
   remuxer.Stop();

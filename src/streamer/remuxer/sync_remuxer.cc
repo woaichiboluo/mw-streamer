@@ -107,7 +107,8 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
       }
       tracks.push_back({stream.stream_index, parameters.codec_type,
                         stream.time_base, parameters.framerate,
-                        parameters.sample_rate, std::nullopt, false});
+                        parameters.sample_rate, std::nullopt, false,
+                        std::nullopt, false});
     }
     auto converter = std::make_unique<internal::PacketConverter>(streams);
     std::vector<mediakit::Track::Ptr> startup_probes;
@@ -166,6 +167,7 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
       producer_generation_.reset();
       generation_.reset();
       origin_.reset();
+      rollback_pending_ = false;
       base_ns_ = end_ns_ = 0;
       failure_.clear();
       draining_ = processing_ = false;
@@ -215,8 +217,8 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     if (producer_generation_ && generation < *producer_generation_)
       throw std::invalid_argument("输入录像generation不得倒退");
     if (producer_generation_ == generation && track->last_dts &&
-        packet.dts <= *track->last_dts) {
-      throw std::invalid_argument("输入录像同轨DTS必须严格递增");
+        packet.dts == *track->last_dts) {
+      throw std::invalid_argument("输入录像同轨DTS不得重复");
     }
     const auto pts_ns = Nanoseconds(packet.pts, time_base);
     const auto dts_ns = Nanoseconds(packet.dts, time_base);
@@ -244,10 +246,10 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
       throw std::length_error("输入录像单包超过缓存容量");
     while (accepting_ && session_id_ == session_id &&
            bytes > config_.max_pending_bytes - pending_bytes_) {
-      // With no consumer work left, only startup data retains the budget.
+      // With no consumer work left, only timeline preparation retains data.
       // The next packet cannot enter to make startup progress.
       if (startup_waiting_ && queue_.empty() && !processing_) {
-        failure_ = "输入录像启动缓存不足以等待各轨首包及视频关键帧";
+        failure_ = "输入录像缓存不足以等待各轨时间线就绪";
         accepting_ = false;
         draining_ = true;
         changed_.notify_all();
@@ -328,6 +330,10 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     int sample_rate;
     std::optional<std::int64_t> last_dts;
     bool seen;
+    // Only the consumer touches these fields; admission's last_dts remains
+    // independent when a generation change is already queued upstream.
+    std::optional<std::int64_t> processed_dts;
+    bool rolled_back;
   };
 
   struct Item {
@@ -471,17 +477,41 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
 
   void Process(Item item) {
     if (generation_ != item.generation) {
+      CompleteRollback(true);
       Initialize(true);
       base_ns_ = end_ns_;
       origin_.reset();
       generation_ = item.generation;
-      for (auto& track : tracks_) track.seen = false;
+      for (auto& track : tracks_) {
+        track.seen = false;
+        track.processed_dts.reset();
+        track.rolled_back = false;
+      }
       {
         std::lock_guard<std::mutex> lock(mutex_);
         startup_waiting_ = true;
       }
     }
     auto& track = tracks_[item.track];
+    if (track.processed_dts && item.dts_ns < *track.processed_dts) {
+      if (track.rolled_back)
+        throw std::runtime_error("输入轨道等待同步时再次回退");
+      if (!rollback_pending_) {
+        // Finish an incomplete startup before retaining the new timestamps.
+        // Other tracks can still emit their old tail using the existing origin.
+        Initialize(true);
+        rollback_pending_ = true;
+        std::lock_guard<std::mutex> lock(mutex_);
+        startup_waiting_ = true;
+      }
+      track.rolled_back = true;
+      MW_LOG_INFO("streamer",
+                  "SyncRemuxer时间戳回退: generation={}, stream={}, "
+                  "previous_dts_ns={}, dts_ns={}",
+                  item.generation, track.index, *track.processed_dts,
+                  item.dts_ns);
+    }
+    track.processed_dts = item.dts_ns;
     if (track.type == AVMEDIA_TYPE_VIDEO && !track.seen &&
         !(item.packet->flags & AV_PKT_FLAG_KEY)) {
       item.packet.Unref();
@@ -489,11 +519,37 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
       return;
     }
     track.seen = true;
-    if (origin_) {
+    if (rollback_pending_ && track.rolled_back) {
+      startup_.push_back(std::move(item));
+      CompleteRollback(false);
+    } else if (origin_) {
       EmitAndRelease(item);
     } else {
       startup_.push_back(std::move(item));
       Initialize(false);
+    }
+  }
+
+  void CompleteRollback(bool force, bool final_eof = false) {
+    if (!rollback_pending_) return;
+    if (!force &&
+        std::any_of(tracks_.begin(), tracks_.end(), [](const auto& track) {
+          return track.seen && !track.rolled_back;
+        })) {
+      return;
+    }
+    // Reuse one common origin for all retained new packets. Do not repeat
+    // startup keyframe selection or change the producer's generation.
+    base_ns_ = end_ns_;
+    origin_.reset();
+    rollback_pending_ = false;
+    for (auto& track : tracks_) track.rolled_back = false;
+    Initialize(true, final_eof);
+    if (origin_) {
+      MW_LOG_INFO("streamer",
+                  "SyncRemuxer共同时间线接续: generation={}, base_ns={}, "
+                  "origin_ns={}",
+                  *generation_, base_ns_, *origin_);
     }
   }
 
@@ -519,6 +575,7 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
           changed_.notify_all();
         }
       }
+      CompleteRollback(true, true);
       Initialize(true, true);
     } catch (const std::exception& error) {
       {
@@ -586,6 +643,7 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
   std::deque<Item> startup_;
   std::optional<std::uint64_t> generation_;
   std::optional<std::int64_t> origin_;
+  bool rollback_pending_ = false;
   std::int64_t base_ns_ = 0;
   std::int64_t end_ns_ = 0;
 };
