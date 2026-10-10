@@ -6,6 +6,7 @@ project(mw_streamer VERSION 0.1.0 LANGUAGES C CXX)
 
 option(BUILD_SHARED "Build logging and streamer as shared libraries" OFF)
 option(BUILD_TESTS "Build tests" ${PROJECT_IS_TOP_LEVEL})
+option(BUILD_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
 set(BUILD_SHARED_LIBS OFF)
 
 set(CMAKE_C_STANDARD 17)
@@ -72,6 +73,10 @@ endif()
 
 add_subdirectory(src)
 target_link_libraries(ZLToolKit PUBLIC mw::log)
+
+if(BUILD_EXAMPLES)
+    add_subdirectory(examples)
+endif()
 
 if(BUILD_TESTS)
     enable_testing()
