@@ -341,10 +341,7 @@ bool H265Track::ready() const {
 }
 
 bool H265Track::inputFrame(const Frame::Ptr &frame) {
-    int type = H265_TYPE(frame->data()[frame->prefixSize()]);
-    if (!frame->configFrame() && type != H265Frame::NAL_SEI_PREFIX && ready()) {
-        return inputFrame_l(frame);
-    }
+    // Frame may contain multiple NAL units even when the track is already ready.
     bool ret = false;
     splitH264(frame->data(), frame->size(), frame->prefixSize(), [&](const char *ptr, size_t len, size_t prefix) {
         using H265FrameInternal = FrameInternal<H265FrameNoCacheAble>;

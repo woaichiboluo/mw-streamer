@@ -453,7 +453,15 @@ class FrameInternal : public FrameInternalBase<Parent> {
 public:
     using Ptr = std::shared_ptr<FrameInternal>;
     FrameInternal(const Frame::Ptr &parent_frame, char *ptr, size_t size, size_t prefix_size)
-        : FrameInternalBase<Parent>(parent_frame, ptr, size, parent_frame->dts(), parent_frame->pts(), prefix_size) {}
+        : FrameInternalBase<Parent>(parent_frame, ptr, size, parent_frame->dts(), parent_frame->pts(), prefix_size),
+          _pts_value(parent_frame->pts()) {}
+
+    // A composite parent's PTS may explicitly be zero; preserve its resolved
+    // value instead of treating it as an omitted PTS in FrameFromPtr.
+    uint64_t pts() const override { return _pts_value; }
+
+private:
+    uint64_t _pts_value;
 };
 
 // 管理一个指针生命周期并生产一个frame  [AUTO-TRANSLATED:449d107b]

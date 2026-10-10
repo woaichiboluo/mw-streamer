@@ -11,11 +11,13 @@
 
 namespace mw::streamer::internal {
 
-// Prepared encoder tracks and owned packets for one serialized muxer session.
+// Prepared tracks and owned packets for one serialized muxer session.
 // Frames borrow retained AVPacket buffers; length-prefixed video is converted
 // once to Annex B before the muxer shares it between outputs.
 class PacketConverter final {
  public:
+  // Configuration may be supplied globally or by video parameter sets in
+  // Annex B packets and AAC configuration in ADTS packets.
   explicit PacketConverter(const std::vector<ffmpeg::StreamInfo>& streams);
   const std::vector<mediakit::Track::Ptr>& tracks() const noexcept;
   mediakit::Frame::Ptr Convert(const ffmpeg::Packet& packet,

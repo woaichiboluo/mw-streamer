@@ -20,6 +20,9 @@ namespace mediakit{
 int dumpAacConfig(const std::string &config, size_t length, uint8_t *out,
                   size_t out_size);
 
+// Return the ADTS frame length, or -1 for an invalid or incomplete header.
+int getAacFrameLength(const uint8_t *data, size_t bytes);
+
 /**
  * aac音频通道
  * AAC audio channel

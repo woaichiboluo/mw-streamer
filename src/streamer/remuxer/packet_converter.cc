@@ -8,6 +8,7 @@
 
 #include "Extension/Factory.h"
 #include "Network/Buffer.h"
+#include "ext-codec/AAC.h"
 #include "ext-codec/H264.h"
 
 namespace mw::streamer::internal {
@@ -161,7 +162,9 @@ PacketConverter::PacketConverter(
     auto track = mediakit::Factory::getTrackByCodecId(codec);
     track->setIndex(stream.stream_index);
     if (parameters.extradata_size == 0) {
-      throw std::invalid_argument("Remuxer需要编码器提供全局编码配置");
+      streams_.push_back({stream.stream_index, stream.time_base, codec, 0});
+      tracks_.push_back(std::move(track));
+      continue;
     }
     const auto* data = parameters.extradata;
     const auto size = static_cast<std::size_t>(parameters.extradata_size);
@@ -238,6 +241,34 @@ mediakit::Frame::Ptr PacketConverter::Convert(const ffmpeg::Packet& packet,
   }
   auto frame = mediakit::Factory::getFrameFromBuffer(
       stream->codec, std::move(buffer), dts_ms, pts_ms);
+  if (stream->codec == mediakit::CodecAAC && frame->prefixSize()) {
+    std::size_t offset = 0;
+    while (offset < frame->size()) {
+      const auto remaining = frame->size() - offset;
+      const auto length = mediakit::getAacFrameLength(
+          reinterpret_cast<const std::uint8_t*>(frame->data() + offset),
+          remaining);
+      if (length <= 7 || static_cast<std::size_t>(length) > remaining) {
+        throw std::invalid_argument("AAC ADTS帧无效或负载截断");
+      }
+      offset += static_cast<std::size_t>(length);
+    }
+  }
+  if (stream->codec == mediakit::CodecAAC) {
+    const auto& track =
+        tracks_[static_cast<std::size_t>(stream - streams_.begin())];
+    if (!track->ready()) {
+      if (!frame->prefixSize()) {
+        throw std::invalid_argument("缺少AAC配置时输入包必须包含ADTS头");
+      }
+      // The output layer clones tracks; retain configuration discovered from
+      // ADTS here as well so subsequent raw AAC packets can use it.
+      track->inputFrame(frame);
+      if (!track->ready()) {
+        throw std::invalid_argument("AAC ADTS头缺少有效编码配置");
+      }
+    }
+  }
   frame->setIndex(stream->index);
   if (pts_ms == 0 && dts_ms != 0) {
     frame = std::make_shared<ZeroPtsFrame>(frame);

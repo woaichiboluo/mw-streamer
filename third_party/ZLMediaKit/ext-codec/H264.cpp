@@ -317,13 +317,7 @@ bool H264Track::ready() const {
 
 bool H264Track::inputFrame(const Frame::Ptr &frame) {
     using H264FrameInternal = FrameInternal<H264FrameNoCacheAble>;
-    int type = H264_TYPE(frame->data()[frame->prefixSize()]);
-    if ((type == H264Frame::NAL_B_P || type == H264Frame::NAL_IDR) && ready()) {
-        return inputFrame_l(frame);
-    }
-
-    // 非I/B/P帧情况下，split一下，防止多个帧粘合在一起  [AUTO-TRANSLATED:b69c6e75]
-    // In the case of non-I/B/P frames, split it to prevent multiple frames from sticking together
+    // Frame may contain multiple NAL units even when its first NAL is a slice.
     bool ret = false;
     splitH264(frame->data(), frame->size(), frame->prefixSize(), [&](const char *ptr, size_t len, size_t prefix) {
         H264FrameInternal::Ptr sub_frame = std::make_shared<H264FrameInternal>(frame, (char *)ptr, len, prefix);

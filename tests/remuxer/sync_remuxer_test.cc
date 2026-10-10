@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <future>
 #include <map>
@@ -16,8 +17,10 @@
 #include <vector>
 
 extern "C" {
+#include <libavcodec/bsf.h>
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/mem.h>
 #include <libavutil/samplefmt.h>
 }
 
@@ -27,6 +30,7 @@ extern "C" {
 #include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/init/init.h"
 #include "mw/streamer/input/ffmpeg_input.h"
+#include "mw/streamer/remuxer/packet_converter.h"
 #include "mw/streamer/remuxer/sync_remuxer.h"
 
 namespace {
@@ -294,6 +298,164 @@ TEST_CASE("SyncRemuxer原包直录保持H264 H265 AAC和单轨的解码内容",
   const auto actual = Decode(output);
   REQUIRE(actual.size() == reference.size());
   for (const auto& [type, frames] : reference) {
+    REQUIRE(actual.count(type) == 1);
+    CHECK(actual.at(type).hashes == frames.hashes);
+  }
+}
+
+TEST_CASE("SyncRemuxer录制无全局配置的Annex B视频和ADTS音频",
+          "[remuxer][sync][recording][in-band]") {
+  Runtime runtime;
+  OutputDirectory directory;
+  std::string name = "h264_aac.mp4";
+  SECTION("H264和AAC") {}
+  SECTION("H265和AAC") { name = "h265_aac.mp4"; }
+  const auto source = ReadMedia(Fixture(name));
+  Media in_band;
+  in_band.streams = source.streams;
+  mw::streamer::internal::PacketConverter prepared(source.streams);
+  for (std::size_t index = 0; index < source.streams.size(); ++index) {
+    const auto& stream = source.streams[index];
+    const auto& track = prepared.tracks()[index];
+    const auto video = std::dynamic_pointer_cast<mediakit::VideoTrack>(track);
+    bool first = true;
+    std::string adts;
+    if (!video) {
+      track->addDelegate([&](const auto& frame) {
+        adts = frame->toString();
+        return true;
+      });
+    }
+    for (const auto& packet : source.packets) {
+      if (packet->stream_index != stream.stream_index) continue;
+      auto normalized = packet.Ref();
+      normalized->time_base = stream.time_base;
+      const auto frame = prepared.Convert(normalized, 0, 0);
+      std::string bytes;
+      if (video) {
+        if (first) {
+          for (const auto& config : video->getConfigFrames())
+            bytes += config->toString();
+        }
+        bytes += frame->toString();
+      } else {
+        adts.clear();
+        REQUIRE(track->inputFrame(frame));
+        REQUIRE_FALSE(adts.empty());
+        bytes = adts;
+      }
+      first = false;
+      ffmpeg::Packet original;
+      ffmpeg::FfmpegException::throwIfError(
+          av_new_packet(original.get(), static_cast<int>(bytes.size())),
+          "分配带内配置测试包");
+      std::memcpy(original->data, bytes.data(), bytes.size());
+      ffmpeg::FfmpegException::throwIfError(
+          av_packet_copy_props(original.get(), packet.get()),
+          "复制带内配置测试包属性");
+      original->time_base = stream.time_base;
+      in_band.packets.push_back(std::move(original));
+    }
+    track->clear();
+    auto* parameters = in_band.streams[index].codec_parameters.get();
+    av_freep(&parameters->extradata);
+    parameters->extradata_size = 0;
+  }
+  // Preserve source interleaving so this also exercises multi-track startup.
+  std::stable_sort(
+      in_band.packets.begin(), in_band.packets.end(),
+      [&](const auto& left, const auto& right) {
+        return av_compare_ts(left->dts,
+                             Track(in_band, left->stream_index).time_base,
+                             right->dts,
+                             Track(in_band, right->stream_index).time_base) < 0;
+      });
+  Notifications notifications;
+  mw::streamer::SyncRemuxer remuxer;
+  notifications.Bind(remuxer);
+  const auto path = Record(remuxer, in_band, directory);
+  REQUIRE(notifications.errors == 0);
+  REQUIRE(notifications.ended == 1);
+  const auto expected = Decode(source);
+  const auto actual = Decode(ReadMedia(path));
+  REQUIRE(actual.size() == expected.size());
+  for (const auto& [type, frames] : expected) {
+    REQUIRE(actual.count(type) == 1);
+    CHECK(actual.at(type).hashes == frames.hashes);
+  }
+}
+
+TEST_CASE("SyncRemuxer录制AUD开头的HEVC包保留每帧及音视频内容",
+          "[remuxer][sync][recording][annex-b][aud]") {
+  Runtime runtime;
+  OutputDirectory directory;
+  const auto source = ReadMedia(Fixture("h265_aac.mp4"));
+  const auto video = std::find_if(
+      source.streams.begin(), source.streams.end(), [](const auto& stream) {
+        return stream.codec_parameters.get()->codec_type == AVMEDIA_TYPE_VIDEO;
+      });
+  REQUIRE(video != source.streams.end());
+  const auto* filter = av_bsf_get_by_name("hevc_mp4toannexb");
+  REQUIRE(filter != nullptr);
+  AVBSFContext* raw = nullptr;
+  ffmpeg::FfmpegException::throwIfError(av_bsf_alloc(filter, &raw),
+                                        "创建HEVC Annex B测试转换器");
+  const auto release = [](AVBSFContext* context) { av_bsf_free(&context); };
+  std::unique_ptr<AVBSFContext, decltype(release)> converter(raw, release);
+  ffmpeg::FfmpegException::throwIfError(
+      avcodec_parameters_copy(raw->par_in, video->codec_parameters.get()),
+      "设置HEVC Annex B测试转换器");
+  raw->time_base_in = video->time_base;
+  ffmpeg::FfmpegException::throwIfError(av_bsf_init(raw),
+                                        "初始化HEVC Annex B测试转换器");
+  Media annex_b;
+  annex_b.streams = source.streams;
+  for (const auto& packet : source.packets) {
+    if (packet->stream_index != video->stream_index) {
+      annex_b.packets.push_back(packet.Ref());
+      continue;
+    }
+    auto coded = packet.Clone();
+    ffmpeg::FfmpegException::throwIfError(av_bsf_send_packet(raw, coded.get()),
+                                          "提交HEVC测试包");
+    ffmpeg::Packet converted;
+    ffmpeg::FfmpegException::throwIfError(
+        av_bsf_receive_packet(raw, converted.get()), "接收HEVC Annex B测试包");
+    // pic_type=2 permits I/P/B slices; the following bit is rbsp_stop_one_bit.
+    constexpr std::uint8_t kAud[]{0, 0, 0, 1, 0x46, 0x01, 0x50};
+    ffmpeg::Packet with_aud;
+    ffmpeg::FfmpegException::throwIfError(
+        av_new_packet(with_aud.get(),
+                      converted->size + static_cast<int>(sizeof(kAud))),
+        "分配AUD开头的HEVC测试包");
+    std::memcpy(with_aud->data, kAud, sizeof(kAud));
+    std::memcpy(with_aud->data + sizeof(kAud), converted->data,
+                static_cast<std::size_t>(converted->size));
+    ffmpeg::FfmpegException::throwIfError(
+        av_packet_copy_props(with_aud.get(), converted.get()),
+        "复制AUD开头的HEVC测试包属性");
+    with_aud->time_base = video->time_base;
+    annex_b.packets.push_back(std::move(with_aud));
+  }
+  Notifications notifications;
+  mw::streamer::SyncRemuxer remuxer;
+  notifications.Bind(remuxer);
+  const auto output = ReadMedia(Record(remuxer, annex_b, directory));
+  REQUIRE(notifications.errors == 0);
+  REQUIRE(notifications.ended == 1);
+  const auto video_packets = [](const Media& media) {
+    return std::count_if(media.packets.begin(), media.packets.end(),
+                         [&](const auto& packet) {
+                           return Track(media, packet->stream_index)
+                                      .codec_parameters.get()
+                                      ->codec_type == AVMEDIA_TYPE_VIDEO;
+                         });
+  };
+  REQUIRE(video_packets(output) == video_packets(source));
+  const auto expected = Decode(source);
+  const auto actual = Decode(output);
+  REQUIRE(actual.size() == expected.size());
+  for (const auto& [type, frames] : expected) {
     REQUIRE(actual.count(type) == 1);
     CHECK(actual.at(type).hashes == frames.hashes);
   }

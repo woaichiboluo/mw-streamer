@@ -103,6 +103,49 @@ Encoded Audio() {
   return output;
 }
 
+Encoded MultiSliceVideo(const char* name) {
+  ffmpeg::VideoEncoderConfig config;
+  config.encoder_name = name;
+  config.width = 128;
+  config.height = 384;
+  config.frame_rate = {50, 1};
+  config.time_base = {1, 50};
+  Options options;
+  options.Set("preset", "ultrafast");
+  if (config.encoder_name == "libx264") {
+    options.Set("tune", "zerolatency");
+    options.Set("threads", "1");
+    options.Set("x264-params", "slices=6:aud=1:repeat-headers=1");
+  } else {
+    options.Set("x265-params",
+                "pools=1:frame-threads=1:log-level=error:ctu=64:slices=6:"
+                "aud=1:repeat-headers=1");
+  }
+  ffmpeg::VideoEncoder encoder(config, options.get());
+  ffmpeg::Frame frame;
+  frame->width = config.width;
+  frame->height = config.height;
+  frame->format = AV_PIX_FMT_YUV420P;
+  frame->time_base = encoder_test::kNanoseconds;
+  frame->pts = encoder_test::kStart;
+  frame->duration = encoder_test::kFrameInterval;
+  ffmpeg::FfmpegException::throwIfError(av_frame_get_buffer(frame.get(), 0),
+                                        "分配多slice视频测试帧");
+  for (int plane = 0; plane < 3; ++plane) {
+    const int divisor = plane == 0 ? 1 : 2;
+    const int width = config.width / divisor;
+    const int height = config.height / divisor;
+    for (int row = 0; row < height; ++row) {
+      std::memset(frame->data[plane] + row * frame->linesize[plane],
+                  plane == 0 ? 32 + row % 128 : 128,
+                  static_cast<std::size_t>(width));
+    }
+  }
+  Encoded output;
+  Encode(encoder, frame, output, 4);
+  return output;
+}
+
 void ExtraData(ffmpeg::StreamInfo& stream, const std::string& data) {
   auto* parameters = stream.codec_parameters.get();
   av_freep(&parameters->extradata);
@@ -189,6 +232,101 @@ TEST_CASE("真实H264与H265配置准备参数集并保留包缓存和毫秒时�
     CHECK(value->dts() == 123456);
     CHECK(value->pts() == 123496);
   }
+  track->delDelegate(delegate);
+}
+
+TEST_CASE("就绪视频Track拆分AUD和六slice复合帧并保留缓存与零PTS",
+          "[remuxer][shared][packet][multi-slice]") {
+  Runtime runtime;
+  const char* name = "libx264";
+  SECTION("H264") {}
+  SECTION("H265") { name = "libx265"; }
+  auto encoded = MultiSliceVideo(name);
+  const bool hevc =
+      encoded.stream.codec_parameters.get()->codec_id == AV_CODEC_ID_HEVC;
+  const auto type = [&](const std::string& nal) {
+    const auto header = static_cast<unsigned char>(nal[0]);
+    return hevc ? ((header >> 1) & 0x3f) : (header & 0x1f);
+  };
+  const auto is_slice = [&](const std::string& nal) {
+    return hevc ? type(nal) <= 23 : type(nal) == 1 || type(nal) == 5;
+  };
+  auto nals = Nals(encoded.packets.front());
+  REQUIRE_FALSE(nals.empty());
+  const auto aud = std::find_if(nals.begin(), nals.end(), [&](const auto& nal) {
+    return type(nal) == (hevc ? 35 : 9);
+  });
+  REQUIRE(aud != nals.end());
+  // Encoders may prepend an initial SEI before their AUD. Put the genuine AUD
+  // first to exercise the same legal access-unit layout as the camera stream.
+  std::rotate(nals.begin(), aud, aud + 1);
+  std::string access_unit;
+  for (const auto& nal : nals) {
+    access_unit.append("\0\0\0\1", 4);
+    access_unit += nal;
+  }
+  encoded.packets.front() = Packet(encoded.stream, access_unit);
+  REQUIRE(type(nals.front()) == (hevc ? 35 : 9));
+  std::vector<std::string> slices;
+  for (const auto& nal : nals) {
+    if (is_slice(nal)) slices.push_back(nal);
+  }
+  REQUIRE(slices.size() == 6);
+  PacketConverter converter({encoded.stream});
+  const auto& track = converter.tracks().front();
+  REQUIRE(track->ready());
+  std::vector<mediakit::Frame::Ptr> emitted;
+  auto* delegate = track->addDelegate([&](const auto& value) {
+    emitted.push_back(mediakit::Frame::getCacheAbleFrame(value));
+    return true;
+  });
+  // Keep the composite Frame API: Track owns the single-NAL adaptation.
+  auto composite = converter.Convert(encoded.packets.front(), 20, 0);
+  CHECK(composite->data() ==
+        reinterpret_cast<const char*>(encoded.packets.front()->data));
+  REQUIRE(track->inputFrame(composite));
+  encoded.packets.clear();
+  composite.reset();
+  std::vector<std::string> actual_slices;
+  int first_slices = 0;
+  for (const auto& value : emitted) {
+    CHECK(value->cacheAble());
+    CHECK(value->getIndex() == 4);
+    CHECK(value->dts() == 20);
+    CHECK(value->pts() == 0);
+    int count = 0;
+    mediakit::splitH264(
+        value->data(), value->size(), value->prefixSize(),
+        [&](const char*, std::size_t, std::size_t) { ++count; });
+    REQUIRE(count == 1);
+    const std::string nal(value->data() + value->prefixSize(),
+                          value->size() - value->prefixSize());
+    if (is_slice(nal)) {
+      actual_slices.push_back(nal);
+      if (value->decodeAble()) ++first_slices;
+    }
+  }
+  CHECK(actual_slices == slices);
+  CHECK(first_slices == 1);
+
+  // A valid six-slice access unit may also start directly with its first slice.
+  // This exercises the former H264 I/P/B fast path without an AUD prefix.
+  std::string slice_packet;
+  for (const auto& slice : slices) {
+    slice_packet.append("\0\0\0\1", 4);
+    slice_packet += slice;
+  }
+  emitted.clear();
+  composite = converter.Convert(Packet(encoded.stream, slice_packet), 40, 40);
+  REQUIRE(track->inputFrame(composite));
+  composite.reset();
+  actual_slices.clear();
+  for (const auto& value : emitted) {
+    const std::string nal(value->data() + value->prefixSize(),
+                          value->size() - value->prefixSize());
+    if (is_slice(nal)) actual_slices.push_back(nal);
+  }
+  CHECK(actual_slices == slices);
   track->delDelegate(delegate);
 }
 
@@ -309,6 +447,106 @@ TEST_CASE("AAC使用真实ASC并由Track生成一次ADTS头",
   track->delDelegate(delegate);
 }
 
+TEST_CASE("轨道无需全局配置且由Annex B参数集和ADTS完成就绪",
+          "[remuxer][shared][packet][in-band]") {
+  Runtime runtime;
+  SECTION("H264和H265参数集随首个关键包输入") {
+    const char* name = "libx264";
+    SECTION("H264") {}
+    SECTION("H265") { name = "libx265"; }
+    auto encoded = Video(name);
+    PacketConverter prepared({encoded.stream});
+    std::string first_packet;
+    const auto prepared_video = std::dynamic_pointer_cast<mediakit::VideoTrack>(
+        prepared.tracks().front());
+    REQUIRE(prepared_video != nullptr);
+    for (const auto& config : prepared_video->getConfigFrames()) {
+      first_packet += config->toString();
+    }
+    first_packet.append(
+        reinterpret_cast<const char*>(encoded.packets.front()->data),
+        static_cast<std::size_t>(encoded.packets.front()->size));
+    av_freep(&encoded.stream.codec_parameters.get()->extradata);
+    encoded.stream.codec_parameters.get()->extradata_size = 0;
+    PacketConverter converter({encoded.stream});
+    const auto& track = converter.tracks().front();
+    CHECK_FALSE(track->ready());
+    std::vector<mediakit::Frame::Ptr> emitted;
+    track->addDelegate([&](const auto& value) {
+      emitted.push_back(value);
+      return true;
+    });
+    auto frame = converter.Convert(Packet(encoded.stream, first_packet), 0, 0);
+    REQUIRE(track->inputFrame(frame));
+    REQUIRE(track->ready());
+    const auto video = std::dynamic_pointer_cast<mediakit::VideoTrack>(track);
+    REQUIRE(video != nullptr);
+    CHECK(video->getVideoWidth() == 64);
+    CHECK(video->getVideoHeight() == 64);
+    CHECK(std::any_of(emitted.begin(), emitted.end(),
+                      [](const auto& value) { return value->keyFrame(); }));
+    CHECK_THROWS_AS(
+        converter.Convert(Packet(encoded.stream, std::string("\x65\x80", 2)),
+                          20, 20),
+        std::invalid_argument);
+  }
+  SECTION("AAC ADTS提供ASC且拒绝裸AAC和截断ADTS") {
+    auto encoded = Audio();
+    PacketConverter prepared({encoded.stream});
+    mediakit::Frame::Ptr adts;
+    prepared.tracks().front()->addDelegate([&](const auto& frame) {
+      adts = frame;
+      return true;
+    });
+    REQUIRE(prepared.tracks().front()->inputFrame(
+        prepared.Convert(encoded.packets.front(), 0, 0)));
+    REQUIRE(adts != nullptr);
+    const auto config = prepared.tracks().front()->getExtraData()->toString();
+    av_freep(&encoded.stream.codec_parameters.get()->extradata);
+    encoded.stream.codec_parameters.get()->extradata_size = 0;
+    PacketConverter converter({encoded.stream});
+    const auto& track = converter.tracks().front();
+    CHECK_FALSE(track->ready());
+    CHECK_THROWS_AS(converter.Convert(encoded.packets.front(), 0, 0),
+                    std::invalid_argument);
+    auto frame =
+        converter.Convert(Packet(encoded.stream, adts->toString()), 42, 42);
+    track->inputFrame(frame);
+    REQUIRE(track->ready());
+    CHECK(track->getExtraData()->toString().substr(0, 2) ==
+          config.substr(0, 2));
+    const auto audio = std::dynamic_pointer_cast<mediakit::AudioTrack>(track);
+    REQUIRE(audio != nullptr);
+    CHECK(audio->getAudioSampleRate() == 48000);
+    CHECK(audio->getAudioChannel() == 2);
+    CHECK(frame->dts() == 42);
+    auto truncated = adts->toString();
+    truncated.pop_back();
+    CHECK_THROWS_AS(
+        converter.Convert(Packet(encoded.stream, truncated), 42, 42),
+        std::invalid_argument);
+    mediakit::Frame::Ptr learned_adts;
+    track->addDelegate([&](const auto& value) {
+      learned_adts = value;
+      return true;
+    });
+    auto raw = converter.Convert(encoded.packets.front(), 64, 64);
+    REQUIRE(track->inputFrame(raw));
+    REQUIRE(learned_adts != nullptr);
+    CHECK(raw->prefixSize() == 0);
+    CHECK(learned_adts->prefixSize() == 7);
+    CHECK(learned_adts->dts() == 64);
+  }
+}
+
+TEST_CASE("包转换仍拒绝已提供但损坏的全局配置",
+          "[remuxer][shared][packet][in-band][validation]") {
+  Runtime runtime;
+  auto encoded = Video("libx264");
+  ExtraData(encoded.stream, std::string("\1\2\3", 3));
+  CHECK_THROWS_AS(PacketConverter({encoded.stream}), std::invalid_argument);
+}
+
 TEST_CASE("包转换拒绝非法配置且不隐式替换编码格式",
           "[remuxer][shared][packet][validation]") {
   Runtime runtime;
@@ -320,10 +558,6 @@ TEST_CASE("包转换拒绝非法配置且不隐式替换编码格式",
   SECTION("重复索引") {
     CHECK_THROWS_AS(PacketConverter({stream, stream}), std::invalid_argument);
     return;
-  }
-  SECTION("缺少全局配置") {
-    av_freep(&stream.codec_parameters.get()->extradata);
-    stream.codec_parameters.get()->extradata_size = 0;
   }
   SECTION("截断avcC") { ExtraData(stream, std::string("\1\2\3", 3)); }
   SECTION("无效参数集") {

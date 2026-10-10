@@ -45,8 +45,9 @@ class MW_STREAMER_API SyncRemuxer final {
   void SetOnError(OnError callback);
   void SetOnEnded(OnEnded callback);
 
-  // Supports one H264/H265 video and one AAC audio track, with complete codec
-  // configuration. Uses the original input tracks from Input::OnReady.
+  // Supports one H264/H265 video and one AAC audio track. Codec configuration
+  // may be supplied in StreamInfo or discovered in Annex B/ADTS packets.
+  // Uses the original input tracks from Input::OnReady.
   void Start(const std::vector<ffmpeg::StreamInfo>& streams);
   // Retains packet buffers without modifying the source. PTS/DTS must exist,
   // and DTS must strictly increase per track within each generation. An unset
