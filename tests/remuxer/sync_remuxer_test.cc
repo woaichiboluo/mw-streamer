@@ -22,6 +22,7 @@ extern "C" {
 }
 
 #include "../encoder/encoder_test_support.h"
+#include "Network/Socket.h"
 #include "Poller/EventPoller.h"
 #include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/init/init.h"
@@ -250,8 +251,8 @@ struct Notifications final {
 
 std::string Record(mw::streamer::SyncRemuxer& remuxer, const Media& media,
                    const OutputDirectory& directory, int generations = 1) {
-  remuxer.Start(media.streams);
   const auto path = remuxer.AddPushUrl(directory.File());
+  remuxer.Start(media.streams);
   for (int generation = 0; generation < generations; ++generation) {
     for (const auto& packet : media.packets) {
       const auto before = Snapshot(*packet.get());
@@ -316,10 +317,8 @@ TEST_CASE("Remux模式Input直接录制原包且不调用解码帧回调",
   std::string path;
   std::vector<PacketSnapshot> received;
   int frames = 0;
-  input.SetOnReady([&](const auto& streams) {
-    remuxer.Start(streams);
-    path = remuxer.AddPushUrl(directory.File());
-  });
+  path = remuxer.AddPushUrl(directory.File());
+  input.SetOnReady([&](const auto& streams) { remuxer.Start(streams); });
   input.SetOnPacket([&](std::uint64_t generation, const auto& packet) {
     const auto before = Snapshot(*packet.get());
     if (!remuxer.SubmitPacket(generation, packet))
@@ -357,6 +356,96 @@ TEST_CASE("Remux模式Input直接录制原包且不调用解码帧回调",
     CHECK(actual.at(type).hashes == value.hashes);
   CHECK(notifications.errors == 0);
   CHECK(notifications.ended == 1);
+}
+
+TEST_CASE("SyncRemuxer停止清空输出且重新登记保存独立完整录像",
+          "[remuxer][sync][recording][lifecycle]") {
+  Runtime runtime;
+  OutputDirectory directory;
+  const auto source = ReadMedia(Fixture("h264_aac.mp4"));
+  const auto expected = Decode(source);
+  Notifications notifications;
+  mw::streamer::SyncRemuxer remuxer;
+  notifications.Bind(remuxer);
+  const auto first = remuxer.AddPushUrl(directory.File());
+  CHECK(remuxer.AddPushUrl(directory.File()) == first);
+  CHECK(remuxer.output_info().output_urls == std::vector<std::string>{first});
+  CHECK_FALSE(std::filesystem::exists(std::filesystem::u8path(first)));
+  std::vector<std::string> paths;
+  for (int session = 0; session < 2; ++session) {
+    CAPTURE(session);
+    if (session != 0) {
+      CHECK(remuxer.AddPushUrl(directory.File()) != first);
+    }
+    remuxer.Start(source.streams);
+    const auto outputs = remuxer.output_info().output_urls;
+    REQUIRE(outputs.size() == 1);
+    paths.push_back(outputs.front());
+    CHECK(remuxer.AddPushUrl(directory.File()) == paths.back());
+    for (const auto& packet : source.packets) {
+      REQUIRE(remuxer.SubmitPacket(0, packet));
+    }
+    remuxer.Stop();
+    CHECK(notifications.ended == session + 1);
+    REQUIRE(notifications.errors == 0);
+  }
+  CHECK(paths.front() == first);
+  REQUIRE(paths.front() != paths.back());
+  for (const auto& path : paths) {
+    const auto actual = Decode(ReadMedia(path));
+    for (const auto& [type, frames] : expected) {
+      REQUIRE(actual.count(type) == 1);
+      CHECK(actual.at(type).hashes == frames.hashes);
+    }
+  }
+  remuxer.Start(source.streams);
+  CHECK(remuxer.output_info().output_urls.empty());
+  remuxer.Stop();
+}
+
+TEST_CASE("SyncRemuxer预配置输出启动失败释放已绑定端口且可以重试",
+          "[remuxer][sync][publish][lifecycle]") {
+  Runtime runtime;
+  const auto source = ReadMedia(Fixture("h264_aac.mp4"));
+  auto first_reservation = toolkit::Socket::createSocket();
+  auto second_reservation = toolkit::Socket::createSocket();
+  REQUIRE(first_reservation->listen(0, "127.0.0.1"));
+  REQUIRE(second_reservation->listen(0, "127.0.0.1"));
+  const auto first_port = first_reservation->get_local_port();
+  const auto occupied_port = second_reservation->get_local_port();
+  first_reservation.reset();
+  second_reservation.reset();
+
+  mw::streamer::SyncRemuxer blocker;
+  blocker.Start(source.streams);
+  blocker.AddRtspPublish("rollback", "blocker", "127.0.0.1", occupied_port);
+
+  mw::streamer::SyncRemuxer remuxer;
+  CHECK_THROWS_AS(
+      remuxer.AddHlsPublish("rollback", "../invalid", "127.0.0.1", first_port),
+      std::invalid_argument);
+  CHECK(remuxer.output_info().hls_url.empty());
+  remuxer.AddRtspPublish("rollback", "retry", "127.0.0.1", first_port);
+  const auto hls =
+      remuxer.AddHlsPublish("rollback", "retry", "127.0.0.1", occupied_port);
+  CHECK_THROWS(remuxer.Start(source.streams));
+  CHECK_FALSE(remuxer.SubmitPacket(0, source.packets.front()));
+  {
+    // The first listener was activated before the second output failed.
+    // A different protocol can use that endpoint only after rollback.
+    mw::streamer::SyncRemuxer probe;
+    probe.Start(source.streams);
+    CHECK_NOTHROW(
+        probe.AddHlsPublish("rollback", "probe", "127.0.0.1", first_port));
+    probe.Stop();
+  }
+  blocker.Stop();
+  REQUIRE_NOTHROW(remuxer.Start(source.streams));
+  CHECK(remuxer.output_info().hls_url == hls);
+  for (const auto& packet : source.packets) {
+    REQUIRE(remuxer.SubmitPacket(0, packet));
+  }
+  remuxer.Stop();
 }
 
 TEST_CASE("SyncRemuxer共同原点保留音频偏移和B帧负DTS",

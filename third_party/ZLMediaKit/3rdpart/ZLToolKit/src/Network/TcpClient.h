@@ -12,6 +12,7 @@
 #define NETWORK_TCPCLIENT_H
 
 #include <memory>
+#include <stdexcept>
 #include "Socket.h"
 #include "Util/SSLBox.h"
 
@@ -195,18 +196,22 @@ public:
 protected:
     void onConnect(const SockException &ex) override {
         if (!ex) {
-            _ssl_box = std::make_shared<SSL_Box>(false);
-            _ssl_box->setOnDecData([this](const Buffer::Ptr &buf) {
-                public_onRecv(buf);
-            });
-            _ssl_box->setOnEncData([this](const Buffer::Ptr &buf) {
-                public_send(buf);
-            });
-
-            if (!isIP(_host.data())) {
-                //设置ssl域名  [AUTO-TRANSLATED:1286a860]
-                //Set ssl domain
-                _ssl_box->setHost(_host.data());
+            try {
+                _ssl_box = std::make_shared<SSL_Box>(false);
+                if (!_ssl_box->setHost(_host.data())) {
+                    throw std::runtime_error("Failed to configure TLS peer identity");
+                }
+                _ssl_box->setOnDecData([this](const Buffer::Ptr &buf) {
+                    public_onRecv(buf);
+                });
+                _ssl_box->setOnEncData([this](const Buffer::Ptr &buf) {
+                    public_send(buf);
+                });
+            } catch (const std::exception &error) {
+                _ssl_box.reset();
+                // Report once through the normal socket error callback.
+                this->shutdown(SockException(Err_other, error.what()));
+                return;
             }
         }
         TcpClientType::onConnect(ex);

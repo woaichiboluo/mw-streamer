@@ -15,8 +15,38 @@
 #include "Network/TcpServer.h"
 #include "Poller/EventPoller.h"
 #include "Pusher/PusherProxy.h"
+#include "mw/streamer/remuxer/output_info.h"
 
 namespace mw::streamer::internal {
+
+// Configuration for one session; all mutations are serialized by the
+// owning Remuxer's control mutex. Preparation needs no initialized runtime.
+class OutputRegistration final {
+ public:
+  enum class Kind { kPush, kRtsp, kHls };
+  struct Entry {
+    Kind kind;
+    std::string original;
+    std::string actual;
+    std::string app;
+    std::string stream;
+    std::string ip;
+    std::uint16_t port = 0;
+    bool tls = false;
+  };
+
+  static Entry PreparePush(const std::string& url);
+  static Entry PreparePublish(Kind kind, const std::string& app,
+                              const std::string& stream, const std::string& ip,
+                              std::uint16_t port, bool tls);
+  const Entry* FindPush(const std::string& url) const;
+  void Add(Entry entry);
+  RemuxerOutputInfo info() const;
+  const std::vector<Entry>& entries() const { return entries_; }
+
+ private:
+  std::vector<Entry> entries_;
+};
 
 // One shared output session. Own through shared_ptr and serialize every call on
 // poller; Flush before Close, allowing queued Ring dispatches to run in
@@ -31,11 +61,14 @@ class RemuxOutput final : public mediakit::MediaSourceEvent,
   void Start(const std::vector<mediakit::Track::Ptr>& tracks);
   // zero_origin applies only before the session has received any frames;
   // later recordings retain the SDK's common origin for cached GOP history.
-  std::string AddPushUrl(const std::string& url, bool zero_origin = false);
+  // Activates the prepared exact path/URL without adding a recording suffix.
+  void AddPrepared(const OutputRegistration::Entry& entry,
+                   bool zero_origin = false);
   void AddRtspPublish(const std::string& app, const std::string& stream,
-                      const std::string& ip, std::uint16_t port);
+                      const std::string& ip, std::uint16_t port, bool tls);
   std::string AddHlsPublish(const std::string& app, const std::string& stream,
-                            const std::string& ip, std::uint16_t port);
+                            const std::string& ip, std::uint16_t port,
+                            bool tls);
   void InputFrame(const mediakit::Frame::Ptr& frame);
   bool tracks_ready() const;
   void Flush();

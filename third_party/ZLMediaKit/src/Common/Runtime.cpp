@@ -20,6 +20,7 @@
 #include "Network/sockutil.h"
 #include "Poller/EventPoller.h"
 #include "Thread/WorkThreadPool.h"
+#include "Util/SSLBox.h"
 #include "Util/util.h"
 #include "mw/log.h"
 
@@ -63,6 +64,9 @@ public:
             toolkit::EventPollerPool::setInstance(nullptr);
             _event_pool.reset();
         }
+        if (_tls_initialized) {
+            toolkit::SSL_Initor::Instance().clearContexts();
+        }
         // NullMediaSource contains timestamp users, so it must be destroyed
         // while the clock remains installed and running.
         if (_null_media_source) {
@@ -89,6 +93,19 @@ public:
         }
         _network_initialized = true;
 
+        auto &tls = toolkit::SSL_Initor::Instance();
+        _tls_initialized = true;
+        tls.initializeContexts();
+        tls.ignoreInvalidCertificate(false);
+        if (!config.tls_certificate_file.empty() &&
+            !tls.loadCertificate(config.tls_certificate_file, true, config.tls_certificate_password, true, true)) {
+            throw std::runtime_error("Failed to load TLS server certificate and private key");
+        }
+        if (!config.tls_trusted_certificate_file.empty() &&
+            !tls.trustCertificate(config.tls_trusted_certificate_file, false, "", true)) {
+            throw std::runtime_error("Failed to load TLS trusted certificate");
+        }
+
         _clock = std::make_unique<toolkit::TimestampClock>();
         toolkit::setTimestampClock(_clock.get());
         _null_media_source = MediaSource::createNullMediaSource();
@@ -112,6 +129,7 @@ public:
 
 private:
     bool _network_initialized = false;
+    bool _tls_initialized = false;
     std::unique_ptr<toolkit::TimestampClock> _clock;
     MediaSource::Ptr _null_media_source;
     std::unique_ptr<toolkit::EventPollerPool> _event_pool;

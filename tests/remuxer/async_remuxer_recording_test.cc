@@ -383,7 +383,7 @@ void CheckName(const std::string& path, const std::string& stem,
   CHECK(std::regex_match(filename,
                          std::regex(stem +
                                     "_[0-9]{4}_[0-9]{2}_[0-9]{2}_[0-9]{2}_"
-                                    "[0-9]{2}_[0-9]{2}\\." +
+                                    "[0-9]{2}_[0-9]{2}(_[0-9]+)?\\." +
                                     extension)));
 }
 
@@ -400,11 +400,15 @@ TEST_CASE("公开AsyncRemuxer多目标录制保留B帧AAC同步并完成动态�
   Notifications notifications;
   mw::streamer::AsyncRemuxer remuxer;
   notifications.Bind(remuxer);
-  remuxer.Start(capture.streams);
   const auto first = remuxer.AddPushUrl(directory.File("single_a.mp4"));
   const auto second = remuxer.AddPushUrl(directory.File("single_b.mp4"));
   const auto hls_a = remuxer.AddPushUrl(directory.File("playlist_a.m3u8"));
   const auto hls_b = remuxer.AddPushUrl(directory.File("playlist_b.m3u8"));
+  CHECK(remuxer.AddPushUrl(directory.File("single_a.mp4")) == first);
+  REQUIRE(remuxer.output_info().output_urls ==
+          std::vector<std::string>{first, second, hls_a, hls_b});
+  CHECK_FALSE(fs::exists(fs::u8path(first)));
+  remuxer.Start(capture.streams);
   CheckName(first, "single_a", "mp4");
   CheckName(second, "single_b", "mp4");
   CheckName(hls_a, "playlist_a", "m3u8");
@@ -459,6 +463,28 @@ TEST_CASE("公开AsyncRemuxer多目标录制保留B帧AAC同步并完成动态�
     CHECK(partial.video_high[index] ==
           MarkerFrame(start + static_cast<int>(index)));
   }
+  const auto first_contents = Read(first);
+  const auto next = remuxer.AddPushUrl(directory.File("single_a.mp4"));
+  CHECK(next != first);
+  remuxer.Start(capture.streams);
+  const auto restarted = remuxer.output_info().output_urls;
+  REQUIRE(restarted.size() == 1);
+  CHECK(restarted.front() == next);
+  CHECK(restarted.front() != first);
+  CHECK(remuxer.AddPushUrl(directory.File("single_a.mp4")) ==
+        restarted.front());
+  for (const auto index : order) {
+    REQUIRE(
+        remuxer.SubmitPacket(capture.packets[index], capture.dts_ns[index]));
+  }
+  remuxer.Stop();
+  CHECK(notifications.ended == 2);
+  REQUIRE(notifications.errors.empty());
+  CHECK(Read(first) == first_contents);
+  CheckFullRecording(restarted.front());
+  remuxer.Start(capture.streams);
+  CHECK(remuxer.output_info().output_urls.empty());
+  remuxer.Stop();
 }
 
 TEST_CASE("公开AsyncRemuxer控制调用校验与空会话结束只通知一次",
@@ -470,9 +496,21 @@ TEST_CASE("公开AsyncRemuxer控制调用校验与空会话结束只通知一次
   Notifications notifications;
   mw::streamer::AsyncRemuxer remuxer;
   notifications.Bind(remuxer);
-  SECTION("Start前不能添加录制目标") {
-    CHECK_THROWS_AS(remuxer.AddPushUrl(directory.File("early.mp4")),
-                    std::logic_error);
+  SECTION("Start前保存目标且立即拒绝非法参数") {
+    CHECK_THROWS_AS(remuxer.AddPushUrl(directory.File("invalid.ts")),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(remuxer.AddRtspPublish("", "camera", "127.0.0.1", 8554),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(
+        remuxer.AddHlsPublish("live", "../camera", "127.0.0.1", 8080),
+        std::invalid_argument);
+    CHECK(remuxer.output_info().output_urls.empty());
+    CHECK(remuxer.output_info().rtsp_url.empty());
+    CHECK(remuxer.output_info().hls_url.empty());
+    const auto path = remuxer.AddPushUrl(directory.File("early.mp4"));
+    CheckName(path, "early", "mp4");
+    CHECK_FALSE(fs::exists(fs::u8path(path)));
+    CHECK(remuxer.output_info().output_urls == std::vector<std::string>{path});
   }
   SECTION("空会话支持DrainStop并拒绝无效输出扩展名") {
     encoder_test::Capture capture;
@@ -488,6 +526,8 @@ TEST_CASE("公开AsyncRemuxer控制调用校验与空会话结束只通知一次
     CHECK_THROWS_AS(remuxer.AddPushUrl(directory.File("invalid.ts")),
                     std::invalid_argument);
     remuxer.Drain();
+    CHECK_THROWS_AS(remuxer.AddPushUrl(directory.File("draining.mp4")),
+                    std::logic_error);
     REQUIRE(notifications.Wait());
     remuxer.Stop();
     remuxer.Drain();
@@ -495,8 +535,10 @@ TEST_CASE("公开AsyncRemuxer控制调用校验与空会话结束只通知一次
     CHECK(notifications.ended == 1);
     CHECK(notifications.errors.empty());
     CHECK_FALSE(notifications.callback_failed);
-    CHECK_THROWS_AS(remuxer.AddPushUrl(directory.File("ended.mp4")),
-                    std::logic_error);
+    const auto path = remuxer.AddPushUrl(directory.File("ended.mp4"));
+    CheckName(path, "ended", "mp4");
+    CHECK_FALSE(fs::exists(fs::u8path(path)));
+    CHECK(remuxer.output_info().output_urls == std::vector<std::string>{path});
   }
 }
 

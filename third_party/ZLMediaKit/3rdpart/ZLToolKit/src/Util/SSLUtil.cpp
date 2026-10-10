@@ -98,7 +98,7 @@ static int getCerType(BIO *bio, const char *passwd, X509 **x509, int type) {
 vector<shared_ptr<X509> > SSLUtil::loadPublicKey(const string &file_path_or_data, const string &passwd, bool isFile) {
     vector<shared_ptr<X509> > ret;
 #if defined(ENABLE_OPENSSL)
-    BIO *bio = isFile ? BIO_new_file((char *) file_path_or_data.data(), "r") :
+    BIO *bio = isFile ? BIO_new_file((char *) file_path_or_data.data(), "rb") :
                BIO_new_mem_buf((char *) file_path_or_data.data(), file_path_or_data.size());
     if (!bio) {
         MW_LOG_WARNING("zlm", "{} failed: {}", (isFile ? "BIO_new_file" : "BIO_new_mem_buf"), getLastError());
@@ -126,7 +126,7 @@ vector<shared_ptr<X509> > SSLUtil::loadPublicKey(const string &file_path_or_data
 shared_ptr<EVP_PKEY> SSLUtil::loadPrivateKey(const string &file_path_or_data, const string &passwd, bool isFile) {
 #if defined(ENABLE_OPENSSL)
     BIO *bio = isFile ?
-               BIO_new_file((char *) file_path_or_data.data(), "r") :
+               BIO_new_file((char *) file_path_or_data.data(), "rb") :
                BIO_new_mem_buf((char *) file_path_or_data.data(), file_path_or_data.size());
     if (!bio) {
         MW_LOG_WARNING("zlm", "{} failed: {}", (isFile ? "BIO_new_file" : "BIO_new_mem_buf"), getLastError());
@@ -226,6 +226,9 @@ shared_ptr<SSL_CTX> SSLUtil::makeSSLContext(const vector<shared_ptr<X509> > &cer
 
 shared_ptr<SSL> SSLUtil::makeSSL(SSL_CTX *ctx) {
 #if defined(ENABLE_OPENSSL)
+    if (!ctx) {
+        return nullptr;
+    }
     auto *ssl = SSL_new(ctx);
     if (!ssl) {
         return nullptr;
@@ -256,6 +259,9 @@ bool SSLUtil::loadDefaultCAs(SSL_CTX *ctx) {
 
 bool SSLUtil::trustCertificate(SSL_CTX *ctx, X509 *cer) {
 #if defined(ENABLE_OPENSSL)
+    if (!ctx || !cer) {
+        return false;
+    }
     X509_STORE *store = SSL_CTX_get_cert_store(ctx);
     if (store && cer) {
         if (X509_STORE_add_cert(store, cer) != 1) {

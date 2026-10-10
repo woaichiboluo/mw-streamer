@@ -96,3 +96,18 @@ foreach(kind async sync)
     set_tests_properties(${hls_test_target} PROPERTIES
         TIMEOUT 60 LABELS "${kind}_remuxer;hls")
 endforeach()
+
+# Use only the public library API, including the real DLL in shared builds.
+add_executable(mw_secure_publish_tests secure_publish_test.cc)
+target_compile_definitions(mw_secure_publish_tests PRIVATE
+    MW_STREAMER_TLS_TEST_DATA_DIR="${MW_STREAMER_TEST_DATA_DIR}")
+target_link_libraries(mw_secure_publish_tests PRIVATE
+    Catch2::Catch2WithMain mw::streamer FFmpeg::avformat
+    OpenSSL::SSL OpenSSL::Crypto)
+if(WIN32)
+    target_compile_definitions(mw_secure_publish_tests PRIVATE NOMINMAX)
+    target_link_libraries(mw_secure_publish_tests PRIVATE ws2_32)
+endif()
+add_test(NAME mw_secure_publish_tests COMMAND mw_secure_publish_tests)
+set_tests_properties(mw_secure_publish_tests PROPERTIES
+    TIMEOUT 90 LABELS "remuxer;tls")

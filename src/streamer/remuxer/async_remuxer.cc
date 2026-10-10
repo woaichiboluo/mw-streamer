@@ -47,26 +47,51 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     }
     auto poller =
         poller_ ? poller_ : toolkit::EventPollerPool::Instance().getPoller();
-    Sync(poller, [&] {
-      auto interleaver = std::make_unique<internal::PacketInterleaver>(streams);
-      auto converter = std::make_unique<internal::PacketConverter>(streams);
-      std::weak_ptr<Impl> weak = shared_from_this();
-      auto output = std::make_shared<internal::RemuxOutput>(
-          poller,
-          [weak](std::string_view target, int code, std::string_view message) {
-            if (auto self = weak.lock()) self->Error(target, code, message);
-          });
-      output->Start(converter->tracks());
-      if (!poller_) poller_ = poller;
-      output_ = std::move(output);
-      converter_ = std::move(converter);
+    auto info = registration_.info();
+    {
       std::lock_guard<std::mutex> lock(mutex_);
-      interleaver_ = std::move(interleaver);
-      performance_.Start(this, streams);
-      shift_ns_.reset();
-      running_ = accepting_ = true;
-      draining_ = closing_ = scheduled_ = false;
-    });
+      output_info_ = std::move(info);
+    }
+    try {
+      Sync(poller, [&] {
+        auto interleaver =
+            std::make_unique<internal::PacketInterleaver>(streams);
+        auto converter = std::make_unique<internal::PacketConverter>(streams);
+        std::weak_ptr<Impl> weak = shared_from_this();
+        auto output = std::make_shared<internal::RemuxOutput>(
+            poller, [weak](std::string_view target, int code,
+                           std::string_view message) {
+              if (auto self = weak.lock()) self->Error(target, code, message);
+            });
+        output->Start(converter->tracks());
+        try {
+          for (const auto& entry : registration_.entries())
+            output->AddPrepared(entry);
+        } catch (...) {
+          const auto error = std::current_exception();
+          try {
+            output->Close();
+          } catch (const std::exception& failure) {
+            MW_LOG_ERROR("streamer", "AsyncRemuxer启动回滚失败: {}",
+                         failure.what());
+          }
+          std::rethrow_exception(error);
+        }
+        if (!poller_) poller_ = poller;
+        output_ = std::move(output);
+        converter_ = std::move(converter);
+        std::lock_guard<std::mutex> lock(mutex_);
+        interleaver_ = std::move(interleaver);
+        performance_.Start(this, streams);
+        shift_ns_.reset();
+        running_ = accepting_ = true;
+        draining_ = closing_ = scheduled_ = false;
+      });
+    } catch (...) {
+      const auto error = std::current_exception();
+      Sync(poller, [] {});
+      std::rethrow_exception(error);
+    }
   }
 
   bool SubmitPacket(const ffmpeg::Packet& packet, std::int64_t ordering_ns) {
@@ -92,35 +117,30 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
 
   std::string AddPushUrl(const std::string& url) {
     std::lock_guard<std::mutex> control(control_);
-    auto poller = ActivePoller();
-    std::string result;
-    Sync(poller, [&] {
-      RequireAccepting();
-      result = output_->AddPushUrl(url);
-    });
-    return result;
+    RequireRegisterable();
+    if (const auto* existing = registration_.FindPush(url))
+      return existing->actual;
+    return Register(internal::OutputRegistration::PreparePush(url));
   }
 
   void AddRtspPublish(const std::string& app, const std::string& stream,
-                      const std::string& ip, std::uint16_t port) {
+                      const std::string& ip, std::uint16_t port, bool tls) {
     std::lock_guard<std::mutex> control(control_);
-    auto poller = ActivePoller();
-    Sync(poller, [&] {
-      RequireAccepting();
-      output_->AddRtspPublish(app, stream, ip, port);
-    });
+    Register(internal::OutputRegistration::PreparePublish(
+        internal::OutputRegistration::Kind::kRtsp, app, stream, ip, port, tls));
   }
 
   std::string AddHlsPublish(const std::string& app, const std::string& stream,
-                            const std::string& ip, std::uint16_t port) {
+                            const std::string& ip, std::uint16_t port,
+                            bool tls) {
     std::lock_guard<std::mutex> control(control_);
-    auto poller = ActivePoller();
-    std::string result;
-    Sync(poller, [&] {
-      RequireAccepting();
-      result = output_->AddHlsPublish(app, stream, ip, port);
-    });
-    return result;
+    return Register(internal::OutputRegistration::PreparePublish(
+        internal::OutputRegistration::Kind::kHls, app, stream, ip, port, tls));
+  }
+
+  RemuxerOutputInfo output_info() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return output_info_;
   }
 
   void Drain() noexcept {
@@ -136,6 +156,8 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     Drain();
     std::unique_lock<std::mutex> lock(mutex_);
     stopped_.wait(lock, [&] { return !running_; });
+    registration_ = {};
+    draining_ = closing_ = false;
   }
 
  private:
@@ -152,10 +174,29 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     if (error) std::rethrow_exception(error);
   }
 
-  toolkit::EventPoller::Ptr ActivePoller() {
+  bool RequireRegisterable() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!accepting_) throw std::logic_error("AsyncRemuxer未启动或已经排空");
-    return poller_;
+    if ((running_ && !accepting_) || draining_ || closing_)
+      throw std::logic_error("AsyncRemuxer正在排空");
+    return running_;
+  }
+  std::string Register(internal::OutputRegistration::Entry entry) {
+    const bool active = RequireRegisterable();
+    auto registration = registration_;
+    registration.Add(entry);
+    auto info = registration.info();
+    if (active) {
+      Sync(poller_, [&] {
+        RequireAccepting();
+        output_->AddPrepared(entry);
+      });
+    }
+    registration_ = std::move(registration);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      output_info_ = std::move(info);
+    }
+    return entry.actual;
   }
   void RequireAccepting() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -306,7 +347,9 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
   }
 
   std::mutex control_;
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
+  internal::OutputRegistration registration_;
+  RemuxerOutputInfo output_info_;
   std::condition_variable stopped_;
   bool running_ = false;
   bool accepting_ = false;
@@ -344,15 +387,30 @@ std::string AsyncRemuxer::AddPushUrl(const std::string& url) {
 void AsyncRemuxer::AddRtspPublish(const std::string& app,
                                   const std::string& stream,
                                   const std::string& ip, std::uint16_t port) {
-  impl_->AddRtspPublish(app, stream, ip, port);
+  AddRtspPublish(app, stream, ip, port, false);
+}
+void AsyncRemuxer::AddRtspPublish(const std::string& app,
+                                  const std::string& stream,
+                                  const std::string& ip, std::uint16_t port,
+                                  bool tls) {
+  impl_->AddRtspPublish(app, stream, ip, port, tls);
 }
 std::string AsyncRemuxer::AddHlsPublish(const std::string& app,
                                         const std::string& stream,
                                         const std::string& ip,
                                         std::uint16_t port) {
-  return impl_->AddHlsPublish(app, stream, ip, port);
+  return AddHlsPublish(app, stream, ip, port, false);
+}
+std::string AsyncRemuxer::AddHlsPublish(const std::string& app,
+                                        const std::string& stream,
+                                        const std::string& ip,
+                                        std::uint16_t port, bool tls) {
+  return impl_->AddHlsPublish(app, stream, ip, port, tls);
 }
 void AsyncRemuxer::Drain() noexcept { impl_->Drain(); }
 void AsyncRemuxer::Stop() noexcept { impl_->Stop(); }
+RemuxerOutputInfo AsyncRemuxer::output_info() const {
+  return impl_->output_info();
+}
 
 }  // namespace mw::streamer

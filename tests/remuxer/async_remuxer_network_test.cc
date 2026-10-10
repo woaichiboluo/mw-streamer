@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -12,10 +13,12 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "../encoder/encoder_test_support.h"
+#include "../tls_test_support.h"
 #include "Common/MediaSource.h"
 #include "Common/config.h"
 #include "Network/Session.h"
@@ -29,6 +32,7 @@
 #include "mw/streamer/init/init.h"
 #include "mw/streamer/input/ffmpeg_input.h"
 #include "mw/streamer/remuxer/async_remuxer.h"
+#include "mw/streamer/remuxer/sync_remuxer.h"
 
 namespace {
 
@@ -38,12 +42,19 @@ using mw::streamer::AsyncRemuxer;
 
 class Runtime final {
  public:
-  explicit Runtime(bool debug = false) {
+  explicit Runtime(bool debug = false,
+                   const tls_test::CertFixture* certificate = nullptr,
+                   bool trust_certificate = true) {
     mw::streamer::InitConfig config;
     config.event_poller_threads = 2;
     config.work_threads = 1;
     config.enable_cpu_affinity = false;
     config.log.console_enabled = 0;
+    if (certificate) {
+      config.tls.certificate_file = certificate->combined_file();
+      if (trust_certificate)
+        config.tls.trusted_certificate_file = certificate->trusted_file();
+    }
     if (debug) {
       config.log.modules = "zlm:trace;streamer:debug";
       config.log.modules_size = std::strlen(config.log.modules);
@@ -105,9 +116,10 @@ Encoded Encode() {
 
 // Replay actual encoded GOPs while increasing both native media ticks and the
 // synchronized ordering clock. Condition-variable pacing is cancellable.
+template <typename Remuxer>
 class Replay final {
  public:
-  Replay(AsyncRemuxer& remuxer, const Encoded& encoded)
+  Replay(Remuxer& remuxer, const Encoded& encoded)
       : remuxer_(remuxer), encoded_(encoded), thread_([this] { Run(); }) {}
   ~Replay() { Stop(); }
   void Stop() {
@@ -144,7 +156,14 @@ class Replay final {
                                           packet->time_base);
           packet->pts += ticks;
           packet->dts += ticks;
-          if (!remuxer_.SubmitPacket(packet, encoded_.clocks[index] + shift)) {
+          bool accepted;
+          if constexpr (std::is_same_v<Remuxer, AsyncRemuxer>) {
+            accepted =
+                remuxer_.SubmitPacket(packet, encoded_.clocks[index] + shift);
+          } else {
+            accepted = remuxer_.SubmitPacket(0, packet);
+          }
+          if (!accepted) {
             valid_ = false;
             return;
           }
@@ -155,7 +174,7 @@ class Replay final {
     }
   }
 
-  AsyncRemuxer& remuxer_;
+  Remuxer& remuxer_;
   const Encoded& encoded_;
   std::mutex mutex_;
   std::condition_variable changed_;
@@ -179,8 +198,7 @@ struct RtmpState {
 
 // ZLM's SDK checkout has no RtmpSession. Use its real wire protocol for the
 // receiver handshake, then inspect the received FLV video messages.
-class RtmpSession final : public toolkit::Session,
-                          public mediakit::RtmpProtocol {
+class RtmpSession : public toolkit::Session, public mediakit::RtmpProtocol {
  public:
   explicit RtmpSession(const toolkit::Socket::Ptr& socket) : Session(socket) {}
   void Configure(const std::shared_ptr<RtmpState>& state) { state_ = state; }
@@ -265,15 +283,23 @@ class RtmpSession final : public toolkit::Session,
 
 class RtmpReceiver final {
  public:
-  RtmpReceiver()
-      : state_(std::make_shared<RtmpState>()),
+  explicit RtmpReceiver(bool tls = false)
+      : tls_(tls),
+        state_(std::make_shared<RtmpState>()),
         poller_(toolkit::EventPollerPool::Instance().getPoller()),
         server_(std::make_shared<toolkit::TcpServer>(poller_)) {
-    server_->start<RtmpSession>(0, "127.0.0.1", 1024,
-                                [this](std::shared_ptr<RtmpSession>& session) {
-                                  session->Configure(state_);
-                                  sessions_.push_back(session);
-                                });
+    if (tls_) {
+      server_->start<toolkit::SessionWithSSL<RtmpSession>>(
+          0, "127.0.0.1", 1024, [this](auto& session) {
+            session->Configure(state_);
+            sessions_.push_back(session);
+          });
+    } else {
+      server_->start<RtmpSession>(0, "127.0.0.1", 1024, [this](auto& session) {
+        session->Configure(state_);
+        sessions_.push_back(session);
+      });
+    }
   }
   ~RtmpReceiver() {
     poller_->sync([&] {
@@ -284,8 +310,9 @@ class RtmpReceiver final {
     });
   }
   std::string Url(const std::string& stream) const {
-    return "rtmp://127.0.0.1:" + std::to_string(server_->getPort()) +
-           "/network/" + stream;
+    return std::string(tls_ ? "rtmps" : "rtmp") +
+           "://127.0.0.1:" + std::to_string(server_->getPort()) + "/network/" +
+           stream;
   }
   bool Wait(const std::string& name, std::size_t packets,
             unsigned connections = 1) {
@@ -319,8 +346,13 @@ class RtmpReceiver final {
     std::lock_guard<std::mutex> lock(state_->mutex);
     return state_->error;
   }
+  bool empty() {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->streams.empty();
+  }
 
  private:
+  bool tls_;
   std::shared_ptr<RtmpState> state_;
   toolkit::EventPoller::Ptr poller_;
   toolkit::TcpServer::Ptr server_;
@@ -329,20 +361,26 @@ class RtmpReceiver final {
 
 class RtspServer final {
  public:
-  explicit RtspServer(std::uint16_t port = 0)
-      : poller_(toolkit::EventPollerPool::Instance().getPoller()),
+  explicit RtspServer(std::uint16_t port = 0, bool tls = false)
+      : tls_(tls),
+        poller_(toolkit::EventPollerPool::Instance().getPoller()),
         server_(std::make_shared<toolkit::TcpServer>(poller_)) {
-    server_->start<mediakit::RtspSession>(port, "127.0.0.1");
+    if (tls_)
+      server_->start<mediakit::RtspSessionWithSSL>(port, "127.0.0.1");
+    else
+      server_->start<mediakit::RtspSession>(port, "127.0.0.1");
   }
   ~RtspServer() {
     poller_->sync([&] { server_.reset(); });
   }
   std::uint16_t port() const { return server_->getPort(); }
   std::string Url(const std::string& stream) const {
-    return "rtsp://127.0.0.1:" + std::to_string(port()) + "/network/" + stream;
+    return std::string(tls_ ? "rtsps" : "rtsp") +
+           "://127.0.0.1:" + std::to_string(port()) + "/network/" + stream;
   }
 
  private:
+  bool tls_;
   toolkit::EventPoller::Ptr poller_;
   toolkit::TcpServer::Ptr server_;
 };
@@ -398,6 +436,10 @@ class RegisteredSource final {
   bool WaitPackets() {
     std::unique_lock<std::mutex> lock(mutex_);
     return changed_.wait_for(lock, 8s, [&] { return video_packets_ >= 5; });
+  }
+  bool registered() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return bool(source_);
   }
 
  private:
@@ -578,10 +620,14 @@ class DecoderInput final {
 
 TEST_CASE("动态RTMP RTSP SRT推流共享编码源且断线仅重连故障目标",
           "[remuxer][async][network][push]") {
-  Runtime runtime(true);
+  const bool tls = GENERATE(false, true);
+  INFO("TLS=" << tls);
+  std::unique_ptr<tls_test::CertFixture> certificate;
+  if (tls) certificate = std::make_unique<tls_test::CertFixture>();
+  Runtime runtime(true, certificate.get());
   const auto encoded = Encode();
-  RtmpReceiver rtmp;
-  RtspServer rtsp;
+  RtmpReceiver rtmp(tls);
+  RtspServer rtsp(0, tls);
   std::mutex errors_mutex;
   std::vector<std::string> errors;
   AsyncRemuxer remuxer;
@@ -650,6 +696,114 @@ TEST_CASE("动态RTMP RTSP SRT推流共享编码源且断线仅重连故障目�
   CHECK(rtmp.error().empty());
   replay.Stop();
   CHECK(replay.valid());
+  remuxer.Stop();
+}
+
+TEST_CASE("SyncRemuxer通过已验证TLS连接持续转推RTMP和RTSP媒体",
+          "[remuxer][sync][network][push][tls]") {
+  tls_test::CertFixture certificate;
+  Runtime runtime(true, &certificate);
+  const auto encoded = Encode();
+  RtmpReceiver rtmp(true);
+  RtspServer rtsp(0, true);
+  const auto rtmp_name = Name();
+  const auto rtsp_name = Name();
+  RegisteredSource received("network", rtsp_name);
+  std::mutex errors_mutex;
+  std::vector<std::string> errors;
+  mw::streamer::SyncRemuxer remuxer;
+  remuxer.SetOnError(
+      [&](std::string_view target, int code, std::string_view message) {
+        std::lock_guard<std::mutex> lock(errors_mutex);
+        errors.push_back(std::string(target) + " code=" + std::to_string(code) +
+                         " " + std::string(message));
+      });
+  remuxer.Start(encoded.streams);
+  const auto rtmp_url = rtmp.Url(rtmp_name);
+  const auto rtsp_url = rtsp.Url(rtsp_name);
+  CHECK(remuxer.AddPushUrl(rtmp_url) == rtmp_url);
+  CHECK(remuxer.AddPushUrl(rtsp_url) == rtsp_url);
+  Replay replay(remuxer, encoded);
+  const auto rtmp_received = rtmp.Wait(rtmp_name, 25);
+  const auto rtsp_received = received.Wait();
+  {
+    std::lock_guard<std::mutex> lock(errors_mutex);
+    std::string diagnostics;
+    for (const auto& error : errors) diagnostics += error + '\n';
+    INFO(diagnostics);
+    REQUIRE(rtmp_received);
+    REQUIRE(rtsp_received);
+  }
+  received.Read();
+  REQUIRE(received.WaitPackets());
+  const auto first = rtmp.Get(rtmp_name);
+  REQUIRE_FALSE(first.video.empty());
+  CHECK_FALSE(first.video.front().empty());
+  REQUIRE(rtmp.Wait(rtmp_name, first.stamps.size() + 5));
+  const auto later = rtmp.Get(rtmp_name);
+  CHECK(later.connections == 1);
+  CHECK(std::is_sorted(later.stamps.begin(), later.stamps.end()));
+  CHECK(later.stamps.back() > first.stamps.back());
+  CHECK(rtmp.error().empty());
+  replay.Stop();
+  CHECK(replay.valid());
+  remuxer.Stop();
+  {
+    std::lock_guard<std::mutex> lock(errors_mutex);
+    CHECK(errors.empty());
+  }
+}
+
+TEST_CASE("RTSPS和RTMPS推流拒绝不可信证书及不匹配的服务端身份",
+          "[remuxer][async][network][push][tls][verification]") {
+  const bool wrong_identity = GENERATE(false, true);
+  INFO("certificate trusted=" << wrong_identity);
+  INFO("certificate identity mismatched=" << wrong_identity);
+  tls_test::CertFixture certificate(wrong_identity
+                                        ? "DNS:other.invalid,IP:127.0.0.2"
+                                        : "DNS:localhost,IP:127.0.0.1");
+  Runtime runtime(true, &certificate, wrong_identity);
+  const auto encoded = Encode();
+  RtmpReceiver rtmp(true);
+  RtspServer rtsp(0, true);
+  const auto rtmp_name = Name();
+  const auto rtsp_name = Name();
+  RegisteredSource received("network", rtsp_name);
+  const auto rtmp_url = rtmp.Url(rtmp_name);
+  const auto rtsp_url = rtsp.Url(rtsp_name);
+  std::mutex errors_mutex;
+  std::condition_variable errors_changed;
+  bool rtmp_failed = false, rtsp_failed = false;
+  std::vector<std::string> errors;
+  AsyncRemuxer remuxer;
+  remuxer.SetOnError([&](std::string_view target, int code,
+                         std::string_view message) {
+    {
+      std::lock_guard<std::mutex> lock(errors_mutex);
+      if (target == rtmp_url) rtmp_failed = true;
+      if (target == rtsp_url) rtsp_failed = true;
+      errors.push_back(std::string(target) + " code=" + std::to_string(code) +
+                       " " + std::string(message));
+    }
+    errors_changed.notify_all();
+  });
+  remuxer.Start(encoded.streams);
+  remuxer.AddPushUrl(rtmp_url);
+  remuxer.AddPushUrl(rtsp_url);
+  Replay replay(remuxer, encoded);
+  {
+    std::unique_lock<std::mutex> lock(errors_mutex);
+    const auto failed = errors_changed.wait_for(
+        lock, 15s, [&] { return rtmp_failed && rtsp_failed; });
+    std::string diagnostics;
+    for (const auto& error : errors) diagnostics += error + '\n';
+    INFO(diagnostics);
+    REQUIRE(failed);
+  }
+  replay.Stop();
+  CHECK(replay.valid());
+  CHECK(rtmp.empty());
+  CHECK_FALSE(received.registered());
   remuxer.Stop();
 }
 

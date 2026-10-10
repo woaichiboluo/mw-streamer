@@ -13,6 +13,8 @@
 #include "onceToken.h"
 #include "SSLUtil.h"
 
+#include <stdexcept>
+
 #if defined(ENABLE_OPENSSL)
 #include <openssl/ssl.h>
 #include <openssl/rand.h>
@@ -33,7 +35,7 @@ using namespace std;
 
 namespace toolkit {
 
-static bool s_ignore_invalid_cer = true;
+static bool s_ignore_invalid_cer = false;
 
 SSL_Initor &SSL_Initor::Instance() {
     static SSL_Initor obj;
@@ -71,9 +73,42 @@ SSL_Initor::SSL_Initor() {
 #endif
     });
 
-    setContext("", SSLUtil::makeSSLContext(vector<shared_ptr<X509> >(), nullptr, false), false);
-    setContext("", SSLUtil::makeSSLContext(vector<shared_ptr<X509> >(), nullptr, true), true);
 #endif //defined(ENABLE_OPENSSL)
+}
+
+void SSL_Initor::initializeContexts() {
+    std::lock_guard<std::recursive_mutex> lck(_mtx);
+    clearContexts();
+    try {
+        if (!setContext("", SSLUtil::makeSSLContext({}, nullptr, false), false) ||
+            !setContext("", SSLUtil::makeSSLContext({}, nullptr, true), true)) {
+            throw std::runtime_error("Failed to initialize TLS contexts");
+        }
+    } catch (...) {
+        clearContexts();
+        throw;
+    }
+}
+
+void SSL_Initor::clearContexts() {
+    std::lock_guard<std::recursive_mutex> lck(_mtx);
+    for (int mode = 0; mode < 2; ++mode) {
+        _default_vhost[mode].clear();
+        _ctx_empty[mode].reset();
+        _ctxs[mode].clear();
+        _ctxs_wildcards[mode].clear();
+    }
+    s_ignore_invalid_cer = false;
+}
+
+bool SSL_Initor::hasServerCertificate() {
+    std::lock_guard<std::recursive_mutex> lck(_mtx);
+#if defined(ENABLE_OPENSSL)
+    auto ctx = getSSLCtx("", true);
+    return ctx && SSL_CTX_get0_certificate(ctx.get()) && SSL_CTX_get0_privatekey(ctx.get());
+#else
+    return false;
+#endif
 }
 
 SSL_Initor::~SSL_Initor() {
@@ -156,7 +191,7 @@ bool SSL_Initor::setContext(const string &vhost, const shared_ptr<SSL_CTX> &ctx,
     if (!ctx) {
         return false;
     }
-    setupCtx(ctx.get());
+    setupCtx(ctx.get(), server_mode);
 #if defined(ENABLE_OPENSSL)
     if (vhost.empty()) {
         _ctx_empty[server_mode] = ctx;
@@ -186,7 +221,7 @@ bool SSL_Initor::setContext(const string &vhost, const shared_ptr<SSL_CTX> &ctx,
 #endif //defined(ENABLE_OPENSSL)
 }
 
-void SSL_Initor::setupCtx(SSL_CTX *ctx) {
+void SSL_Initor::setupCtx(SSL_CTX *ctx, bool server_mode) {
 #if defined(ENABLE_OPENSSL)
     //加载默认信任证书  [AUTO-TRANSLATED:4d98f092]
     //Load default trusted certificate
@@ -195,7 +230,7 @@ void SSL_Initor::setupCtx(SSL_CTX *ctx) {
     SSL_CTX_set_verify_depth(ctx, 9);
     SSL_CTX_set_mode(ctx, SSL_MODE_AUTO_RETRY);
     SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, [](int ok, X509_STORE_CTX *pStore) {
+    SSL_CTX_set_verify(ctx, server_mode ? SSL_VERIFY_NONE : SSL_VERIFY_PEER, [](int ok, X509_STORE_CTX *pStore) {
         if (!ok) {
             int depth = X509_STORE_CTX_get_error_depth(pStore);
             int err = X509_STORE_CTX_get_error(pStore);
@@ -263,8 +298,13 @@ bool SSL_Initor::trustCertificate(X509 *cer, bool server_mode) {
 
 bool SSL_Initor::trustCertificate(const string &pem_p12_cer, bool server_mode, const string &password, bool is_file) {
     auto cers = SSLUtil::loadPublicKey(pem_p12_cer, password, is_file);
+    if (cers.empty()) {
+        return false;
+    }
     for (auto &cer : cers) {
-        trustCertificate(cer.get(), server_mode);
+        if (!trustCertificate(cer.get(), server_mode)) {
+            return false;
+        }
     }
     return true;
 }
@@ -321,26 +361,34 @@ string SSL_Initor::defaultVhost(bool server_mode) {
 
 SSL_Box::~SSL_Box() {}
 
-SSL_Box::SSL_Box(bool server_mode, bool enable, int buff_size) {
+SSL_Box::SSL_Box(bool server_mode, bool enable, int buff_size)
+    : _server_mode(server_mode), _send_handshake(false), _buff_size(buff_size), _read_bio(nullptr), _write_bio(nullptr) {
+    if (!enable) {
+        return;
+    }
 #if defined(ENABLE_OPENSSL)
+    _ssl = SSL_Initor::Instance().makeSSL(server_mode);
+    if (!_ssl) {
+        throw std::runtime_error("Failed to create TLS connection: " + SSLUtil::getLastError());
+    }
     _read_bio = BIO_new(BIO_s_mem());
-    _server_mode = server_mode;
-    if (enable) {
-        _ssl = SSL_Initor::Instance().makeSSL(server_mode);
+    _write_bio = BIO_new(BIO_s_mem());
+    if (!_read_bio || !_write_bio) {
+        BIO_free(_read_bio);
+        BIO_free(_write_bio);
+        throw std::runtime_error("Failed to create TLS buffers: " + SSLUtil::getLastError());
     }
-    if (_ssl) {
-        _write_bio = BIO_new(BIO_s_mem());
-        SSL_set_bio(_ssl.get(), _read_bio, _write_bio);
-        _server_mode ? SSL_set_accept_state(_ssl.get()) : SSL_set_connect_state(_ssl.get());
-    } else {
-        MW_LOG_WARNING("zlm", "makeSSL failed");
-    }
-    _send_handshake = false;
-    _buff_size = buff_size;
+    SSL_set_bio(_ssl.get(), _read_bio, _write_bio);
+    _server_mode ? SSL_set_accept_state(_ssl.get()) : SSL_set_connect_state(_ssl.get());
+#else
+    throw std::runtime_error("TLS requires ENABLE_OPENSSL");
 #endif //defined(ENABLE_OPENSSL)
 }
 
 void SSL_Box::shutdown() {
+    if (!_ssl) {
+        return;
+    }
 #if defined(ENABLE_OPENSSL)
     _buffer_send.clear();
     int ret = SSL_shutdown(_ssl.get());
@@ -483,6 +531,9 @@ void SSL_Box::flushReadBio() {
 }
 
 void SSL_Box::flush() {
+    if (!_ssl) {
+        return;
+    }
 #if defined(ENABLE_OPENSSL)
     if (_is_flush) {
         return;
@@ -536,9 +587,17 @@ void SSL_Box::flush() {
 }
 
 bool SSL_Box::setHost(const char *host) {
-    if (!_ssl) {
+    if (!_ssl || !host || !host[0]) {
         return false;
     }
+#if defined(ENABLE_OPENSSL)
+    if (isIP(host)) {
+        return X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(_ssl.get()), host) == 1;
+    }
+    if (X509_VERIFY_PARAM_set1_host(SSL_get0_param(_ssl.get()), host, 0) != 1) {
+        return false;
+    }
+#endif
 #ifdef SSL_ENABLE_SNI
     return 0 != SSL_set_tlsext_host_name(_ssl.get(), host);
 #else

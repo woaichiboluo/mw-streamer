@@ -11,6 +11,7 @@
 #include "mw/export.h"
 #include "mw/streamer/ffmpeg/packet.h"
 #include "mw/streamer/ffmpeg/stream_info.h"
+#include "mw/streamer/remuxer/output_info.h"
 
 namespace mw::streamer {
 
@@ -41,28 +42,45 @@ class MW_STREAMER_API AsyncRemuxer final {
   // Safe for concurrent Encoder::OnPacket calls. Retains the packet; dts_ns is
   // Encoder's synchronized ordering clock. No network congestion dropping.
   bool SubmitPacket(const ffmpeg::Packet& packet, std::int64_t dts_ns);
-  // Start first. Network URLs retry automatically. Local .mp4/.m3u8 paths gain
-  // _YYYY_MM_DD_HH_MM_SS before their extension. Returns the actual URL/path.
-  // Targets remain until this session ends; repeated network URLs are shared.
+  // Before Start, registers an output without creating resources; during a
+  // session, activates it synchronously. Network URLs retry automatically.
+  // Local .mp4/.m3u8 paths gain _YYYY_MM_DD_HH_MM_SS_id before their extension.
+  // Returns the actual URL/planned path, which Start uses unchanged. Repeated
+  // URLs/paths share the registered output. Draining sessions reject additions.
   std::string AddPushUrl(const std::string& url);
   // One local publishing point per session. Same IP/port shares a listener
   // across AsyncRemuxers; app/stream must be unique within the process.
   void AddRtspPublish(const std::string& app, const std::string& stream,
                       const std::string& ip, std::uint16_t port);
-  // Start first. One HTTP HLS publication per session, independent of RTSP.
+  // TLS publication requires InitConfig.tls.certificate_file.
+  void AddRtspPublish(const std::string& app, const std::string& stream,
+                      const std::string& ip, std::uint16_t port, bool tls);
+  // May be registered before Start or activated afterward. One HTTP HLS
+  // publication per session, independent of RTSP.
   // Returns http://IP:port/app/stream/hls.m3u8 with rolling TS segments.
   // Same IP/port shares a listener; HLS app/stream is unique in the process.
-  // Invalid arguments or occupied paths/listeners throw synchronously.
+  // Parameter errors throw on Add. Binding/certificate errors throw when
+  // activated, in Start or an Add during operation.
   // HLS uses ZLM's configured HTTP root. Live HLS files are cleaned
   // synchronously when this session ends.
   // app/stream must be single ASCII URI segments.
   std::string AddHlsPublish(const std::string& app, const std::string& stream,
                             const std::string& ip, std::uint16_t port);
+  // true publishes HTTPS; false keeps HTTP. TLS requires a server certificate.
+  std::string AddHlsPublish(const std::string& app, const std::string& stream,
+                            const std::string& ip, std::uint16_t port,
+                            bool tls);
+  // Thread-safe snapshot, also available from callbacks. Before Start these
+  // are planned addresses. Stop preserves the snapshot until new additions
+  // or Start, while clearing the configured outputs.
+  RemuxerOutputInfo output_info() const;
   // Rejects new packets/targets, drains accepted packets and finalizes files.
   // OnEnded fires once. Live network delivery is managed by ZLM.
   void Drain() noexcept;
   // Drains synchronously and waits for completion, outside callbacks. Another
-  // Start begins a new session with an empty target list and a fresh timeline.
+  // Start begins a new session with a fresh timeline. Stop clears configured
+  // outputs, including any added before Start; add them again before
+  // restarting.
   void Stop() noexcept;
 
  private:

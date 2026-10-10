@@ -12,6 +12,7 @@
 #define ZLMEDIAKIT_RUNTIME_H
 
 #include <cstddef>
+#include <string>
 
 namespace mediakit {
 
@@ -21,6 +22,9 @@ struct RuntimeConfig {
     std::size_t event_poller_threads = 0;
     std::size_t work_threads = 0;
     bool enable_cpu_affinity = true;
+    std::string tls_certificate_file;
+    std::string tls_certificate_password;
+    std::string tls_trusted_certificate_file;
 };
 
 // Creates and installs the SDK runtime before constructing any ZLM users.

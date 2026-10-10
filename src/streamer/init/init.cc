@@ -47,6 +47,9 @@ MwStreamerContext* Init(const InitConfig& config) {
   zlm_config.event_poller_threads = config.event_poller_threads;
   zlm_config.work_threads = config.work_threads;
   zlm_config.enable_cpu_affinity = config.enable_cpu_affinity;
+  zlm_config.tls_certificate_file = config.tls.certificate_file;
+  zlm_config.tls_certificate_password = config.tls.certificate_password;
+  zlm_config.tls_trusted_certificate_file = config.tls.trusted_certificate_file;
   context->zlm_runtime = mediakit::init(zlm_config);
   return context.release();
 }

@@ -2,6 +2,7 @@
 #define MW_STREAMER_INIT_INIT_H_
 
 #include <cstddef>
+#include <string>
 
 #include "mw/export.h"
 #include "mw/log.h"
@@ -9,6 +10,17 @@
 namespace mw::streamer {
 
 class MwStreamerContext;
+
+struct TlsConfig {
+  // PEM/P12 file containing the server certificate chain and private key.
+  // Empty means no TLS server certificate. Credentials belong to this runtime.
+  std::string certificate_file;
+  std::string certificate_password;
+  // Optional additional trusted certificate/CA file for ZLM TLS clients.
+  // Default OpenSSL trust paths are retained. FFmpeg's TLS clients are
+  // separate.
+  std::string trusted_certificate_file;
+};
 
 struct MW_STREAMER_API InitConfig {
   InitConfig();
@@ -18,6 +30,7 @@ struct MW_STREAMER_API InitConfig {
   std::size_t event_poller_threads = 0;
   std::size_t work_threads = 0;
   bool enable_cpu_affinity = true;
+  TlsConfig tls;
 };
 
 // Creates the process-wide runtime before using any ZLM-backed objects.

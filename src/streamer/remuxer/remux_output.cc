@@ -16,6 +16,7 @@ extern "C" {
 #include "Http/HttpSession.h"
 #include "Record/RemuxRecorder.h"
 #include "Rtsp/RtspSession.h"
+#include "Util/SSLBox.h"
 #include "Util/mini.h"
 #include "Util/util.h"
 #include "fmt/format.h"
@@ -26,8 +27,22 @@ namespace {
 
 std::atomic<std::uint64_t> next_source_id{0};
 std::mutex listeners_mutex;
+std::atomic<std::uint64_t> next_recording_id{0};
 std::set<std::pair<std::string, std::string>> published_paths;
 std::set<std::pair<std::string, std::string>> hls_published_paths;
+
+enum class ListenerProtocol { kRtsp, kRtsps, kHttp, kHttps };
+struct Listener {
+  std::weak_ptr<toolkit::TcpServer> server;
+  ListenerProtocol protocol;
+};
+std::map<std::pair<std::string, std::uint16_t>, Listener> listeners;
+
+void RequireServerCertificate(bool tls) {
+  if (tls && !toolkit::SSL_Initor::Instance().hasServerCertificate()) {
+    throw std::invalid_argument("TLS发布需要在InitConfig.tls中配置服务器证书");
+  }
+}
 
 void ReservePath(const std::string& app, const std::string& stream) {
   std::lock_guard<std::mutex> lock(listeners_mutex);
@@ -43,47 +58,146 @@ void ReleasePath(const std::pair<std::string, std::string>& path) {
 
 template <typename Session>
 toolkit::TcpServer::Ptr Listen(const std::string& ip, std::uint16_t port,
-                               const toolkit::EventPoller::Ptr& poller) {
+                               const toolkit::EventPoller::Ptr& poller,
+                               ListenerProtocol protocol) {
   std::lock_guard<std::mutex> lock(listeners_mutex);
-  static std::map<std::pair<std::string, std::uint16_t>,
-                  std::weak_ptr<toolkit::TcpServer>>
-      listeners;
   for (auto iterator = listeners.begin(); iterator != listeners.end();) {
-    if (iterator->second.expired())
+    if (iterator->second.server.expired())
       iterator = listeners.erase(iterator);
     else
       ++iterator;
   }
   auto& entry = listeners[{ip, port}];
-  if (auto server = entry.lock()) return server;
+  if (auto server = entry.server.lock()) {
+    if (entry.protocol != protocol) {
+      throw std::invalid_argument("监听地址和端口已经用于不同的发布协议");
+    }
+    return server;
+  }
   auto server = std::make_shared<toolkit::TcpServer>(poller);
   server->start<Session>(port, ip);
-  entry = server;
+  entry = {server, protocol};
   return server;
 }
 
 std::string Schema(const std::string& url) {
-  if (url.rfind("rtsp://", 0) == 0) return RTSP_SCHEMA;
-  if (url.rfind("rtmp://", 0) == 0) return RTMP_SCHEMA;
+  if (url.rfind("rtsp://", 0) == 0 || url.rfind("rtsps://", 0) == 0)
+    return RTSP_SCHEMA;
+  if (url.rfind("rtmp://", 0) == 0 || url.rfind("rtmps://", 0) == 0)
+    return RTMP_SCHEMA;
   if (url.rfind("srt://", 0) == 0) return TS_SCHEMA;
   if (url.find("://") == std::string::npos) {
     const auto extension = std::filesystem::u8path(url).extension().u8string();
     if (extension == ".mp4" || extension == ".m3u8") return {};
   }
   throw std::invalid_argument(
-      "Remuxer目标需要RTSP、RTMP、SRT或本地MP4/M3U8路径");
+      "Remuxer目标需要RTSP(S)、RTMP(S)、SRT或本地MP4/M3U8路径");
 }
 
 std::string RecordingPath(const std::string& path) {
   const auto source = std::filesystem::absolute(std::filesystem::u8path(path));
-  const auto name = source.stem().u8string() + "_" +
-                    toolkit::getTimeStr("%Y_%m_%d_%H_%M_%S") +
-                    source.extension().u8string();
-  return (source.parent_path() / std::filesystem::u8path(name))
-      .generic_u8string();
+  std::filesystem::path candidate;
+  do {
+    const auto name = source.stem().u8string() + "_" +
+                      toolkit::getTimeStr("%Y_%m_%d_%H_%M_%S") + "_" +
+                      std::to_string(++next_recording_id) +
+                      source.extension().u8string();
+    candidate = source.parent_path() / std::filesystem::u8path(name);
+  } while (std::filesystem::exists(candidate));
+  return candidate.generic_u8string();
+}
+
+void ValidatePublish(OutputRegistration::Kind kind, const std::string& app,
+                     const std::string& stream, const std::string& ip,
+                     std::uint16_t port) {
+  if (kind == OutputRegistration::Kind::kRtsp) {
+    if (app.empty() || stream.empty() || ip.empty() || port == 0 ||
+        app.find_first_of("/\\") != std::string::npos ||
+        stream.find_first_of("/\\") != std::string::npos) {
+      throw std::invalid_argument(
+          "RTSP发布需要有效app、stream、监听地址和端口");
+    }
+    return;
+  }
+  const auto valid_segment = [](const std::string& value) {
+    return !value.empty() && value != "." && value != ".." &&
+           std::all_of(value.begin(), value.end(), [](char c) {
+             return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+           });
+  };
+  if (!valid_segment(app) || !valid_segment(stream) || ip.empty() || port == 0)
+    throw std::invalid_argument("HLS发布需要有效app、stream、监听地址和端口");
 }
 
 }  // namespace
+
+OutputRegistration::Entry OutputRegistration::PreparePush(
+    const std::string& url) {
+  Entry entry;
+  entry.kind = Kind::kPush;
+  entry.original = url;
+  entry.actual = Schema(url).empty() ? RecordingPath(url) : url;
+  return entry;
+}
+
+OutputRegistration::Entry OutputRegistration::PreparePublish(
+    Kind kind, const std::string& app, const std::string& stream,
+    const std::string& ip, std::uint16_t port, bool tls) {
+  ValidatePublish(kind, app, stream, ip, port);
+  Entry entry;
+  entry.kind = kind;
+  entry.app = app;
+  entry.stream = stream;
+  entry.ip = ip;
+  entry.port = port;
+  entry.tls = tls;
+  const auto host = ip.find(':') == std::string::npos ? ip : "[" + ip + "]";
+  const auto scheme =
+      kind == Kind::kRtsp ? (tls ? "rtsps" : "rtsp") : (tls ? "https" : "http");
+  entry.actual = fmt::format("{}://{}:{}/{}/{}{}", scheme, host, port, app,
+                             stream, kind == Kind::kHls ? "/hls.m3u8" : "");
+  return entry;
+}
+
+const OutputRegistration::Entry* OutputRegistration::FindPush(
+    const std::string& url) const {
+  const auto found =
+      std::find_if(entries_.begin(), entries_.end(), [&](const auto& entry) {
+        return entry.kind == Kind::kPush && entry.original == url;
+      });
+  return found == entries_.end() ? nullptr : &*found;
+}
+
+void OutputRegistration::Add(Entry entry) {
+  if (entry.kind != Kind::kPush &&
+      std::any_of(entries_.begin(), entries_.end(), [&](const auto& existing) {
+        return existing.kind == entry.kind;
+      })) {
+    throw std::logic_error(entry.kind == Kind::kRtsp
+                               ? "Remuxer只允许一个RTSP发布点"
+                               : "Remuxer只允许一个HLS发布点");
+  }
+  entries_.push_back(std::move(entry));
+}
+
+RemuxerOutputInfo OutputRegistration::info() const {
+  RemuxerOutputInfo result;
+  for (const auto& entry : entries_) {
+    switch (entry.kind) {
+      case Kind::kPush:
+        result.output_urls.push_back(entry.actual);
+        break;
+      case Kind::kRtsp:
+        result.rtsp_url = entry.actual;
+        break;
+      case Kind::kHls:
+        result.hls_url = entry.actual;
+        break;
+    }
+  }
+  return result;
+}
 
 RemuxOutput::RemuxOutput(toolkit::EventPoller::Ptr poller,
                          ErrorCallback callback)
@@ -119,38 +233,47 @@ void RemuxOutput::Start(const std::vector<mediakit::Track::Ptr>& tracks) {
   muxer_ = std::move(muxer);
 }
 
-std::string RemuxOutput::AddPushUrl(const std::string& url, bool zero_origin) {
+void RemuxOutput::AddPrepared(const OutputRegistration::Entry& entry,
+                              bool zero_origin) {
+  if (entry.kind == OutputRegistration::Kind::kRtsp) {
+    AddRtspPublish(entry.app, entry.stream, entry.ip, entry.port, entry.tls);
+    return;
+  }
+  if (entry.kind == OutputRegistration::Kind::kHls) {
+    AddHlsPublish(entry.app, entry.stream, entry.ip, entry.port, entry.tls);
+    return;
+  }
+  const auto& url = entry.actual;
   const auto schema = Schema(url);
   if (!schema.empty()) {
     const auto existing =
         std::find_if(targets_.begin(), targets_.end(),
                      [&](const auto& target) { return target.url == url; });
-    if (existing != targets_.end()) return url;
+    if (existing != targets_.end()) return;
     targets_.push_back({url, schema, nullptr});
     StartPushers();
-    return url;
+    return;
   }
-  const auto result = RecordingPath(url);
   auto recorder = mediakit::createRemuxRecorder(
-      result, std::filesystem::u8path(url).extension() == ".m3u8");
+      url, std::filesystem::u8path(url).extension() == ".m3u8");
   if (zero_origin && !received_frame_) recorder->setTimestampOrigin(0);
   muxer_->addRecorder(recorder);
-  MW_LOG_INFO("streamer", "Remuxer recording: {}", result);
-  return result;
+  MW_LOG_INFO("streamer", "Remuxer recording: {}", url);
 }
 
 void RemuxOutput::AddRtspPublish(const std::string& app,
                                  const std::string& stream,
-                                 const std::string& ip, std::uint16_t port) {
-  if (app.empty() || stream.empty() || ip.empty() || port == 0 ||
-      app.find_first_of("/\\") != std::string::npos ||
-      stream.find_first_of("/\\") != std::string::npos) {
-    throw std::invalid_argument("RTSP发布需要有效app、stream、监听地址和端口");
-  }
+                                 const std::string& ip, std::uint16_t port,
+                                 bool tls) {
+  ValidatePublish(OutputRegistration::Kind::kRtsp, app, stream, ip, port);
   if (server_) throw std::logic_error("Remuxer只允许一个RTSP发布点");
+  RequireServerCertificate(tls);
   ReservePath(app, stream);
   try {
-    auto server = Listen<mediakit::RtspSession>(ip, port, poller_);
+    auto server = tls ? Listen<mediakit::RtspSessionWithSSL>(
+                            ip, port, poller_, ListenerProtocol::kRtsps)
+                      : Listen<mediakit::RtspSession>(ip, port, poller_,
+                                                      ListenerProtocol::kRtsp);
     auto source = muxer_->getMediaSource(RTSP_SCHEMA);
     source->setMediaTuple(mediakit::MediaTuple(DEFAULT_VHOST, app, stream));
     server_ = std::move(server);
@@ -159,31 +282,27 @@ void RemuxOutput::AddRtspPublish(const std::string& app,
     ReleasePath({app, stream});
     throw;
   }
-  MW_LOG_INFO("streamer", "Remuxer RTSP publish: rtsp://{}:{}/{}/{}", ip, port,
-              app, stream);
+  MW_LOG_INFO("streamer", "Remuxer RTSP publish: {}://{}:{}/{}/{}",
+              tls ? "rtsps" : "rtsp", ip, port, app, stream);
 }
 
 std::string RemuxOutput::AddHlsPublish(const std::string& app,
                                        const std::string& stream,
                                        const std::string& ip,
-                                       std::uint16_t port) {
-  const auto valid_segment = [](const std::string& value) {
-    return !value.empty() && value != "." && value != ".." &&
-           std::all_of(value.begin(), value.end(), [](char c) {
-             return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                    (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
-           });
-  };
-  if (!valid_segment(app) || !valid_segment(stream) || ip.empty() || port == 0)
-    throw std::invalid_argument("HLS发布需要有效app、stream、监听地址和端口");
+                                       std::uint16_t port, bool tls) {
+  ValidatePublish(OutputRegistration::Kind::kHls, app, stream, ip, port);
   if (hls_server_) throw std::logic_error("Remuxer只允许一个HLS发布点");
+  RequireServerCertificate(tls);
   {
     std::lock_guard<std::mutex> lock(listeners_mutex);
     if (!hls_published_paths.emplace(app, stream).second)
       throw std::invalid_argument("HLS发布路径已经被占用");
   }
   try {
-    auto server = Listen<mediakit::HttpSession>(ip, port, poller_);
+    auto server = tls ? Listen<mediakit::HttpsSession>(ip, port, poller_,
+                                                       ListenerProtocol::kHttps)
+                      : Listen<mediakit::HttpSession>(ip, port, poller_,
+                                                      ListenerProtocol::kHttp);
     auto option = muxer_->getOption();
     option.enable_rtsp = option.enable_rtmp = option.enable_ts = false;
     option.enable_hls = true;
@@ -206,8 +325,8 @@ std::string RemuxOutput::AddHlsPublish(const std::string& app,
     throw;
   }
   const auto host = ip.find(':') == std::string::npos ? ip : "[" + ip + "]";
-  auto url =
-      fmt::format("http://{}:{}/{}/{}/hls.m3u8", host, port, app, stream);
+  auto url = fmt::format("{}://{}:{}/{}/{}/hls.m3u8", tls ? "https" : "http",
+                         host, port, app, stream);
   MW_LOG_INFO("streamer", "Remuxer HLS publish: {}", url);
   return url;
 }

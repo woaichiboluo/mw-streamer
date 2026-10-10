@@ -35,6 +35,11 @@ public:
 
     static SSL_Initor &Instance();
 
+    // Runtime boundaries require all SSL users to have been destroyed.
+    void initializeContexts();
+    void clearContexts();
+    bool hasServerCertificate();
+
     /**
      * 从文件或字符串中加载公钥和私钥
      * 该证书文件必须同时包含公钥和私钥(cer格式的证书只包括公钥，请使用后面的方法加载)
@@ -60,10 +65,10 @@ public:
 
     /**
      * 是否忽略无效的证书
-     * 默认忽略，强烈建议不要忽略！
+     * 默认验证，强烈建议不要忽略！
      * @param ignore 标记
      * Whether to ignore invalid certificates
-     * Ignore by default, strongly not recommended!
+     * Verification is enabled by default; ignoring errors is strongly discouraged!
      * @param ignore Flag
      
      * [AUTO-TRANSLATED:fd45125a]
@@ -155,7 +160,7 @@ private:
      
      * [AUTO-TRANSLATED:1b3438d0]
      */
-    static void setupCtx(SSL_CTX *ctx);
+    static void setupCtx(SSL_CTX *ctx, bool server_mode);
 
     std::shared_ptr<SSL_CTX> getSSLCtx_l(const std::string &vhost, bool server_mode);
 
@@ -258,9 +263,11 @@ public:
 
     /**
      * 设置虚拟主机名
+     * 客户端同时校验该域名或IP是否与服务端证书匹配。
      * @param host 虚拟主机名
      * @return 是否成功
      * Sets the virtual host name
+     * Also verifies the client peer certificate against this hostname or IP.
      * @param host Virtual host name
      * @return Whether the operation was successful
      
