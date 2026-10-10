@@ -4,6 +4,10 @@
 #include <memory>
 #include <stdexcept>
 
+#ifdef _WIN32
+#include <Windows.h>
+#endif
+
 #ifdef __linux__
 #include <errno.h>
 #include <signal.h>
@@ -73,6 +77,40 @@ int CheckClosedWrites() {
 #endif
 
 }  // namespace
+
+#ifdef _WIN32
+TEST_CASE("streamer configures only an attached console for UTF-8") {
+  const UINT input_code_page = GetConsoleCP();
+  const UINT output_code_page = GetConsoleOutputCP();
+  if (input_code_page == 0) {
+    ContextOwner context(Init(TestConfig()), &Shutdown);
+    CHECK(GetConsoleCP() == 0);
+    CHECK(GetConsoleOutputCP() == 0);
+    Close(context);
+    return;
+  }
+
+  struct RestoreCodePages {
+    UINT input;
+    UINT output;
+    ~RestoreCodePages() {
+      SetConsoleCP(input);
+      SetConsoleOutputCP(output);
+    }
+  } restore{input_code_page, output_code_page};
+
+  for (int iteration = 0; iteration < 2; ++iteration) {
+    REQUIRE(SetConsoleCP(1252));
+    REQUIRE(SetConsoleOutputCP(1252));
+    ContextOwner context(Init(TestConfig()), &Shutdown);
+    CHECK(GetConsoleCP() == CP_UTF8);
+    CHECK(GetConsoleOutputCP() == CP_UTF8);
+    Close(context);
+    CHECK(GetConsoleCP() == CP_UTF8);
+    CHECK(GetConsoleOutputCP() == CP_UTF8);
+  }
+}
+#endif
 
 #ifdef __linux__
 TEST_CASE("streamer ignores SIGPIPE across shutdown and reinitialization") {

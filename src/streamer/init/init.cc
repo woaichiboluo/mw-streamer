@@ -36,6 +36,7 @@ class MwStreamerContext final {
 InitConfig::InitConfig() { mw_log_default_config(&log); }
 
 MwStreamerContext* Init(const InitConfig& config) {
+  internal::EnableUtf8Console();
   auto context = std::make_unique<MwStreamerContext>();
   context->logging = std::make_unique<mw::log::Logging>(config.log);
   internal::IgnoreSigpipe();

@@ -35,6 +35,8 @@ struct MW_STREAMER_API InitConfig {
 
 // Creates the process-wide runtime before using any ZLM-backed objects.
 // Only one context may be active; another Init() is allowed after Shutdown().
+// On Windows, sets an attached console's input/output code pages to UTF-8
+// before initializing logging; the code pages remain set after Shutdown().
 // Initializes logging and FFmpeg, then delegates ZLM's owned resources to its
 // init/shutdown lifecycle. Requests 1 ms timer resolution on Windows until
 // Shutdown(). On POSIX, ignores SIGPIPE process-wide before initializing media

@@ -21,6 +21,8 @@ void IgnoreSigpipe() {
   }
 }
 
+void EnableUtf8Console() {}
+
 // Retain the existing non-Windows scheduling behavior.
 ScopedTimerResolution::ScopedTimerResolution() = default;
 ScopedTimerResolution::~ScopedTimerResolution() = default;

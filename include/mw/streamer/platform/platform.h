@@ -16,6 +16,10 @@ MW_STREAMER_API bool HasEnvironmentVariable(const char* name) noexcept;
 // before starting media workers. The signal disposition is not restored.
 void IgnoreSigpipe();
 
+// Sets the attached Windows console's input/output code pages to UTF-8.
+// No-op without a console or on POSIX. The code pages are not restored.
+void EnableUtf8Console();
+
 // Owned by Init/Shutdown; destroy after all media workers have stopped.
 class ScopedTimerResolution final {
  public:
