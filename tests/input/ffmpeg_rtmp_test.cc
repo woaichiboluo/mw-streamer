@@ -214,11 +214,17 @@ class ConnectServer final {
 }  // namespace
 
 TEST_CASE("FFmpeg RTMP input advertises Enhanced RTMP HEVC support",
-          "[input][ffmpeg][rtmp]") {
+          "[input][ffmpeg][rtmp][options]") {
   ConnectServer server;
   mw::streamer::FfmpegInputConfig config;
   config.auto_reconnect = false;
   config.open_timeout = 10s;
+  std::string codec = "hvc1";
+  SECTION("HEVC is advertised by default") {}
+  SECTION("caller options override default codecs") {
+    codec = "av01";
+    config.options["rtmp_enhanced_codecs"] = codec;
+  }
   mw::streamer::FfmpegInput input(config);
   input.Start(server.url());
   const bool received = server.WaitForConnect();
@@ -235,7 +241,7 @@ TEST_CASE("FFmpeg RTMP input advertises Enhanced RTMP HEVC support",
   REQUIRE(server.state()->received);
   REQUIRE(server.state()->codecs.type() == AMF_STRICT_ARRAY);
   AMFValue expected_codecs(AMF_STRICT_ARRAY);
-  expected_codecs.add("hvc1");
+  expected_codecs.add(codec);
   AMFEncoder expected;
   expected << expected_codecs;
   AMFEncoder actual;

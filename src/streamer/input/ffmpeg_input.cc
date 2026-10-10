@@ -454,8 +454,19 @@ void FfmpegInput::OpenAttempt() {
   if (protocol && std::strncmp(protocol, "rtmp", 4) == 0) {
     result = av_dict_set(&options, "rtmp_enhanced_codecs", "hvc1", 0);
   }
+  for (const auto& [key, value] : config_.options) {
+    if (result < 0) break;
+    result = av_dict_set(&options, key.c_str(), value.c_str(), 0);
+  }
   if (result >= 0) {
     result = avformat_open_input(&format_, url_.c_str(), nullptr, &options);
+  }
+  if (result >= 0) {
+    const AVDictionaryEntry* unused = nullptr;
+    while ((unused = av_dict_get(options, "", unused, AV_DICT_IGNORE_SUFFIX))) {
+      MW_LOG_WARNING("streamer", "Input[{}]FFmpeg未使用输入选项: {}",
+                     static_cast<const void*>(this), unused->key);
+    }
   }
   av_dict_free(&options);
   ffmpeg::FfmpegException::throwIfError(result, "avformat_open_input");

@@ -95,6 +95,7 @@ struct ServerState {
   };
   std::vector<RequestResponse> sequence;
   size_t requests = 0;
+  std::vector<std::string> request_headers;
   std::vector<std::weak_ptr<toolkit::Session>> sessions;
 };
 
@@ -116,6 +117,7 @@ class HttpSession final : public toolkit::Session {
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
       ++state_->requests;
+      state_->request_headers.push_back(request_);
       response = state_->response;
       media = state_->flv;
       content_type = state_->content_type;
@@ -244,6 +246,10 @@ class HttpServer final {
   size_t requests() const {
     std::lock_guard<std::mutex> lock(state_->mutex);
     return state_->requests;
+  }
+  std::vector<std::string> request_headers() const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->request_headers;
   }
   bool WaitForRequest() {
     std::unique_lock<std::mutex> lock(state_->mutex);
@@ -1106,6 +1112,54 @@ TEST_CASE("FFmpeg input stops scheduled delivery and restarts") {
         AV_CODEC_ID_HEVC);
   CHECK(StateCount(restarted, InputState::kFailed) == 0);
   CHECK(observer.HasNoNewCallbacks());
+}
+
+TEST_CASE("FFmpeg input preserves HTTP options across loop and retries",
+          "[input][ffmpeg][options]") {
+  HttpServer server(ServerState::Response::kMedia);
+  Observer observer;
+  auto config = RetryConfig(1);
+  config.options = {{"user_agent", "mw-streamer-options-test"},
+                    {"referer", "https://example.com/media/"},
+                    {"headers", "X-Mw-Input: retained\r\n"}};
+  SECTION("initial open") {}
+  SECTION("failed loop reopen and reconnect") {
+    config.loop = true;
+    observer.TrackLoops();
+    server.SetResponseSequence({
+        {ServerState::Response::kMedia, "h264_aac.flv"},
+        {ServerState::Response::kFailure, "h264_aac.flv"},
+        {ServerState::Response::kMedia, "h264_aac.flv"},
+    });
+  }
+  FfmpegInput input(config);
+  observer.Attach(input);
+  input.Start(server.url());
+  if (config.loop) {
+    REQUIRE(observer.Wait([](const auto& value) {
+      return (!value.frames.empty() && value.frames.back().generation == 2) ||
+             StateCount(value, InputState::kFailed) != 0;
+    }));
+  } else {
+    REQUIRE(observer.WaitState(InputState::kEnded));
+  }
+  input.Stop();
+  const auto value = observer.snapshot();
+  CHECK(value.valid);
+  CHECK(value.ready == 1);
+  CHECK_FALSE(value.frames.empty());
+  CHECK(StateCount(value, InputState::kFailed) == 0);
+  CHECK(StateCount(value, InputState::kWaitingRetry) == (config.loop ? 1 : 0));
+  const auto requests = server.request_headers();
+  REQUIRE(requests.size() == (config.loop ? 3 : 1));
+  for (const auto& request : requests) {
+    INFO(request);
+    CHECK(request.find("User-Agent: mw-streamer-options-test\r\n") !=
+          std::string::npos);
+    CHECK(request.find("Referer: https://example.com/media/\r\n") !=
+          std::string::npos);
+    CHECK(request.find("X-Mw-Input: retained\r\n") != std::string::npos);
+  }
 }
 
 TEST_CASE("FFmpeg input reports first failure and respects retry limits") {

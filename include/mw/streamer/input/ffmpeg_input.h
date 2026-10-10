@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -74,6 +75,12 @@ struct MW_STREAMER_API FfmpegInputConfig {
   // pitch); kBatch applies speed only to delivery waits, retaining media time
   // and the decoded audio sample_rate. Processing can slow delivery.
   double playback_speed = 1.0;
+  // FFmpeg input/protocol options passed to avformat_open_input on every open,
+  // including reconnects and loops. User values override built-in defaults.
+  // Unknown or inapplicable options retain FFmpeg's behavior: opening may
+  // succeed, with unused option names logged as warnings. Invalid values for
+  // recognized options follow the existing input error/retry policy.
+  std::map<std::string, std::string> options;
 };
 
 // Demand-driven reading, decoding and scheduled frame delivery.

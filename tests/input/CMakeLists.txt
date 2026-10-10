@@ -1,6 +1,7 @@
 add_executable(mw_ffmpeg_input_tests
     ffmpeg_input_test.cc
     ffmpeg_input_packet_test.cc
+    ffmpeg_input_options_test.cc
     ffmpeg_input_speed_test.cc
     ffmpeg_rtmp_test.cc
     input_test_main.cc
@@ -19,9 +20,9 @@ add_test(NAME mw_ffmpeg_input_tests COMMAND mw_ffmpeg_input_tests)
 set_tests_properties(mw_ffmpeg_input_tests PROPERTIES TIMEOUT 90)
 
 if(BUILD_SHARED)
-    # Exercise frame timing modes through the DLL's public Input API.
+    # Exercise timing modes and input options through the DLL's public API.
     add_executable(mw_ffmpeg_input_public_tests
-        ffmpeg_input_speed_test.cc input_test_main.cc)
+        ffmpeg_input_speed_test.cc ffmpeg_input_options_test.cc input_test_main.cc)
     target_compile_definitions(mw_ffmpeg_input_public_tests PRIVATE
         MW_STREAMER_INPUT_TEST_DATA_DIR="${MW_STREAMER_TEST_DATA_DIR}")
     target_link_libraries(mw_ffmpeg_input_public_tests PRIVATE
