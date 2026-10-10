@@ -4,6 +4,15 @@ target_link_libraries(mw_processor_tests PRIVATE
 add_test(NAME mw_processor_tests COMMAND mw_processor_tests)
 set_tests_properties(mw_processor_tests PROPERTIES TIMEOUT 60)
 
+add_executable(mw_batch_processor_tests
+    batch_processor_test.cc batch_processor_input_test.cc processor_test_main.cc)
+target_compile_definitions(mw_batch_processor_tests PRIVATE
+    MW_STREAMER_BATCH_PROCESSOR_TEST_DATA_DIR="${MW_STREAMER_TEST_DATA_DIR}")
+target_link_libraries(mw_batch_processor_tests PRIVATE
+    Catch2::Catch2 mw::streamer FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil fmt::fmt)
+add_test(NAME mw_batch_processor_tests COMMAND mw_batch_processor_tests)
+set_tests_properties(mw_batch_processor_tests PROPERTIES TIMEOUT 30)
+
 # Manual network content-sync measurement against the generated flash/tone source.
 add_executable(mw_processor_sync_probe processor_sync_probe.cc)
 target_link_libraries(mw_processor_sync_probe PRIVATE mw::streamer fmt::fmt)

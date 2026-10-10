@@ -13,6 +13,7 @@ set(MW_STREAMER_SOURCES
     input/ffmpeg_input.cc
     pipeline/remux_pipeline.cc
     performance/performance.cc
+    processor/batch_processor.cc
     processor/processor.cc
     remuxer/packet_converter.cc
     remuxer/async_remuxer.cc
