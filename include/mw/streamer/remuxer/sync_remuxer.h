@@ -22,8 +22,13 @@ struct MW_STREAMER_API SyncRemuxerConfig {
   std::size_t max_pending_bytes = 64 * 1024 * 1024;
 };
 
-// Original compressed input recording with bounded asynchronous consumption.
-// SubmitPacket waits only for buffer space, not for writing or peer receipt.
+// Original compressed input forwarding and recording. Network push URLs and
+// RTSP/HLS publications enable the corrected DTS playback clock for all
+// outputs; file recordings alone run at full speed. Adding a network output
+// during a session starts its send clock at the current media position.
+// SubmitPacket waits for this packet's worker processing, including its send
+// deadline and local SDK submission, not for remote peer receipt. Preparation
+// may retain packets until the producer supplies the other track.
 // Requires Init before Start and destruction before Shutdown. Serialize input
 // packet calls in demux order, and serialize Start/Stop/output control calls.
 // Drain may run concurrently with a blocked SubmitPacket. Callbacks execute on
@@ -61,7 +66,10 @@ class MW_STREAMER_API SyncRemuxer final {
   // Preparation for startup or rollback is bounded by the same capacity;
   // exhaustion terminates the session rather than deadlocking. Drain joins
   // retained packets even when another track has not rolled back. Exceeding the
-  // output SDK's unready-track cache also fails explicitly. Throws
+  // output SDK's unready-track cache also fails explicitly. Send deadlines
+  // for network outputs follow one steady clock across generation changes and
+  // timestamp rollbacks; pure file recordings do not wait on media time.
+  // Start creates a new clock. Throws
   // invalid_argument for invalid packets, length_error for an oversized packet;
   // returns false after Drain/Stop or a session failure.
   bool SubmitPacket(std::uint64_t generation, const ffmpeg::Packet& packet);

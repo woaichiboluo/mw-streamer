@@ -68,7 +68,9 @@ class OutputDirectory final {
     std::error_code error;
     std::filesystem::remove_all(path_, error);
   }
-  std::string File() const { return (path_ / "record.mp4").string(); }
+  std::string File(const std::string& name = "record.mp4") const {
+    return (path_ / name).string();
+  }
 
  private:
   std::filesystem::path path_;
@@ -361,7 +363,193 @@ void SubmitUnchanged(mw::streamer::SyncRemuxer& remuxer,
   REQUIRE(Snapshot(*packet.get()) == before);
 }
 
+Media TimedVideo(std::size_t count, std::int64_t interval_us) {
+  auto source = ReadMedia(Fixture("h264_video.mp4"));
+  const auto keyframe = source.packets.front().Clone();
+  const auto time_base = source.streams.front().time_base;
+  source.packets.clear();
+  for (std::size_t index = 0; index < count; ++index) {
+    auto packet = keyframe.Clone();
+    packet->pts = packet->dts =
+        av_rescale_q(static_cast<std::int64_t>(index) * interval_us,
+                     kMicroseconds, time_base);
+    packet->duration = av_rescale_q(interval_us, kMicroseconds, time_base);
+    source.packets.push_back(std::move(packet));
+  }
+  return source;
+}
+
+void AddTestRtsp(mw::streamer::SyncRemuxer& remuxer) {
+  auto reservation = toolkit::Socket::createSocket();
+  REQUIRE(reservation->listen(0, "127.0.0.1"));
+  const auto port = reservation->get_local_port();
+  reservation.reset();
+  remuxer.AddRtspPublish("pacing", "test", "127.0.0.1", port);
+}
+
 }  // namespace
+
+TEST_CASE("SyncRemuxer逐包背压使用DTS发送节拍而不是PTS",
+          "[remuxer][sync][pacing]") {
+  Runtime runtime;
+  auto media = TimedVideo(3, 120000);
+  // Presentation order can differ from decode order; it must not delay sending
+  // the middle packet until its later PTS or send the last packet in a burst.
+  media.packets[1]->pts =
+      av_rescale_q(480000, kMicroseconds, media.streams.front().time_base);
+  Notifications notifications;
+  mw::streamer::SyncRemuxer remuxer;
+  notifications.Bind(remuxer);
+  AddTestRtsp(remuxer);
+  remuxer.Start(media.streams);
+  const auto started = std::chrono::steady_clock::now();
+  for (std::size_t index = 0; index < media.packets.size(); ++index) {
+    SubmitUnchanged(remuxer, media.packets[index]);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    const auto expected = 120ms * static_cast<std::int64_t>(index);
+    CAPTURE(index);
+    CHECK(elapsed >= expected - 15ms);
+    CHECK(elapsed < expected + 200ms);
+  }
+  remuxer.Stop();
+  CHECK(notifications.errors == 0);
+  CHECK(notifications.ended == 1);
+}
+
+TEST_CASE("SyncRemuxer代际循环沿用连续发送时钟并在重新Start时重置",
+          "[remuxer][sync][pacing][generation]") {
+  Runtime runtime;
+  const auto media = TimedVideo(3, 120000);
+  Notifications notifications;
+  mw::streamer::SyncRemuxer remuxer;
+  notifications.Bind(remuxer);
+  for (int session = 0; session < 2; ++session) {
+    AddTestRtsp(remuxer);
+    remuxer.Start(media.streams);
+    const auto started = std::chrono::steady_clock::now();
+    for (std::uint64_t generation = 0; generation < 2; ++generation) {
+      for (std::size_t index = 0; index < media.packets.size(); ++index) {
+        REQUIRE(remuxer.SubmitPacket(generation, media.packets[index]));
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+        const auto expected =
+            120ms * static_cast<std::int64_t>(generation * 3 + index);
+        CAPTURE(session, generation, index);
+        CHECK(elapsed >= expected - 15ms);
+        CHECK(elapsed < expected + 300ms);
+      }
+    }
+    remuxer.Stop();
+    CHECK(notifications.errors == 0);
+    CHECK(notifications.ended == session + 1);
+  }
+}
+
+TEST_CASE("SyncRemuxerStop只等待在途包而不预读整段录像",
+          "[remuxer][sync][pacing][lifecycle]") {
+  Runtime runtime;
+  OutputDirectory directory;
+  const auto media = TimedVideo(30, 300000);
+  Notifications notifications;
+  mw::streamer::SyncRemuxer remuxer;
+  notifications.Bind(remuxer);
+  const auto path = remuxer.AddPushUrl(directory.File());
+  AddTestRtsp(remuxer);
+  remuxer.Start(media.streams);
+  REQUIRE(remuxer.SubmitPacket(0, media.packets.front()));
+  std::promise<void> started;
+  auto entered = started.get_future();
+  auto submit = std::async(std::launch::async, [&] {
+    started.set_value();
+    std::size_t accepted = 0;
+    for (std::size_t index = 1; index < media.packets.size(); ++index) {
+      if (!remuxer.SubmitPacket(0, media.packets[index])) break;
+      ++accepted;
+    }
+    return accepted;
+  });
+  entered.wait();
+  CHECK(submit.wait_for(80ms) == std::future_status::timeout);
+  const auto stopping = std::chrono::steady_clock::now();
+  remuxer.Stop();
+  const auto elapsed = std::chrono::steady_clock::now() - stopping;
+  CHECK(elapsed >= 100ms);
+  CHECK(elapsed < 2s);
+  CHECK(submit.get() == 1);
+  CHECK(notifications.errors == 0);
+  CHECK(notifications.ended == 1);
+  CHECK(ReadMedia(path).packets.size() == 2);
+}
+
+TEST_CASE("SyncRemuxer纯MP4和M3U8文件输出全速处理",
+          "[remuxer][sync][pacing][recording]") {
+  Runtime runtime;
+  OutputDirectory directory;
+  const auto media = TimedVideo(30, 300000);
+  std::string name = "record.mp4";
+  SECTION("MP4") {}
+  SECTION("M3U8") { name = "record.m3u8"; }
+  Notifications notifications;
+  mw::streamer::SyncRemuxer remuxer;
+  notifications.Bind(remuxer);
+  const auto path = remuxer.AddPushUrl(directory.File(name));
+  remuxer.Start(media.streams);
+  const auto started = std::chrono::steady_clock::now();
+  for (const auto& packet : media.packets) SubmitUnchanged(remuxer, packet);
+  remuxer.Stop();
+  CHECK(std::chrono::steady_clock::now() - started < 1s);
+  CHECK(notifications.errors == 0);
+  CHECK(notifications.ended == 1);
+  CHECK(ReadMedia(path).packets.size() == media.packets.size());
+}
+
+TEST_CASE("SyncRemuxer运行中添加RTSP从当前DTS建立节拍并保留录像时间戳",
+          "[remuxer][sync][pacing][publish]") {
+  Runtime runtime;
+  OutputDirectory directory;
+  auto media = TimedVideo(4, 120000);
+  const auto time_base = media.streams.front().time_base;
+  const auto shift = av_rescale_q(10000000, kMicroseconds, time_base);
+  for (std::size_t index = 1; index < media.packets.size(); ++index) {
+    media.packets[index]->pts += shift;
+    media.packets[index]->dts += shift;
+  }
+  Notifications notifications;
+  mw::streamer::SyncRemuxer remuxer;
+  notifications.Bind(remuxer);
+  const auto path = remuxer.AddPushUrl(directory.File());
+  remuxer.Start(media.streams);
+  auto started = std::chrono::steady_clock::now();
+  SubmitUnchanged(remuxer, media.packets[0]);
+  SubmitUnchanged(remuxer, media.packets[1]);
+  CHECK(std::chrono::steady_clock::now() - started < 1s);
+  AddTestRtsp(remuxer);
+  started = std::chrono::steady_clock::now();
+  SubmitUnchanged(remuxer, media.packets[2]);
+  CHECK(std::chrono::steady_clock::now() - started < 200ms);
+  SubmitUnchanged(remuxer, media.packets[3]);
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  CHECK(elapsed >= 105ms);
+  CHECK(elapsed < 420ms);
+  remuxer.Stop();
+  CHECK(notifications.errors == 0);
+  CHECK(notifications.ended == 1);
+  const auto output = ReadMedia(path);
+  REQUIRE(output.packets.size() == media.packets.size());
+  for (std::size_t index = 0; index < media.packets.size(); ++index) {
+    const auto& packet = output.packets[index];
+    const auto recorded_time_base =
+        Track(output, packet->stream_index).time_base;
+    const auto expected =
+        av_rescale_q(media.packets[index]->pts, time_base, kMicroseconds);
+    const auto pts =
+        av_rescale_q(packet->pts, recorded_time_base, kMicroseconds);
+    const auto dts =
+        av_rescale_q(packet->dts, recorded_time_base, kMicroseconds);
+    CAPTURE(index);
+    CHECK(std::abs(pts - expected) <= 1000);
+    CHECK(std::abs(dts - expected) <= 1000);
+  }
+}
 
 TEST_CASE("SyncRemuxer原包直录保持H264 H265 AAC和单轨的解码内容",
           "[remuxer][sync][recording]") {
@@ -1125,7 +1313,11 @@ TEST_CASE("SyncRemuxer满队列等待且Drain和Stop解除提交阻塞",
   toolkit::EventPollerPool::Instance().getPoller()->async(
       [&] { gate.Enter(); });
   REQUIRE(gate.Wait());
-  REQUIRE(remuxer.SubmitPacket(0, media.packets.front()));
+  auto first_submit = std::async(std::launch::async, [&] {
+    return remuxer.SubmitPacket(0, media.packets.front());
+  });
+  encoder_test::ReleaseGate release_first_submit{gate};
+  CHECK(first_submit.wait_for(100ms) == std::future_status::timeout);
   std::promise<void> started;
   auto entered = started.get_future();
   auto submit = std::async(std::launch::async, [&] {
@@ -1140,8 +1332,10 @@ TEST_CASE("SyncRemuxer满队列等待且Drain和Stop解除提交阻塞",
     remuxer.Drain();
     const auto status = submit.wait_for(2s);
     CHECK(status == std::future_status::ready);
+    CHECK(first_submit.wait_for(100ms) == std::future_status::timeout);
     gate.Release();
     CHECK_FALSE(submit.get());
+    CHECK(first_submit.get());
     remuxer.Stop();
   }
   SECTION("Stop解除阻塞") {
@@ -1149,8 +1343,10 @@ TEST_CASE("SyncRemuxer满队列等待且Drain和Stop解除提交阻塞",
     encoder_test::ReleaseGate release_stop{gate};
     const auto status = submit.wait_for(2s);
     CHECK(status == std::future_status::ready);
+    CHECK(first_submit.wait_for(100ms) == std::future_status::timeout);
     gate.Release();
     CHECK_FALSE(submit.get());
+    CHECK(first_submit.get());
     CHECK(stop.wait_for(5s) == std::future_status::ready);
     stop.get();
   }

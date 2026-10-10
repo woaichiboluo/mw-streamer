@@ -1,6 +1,7 @@
 #include "mw/streamer/remuxer/sync_remuxer.h"
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <exception>
@@ -29,6 +30,16 @@ namespace {
 
 constexpr AVRational kNanoseconds{1, 1000000000};
 constexpr AVRational kMilliseconds{1, 1000};
+using Clock = std::chrono::steady_clock;
+
+bool HasNetworkOutput(const internal::OutputRegistration& registration) {
+  return std::any_of(registration.entries().begin(),
+                     registration.entries().end(), [](const auto& entry) {
+                       return entry.kind !=
+                                  internal::OutputRegistration::Kind::kPush ||
+                              entry.original.find("://") != std::string::npos;
+                     });
+}
 
 std::int64_t Add(std::int64_t left, std::int64_t right) {
   if ((right > 0 && left > std::numeric_limits<std::int64_t>::max() - right) ||
@@ -169,6 +180,9 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
       origin_.reset();
       rollback_pending_ = false;
       base_ns_ = end_ns_ = 0;
+      send_started_.reset();
+      send_origin_ns_ = 0;
+      paced_ = HasNetworkOutput(registration_);
       failure_.clear();
       draining_ = processing_ = false;
       startup_waiting_ = true;
@@ -270,7 +284,13 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     }
     track->last_dts = packet.dts;
     changed_.notify_all();
-    return true;
+    // Serial submissions wait for Process, not Release: startup and rollback
+    // may retain this packet until the producer supplies the other track.
+    changed_.wait(lock, [&] {
+      return session_id_ != session_id || !failure_.empty() ||
+             (queue_.empty() && !processing_);
+    });
+    return session_id_ == session_id && failure_.empty();
   }
 
   std::string AddPushUrl(const std::string& url) {
@@ -368,6 +388,7 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       output_info_ = std::move(info);
+      paced_ = HasNetworkOutput(registration_);
     }
     return entry.actual;
   }
@@ -383,6 +404,7 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (target.empty()) {
+        failure_ = message;
         accepting_ = false;
         draining_ = true;
         changed_.notify_all();
@@ -400,7 +422,7 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     changed_.notify_all();
   }
 
-  void Emit(const Item& item) {
+  void Emit(const Item& item, bool prepare_tracks = false) {
     const auto pts = Add(base_ns_, Offset(item.pts_ns, *origin_));
     const auto dts = Add(base_ns_, Offset(item.dts_ns, *origin_));
     const auto end = Add(std::max(pts, dts), item.duration_ns);
@@ -408,6 +430,29 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
         av_rescale_q(pts, kNanoseconds, kMilliseconds));
     const auto dts_ms = static_cast<std::uint64_t>(
         av_rescale_q(dts, kNanoseconds, kMilliseconds));
+    bool paced;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      paced = paced_;
+    }
+    if (paced && !prepare_tracks) {
+      // A network output added to a running file recording starts from the
+      // current media position, without waiting through the recorded prefix.
+      if (!send_started_) {
+        send_started_ = Clock::now();
+        send_origin_ns_ = dts;
+      }
+      const auto elapsed_ns =
+          dts > send_origin_ns_ ? Offset(dts, send_origin_ns_) : 0;
+      const auto delay = std::chrono::duration_cast<Clock::duration>(
+          std::chrono::nanoseconds(elapsed_ns));
+      if (delay > Clock::time_point::max() - *send_started_) {
+        throw std::invalid_argument("输入发送时刻溢出");
+      }
+      // Wait on the consumer, never on the ZLM poller. The same clock continues
+      // across generation changes and common-offset timestamp corrections.
+      std::this_thread::sleep_until(*send_started_ + delay);
+    }
     Sync(poller_, [&] {
       auto frame = converter_->Convert(item.packet, dts_ms, pts_ms);
       if (!output_->tracks_ready()) {
@@ -427,8 +472,8 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     end_ns_ = std::max(end_ns_, end);
   }
 
-  void EmitAndRelease(Item& item) {
-    Emit(item);
+  void EmitAndRelease(Item& item, bool prepare_tracks = false) {
+    Emit(item, prepare_tracks);
     item.packet.Unref();
     Release(item.bytes);
   }
@@ -448,20 +493,28 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     origin_ = minimum;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (paced_ && !send_started_) {
+        send_started_ = Clock::now();
+        send_origin_ns_ = base_ns_;
+      }
       startup_waiting_ = false;
       changed_.notify_all();
     }
     // Prime each actual track before sending a long startup prefix. This only
     // changes cross-track order; each track still sees its own first packet
     // first, and ZLM preserves the shared timestamps when draining its cache.
-    while (!actual_tracks.empty()) {
+    bool tracks_ready = false;
+    Sync(poller_, [&] { tracks_ready = output_->tracks_ready(); });
+    // Only prime an unready SDK. Otherwise emitting each track's first packet
+    // ahead of the prefix would delay older packets from the other track.
+    while (!tracks_ready && !actual_tracks.empty()) {
       const auto first = std::find_if(
           startup_.begin(), startup_.end(),
           [&](const auto& item) { return actual_tracks.count(item.track); });
       auto item = std::move(*first);
       startup_.erase(first);
       actual_tracks.erase(item.track);
-      EmitAndRelease(item);
+      EmitAndRelease(item, true);
     }
     if (final_eof) {
       Sync(poller_, [&] {
@@ -580,6 +633,7 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     } catch (const std::exception& error) {
       {
         std::lock_guard<std::mutex> lock(mutex_);
+        failure_ = error.what();
         accepting_ = false;
         changed_.notify_all();
       }
@@ -625,6 +679,7 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
   bool accepting_ = false;
   bool draining_ = false;
   bool processing_ = false;
+  bool paced_ = false;
   bool startup_waiting_ = true;
   std::size_t pending_bytes_ = 0;
   std::uint64_t session_id_ = 0;
@@ -646,6 +701,8 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
   bool rollback_pending_ = false;
   std::int64_t base_ns_ = 0;
   std::int64_t end_ns_ = 0;
+  std::optional<Clock::time_point> send_started_;
+  std::int64_t send_origin_ns_ = 0;
 };
 
 SyncRemuxer::SyncRemuxer(SyncRemuxerConfig config)

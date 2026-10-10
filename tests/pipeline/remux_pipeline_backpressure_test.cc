@@ -6,7 +6,6 @@
 #include <filesystem>
 #include <future>
 #include <memory>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -146,19 +145,16 @@ TEST_CASE("RemuxPipeline停止等待原包背压完成并排空录制",
   // Release before pipeline destruction if any subsequent assertion fails.
   encoder_test::ReleaseGate release_pipeline{gate};
   std::string output_path;
-  pipeline.SetOnReady([&](const auto& ready) {
-    output_path = ready.output_urls.at(0);
-    toolkit::EventPollerPool::Instance().getPoller()->async(
-        [&] { gate.Enter(); });
-    if (!gate.Wait()) throw std::runtime_error("输出背压门未进入");
-  });
+  pipeline.SetOnReady(
+      [&](const auto& ready) { output_path = ready.output_urls.at(0); });
   pipeline.Start(source_path);
+  toolkit::EventPollerPool::Instance().getPoller()->async(
+      [&] { gate.Enter(); });
   REQUIRE(gate.Wait());
   REQUIRE(pipeline.state() == mw::streamer::PipelineState::kRunning);
 
-  // There is no public pending-packet query. Give local demuxing time to fill
-  // the one-packet budget while the poller is frozen; the output below must
-  // also contain the packet whose SubmitPacket was waiting for space.
+  // Freeze after Start has received the first processed packet. Give local
+  // demuxing time to block SubmitPacket on the poller before stopping Input.
   std::this_thread::sleep_for(100ms);
   std::promise<void> started;
   auto entered = started.get_future();
@@ -176,7 +172,7 @@ TEST_CASE("RemuxPipeline停止等待原包背压完成并排空录制",
   CHECK(pipeline.state() == mw::streamer::PipelineState::kStopped);
 
   const auto recorded = ReadPackets(output_path);
-  // Draining Remuxer before joining Input would reject the waiting packet.
+  // The first packet and subsequent accepted work must survive Stop.
   REQUIRE(recorded.size() >= 2);
   CHECK(recorded.at(1)->dts > recorded.front()->dts);
 }
