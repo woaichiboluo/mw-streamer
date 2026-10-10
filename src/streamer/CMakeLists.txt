@@ -11,6 +11,7 @@ set(MW_STREAMER_SOURCES
     encoder/encoder.cc
     init/init.cc
     input/ffmpeg_input.cc
+    pipeline/remux_pipeline.cc
     performance/performance.cc
     processor/processor.cc
     remuxer/packet_converter.cc

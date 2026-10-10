@@ -20,6 +20,7 @@ extern "C" {
 
 #include "../encoder/encoder_test_support.h"
 #include "mw/streamer/init/init.h"
+#include "mw/streamer/pipeline/remux_pipeline.h"
 #include "mw/streamer/remuxer/async_remuxer.h"
 #include "mw/streamer/remuxer/sync_remuxer.h"
 
@@ -297,4 +298,110 @@ TEST_CASE("HTTPS发布要求本次初始化配置证书且Shutdown清除旧证�
           .AddHlsPublish("live", Name(), "127.0.0.1", tls_test::ReservePort())
           .find("http://") == 0);
   remuxer.Stop();
+}
+
+TEST_CASE("RemuxPipeline启动前添加HTTPS并停止本地循环发布",
+          "[pipeline][https][tls]") {
+  tls_test::CertFixture certificate;
+  Runtime runtime(Config(certificate.combined_file()));
+  mw::streamer::RemuxPipelineConfig config;
+  config.input.loop = true;
+  mw::streamer::RemuxPipeline pipeline(config);
+  const auto planned_url = pipeline.AddHlsPublish(
+      "tls", Name(), "127.0.0.1", tls_test::ReservePort(), true);
+  pipeline.Start(std::string(MW_STREAMER_TLS_TEST_DATA_DIR) +
+                 "/seek_h264_aac.mp4");
+  const auto url = pipeline.ready_info().hls_url;
+  REQUIRE(url == planned_url);
+  REQUIRE(url.find("https://127.0.0.1:") == 0);
+  tls_test::Response segment;
+  const auto deadline = std::chrono::steady_clock::now() + 8s;
+  do {
+    const auto playlist = Playlist(url, certificate);
+    REQUIRE(playlist.body.find("#EXTM3U") == 0);
+    const auto segment_url =
+        url.substr(0, url.rfind('/') + 1) + Segments(playlist.body).back();
+    segment =
+        tls_test::VerifiedHttpGet(segment_url, certificate.trusted_file());
+    // kRemux does not pace file reads. A rolling segment can be removed while
+    // the client opens its request; fetch the current playlist again in that
+    // case.
+    if (segment.status == 200) break;
+  } while (std::chrono::steady_clock::now() < deadline);
+  REQUIRE(segment.status == 200);
+  RequireDecodedTs(segment.body, certificate, 10);
+  pipeline.Stop();
+  REQUIRE(pipeline.state() == mw::streamer::PipelineState::kStopped);
+  REQUIRE_THROWS(tls_test::VerifiedHttpGet(url, certificate.trusted_file()));
+}
+
+TEST_CASE("RemuxPipeline启动前添加RTSPS并实际交付音视频",
+          "[pipeline][rtsps][tls]") {
+  tls_test::CertFixture certificate;
+  Runtime runtime(Config(certificate.combined_file()));
+  std::mutex mutex;
+  std::condition_variable changed;
+  int video_index = -1, audio_index = -1;
+  unsigned videos = 0, audios = 0;
+  std::string error;
+  mw::streamer::RemuxPipelineConfig config;
+  config.input.loop = true;
+  mw::streamer::RemuxPipeline pipeline(config);
+  pipeline.AddRtspPublish("tls", Name(), "127.0.0.1", tls_test::ReservePort(),
+                          true);
+  pipeline.Start(std::string(MW_STREAMER_TLS_TEST_DATA_DIR) +
+                 "/seek_h264_aac.mp4");
+  const auto url = pipeline.ready_info().rtsp_url;
+  REQUIRE(url.find("rtsps://127.0.0.1:") == 0);
+  mw::streamer::FfmpegInputConfig client_config;
+  client_config.mode = mw::streamer::InputMode::kRemux;
+  client_config.auto_reconnect = false;
+  client_config.open_timeout = 5s;
+  client_config.read_timeout = 3s;
+  mw::streamer::FfmpegInput client(client_config);
+  client.SetOnReady([&](const std::vector<ffmpeg::StreamInfo>& streams) {
+    std::lock_guard<std::mutex> lock(mutex);
+    for (const auto& stream : streams) {
+      if (stream.codec_parameters.get()->codec_id == AV_CODEC_ID_H264)
+        video_index = stream.stream_index;
+      if (stream.codec_parameters.get()->codec_id == AV_CODEC_ID_AAC)
+        audio_index = stream.stream_index;
+    }
+  });
+  client.SetOnPacket([&](std::uint64_t, const ffmpeg::Packet& packet) {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (packet->size > 0 && packet->data) {
+        if (packet->stream_index == video_index) ++videos;
+        if (packet->stream_index == audio_index) ++audios;
+      }
+    }
+    changed.notify_all();
+  });
+  client.SetOnStateChanged(
+      [&](mw::streamer::InputState state, int, std::string_view message) {
+        if (state != mw::streamer::InputState::kFailed) return;
+        {
+          std::lock_guard<std::mutex> lock(mutex);
+          error = message.empty() ? "RTSPS input failed" : std::string(message);
+        }
+        changed.notify_all();
+      });
+  client.Start(url);
+  bool received = false;
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    received = changed.wait_for(lock, 5s, [&] {
+      return (videos >= 5 && audios >= 5) || !error.empty();
+    });
+  }
+  client.Stop();
+  pipeline.Stop();
+  INFO(error);
+  CAPTURE(videos, audios);
+  REQUIRE(received);
+  REQUIRE(error.empty());
+  REQUIRE(videos >= 5);
+  REQUIRE(audios >= 5);
+  REQUIRE(pipeline.state() == mw::streamer::PipelineState::kStopped);
 }
