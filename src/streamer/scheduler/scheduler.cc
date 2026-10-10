@@ -110,7 +110,7 @@ bool Scheduler::Start(const std::vector<ffmpeg::StreamInfo>& streams) noexcept {
     return false;
   }
   MW_LOG_INFO("streamer",
-              "Scheduler启动: video={}, fps={}/{}, audio={}, "
+              "Scheduler 启动: video={}, fps={}/{}, audio={}, "
               "sample_rate={}, block_samples={}",
               video, config_.video_frame_rate.num, config_.video_frame_rate.den,
               audio, config_.audio_sample_rate, config_.audio_block_samples);
@@ -131,7 +131,8 @@ bool Scheduler::SubmitVideo(const ffmpeg::Frame& frame) noexcept {
                  FramePts(frame), SystemNs(Clock::now()));
     if (video_frames_.size() >= kMaxVideoFrames) {
       // Clear the video cache and reset selection when it reaches this limit.
-      MW_LOG_WARNING("streamer", "Scheduler视频缓存达到30帧，清空并重新同步");
+      MW_LOG_WARNING("streamer",
+                     "Scheduler 视频缓存达到 30 帧，清空并重新同步");
       performance_.RejectVideo(video_frames_.size());
       video_frames_.clear();
       video_timing_set_ = false;
@@ -144,7 +145,7 @@ bool Scheduler::SubmitVideo(const ffmpeg::Frame& frame) noexcept {
       std::lock_guard<std::mutex> lock(mutex_);
       performance_.Error(true);
     }
-    MW_LOG_ERROR("streamer", "Scheduler缓存视频失败: {}", error.what());
+    MW_LOG_ERROR("streamer", "Scheduler 缓存视频失败: {}", error.what());
     return false;
   }
   Wake();
@@ -221,7 +222,7 @@ bool Scheduler::QueueAudio(ffmpeg::Frame frame, bool append_tail) {
                mapping.append, mapping.reset_buffer, audio_timestamp_,
                audio_queued_samples_);
   if (mapping.reset_buffer) {
-    MW_LOG_DEBUG("streamer", "Scheduler音频时间戳跳变，重置PCM缓存");
+    MW_LOG_DEBUG("streamer", "Scheduler 音频时间戳跳变，重置 PCM 缓存");
     ResetAudio(now);
   }
   auto placement = audio_queued_samples_;
@@ -238,7 +239,7 @@ bool Scheduler::QueueAudio(ffmpeg::Frame frame, bool append_tail) {
   const auto end = placement + frame->nb_samples;
   if (end > kMaxAudioSamples) {
     performance_.RejectAudio(frame->nb_samples);
-    MW_LOG_WARNING("streamer", "Scheduler音频缓存超过样本上限，丢弃本次输入");
+    MW_LOG_WARNING("streamer", "Scheduler 音频缓存超过样本上限，丢弃本次输入");
     return false;
   }
   // Replace the previous tail at the mapped position. Gaps between segments
@@ -284,7 +285,7 @@ bool Scheduler::SubmitAudio(const ffmpeg::Frame& frame) noexcept {
       std::lock_guard<std::mutex> lock(mutex_);
       performance_.Error(false);
     }
-    MW_LOG_ERROR("streamer", "Scheduler音频处理失败: {}", error.what());
+    MW_LOG_ERROR("streamer", "Scheduler 音频处理失败: {}", error.what());
   }
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -342,7 +343,7 @@ void Scheduler::Drain() noexcept {
       std::lock_guard<std::mutex> lock(mutex_);
       performance_.Error(false);
     }
-    MW_LOG_ERROR("streamer", "Scheduler排空音频失败: {}", error.what());
+    MW_LOG_ERROR("streamer", "Scheduler 排空音频失败: {}", error.what());
   }
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -351,7 +352,7 @@ void Scheduler::Drain() noexcept {
   idle_.notify_all();
   Wake();
   NotifyEnded();
-  MW_LOG_DEBUG("streamer", "Scheduler开始排空");
+  MW_LOG_DEBUG("streamer", "Scheduler 开始排空");
 }
 
 bool Scheduler::TickVideo(Clock::time_point now) {
@@ -528,7 +529,7 @@ bool Scheduler::TickAudio(Clock::time_point start, Clock::time_point end) {
       } else {
         pending = !finite_tail && audio_queued_samples_ < block;
       }
-      MW_LOG_TRACE("streamer", "Scheduler音频缓冲达上限，追赶丢弃{}个样本",
+      MW_LOG_TRACE("streamer", "Scheduler 音频缓冲达上限，追赶丢弃 {} 个样本",
                    discarded);
     }
     if (!pending && audio_timestamp_ < window.start) {
@@ -538,8 +539,8 @@ bool Scheduler::TickAudio(Clock::time_point start, Clock::time_point end) {
       const auto added =
           audio_output_timing_.total_buffering_ticks() - previous;
       if (added) {
-        MW_LOG_DEBUG("streamer", "Scheduler音频增加缓冲{}块，累计{}块", added,
-                     audio_output_timing_.total_buffering_ticks());
+        MW_LOG_DEBUG("streamer", "Scheduler 音频增加缓冲 {} 块，累计 {} 块",
+                     added, audio_output_timing_.total_buffering_ticks());
       }
     }
     int offset = 0;
@@ -695,7 +696,7 @@ void Scheduler::NotifyEnded() noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
         performance_.Finish(video_frames_.size(), audio_queued_samples_);
       }
-      MW_LOG_INFO("streamer", "Scheduler排空完成");
+      MW_LOG_INFO("streamer", "Scheduler 排空完成");
       if (on_ended_) on_ended_();
     }
     {
@@ -743,7 +744,7 @@ void Scheduler::Stop() noexcept {
     Clear();
     initialized_ = false;
   }
-  MW_LOG_INFO("streamer", "Scheduler停止完成");
+  MW_LOG_INFO("streamer", "Scheduler 停止完成");
 }
 
 void Scheduler::RequestStop() noexcept {

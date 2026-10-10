@@ -92,7 +92,7 @@ void Encoder::Open(AVDictionary* options) {
   if (name.size() >= 6 && name.substr(name.size() - 6) == "_nvenc" &&
       !av_dict_get(copied.get(), "preset", nullptr, 0)) {
     FfmpegException::throwIfError(
-        av_dict_set(copied.address(), "preset", "p2", 0), "设置NVENC预设");
+        av_dict_set(copied.address(), "preset", "p2", 0), "设置 NVENC 预设");
   }
   FfmpegException::throwIfError(
       avcodec_open2(context(), codec, copied.address()), "avcodec_open2");
@@ -140,13 +140,13 @@ void VideoEncoder::ConfigureDevice(const VideoEncoderConfig& config,
   const auto* native =
       reinterpret_cast<const AVHWDeviceContext*>(device.get()->data);
   if (native->type != AV_HWDEVICE_TYPE_CUDA) {
-    throw std::invalid_argument("CUDA编码设备配置无效");
+    throw std::invalid_argument("CUDA 编码设备配置无效");
   }
   auto* codec_context = context();
   for (int index = 0;; ++index) {
     const auto* supported = avcodec_get_hw_config(codec_context->codec, index);
     if (!supported) {
-      throw std::invalid_argument("指定编码器不支持CUDA设备");
+      throw std::invalid_argument("指定编码器不支持 CUDA 设备");
     }
     if (supported->device_type == AV_HWDEVICE_TYPE_CUDA &&
         supported->pix_fmt == AV_PIX_FMT_CUDA &&
@@ -169,7 +169,7 @@ void VideoEncoder::ConfigureDevice(const VideoEncoderConfig& config,
   frames->height = config.height;
   FfmpegException::throwIfError(
       av_hwframe_ctx_init(codec_context->hw_frames_ctx),
-      "初始化CUDA编码帧描述");
+      "初始化 CUDA 编码帧描述");
 }
 
 VideoEncoder::VideoEncoder(const VideoEncoderConfig& config,
@@ -211,7 +211,7 @@ Frame VideoEncoder::PrepareFrame(const Frame& source) const {
   if (target && origin) {
     if (!origin->device_ref ||
         origin->device_ref->data != codec->hw_device_ctx->data) {
-      throw std::invalid_argument("GPU视频帧不属于共享编码设备");
+      throw std::invalid_argument("GPU 视频帧不属于共享编码设备");
     }
     return source.Ref();
   }
@@ -219,12 +219,12 @@ Frame VideoEncoder::PrepareFrame(const Frame& source) const {
   if (target) {
     FfmpegException::throwIfError(
         av_hwframe_get_buffer(codec->hw_frames_ctx, result.get(), 0),
-        "分配上传GPU帧");
+        "分配上传 GPU 帧");
   } else {
     result->format = layout;
   }
   FfmpegException::throwIfError(
-      av_hwframe_transfer_data(result.get(), frame, 0), "搬运CPU/GPU视频帧");
+      av_hwframe_transfer_data(result.get(), frame, 0), "搬运 CPU/GPU 视频帧");
   result.CopyPropertiesFrom(source);
   return result;
 }
@@ -255,17 +255,17 @@ void Encoder::ValidateFrame(const AVFrame& frame) const {
   const auto* codec_context = context();
   if (frame.pts == AV_NOPTS_VALUE || !PositiveRatio(frame.time_base) ||
       frame.duration < 0 || frame.format < 0 || !frame.data[0]) {
-    throw std::invalid_argument("编码输入Frame数据或时间戳无效");
+    throw std::invalid_argument("编码输入 Frame 数据或时间戳无效");
   }
   if (codec_context->codec_type == AVMEDIA_TYPE_VIDEO) {
     if (frame.format != codec_context->pix_fmt ||
         frame.width != codec_context->width ||
         frame.height != codec_context->height) {
-      throw std::invalid_argument("视频Frame格式或尺寸与编码配置不匹配");
+      throw std::invalid_argument("视频 Frame 格式或尺寸与编码配置不匹配");
     }
     if (codec_context->hw_frames_ctx) {
       if (!frame.hw_frames_ctx) {
-        throw std::invalid_argument("CUDA编码需要GPU Frame");
+        throw std::invalid_argument("CUDA 编码需要 GPU Frame");
       }
       const auto* expected = reinterpret_cast<const AVHWFramesContext*>(
           codec_context->hw_frames_ctx->data);
@@ -275,7 +275,7 @@ void Encoder::ValidateFrame(const AVFrame& frame) const {
           actual->device_ref->data != codec_context->hw_device_ctx->data ||
           actual->format != expected->format ||
           actual->sw_format != expected->sw_format) {
-        throw std::invalid_argument("GPU Frame设备或底层像素格式不匹配");
+        throw std::invalid_argument("GPU Frame 设备或底层像素格式不匹配");
       }
     }
     return;
@@ -285,20 +285,21 @@ void Encoder::ValidateFrame(const AVFrame& frame) const {
       av_channel_layout_compare(&frame.ch_layout, &codec_context->ch_layout) !=
           0 ||
       frame.nb_samples <= 0) {
-    throw std::invalid_argument("音频Frame格式与编码配置不匹配");
+    throw std::invalid_argument("音频 Frame 格式与编码配置不匹配");
   }
   const int capabilities = codec_context->codec->capabilities;
   if (!(capabilities & AV_CODEC_CAP_VARIABLE_FRAME_SIZE) &&
       (frame.nb_samples > codec_context->frame_size ||
        (frame.nb_samples < codec_context->frame_size &&
         !(capabilities & AV_CODEC_CAP_SMALL_LAST_FRAME)))) {
-    throw std::invalid_argument("音频Frame样本数与编码帧大小不匹配");
+    throw std::invalid_argument("音频 Frame 样本数与编码帧大小不匹配");
   }
 }
 
 bool Encoder::SendFrame(const Frame& frame) {
   if (!frame.get()) {
-    throw std::invalid_argument("编码输入Frame不能为空，请使用Drain提交EOF");
+    throw std::invalid_argument(
+        "编码输入 Frame 不能为空，请使用 Drain 提交 EOF");
   }
   ValidateFrame(*frame.get());
   auto submitted = frame.Ref();

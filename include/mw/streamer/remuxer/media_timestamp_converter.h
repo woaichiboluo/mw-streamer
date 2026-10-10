@@ -51,7 +51,7 @@ class MediaTimestampConverter final {
     const auto* input = packet.get();
     if (!input || input->pts == AV_NOPTS_VALUE ||
         input->dts == AV_NOPTS_VALUE) {
-      throw std::invalid_argument("媒体时间转换需要有效PTS和DTS");
+      throw std::invalid_argument("媒体时间转换需要有效 PTS 和 DTS");
     }
     const auto track = std::find_if(
         tracks_.begin(), tracks_.end(),

@@ -86,7 +86,7 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
  public:
   explicit Impl(SyncRemuxerConfig config) : config_(config) {
     if (!config_.max_pending_bytes)
-      throw std::invalid_argument("SyncRemuxer缓存容量必须大于零");
+      throw std::invalid_argument("SyncRemuxer 缓存容量必须大于零");
   }
 
   void SetOnError(OnError callback) {
@@ -102,7 +102,7 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     std::lock_guard<std::mutex> control(control_);
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (running_) throw std::logic_error("SyncRemuxer已经启动");
+      if (running_) throw std::logic_error("SyncRemuxer 已经启动");
     }
     if (worker_.joinable()) worker_.join();
     if (streams.empty()) throw std::invalid_argument("输入录像轨道不能为空");
@@ -152,7 +152,7 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
           try {
             output->Close();
           } catch (const std::exception& failure) {
-            MW_LOG_ERROR("streamer", "SyncRemuxer启动回滚失败: {}",
+            MW_LOG_ERROR("streamer", "SyncRemuxer 启动回滚失败: {}",
                          failure.what());
           }
           std::rethrow_exception(error);
@@ -197,7 +197,8 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
         Sync(poller_, [&] { output_->Close(); });
         Sync(poller_, [] {});
       } catch (const std::exception& failure) {
-        MW_LOG_ERROR("streamer", "SyncRemuxer启动回滚失败: {}", failure.what());
+        MW_LOG_ERROR("streamer", "SyncRemuxer 启动回滚失败: {}",
+                     failure.what());
       }
       std::lock_guard<std::mutex> lock(mutex_);
       running_ = accepting_ = false;
@@ -217,7 +218,7 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     if (track == tracks_.end() || !packet.data || packet.size <= 0 ||
         packet.pts == AV_NOPTS_VALUE || packet.dts == AV_NOPTS_VALUE ||
         packet.duration < 0) {
-      throw std::invalid_argument("输入录像需要有效轨道、负载和PTS/DTS");
+      throw std::invalid_argument("输入录像需要有效轨道、负载和 PTS/DTS");
     }
     if (packet.time_base.num < 0 || packet.time_base.den < 0 ||
         (packet.time_base.num > 0 && packet.time_base.den == 0)) {
@@ -229,10 +230,10 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
       throw std::invalid_argument("输入录像包与轨道时间基不匹配");
     }
     if (producer_generation_ && generation < *producer_generation_)
-      throw std::invalid_argument("输入录像generation不得倒退");
+      throw std::invalid_argument("输入录像 generation 不得倒退");
     if (producer_generation_ == generation && track->last_dts &&
         packet.dts == *track->last_dts) {
-      throw std::invalid_argument("输入录像同轨DTS不得重复");
+      throw std::invalid_argument("输入录像同轨 DTS 不得重复");
     }
     const auto pts_ns = Nanoseconds(packet.pts, time_base);
     const auto dts_ns = Nanoseconds(packet.dts, time_base);
@@ -369,7 +370,7 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
   bool RequireRegisterable() {
     std::lock_guard<std::mutex> lock(mutex_);
     if ((running_ && !accepting_) || draining_)
-      throw std::logic_error("SyncRemuxer正在排空");
+      throw std::logic_error("SyncRemuxer 正在排空");
     return running_;
   }
 
@@ -395,7 +396,7 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
 
   void RequireAccepting() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!accepting_) throw std::logic_error("SyncRemuxer未启动或已经排空");
+    if (!accepting_) throw std::logic_error("SyncRemuxer 未启动或已经排空");
   }
 
   void ReportError(std::string_view target, int code,
@@ -559,7 +560,7 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
       }
       track.rolled_back = true;
       MW_LOG_INFO("streamer",
-                  "SyncRemuxer时间戳回退: generation={}, stream={}, "
+                  "SyncRemuxer 时间戳回退: generation={}, stream={}, "
                   "previous_dts_ns={}, dts_ns={}",
                   item.generation, track.index, *track.processed_dts,
                   item.dts_ns);
@@ -600,7 +601,7 @@ class SyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     Initialize(true, final_eof);
     if (origin_) {
       MW_LOG_INFO("streamer",
-                  "SyncRemuxer共同时间线接续: generation={}, base_ns={}, "
+                  "SyncRemuxer 共同时间线接续: generation={}, base_ns={}, "
                   "origin_ns={}",
                   *generation_, base_ns_, *origin_);
     }

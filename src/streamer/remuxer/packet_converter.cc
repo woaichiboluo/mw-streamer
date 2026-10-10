@@ -41,28 +41,28 @@ mediakit::CodecId Codec(const AVCodecParameters& parameters) {
              parameters.codec_id == AV_CODEC_ID_AAC) {
     return mediakit::CodecAAC;
   }
-  throw std::invalid_argument("Remuxer仅支持H264、H265和AAC编码轨道");
+  throw std::invalid_argument("Remuxer 仅支持 H264、H265 和 AAC 编码轨道");
 }
 
 void ValidateNal(mediakit::CodecId codec, const char* data, std::size_t size) {
   const auto* bytes = reinterpret_cast<const std::uint8_t*>(data);
   if (size < (codec == mediakit::CodecH264 ? 2U : 3U) || (bytes[0] & 0x80)) {
-    throw std::invalid_argument("视频NAL头部无效或负载截断");
+    throw std::invalid_argument("视频 NAL 头部无效或负载截断");
   }
   if (codec == mediakit::CodecH264) {
     const auto type = bytes[0] & 0x1f;
     if (type == 0 || type >= 24) {
-      throw std::invalid_argument("H264 NAL类型无效");
+      throw std::invalid_argument("H264 NAL 类型无效");
     }
   } else if (!(bytes[1] & 0x07)) {
-    throw std::invalid_argument("H265 NAL temporal_id无效");
+    throw std::invalid_argument("H265 NAL temporal_id 无效");
   }
 }
 
 void ValidateAnnexB(mediakit::CodecId codec, const char* data,
                     std::size_t size) {
   const auto prefix = mediakit::prefixSize(data, size);
-  if (!prefix) throw std::invalid_argument("视频包缺少Annex B起始码");
+  if (!prefix) throw std::invalid_argument("视频包缺少 Annex B 起始码");
   mediakit::splitH264(
       data, size, prefix,
       [&](const char* nal, std::size_t bytes, std::size_t nal_prefix) {
@@ -73,7 +73,7 @@ void ValidateAnnexB(mediakit::CodecId codec, const char* data,
 std::uint32_t ReadLength(const std::uint8_t* data, std::size_t size,
                          std::size_t& offset, int width) {
   if (static_cast<std::size_t>(width) > size - offset) {
-    throw std::invalid_argument("视频NAL长度字段截断");
+    throw std::invalid_argument("视频 NAL 长度字段截断");
   }
   std::uint32_t length = 0;
   for (int index = 0; index < width; ++index) {
@@ -105,7 +105,7 @@ void AppendNal(std::string& output, mediakit::CodecId codec,
                int length_width) {
   const auto length = ReadLength(data, size, offset, length_width);
   if (length > size - offset) {
-    throw std::invalid_argument("视频NAL负载截断");
+    throw std::invalid_argument("视频 NAL 负载截断");
   }
   ValidateNal(codec, reinterpret_cast<const char*>(data + offset), length);
   output.append("\0\0\0\1", 4);
@@ -127,7 +127,7 @@ std::string Configuration(mediakit::CodecId codec, const std::uint8_t* data,
     const auto sps_count = data[5] & 0x1f;
     for (int index = 0; index < sps_count; ++index)
       AppendNal(annex_b, codec, data, size, offset, 2);
-    if (offset == size) throw std::invalid_argument("avcC缺少PPS字段");
+    if (offset == size) throw std::invalid_argument("avcC 缺少 PPS 字段");
     const auto pps_count = data[offset++];
     for (int index = 0; index < pps_count; ++index)
       AppendNal(annex_b, codec, data, size, offset, 2);
@@ -135,13 +135,13 @@ std::string Configuration(mediakit::CodecId codec, const std::uint8_t* data,
     length_width = (data[21] & 0x03) + 1;
     offset = 23;
     for (int array = 0; array < data[22]; ++array) {
-      if (offset == size) throw std::invalid_argument("hvcC数组字段截断");
+      if (offset == size) throw std::invalid_argument("hvcC 数组字段截断");
       ++offset;
       const auto count = ReadLength(data, size, offset, 2);
       for (std::uint32_t index = 0; index < count; ++index)
         AppendNal(annex_b, codec, data, size, offset, 2);
     }
-    if (offset != size) throw std::invalid_argument("hvcC存在多余数据");
+    if (offset != size) throw std::invalid_argument("hvcC 存在多余数据");
   }
   return annex_b;
 }
@@ -155,7 +155,7 @@ PacketConverter::PacketConverter(
     if (std::any_of(streams_.begin(), streams_.end(), [&](const auto& value) {
           return value.index == stream.stream_index;
         })) {
-      throw std::invalid_argument("Remuxer编码轨道索引重复");
+      throw std::invalid_argument("Remuxer 编码轨道索引重复");
     }
     const auto& parameters = *stream.codec_parameters.get();
     const auto codec = Codec(parameters);
@@ -170,13 +170,13 @@ PacketConverter::PacketConverter(
     const auto size = static_cast<std::size_t>(parameters.extradata_size);
     int length_width = 0;
     if (codec == mediakit::CodecAAC) {
-      if (size < 2) throw std::invalid_argument("AAC编码配置截断");
+      if (size < 2) throw std::invalid_argument("AAC 编码配置截断");
       track->setExtraData(data, size);
       const auto audio = std::static_pointer_cast<mediakit::AudioTrack>(track);
       if (audio->getAudioSampleRate() <= 0 || audio->getAudioChannel() <= 0 ||
           audio->getAudioSampleRate() != parameters.sample_rate ||
           audio->getAudioChannel() != parameters.ch_layout.nb_channels) {
-        throw std::invalid_argument("AAC配置与编码轨道的采样率或声道数不一致");
+        throw std::invalid_argument("AAC 配置与编码轨道的采样率或声道数不一致");
       }
     } else {
       std::string config;
@@ -192,7 +192,7 @@ PacketConverter::PacketConverter(
       track->inputFrame(frame);
     }
     if (!track->ready()) {
-      throw std::invalid_argument("Remuxer编码配置缺少有效参数集");
+      throw std::invalid_argument("Remuxer 编码配置缺少有效参数集");
     }
     streams_.push_back(
         {stream.stream_index, stream.time_base, codec, length_width});
@@ -210,7 +210,7 @@ mediakit::Frame::Ptr PacketConverter::Convert(const ffmpeg::Packet& packet,
                                               std::uint64_t pts_ms) {
   const auto* input = packet.get();
   if (!input || !input->data || input->size <= 0) {
-    throw std::invalid_argument("Remuxer需要非空编码包");
+    throw std::invalid_argument("Remuxer 需要非空编码包");
   }
   const auto stream = std::find_if(
       streams_.begin(), streams_.end(),
@@ -218,7 +218,7 @@ mediakit::Frame::Ptr PacketConverter::Convert(const ffmpeg::Packet& packet,
   if (stream == streams_.end() || input->time_base.num <= 0 ||
       input->time_base.den <= 0 ||
       av_cmp_q(input->time_base, stream->time_base) != 0) {
-    throw std::invalid_argument("Remuxer编码包轨道或时间基不匹配");
+    throw std::invalid_argument("Remuxer 编码包轨道或时间基不匹配");
   }
   toolkit::Buffer::Ptr buffer = std::make_shared<PacketBuffer>(packet);
   if (stream->codec != mediakit::CodecAAC) {
@@ -226,7 +226,7 @@ mediakit::Frame::Ptr PacketConverter::Convert(const ffmpeg::Packet& packet,
         !mediakit::prefixSize(buffer->data(), buffer->size())) {
       if (!stream->nal_length_size) {
         throw std::invalid_argument(
-            "视频包需要Annex B格式或编码配置中的NAL长度");
+            "视频包需要 Annex B 格式或编码配置中的 NAL 长度");
       }
       std::string annex_b;
       std::size_t offset = 0;
@@ -249,7 +249,7 @@ mediakit::Frame::Ptr PacketConverter::Convert(const ffmpeg::Packet& packet,
           reinterpret_cast<const std::uint8_t*>(frame->data() + offset),
           remaining);
       if (length <= 7 || static_cast<std::size_t>(length) > remaining) {
-        throw std::invalid_argument("AAC ADTS帧无效或负载截断");
+        throw std::invalid_argument("AAC ADTS 帧无效或负载截断");
       }
       offset += static_cast<std::size_t>(length);
     }
@@ -259,13 +259,13 @@ mediakit::Frame::Ptr PacketConverter::Convert(const ffmpeg::Packet& packet,
         tracks_[static_cast<std::size_t>(stream - streams_.begin())];
     if (!track->ready()) {
       if (!frame->prefixSize()) {
-        throw std::invalid_argument("缺少AAC配置时输入包必须包含ADTS头");
+        throw std::invalid_argument("缺少 AAC 配置时输入包必须包含 ADTS 头");
       }
       // The output layer clones tracks; retain configuration discovered from
       // ADTS here as well so subsequent raw AAC packets can use it.
       track->inputFrame(frame);
       if (!track->ready()) {
-        throw std::invalid_argument("AAC ADTS头缺少有效编码配置");
+        throw std::invalid_argument("AAC ADTS 头缺少有效编码配置");
       }
     }
   }

@@ -19,7 +19,7 @@ class MwStreamerContext final {
     if (ffmpeg_network_initialized) {
       const int error = avformat_network_deinit();
       if (error < 0) {
-        MW_LOG_ERROR("streamer", "释放FFmpeg网络失败: {}",
+        MW_LOG_ERROR("streamer", "释放 FFmpeg 网络失败: {}",
                      ffmpeg::AvErrorStr(error));
       }
     }

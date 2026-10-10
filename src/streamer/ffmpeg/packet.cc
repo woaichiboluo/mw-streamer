@@ -16,7 +16,7 @@ Packet::Packet() : packet_(av_packet_alloc()) {
 
 Packet::Packet(AVPacket* packet) : packet_(packet) {
   if (!packet_) {
-    throw std::invalid_argument("不能接管空AVPacket");
+    throw std::invalid_argument("不能接管空 AVPacket");
   }
 }
 
@@ -24,10 +24,10 @@ Packet::~Packet() { av_packet_free(&packet_); }
 
 Packet::Packet(const Packet& other) : Packet() {
   if (!other.packet_) {
-    throw std::logic_error("不能引用已移动的Packet");
+    throw std::logic_error("不能引用已移动的 Packet");
   }
   FfmpegException::throwIfError(av_packet_ref(packet_, other.packet_),
-                                "引用AVPacket");
+                                "引用 AVPacket");
 }
 
 Packet& Packet::operator=(const Packet& other) {
@@ -59,7 +59,7 @@ Packet Packet::Clone(const AVPacket& source) {
 
 Packet Packet::Clone() const {
   if (!packet_) {
-    throw std::logic_error("不能Clone已移动的Packet");
+    throw std::logic_error("不能 Clone 已移动的 Packet");
   }
   return Clone(*packet_);
 }

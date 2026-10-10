@@ -43,7 +43,7 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     std::lock_guard<std::mutex> control(control_);
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (running_) throw std::logic_error("AsyncRemuxer已经启动");
+      if (running_) throw std::logic_error("AsyncRemuxer 已经启动");
     }
     auto poller =
         poller_ ? poller_ : toolkit::EventPollerPool::Instance().getPoller();
@@ -72,7 +72,7 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
           try {
             output->Close();
           } catch (const std::exception& failure) {
-            MW_LOG_ERROR("streamer", "AsyncRemuxer启动回滚失败: {}",
+            MW_LOG_ERROR("streamer", "AsyncRemuxer 启动回滚失败: {}",
                          failure.what());
           }
           std::rethrow_exception(error);
@@ -177,7 +177,7 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
   bool RequireRegisterable() {
     std::lock_guard<std::mutex> lock(mutex_);
     if ((running_ && !accepting_) || draining_ || closing_)
-      throw std::logic_error("AsyncRemuxer正在排空");
+      throw std::logic_error("AsyncRemuxer 正在排空");
     return running_;
   }
   std::string Register(internal::OutputRegistration::Entry entry) {
@@ -200,7 +200,7 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
   }
   void RequireAccepting() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!accepting_) throw std::logic_error("AsyncRemuxer未启动或已经排空");
+    if (!accepting_) throw std::logic_error("AsyncRemuxer 未启动或已经排空");
   }
   void Error(std::string_view target, int code, std::string_view message,
              bool closing_error = false) {

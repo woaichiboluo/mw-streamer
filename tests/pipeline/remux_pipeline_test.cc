@@ -717,7 +717,7 @@ TEST_CASE("RemuxPipeline单个网络输出失败不终止整个会话",
                    probe.data(), probe.size());
       std::ifstream file(log_file);
       const std::string text((std::istreambuf_iterator<char>(file)), {});
-      return text.find("RemuxPipeline输出错误: target=" + unavailable) !=
+      return text.find("RemuxPipeline 输出错误: target=" + unavailable) !=
              std::string::npos;
     }));
     CHECK(pipeline.state() == PipelineState::kRunning);

@@ -16,7 +16,7 @@ Frame::Frame() : frame_(av_frame_alloc()) {
 
 Frame::Frame(AVFrame* frame) : frame_(frame) {
   if (!frame_) {
-    throw std::invalid_argument("不能接管空AVFrame");
+    throw std::invalid_argument("不能接管空 AVFrame");
   }
 }
 
@@ -24,10 +24,10 @@ Frame::~Frame() { av_frame_free(&frame_); }
 
 Frame::Frame(const Frame& other) : Frame() {
   if (!other.frame_) {
-    throw std::logic_error("不能引用已移动的Frame");
+    throw std::logic_error("不能引用已移动的 Frame");
   }
   FfmpegException::throwIfError(av_frame_ref(frame_, other.frame_),
-                                "引用AVFrame");
+                                "引用 AVFrame");
 }
 
 Frame& Frame::operator=(const Frame& other) {
@@ -59,7 +59,7 @@ Frame Frame::Clone(const AVFrame& source) {
 
 Frame Frame::Clone() const {
   if (!frame_) {
-    throw std::logic_error("不能Clone已移动的Frame");
+    throw std::logic_error("不能 Clone 已移动的 Frame");
   }
   return Clone(*frame_);
 }
@@ -68,10 +68,10 @@ Frame Frame::Ref() const { return Frame(*this); }
 
 void Frame::CopyPropertiesFrom(const Frame& source) {
   if (!frame_ || !source.frame_) {
-    throw std::logic_error("不能复制已移动Frame的属性");
+    throw std::logic_error("不能复制已移动 Frame 的属性");
   }
   FfmpegException::throwIfError(av_frame_copy_props(frame_, source.frame_),
-                                "复制AVFrame属性");
+                                "复制 AVFrame 属性");
 }
 
 void Frame::ClearCrop() noexcept {

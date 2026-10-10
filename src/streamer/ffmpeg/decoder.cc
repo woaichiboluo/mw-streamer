@@ -74,12 +74,12 @@ VideoDecoder::VideoDecoder(const StreamInfo& stream,
     const auto* native =
         reinterpret_cast<const AVHWDeviceContext*>(device.get()->data);
     if (native->type != AV_HWDEVICE_TYPE_CUDA) {
-      throw std::invalid_argument("硬解只支持CUDA视频设备");
+      throw std::invalid_argument("硬解只支持 CUDA 视频设备");
     }
     for (int index = 0;; ++index) {
       const auto* config = avcodec_get_hw_config(codec_context->codec, index);
       if (!config) {
-        throw std::invalid_argument("指定解码器不支持CUDA设备");
+        throw std::invalid_argument("指定解码器不支持 CUDA 设备");
       }
       if (config->device_type == native->type &&
           config->pix_fmt == AV_PIX_FMT_CUDA &&
@@ -120,7 +120,8 @@ bool Decoder::SendPacket(const Packet& packet) {
   const auto started = performance_.Begin();
   if (!packet.get() || !packet->data || packet->size <= 0) {
     performance_.PacketSent(started, nullptr, AVERROR(EINVAL));
-    throw std::invalid_argument("解码输入Packet不能为空，请使用Drain提交EOF");
+    throw std::invalid_argument(
+        "解码输入 Packet 不能为空，请使用 Drain 提交 EOF");
   }
   const int result = avcodec_send_packet(context_.get(), packet.get());
   performance_.PacketSent(started, packet.get(), result);

@@ -42,6 +42,14 @@ TEST_CASE("FFmpeg异常复制string_view的描述内容") {
   operation.clear();
 
   const std::string message = exception.what();
-  CHECK(message.find("打开解码器失败: ") == 0);
+  CHECK(message.find("打开解码器 失败: ") == 0);
   CHECK(message.find("后缀") == std::string::npos);
+}
+
+TEST_CASE("FFmpeg异常在函数名和失败描述之间保留空格") {
+  const ffmpeg::FfmpegException exception(AVERROR_HTTP_FORBIDDEN,
+                                          "avformat_open_input");
+  CHECK(std::string(exception.what()) ==
+        "avformat_open_input 失败: " +
+            ffmpeg::AvErrorStr(AVERROR_HTTP_FORBIDDEN));
 }

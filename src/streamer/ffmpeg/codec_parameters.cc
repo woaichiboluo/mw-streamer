@@ -16,7 +16,7 @@ CodecParameters::CodecParameters() : parameters_(avcodec_parameters_alloc()) {
 CodecParameters::CodecParameters(const AVCodecParameters& source)
     : CodecParameters() {
   FfmpegException::throwIfError(avcodec_parameters_copy(parameters_, &source),
-                                "复制FFmpeg编解码参数");
+                                "复制 FFmpeg 编解码参数");
 }
 
 CodecParameters::~CodecParameters() { avcodec_parameters_free(&parameters_); }
@@ -28,7 +28,7 @@ CodecParameters::CodecParameters(const CodecParameters& other)
   }
   FfmpegException::throwIfError(
       avcodec_parameters_copy(parameters_, other.parameters_),
-      "复制FFmpeg编解码参数");
+      "复制 FFmpeg 编解码参数");
 }
 
 CodecParameters& CodecParameters::operator=(const CodecParameters& other) {

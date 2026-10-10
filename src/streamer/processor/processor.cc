@@ -31,12 +31,12 @@ void Processor::SetOnStop(OnStop callback) noexcept {
 bool Processor::Start(const std::vector<ffmpeg::StreamInfo>& streams,
                       const ffmpeg::HwDeviceContext& video_device) noexcept {
   if (on_ready_ && !on_ready_(streams, video_device)) {
-    MW_LOG_WARNING("streamer", "Processor启动被OnReady拒绝");
+    MW_LOG_WARNING("streamer", "Processor 启动被 OnReady 拒绝");
     return false;
   }
   started_ = true;
   ended_ = false;
-  MW_LOG_INFO("streamer", "Processor启动完成");
+  MW_LOG_INFO("streamer", "Processor 启动完成");
   return true;
 }
 
@@ -51,14 +51,14 @@ ffmpeg::Frame Processor::ProcessAudio(const ffmpeg::Frame& frame) noexcept {
 void Processor::End() noexcept {
   if (!started_ || ended_) return;
   ended_ = true;
-  MW_LOG_INFO("streamer", "Processor处理结束");
+  MW_LOG_INFO("streamer", "Processor 处理结束");
   if (on_ended_) on_ended_();
 }
 
 void Processor::Stop() noexcept {
   if (!started_) return;
   started_ = false;
-  MW_LOG_INFO("streamer", "Processor停止完成");
+  MW_LOG_INFO("streamer", "Processor 停止完成");
   if (on_stop_) on_stop_();
 }
 

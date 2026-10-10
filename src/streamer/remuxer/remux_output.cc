@@ -40,14 +40,15 @@ std::map<std::pair<std::string, std::uint16_t>, Listener> listeners;
 
 void RequireServerCertificate(bool tls) {
   if (tls && !toolkit::SSL_Initor::Instance().hasServerCertificate()) {
-    throw std::invalid_argument("TLS发布需要在InitConfig.tls中配置服务器证书");
+    throw std::invalid_argument(
+        "TLS 发布需要在 InitConfig.tls 中配置服务器证书");
   }
 }
 
 void ReservePath(const std::string& app, const std::string& stream) {
   std::lock_guard<std::mutex> lock(listeners_mutex);
   if (!published_paths.emplace(app, stream).second) {
-    throw std::invalid_argument("RTSP发布路径已经被占用");
+    throw std::invalid_argument("RTSP 发布路径已经被占用");
   }
 }
 
@@ -91,7 +92,7 @@ std::string Schema(const std::string& url) {
     if (extension == ".mp4" || extension == ".m3u8") return {};
   }
   throw std::invalid_argument(
-      "Remuxer目标需要RTSP(S)、RTMP(S)、SRT或本地MP4/M3U8路径");
+      "Remuxer 目标需要 RTSP(S)、RTMP(S)、SRT 或本地 MP4/M3U8 路径");
 }
 
 std::string RecordingPath(const std::string& path) {
@@ -115,7 +116,7 @@ void ValidatePublish(OutputRegistration::Kind kind, const std::string& app,
         app.find_first_of("/\\") != std::string::npos ||
         stream.find_first_of("/\\") != std::string::npos) {
       throw std::invalid_argument(
-          "RTSP发布需要有效app、stream、监听地址和端口");
+          "RTSP 发布需要有效 app、stream、监听地址和端口");
     }
     return;
   }
@@ -127,7 +128,7 @@ void ValidatePublish(OutputRegistration::Kind kind, const std::string& app,
            });
   };
   if (!valid_segment(app) || !valid_segment(stream) || ip.empty() || port == 0)
-    throw std::invalid_argument("HLS发布需要有效app、stream、监听地址和端口");
+    throw std::invalid_argument("HLS 发布需要有效 app、stream、监听地址和端口");
 }
 
 }  // namespace
@@ -175,8 +176,8 @@ void OutputRegistration::Add(Entry entry) {
         return existing.kind == entry.kind;
       })) {
     throw std::logic_error(entry.kind == Kind::kRtsp
-                               ? "Remuxer只允许一个RTSP发布点"
-                               : "Remuxer只允许一个HLS发布点");
+                               ? "Remuxer 只允许一个 RTSP 发布点"
+                               : "Remuxer 只允许一个 HLS 发布点");
   }
   entries_.push_back(std::move(entry));
 }
@@ -227,7 +228,8 @@ void RemuxOutput::Start(const std::vector<mediakit::Track::Ptr>& tracks) {
   muxer->setMediaListener(shared_from_this());
   muxer->setTrackReadyTimeoutMS(0);
   for (const auto& track : tracks) {
-    if (!muxer->addTrack(track)) throw std::invalid_argument("ZLM拒绝编码轨道");
+    if (!muxer->addTrack(track))
+      throw std::invalid_argument("ZLM 拒绝编码轨道");
   }
   muxer->addTrackCompleted();
   muxer_ = std::move(muxer);
@@ -266,7 +268,7 @@ void RemuxOutput::AddRtspPublish(const std::string& app,
                                  const std::string& ip, std::uint16_t port,
                                  bool tls) {
   ValidatePublish(OutputRegistration::Kind::kRtsp, app, stream, ip, port);
-  if (server_) throw std::logic_error("Remuxer只允许一个RTSP发布点");
+  if (server_) throw std::logic_error("Remuxer 只允许一个 RTSP 发布点");
   RequireServerCertificate(tls);
   ReservePath(app, stream);
   try {
@@ -291,12 +293,12 @@ std::string RemuxOutput::AddHlsPublish(const std::string& app,
                                        const std::string& ip,
                                        std::uint16_t port, bool tls) {
   ValidatePublish(OutputRegistration::Kind::kHls, app, stream, ip, port);
-  if (hls_server_) throw std::logic_error("Remuxer只允许一个HLS发布点");
+  if (hls_server_) throw std::logic_error("Remuxer 只允许一个 HLS 发布点");
   RequireServerCertificate(tls);
   {
     std::lock_guard<std::mutex> lock(listeners_mutex);
     if (!hls_published_paths.emplace(app, stream).second)
-      throw std::invalid_argument("HLS发布路径已经被占用");
+      throw std::invalid_argument("HLS 发布路径已经被占用");
   }
   try {
     auto server = tls ? Listen<mediakit::HttpsSession>(ip, port, poller_,

@@ -48,7 +48,7 @@ StreamInfo StreamInfo::FromCodecContext(const AVCodecContext& context,
   CodecParameters parameters;
   FfmpegException::throwIfError(
       avcodec_parameters_from_context(parameters.get(), &context),
-      "从AVCodecContext导出CodecParameters");
+      "从 AVCodecContext 导出 CodecParameters");
   StreamInfo stream_info{
       stream_index,
       std::move(parameters),
@@ -66,7 +66,7 @@ void StreamInfo::Validate() const {
        parameters->codec_type != AVMEDIA_TYPE_VIDEO) ||
       parameters->extradata_size < 0 ||
       (parameters->extradata_size > 0 && !parameters->extradata)) {
-    throw std::invalid_argument("FFmpeg StreamInfo参数无效");
+    throw std::invalid_argument("FFmpeg StreamInfo 参数无效");
   }
 }
 

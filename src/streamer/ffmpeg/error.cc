@@ -18,7 +18,7 @@ std::string AvErrorStr(int error) {
 
 FfmpegException::FfmpegException(int error, std::string_view operation)
     : std::runtime_error(
-          fmt::format("{}失败: {}", operation, AvErrorStr(error))),
+          fmt::format("{} 失败: {}", operation, AvErrorStr(error))),
       error_code_(error) {}
 
 int FfmpegException::error_code() const noexcept { return error_code_; }

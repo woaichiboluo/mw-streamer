@@ -32,7 +32,7 @@ void EnableUtf8Console() {
 
 ScopedTimerResolution::ScopedTimerResolution() {
   if (timeBeginPeriod(1) != TIMERR_NOERROR) {
-    throw std::runtime_error("无法申请Windows 1ms定时精度");
+    throw std::runtime_error("无法申请 Windows 1 ms 定时精度");
   }
 }
 

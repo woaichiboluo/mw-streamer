@@ -21,7 +21,7 @@ bool Terminal(PipelineState state) {
 
 FfmpegInputConfig InputConfig(const RemuxPipelineConfig& config) {
   if (config.input.mode != InputMode::kRemux) {
-    throw std::invalid_argument("RemuxPipeline需要kRemux输入模式");
+    throw std::invalid_argument("RemuxPipeline 需要 kRemux 输入模式");
   }
   return config.input;
 }
@@ -32,9 +32,9 @@ void Notify(const Callback& callback, Args&&... args) noexcept {
   try {
     callback(std::forward<Args>(args)...);
   } catch (const std::exception& error) {
-    MW_LOG_ERROR("streamer", "RemuxPipeline业务回调异常: {}", error.what());
+    MW_LOG_ERROR("streamer", "RemuxPipeline 业务回调异常: {}", error.what());
   } catch (...) {
-    MW_LOG_ERROR("streamer", "RemuxPipeline业务回调发生未知异常");
+    MW_LOG_ERROR("streamer", "RemuxPipeline 业务回调发生未知异常");
   }
 }
 
@@ -58,7 +58,7 @@ class RemuxPipeline::Impl final {
     remuxer_.SetOnError([this](auto target, int code, auto message) {
       if (!target.empty()) {
         MW_LOG_WARNING("streamer",
-                       "RemuxPipeline输出错误: target={} code={} {}", target,
+                       "RemuxPipeline 输出错误: target={} code={} {}", target,
                        code, message);
         return;
       }
@@ -112,13 +112,13 @@ class RemuxPipeline::Impl final {
   void Start(std::string_view url) {
     if (url.empty() ||
         url.find_first_not_of(" \t\r\n\f\v") == std::string_view::npos) {
-      throw std::invalid_argument("RemuxPipeline输入地址不能为空");
+      throw std::invalid_argument("RemuxPipeline 输入地址不能为空");
     }
     {
       std::lock_guard<std::mutex> control(control_);
       const auto previous = state();
       if (previous != PipelineState::kIdle && !Terminal(previous)) {
-        throw std::logic_error("RemuxPipeline已经启动");
+        throw std::logic_error("RemuxPipeline 已经启动");
       }
       if (worker_.joinable()) worker_.join();
       {
@@ -156,7 +156,7 @@ class RemuxPipeline::Impl final {
     }
     Stop();
     if (error) std::rethrow_exception(error);
-    throw ffmpeg::FfmpegException(AVERROR_EXIT, "RemuxPipeline启动被停止");
+    throw ffmpeg::FfmpegException(AVERROR_EXIT, "RemuxPipeline 启动被停止");
   }
 
   void Stop() {
@@ -186,7 +186,7 @@ class RemuxPipeline::Impl final {
  private:
   void RequireAdding() const {
     if (!Terminal(state()) && Finishing()) {
-      throw std::logic_error("RemuxPipeline停止过程中不能添加输出");
+      throw std::logic_error("RemuxPipeline 停止过程中不能添加输出");
     }
   }
 
@@ -205,7 +205,7 @@ class RemuxPipeline::Impl final {
 
   void RequireConfigurable() {
     if (worker_.joinable())
-      throw std::logic_error("配置RemuxPipeline回调前需要Stop");
+      throw std::logic_error("配置 RemuxPipeline 回调前需要 Stop");
   }
 
   bool Finishing() const {
@@ -250,7 +250,7 @@ class RemuxPipeline::Impl final {
 
   void Fail(std::string_view source, int code, std::string_view message,
             std::exception_ptr error = {}) {
-    MW_LOG_ERROR("streamer", "RemuxPipeline会话失败: source={} code={} {}",
+    MW_LOG_ERROR("streamer", "RemuxPipeline 会话失败: source={} code={} {}",
                  source, code, message);
     std::lock_guard<std::mutex> lock(mutex_);
     if (Terminal(status_.state)) return;
