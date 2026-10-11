@@ -12,6 +12,7 @@ set(MW_STREAMER_SOURCES
     init/init.cc
     input/ffmpeg_input.cc
     pipeline/batch_pipeline.cc
+    pipeline/live_pipeline.cc
     pipeline/remux_pipeline.cc
     performance/performance.cc
     processor/batch_processor.cc
