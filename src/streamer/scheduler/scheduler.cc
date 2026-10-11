@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <exception>
+#include <new>
 #include <utility>
 
 extern "C" {
@@ -40,6 +41,15 @@ bool SameAudioFormat(const AVFrame& left, const AVFrame& right) {
   return left.format == right.format && left.sample_rate == right.sample_rate &&
          av_channel_layout_compare(&left.ch_layout, &right.ch_layout) == 0;
 }
+
+int ErrorCode(const std::exception& error) noexcept {
+  if (const auto* native =
+          dynamic_cast<const ffmpeg::FfmpegException*>(&error)) {
+    return native->error_code();
+  }
+  return dynamic_cast<const std::bad_alloc*>(&error) ? AVERROR(ENOMEM)
+                                                     : AVERROR_EXTERNAL;
+}
 }  // namespace
 
 Scheduler::Scheduler(SchedulerConfig config) noexcept : config_(config) {}
@@ -56,6 +66,10 @@ void Scheduler::SetOnAudio(OnFrame callback) noexcept {
 
 void Scheduler::SetOnEnded(OnEnded callback) noexcept {
   on_ended_ = std::move(callback);
+}
+
+void Scheduler::SetOnError(OnError callback) noexcept {
+  on_error_ = std::move(callback);
 }
 
 bool Scheduler::Start(const std::vector<ffmpeg::StreamInfo>& streams) noexcept {
@@ -76,6 +90,7 @@ bool Scheduler::Start(const std::vector<ffmpeg::StreamInfo>& streams) noexcept {
     Clear();
     initialized_ = true;
     stopping_ = false;
+    failed_ = false;
     draining_ = false;
     ended_notified_ = false;
     video_done_ = !video;
@@ -126,13 +141,13 @@ std::int64_t Scheduler::OutputTime(Clock::time_point now) const noexcept {
 bool Scheduler::SubmitVideo(const ffmpeg::Frame& frame) noexcept {
   try {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!initialized_ || stopping_ || draining_ || video_done_) return false;
+    if (!initialized_ || stopping_ || failed_ || draining_ || video_done_)
+      return false;
     MW_LOG_TRACE("streamer", "Scheduler video input: pts={}, now={}",
                  FramePts(frame), SystemNs(Clock::now()));
     if (video_frames_.size() >= kMaxVideoFrames) {
       // Clear the video cache and reset selection when it reaches this limit.
-      MW_LOG_WARNING("streamer",
-                     "Scheduler 视频缓存达到 30 帧，清空并重新同步");
+      MW_LOG_ERROR("streamer", "Scheduler 视频缓存达到 30 帧，清空并重新同步");
       performance_.RejectVideo(video_frames_.size());
       video_frames_.clear();
       video_timing_set_ = false;
@@ -141,11 +156,7 @@ bool Scheduler::SubmitVideo(const ffmpeg::Frame& frame) noexcept {
     video_frames_.push_back(frame.Ref());
     performance_.Accept(true);
   } catch (const std::exception& error) {
-    if (performance_.enabled()) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      performance_.Error(true);
-    }
-    MW_LOG_ERROR("streamer", "Scheduler 缓存视频失败: {}", error.what());
+    Fail(ErrorCode(error), error.what(), true);
     return false;
   }
   Wake();
@@ -210,7 +221,7 @@ ffmpeg::Frame Scheduler::ResampleAudio(const ffmpeg::Frame& frame) {
 
 bool Scheduler::QueueAudio(ffmpeg::Frame frame, bool append_tail) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (stopping_) return false;
+  if (stopping_ || failed_) return false;
   const auto now = SystemNs(Clock::now());
   const auto rate = config_.audio_sample_rate;
   const auto mapping = audio_timing_.Map(FramePts(frame), frame->nb_samples,
@@ -239,7 +250,7 @@ bool Scheduler::QueueAudio(ffmpeg::Frame frame, bool append_tail) {
   const auto end = placement + frame->nb_samples;
   if (end > kMaxAudioSamples) {
     performance_.RejectAudio(frame->nb_samples);
-    MW_LOG_WARNING("streamer", "Scheduler 音频缓存超过样本上限，丢弃本次输入");
+    MW_LOG_ERROR("streamer", "Scheduler 音频缓存超过样本上限，丢弃本次输入");
     return false;
   }
   // Replace the previous tail at the mapped position. Gaps between segments
@@ -269,7 +280,8 @@ bool Scheduler::QueueAudio(ffmpeg::Frame frame, bool append_tail) {
 bool Scheduler::SubmitAudio(const ffmpeg::Frame& frame) noexcept {
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!initialized_ || stopping_ || draining_ || audio_done_) return false;
+    if (!initialized_ || stopping_ || failed_ || draining_ || audio_done_)
+      return false;
     ++audio_calls_;
   }
   bool accepted = false;
@@ -281,11 +293,7 @@ bool Scheduler::SubmitAudio(const ffmpeg::Frame& frame) noexcept {
       accepted = true;
     }
   } catch (const std::exception& error) {
-    if (performance_.enabled()) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      performance_.Error(false);
-    }
-    MW_LOG_ERROR("streamer", "Scheduler 音频处理失败: {}", error.what());
+    Fail(ErrorCode(error), error.what(), false);
   }
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -332,18 +340,14 @@ void Scheduler::FlushResampler() {
 void Scheduler::Drain() noexcept {
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!initialized_ || stopping_ || draining_) return;
+    if (!initialized_ || stopping_ || failed_ || draining_) return;
     draining_ = true;
     ++audio_calls_;
   }
   try {
     FlushResampler();
   } catch (const std::exception& error) {
-    if (performance_.enabled()) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      performance_.Error(false);
-    }
-    MW_LOG_ERROR("streamer", "Scheduler 排空音频失败: {}", error.what());
+    Fail(ErrorCode(error), error.what(), false);
   }
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -683,8 +687,8 @@ void Scheduler::NotifyEnded() noexcept {
   bool notify = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (initialized_ && draining_ && !stopping_ && video_done_ && audio_done_ &&
-        audio_calls_ == 0 && !ended_notified_) {
+    if (initialized_ && draining_ && !stopping_ && !failed_ && video_done_ &&
+        audio_done_ && audio_calls_ == 0 && !ended_notified_) {
       ended_notified_ = true;
       ++callback_calls_;
       notify = true;
@@ -705,6 +709,25 @@ void Scheduler::NotifyEnded() noexcept {
     }
     idle_.notify_all();
   }
+}
+
+void Scheduler::Fail(int error, std::string_view message, bool video) noexcept {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!initialized_ || stopping_ || failed_) return;
+    failed_ = true;
+    if (performance_.enabled()) performance_.Error(video);
+    ++callback_calls_;
+  }
+  RequestStop();
+  MW_LOG_ERROR("streamer", "Scheduler 运行失败: track={}, error={}, reason={}",
+               video ? "video" : "audio", error, message);
+  if (on_error_) on_error_(error, message);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    --callback_calls_;
+  }
+  idle_.notify_all();
 }
 
 void Scheduler::Clear() noexcept {
@@ -786,8 +809,7 @@ void Scheduler::RunVideo() noexcept {
     TickVideo(started);
     if (performance_.enabled()) RecordTick(true, tick_started, started, 0);
   } catch (const std::exception& error) {
-    MW_LOG_ERROR("streamer", "调度视频线程初始化失败: {}", error.what());
-    RequestStop();
+    Fail(ErrorCode(error), error.what(), true);
     WorkerStarted();
     FinishTrack(true);
     return;
@@ -808,14 +830,9 @@ void Scheduler::RunVideo() noexcept {
       if (!running) break;
     } catch (const std::exception& error) {
       if (performance_.enabled()) {
-        {
-          std::lock_guard<std::mutex> lock(mutex_);
-          performance_.Error(true);
-        }
         RecordTick(true, tick_started, deadline, interval);
       }
-      MW_LOG_ERROR("streamer", "视频输出失败: {}", error.what());
-      RequestStop();
+      Fail(ErrorCode(error), error.what(), true);
       break;
     }
     ++tick;
@@ -859,16 +876,11 @@ void Scheduler::RunAudio() noexcept {
       if (!running) break;
     } catch (const std::exception& error) {
       if (performance_.enabled()) {
-        {
-          std::lock_guard<std::mutex> lock(mutex_);
-          performance_.Error(false);
-        }
         RecordTick(
             false, tick_started, deadline,
             SamplesNs(config_.audio_block_samples, config_.audio_sample_rate));
       }
-      MW_LOG_ERROR("streamer", "音频输出失败: {}", error.what());
-      RequestStop();
+      Fail(ErrorCode(error), error.what(), false);
       break;
     }
     samples += config_.audio_block_samples;

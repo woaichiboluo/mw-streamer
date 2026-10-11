@@ -9,6 +9,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -40,6 +41,11 @@ class MW_STREAMER_API Scheduler final {
   // at the configured rate and preserves the input channel layout.
   using OnFrame = std::function<void(const ffmpeg::Frame&)>;
   using OnEnded = std::function<void()>;
+  // Once per session for an unrecoverable processing error. Runs on the input
+  // caller or an output worker, outside internal locks. Both workers are
+  // requested to stop and further input is rejected. The external pipeline
+  // must stop Input and call Stop; never call Stop from this callback.
+  using OnError = std::function<void(int, std::string_view)>;
 
   explicit Scheduler(SchedulerConfig config = {}) noexcept;
   ~Scheduler();
@@ -51,19 +57,22 @@ class MW_STREAMER_API Scheduler final {
   void SetOnVideo(OnFrame callback) noexcept;
   void SetOnAudio(OnFrame callback) noexcept;
   void SetOnEnded(OnEnded callback) noexcept;
+  void SetOnError(OnError callback) noexcept;
 
   // Starts a fresh session. A track absent from streams has no worker.
   // false means configuration is invalid, already started, or startup failed.
   // Stop must precede starting another session; callbacks are retained.
   bool Start(const std::vector<ffmpeg::StreamInfo>& streams) noexcept;
+  // false also covers normal cache overflow and inactive/draining sessions;
+  // only OnError signals an unrecoverable processing failure.
   bool SubmitVideo(const ffmpeg::Frame& frame) noexcept;
   bool SubmitAudio(const ffmpeg::Frame& frame) noexcept;
   // Finishes the current input, drains SWR and short PCM tails, then invokes
   // OnEnded once after both tracks and their frame callbacks finish.
   void Drain() noexcept;
-  // Cancels and joins workers, waits for in-flight input and OnEnded calls,
-  // then clears buffers. No callbacks run afterward until the next Start.
-  // The external pipeline calls Stop, never a Scheduler callback.
+  // Cancels and joins workers, waits for in-flight input and OnEnded/OnError
+  // calls, then clears buffers. No callbacks run afterward until the next
+  // Start. The external pipeline calls Stop, never a Scheduler callback.
   void Stop() noexcept;
 
  private:
@@ -83,6 +92,7 @@ class MW_STREAMER_API Scheduler final {
   void WorkerStarted() noexcept;
   void FinishTrack(bool video) noexcept;
   void NotifyEnded() noexcept;
+  void Fail(int error, std::string_view message, bool video) noexcept;
   void RequestStop() noexcept;
   void Join() noexcept;
   void Wake() noexcept;
@@ -105,10 +115,12 @@ class MW_STREAMER_API Scheduler final {
   OnFrame on_video_;
   OnFrame on_audio_;
   OnEnded on_ended_;
+  OnError on_error_;
   std::mutex mutex_;
   std::condition_variable idle_;
   bool initialized_ = false;
   bool stopping_ = false;
+  bool failed_ = false;
   bool draining_ = false;
   bool video_done_ = true;
   bool audio_done_ = true;
