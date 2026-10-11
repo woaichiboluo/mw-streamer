@@ -167,7 +167,9 @@ void Encoder::Start(const EncoderConfig& config,
       native.encoder_name = config.video_encoder_name;
       native.width = config.width ? config.width : parameters->width;
       native.height = config.height ? config.height : parameters->height;
-      native.pixel_format = static_cast<AVPixelFormat>(parameters->format);
+      native.pixel_format = config.video_pixel_format == AV_PIX_FMT_NONE
+                                ? static_cast<AVPixelFormat>(parameters->format)
+                                : config.video_pixel_format;
       native.frame_rate = config.fps;
       native.time_base = av_inv_q(config.fps);
       native.bit_rate = config.video_bit_rate;

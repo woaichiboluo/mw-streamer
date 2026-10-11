@@ -8,6 +8,117 @@ namespace {
 using namespace encoder_test;
 using mw::streamer::Encoder;
 
+ffmpeg::Frame Nv12VideoFrame(int index) {
+  ffmpeg::Frame frame;
+  frame->width = 64;
+  frame->height = 64;
+  frame->format = AV_PIX_FMT_NV12;
+  frame->time_base = kNanoseconds;
+  frame->pts = kStart + index * kFrameInterval;
+  frame->duration = kFrameInterval;
+  ffmpeg::FfmpegException::throwIfError(av_frame_get_buffer(frame.get(), 0),
+                                        "分配 NV12 视频测试帧");
+  for (int plane = 0; plane < 2; ++plane) {
+    const int rows = plane == 0 ? 64 : 32;
+    const int value = plane == 0 ? 20 + index * 20 : 128;
+    for (int row = 0; row < rows; ++row) {
+      std::memset(frame->data[plane] + row * frame->linesize[plane], value, 64);
+    }
+  }
+  return frame;
+}
+
+TEST_CASE("视频像素格式默认沿用轨道且显式配置优先",
+          "[encoder][configuration][pixel-format]") {
+  Capture capture;
+  Encoder encoder;
+  capture.Bind(encoder);
+  ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
+  auto config = Config();
+  CHECK(config.video_pixel_format == AV_PIX_FMT_NONE);
+  auto source = VideoStream();
+  SECTION("未指定格式时使用 NV12 输入轨道") {
+    source.codec_parameters.get()->format = AV_PIX_FMT_NV12;
+  }
+  SECTION("显式 NV12 格式覆盖 YUV420P 输入轨道") {
+    config.video_pixel_format = AV_PIX_FMT_NV12;
+  }
+  const auto source_format = source.codec_parameters.get()->format;
+  encoder.Start(config, {source}, cpu);
+  CHECK(source.codec_parameters.get()->format == source_format);
+  for (int index = 0; index < 3; ++index) {
+    REQUIRE(encoder.SubmitVideo(Nv12VideoFrame(index)));
+  }
+  encoder.Drain();
+  REQUIRE(capture.Wait());
+  encoder.Stop();
+  CHECK(capture.errors == 0);
+  CHECK(capture.ended == 1);
+  CHECK(capture.callback_error.empty());
+  CHECK(source.codec_parameters.get()->format == source_format);
+  REQUIRE(capture.streams.size() == 1);
+  const auto& encoded_stream = capture.streams.front();
+  ffmpeg::VideoDecoder decoder(encoded_stream);
+  const auto frames =
+      Decode(decoder, capture.packets, encoded_stream.stream_index);
+  REQUIRE(frames.size() == 3);
+  for (std::size_t index = 0; index < frames.size(); ++index) {
+    CHECK(frames[index]->width == 64);
+    CHECK(frames[index]->height == 64);
+    const int expected = 20 + static_cast<int>(index) * 20;
+    const int actual = frames[index]->data[0][0];
+    CHECK(actual >= expected - 4);
+    CHECK(actual <= expected + 4);
+  }
+}
+
+TEST_CASE("无效视频像素格式启动失败后可重新启动",
+          "[encoder][configuration][pixel-format]") {
+  Capture capture;
+  Encoder encoder;
+  capture.Bind(encoder);
+  ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
+  auto config = Config();
+  SECTION("不存在的像素格式") { config.video_pixel_format = AV_PIX_FMT_NB; }
+  SECTION("编码器不支持的像素格式") {
+    config.video_pixel_format = AV_PIX_FMT_RGB24;
+  }
+  CHECK_THROWS(encoder.Start(config, {VideoStream()}, cpu));
+  CHECK(capture.ready == 0);
+  CHECK(capture.errors == 0);
+  REQUIRE_NOTHROW(encoder.Start(Config(), {VideoStream()}, cpu));
+  REQUIRE(encoder.SubmitVideo(VideoFrame(0)));
+  encoder.Drain();
+  REQUIRE(capture.Wait());
+  encoder.Stop();
+  CHECK(capture.ready == 1);
+  CHECK(capture.ended == 1);
+  CHECK(capture.errors == 0);
+  REQUIRE(capture.streams.size() == 1);
+  const auto& encoded_stream = capture.streams.front();
+  ffmpeg::VideoDecoder decoder(encoded_stream);
+  CHECK(Decode(decoder, capture.packets, encoded_stream.stream_index).size() ==
+        1);
+}
+
+TEST_CASE("显式视频像素格式不会自动转换不匹配的输入帧",
+          "[encoder][configuration][pixel-format]") {
+  Capture capture;
+  Encoder encoder;
+  capture.Bind(encoder);
+  ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
+  auto config = Config();
+  config.video_pixel_format = AV_PIX_FMT_NV12;
+  encoder.Start(config, {VideoStream()}, cpu);
+  REQUIRE(encoder.SubmitVideo(VideoFrame(0)));
+  REQUIRE(capture.Wait());
+  encoder.Stop();
+  CHECK(capture.errors == 1);
+  CHECK(capture.ended == 0);
+  CHECK(capture.packets.empty());
+  CHECK(capture.callback_error.empty());
+}
+
 TEST_CASE("编码器启动提供输出轨道并允许停止后重新启动",
           "[encoder][lifecycle]") {
   Capture capture;

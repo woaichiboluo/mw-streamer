@@ -272,9 +272,9 @@ TEST_CASE("软硬解码交叉编码机械上传下载并保留共享CUDA设备�
   for (const auto& frame : input_frames) snapshots.push_back(Snapshot(frame));
 
   stream.time_base = kNanoseconds;
-  stream.codec_parameters.get()->format =
-      gpu_input ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+  const int source_format = stream.codec_parameters.get()->format;
   mw::streamer::EncoderConfig config;
+  config.video_pixel_format = gpu_input ? AV_PIX_FMT_NV12 : AV_PIX_FMT_NONE;
   config.fps = {10, 1};
   config.video_bit_rate = 2000000;
   config.gop_size = 10;
@@ -310,6 +310,7 @@ TEST_CASE("软硬解码交叉编码机械上传下载并保留共享CUDA设备�
   });
   // A shared input device does not force a software encoder onto the GPU.
   encoder.Start(config, {stream}, device);
+  CHECK(stream.codec_parameters.get()->format == source_format);
   REQUIRE(capture.streams.size() == 1);
   for (std::size_t index = 0; index < input_frames.size(); ++index) {
     REQUIRE(encoder.SubmitVideo(input_frames[index]));
@@ -376,8 +377,9 @@ TEST_CASE("外层CUDA编码支持CBR和带峰值上限的VBR", "[.][encoder][cud
   ffmpeg::StreamInfo stream;
   const auto frames = ReadFrames(device, stream);
   stream.time_base = kNanoseconds;
-  stream.codec_parameters.get()->format = AV_PIX_FMT_NV12;
+  const int source_format = stream.codec_parameters.get()->format;
   mw::streamer::EncoderConfig config;
+  config.video_pixel_format = AV_PIX_FMT_NV12;
   config.video_encoder_name = name;
   config.fps = {10, 1};
   config.video_bit_rate = 2000000;
@@ -405,6 +407,7 @@ TEST_CASE("外层CUDA编码支持CBR和带峰值上限的VBR", "[.][encoder][cud
     capture.wake.notify_all();
   });
   encoder.Start(config, {stream}, device);
+  CHECK(stream.codec_parameters.get()->format == source_format);
   REQUIRE(capture.streams.size() == 1);
   const auto& output = capture.streams.front();
   CHECK(output.codec_parameters.get()->bit_rate == config.video_bit_rate);

@@ -27,6 +27,10 @@ struct MW_STREAMER_API EncoderConfig {
   // Both zero preserve the input dimensions. No implicit resizing.
   int width = 0;
   int height = 0;
+  // NONE inherits the incoming stream's format. Otherwise this is the required
+  // pixel layout after processing (for example YUV420P or NV12), including the
+  // software layout of CUDA surfaces. No implicit pixel format conversion.
+  AVPixelFormat video_pixel_format = AV_PIX_FMT_NONE;
   std::string video_encoder_name = "libx264";
   std::string audio_encoder_name = "aac";
   std::int64_t video_bit_rate = 5000000;
