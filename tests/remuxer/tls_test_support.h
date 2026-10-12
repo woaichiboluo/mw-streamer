@@ -1,5 +1,5 @@
-#ifndef MW_STREAMER_TESTS_TLS_TEST_SUPPORT_H_
-#define MW_STREAMER_TESTS_TLS_TEST_SUPPORT_H_
+#ifndef MW_STREAMER_TESTS_REMUXER_TLS_TEST_SUPPORT_H_
+#define MW_STREAMER_TESTS_REMUXER_TLS_TEST_SUPPORT_H_
 
 #if defined(_WIN32)
 #include <winsock2.h>
@@ -365,4 +365,4 @@ inline Response VerifiedHttpGet(const std::string& url,
 
 }  // namespace tls_test
 
-#endif  // MW_STREAMER_TESTS_TLS_TEST_SUPPORT_H_
+#endif  // MW_STREAMER_TESTS_REMUXER_TLS_TEST_SUPPORT_H_

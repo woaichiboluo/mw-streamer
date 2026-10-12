@@ -12,7 +12,7 @@
 #include <type_traits>
 #include <vector>
 
-#include "../tls_test_support.h"
+#include "tls_test_support.h"
 
 extern "C" {
 #include <libavformat/avformat.h>

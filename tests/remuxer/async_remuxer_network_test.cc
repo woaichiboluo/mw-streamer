@@ -18,7 +18,6 @@
 #include <vector>
 
 #include "../encoder/encoder_test_support.h"
-#include "../tls_test_support.h"
 #include "Common/MediaSource.h"
 #include "Common/config.h"
 #include "Network/Session.h"
@@ -33,6 +32,7 @@
 #include "mw/streamer/input/ffmpeg_input.h"
 #include "mw/streamer/remuxer/async_remuxer.h"
 #include "mw/streamer/remuxer/sync_remuxer.h"
+#include "tls_test_support.h"
 
 namespace {
 
