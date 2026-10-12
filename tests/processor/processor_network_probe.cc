@@ -229,7 +229,7 @@ struct Probe {
       return;
     }
     std::vector<float> samples;
-    samples.reserve(frame->nb_samples);
+    samples.reserve(static_cast<std::size_t>(frame->nb_samples));
     for (int index = 0; index < frame->nb_samples; ++index)
       samples.push_back(ChannelZero(*frame.get(), index));
     if (frame->nb_samples < 128) {
@@ -238,7 +238,7 @@ struct Probe {
     }
     int anchor = -1;
     for (int i = 0; i < frame->nb_samples; ++i) {
-      if (std::abs(samples[i]) > 1e-5f) {
+      if (std::abs(samples[static_cast<std::size_t>(i)]) > 1e-5f) {
         anchor = std::min(i, frame->nb_samples - 128);
         break;
       }
@@ -276,7 +276,8 @@ struct Probe {
         float sample = 0;
         int64_t sample_pts = 0;
         if (!Reference(chunk, candidate + i, sample, sample_pts) ||
-            std::abs(sample - samples[anchor + i]) > 1.0f / 1073741824.0f) {
+            std::abs(sample - samples[static_cast<std::size_t>(anchor + i)]) >
+                1.0f / 1073741824.0f) {
           equal = false;
           break;
         }

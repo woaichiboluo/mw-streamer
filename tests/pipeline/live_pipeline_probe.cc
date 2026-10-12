@@ -189,9 +189,9 @@ int main(int argc, char** argv) {
         StateName(status.state), ready.load(), ended.load(), stopped.load(),
         startup, processed, stop_ms, video.frames.load(), audio.frames.load(),
         video.MediaSeconds(), audio.MediaSeconds(),
-        video.frames.load() / processed, audio.sample_rate.load(),
-        cuda_frames.load(), backend, config.input.loop, end_order.load(),
-        stop_order.load());
+        static_cast<double>(video.frames.load()) / processed,
+        audio.sample_rate.load(), cuda_frames.load(), backend,
+        config.input.loop, end_order.load(), stop_order.load());
     if (status.state == PipelineState::kFailed || invalid.load() ||
         (cuda && cuda_frames.load() != video.frames.load())) {
       fmt::print(stderr, "{}: {}\n", status.error_source, status.error_message);

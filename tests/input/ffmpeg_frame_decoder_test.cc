@@ -92,7 +92,7 @@ TEST_CASE("异步解码保留原始音频数据和时间戳并排空 EOF",
   decoder.Finish();
   ffmpeg::Frame frame;
   std::vector<std::int64_t> timestamps;
-  REQUIRE(WaitFor([&] {
+  const bool finished = WaitFor([&] {
     while (decoder.TryReceive(frame)) {
       timestamps.push_back(frame->pts);
       REQUIRE(frame->pts == frame->best_effort_timestamp);
@@ -106,7 +106,8 @@ TEST_CASE("异步解码保留原始音频数据和时间戳并排空 EOF",
       REQUIRE(frame->data[0][319] == 0x3a);
     }
     return decoder.finished();
-  }));
+  });
+  REQUIRE(finished);
   REQUIRE(timestamps.size() == 20);
   for (std::size_t index = 0; index < timestamps.size(); ++index) {
     REQUIRE(timestamps[index] == static_cast<std::int64_t>(index * 10));
@@ -174,7 +175,7 @@ TEST_CASE("输出队列满时 EOF 等待待推帧交付后完整排空",
   REQUIRE(decoder.end_pts() == AV_NOPTS_VALUE);
   int received = 0;
   ffmpeg::Frame frame;
-  REQUIRE(WaitFor([&] {
+  const bool finished = WaitFor([&] {
     while (decoder.TryReceive(frame)) {
       REQUIRE(frame->pts == received * 10);
       REQUIRE(frame->best_effort_timestamp == frame->pts);
@@ -182,7 +183,8 @@ TEST_CASE("输出队列满时 EOF 等待待推帧交付后完整排空",
       ++received;
     }
     return decoder.finished();
-  }));
+  });
+  REQUIRE(finished);
   REQUIRE(received == 12);
   REQUIRE(decoded == 12);
   REQUIRE(released == 12 * 320);

@@ -272,8 +272,9 @@ std::string Record(mw::streamer::SyncRemuxer& remuxer, const Media& media,
   return path;
 }
 
-void CheckRepeatedOutput(const Media& source, const Media& output,
-                         const std::map<AVMediaType, int>& repetitions) {
+void CheckRepeatedOutput(
+    const Media& source, const Media& output,
+    const std::map<AVMediaType, std::size_t>& repetitions) {
   std::map<AVMediaType, std::vector<const AVPacket*>> original;
   std::map<AVMediaType, std::vector<const AVPacket*>> recorded;
   for (const auto& packet : source.packets) {
@@ -328,7 +329,7 @@ void CheckRepeatedOutput(const Media& source, const Media& output,
         repetitions.at(AVMEDIA_TYPE_AUDIO) == repetitions.at(AVMEDIA_TYPE_VIDEO)
             ? repetitions.at(AVMEDIA_TYPE_AUDIO)
             : 1;
-    for (int round = 0; round < count; ++round) {
+    for (std::size_t round = 0; round < count; ++round) {
       CAPTURE(round);
       const auto actual_offset =
           first_pts(recorded, output, AVMEDIA_TYPE_AUDIO,
@@ -349,7 +350,7 @@ void CheckRepeatedOutput(const Media& source, const Media& output,
     // every decoded frame, including delayed B frames at each boundary.
     if (type == AVMEDIA_TYPE_VIDEO) {
       std::vector<std::uint64_t> hashes;
-      for (int round = 0; round < repetitions.at(type); ++round)
+      for (std::size_t round = 0; round < repetitions.at(type); ++round)
         hashes.insert(hashes.end(), frames.hashes.begin(), frames.hashes.end());
       CHECK(actual.at(type).hashes == hashes);
     }

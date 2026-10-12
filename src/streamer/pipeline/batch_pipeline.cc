@@ -288,8 +288,8 @@ class BatchPipeline::Impl final {
   using Clock = std::chrono::steady_clock;
   struct DeliveryClock {
     AVRational time_base;
-    std::optional<long double> anchor;
-    Clock::time_point started;
+    std::optional<long double> anchor = {};
+    Clock::time_point started = {};
     std::int64_t end_pts = AV_NOPTS_VALUE;
     bool ended = false;
   };

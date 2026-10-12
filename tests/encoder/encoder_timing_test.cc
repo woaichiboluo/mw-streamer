@@ -198,7 +198,9 @@ TEST_CASE("channel frame 不按输入音视频起点裁掉音频前缀",
     const auto* samples =
         reinterpret_cast<const float*>(frame->extended_data[0]);
     double mean = 0;
-    for (int index = 256; index < 768; ++index) mean += samples[index];
+    for (int index = 256; index < 768; ++index) {
+      mean += static_cast<double>(samples[index]);
+    }
     mean /= 512;
     CHECK(std::abs(mean - 0.75) < 0.1);
     checked_prefix = true;
@@ -279,7 +281,7 @@ TEST_CASE("Stop 排空 B 帧保留原生负 DTS 与展示顺序",
   }
   std::sort(presentation_times.begin(), presentation_times.end());
   for (int index = 0; index < kFrames; ++index) {
-    CHECK(presentation_times[index] == index);
+    CHECK(presentation_times[static_cast<std::size_t>(index)] == index);
   }
   const auto& stream = capture.streams.front();
   ffmpeg::VideoDecoder decoder(stream);
@@ -333,7 +335,9 @@ TEST_CASE("Stop 和析构排空 AAC 滤镜短尾及编码器延迟",
     const auto* samples =
         reinterpret_cast<const float*>(frame->extended_data[0]);
     double mean = 0;
-    for (int index = 256; index < 768; ++index) mean += samples[index];
+    for (int index = 256; index < 768; ++index) {
+      mean += static_cast<double>(samples[index]);
+    }
     mean /= 512;
     if (frame->pts == 0) {
       CHECK(std::abs(mean - 0.75) < 0.1);

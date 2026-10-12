@@ -40,7 +40,7 @@ struct DecodedInputSource {
   // boundary. Report actual produced channel frames, not raw decoded frames.
   // Input sources require this signal; standalone synthetic sources may omit
   // it. Capturing this function does not retain or access the Input object.
-  std::function<void(std::int64_t produced_frames)> complete;
+  std::function<void(std::int64_t produced_frames)> complete = {};
 };
 
 }  // namespace mw::streamer

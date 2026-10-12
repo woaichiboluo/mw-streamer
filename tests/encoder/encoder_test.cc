@@ -49,7 +49,7 @@ TEST_CASE("视频像素格式默认沿用轨道且显式配置优先",
   CHECK(source.codec_parameters.get()->format == source_format);
   for (int index = 0; index < 3; ++index) {
     REQUIRE(encoder.SubmitFrame(Video(Nv12VideoFrame(index))));
-    REQUIRE(capture.WaitPackets(index + 1));
+    REQUIRE(capture.WaitPackets(static_cast<std::size_t>(index + 1)));
   }
   encoder.Drain();
   REQUIRE(capture.Wait());

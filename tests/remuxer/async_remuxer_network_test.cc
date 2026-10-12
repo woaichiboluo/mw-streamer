@@ -6,6 +6,7 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <future>
@@ -45,7 +46,8 @@ class Runtime final {
  public:
   explicit Runtime(bool debug = false,
                    const tls_test::CertFixture* certificate = nullptr,
-                   bool trust_certificate = true, int poller_threads = 2) {
+                   bool trust_certificate = true,
+                   std::size_t poller_threads = 2) {
     mw::streamer::InitConfig config;
     config.event_poller_threads = poller_threads;
     config.work_threads = 1;

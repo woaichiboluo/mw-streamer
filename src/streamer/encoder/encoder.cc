@@ -148,7 +148,10 @@ class AudioFilter final {
     Check(avfilter_init_str(sink_, nullptr), "初始化编码音频输出");
     Check(avfilter_link(source_, 0, sink_, 0), "连接编码音频滤镜");
     Check(avfilter_graph_config(graph_.get(), nullptr), "配置编码音频滤镜");
-    if (frame_size > 0) av_buffersink_set_frame_size(sink_, frame_size);
+    if (frame_size > 0) {
+      av_buffersink_set_frame_size(sink_,
+                                   static_cast<unsigned int>(frame_size));
+    }
   }
 
   void Submit(const ffmpeg::Frame& frame) {

@@ -386,7 +386,8 @@ TEST_CASE("非整数帧率音频样本按周期分配且无累计漂移",
   const int cycle[]{800, 801, 801, 801, 801};
   std::int64_t samples = 0;
   for (std::size_t n = 0; n < output.audio.size(); ++n) {
-    REQUIRE(output.audio[n]->nb_samples == cycle[(n + initial_still) % 5]);
+    REQUIRE(output.audio[n]->nb_samples ==
+            cycle[(n + static_cast<std::size_t>(initial_still)) % 5]);
     REQUIRE(output.audio[n]->pts == samples);
     samples += output.audio[n]->nb_samples;
   }
@@ -450,7 +451,9 @@ TEST_CASE("29.97 帧率按输出相位分配音频样本且跨块余量保留 PC
   int expected = 0;
   for (std::size_t tick = 0; tick < output.audio.size(); ++tick) {
     const auto& frame = output.audio[tick];
-    REQUIRE(frame->nb_samples == channel_cycle[(tick + initial_still) % 5]);
+    REQUIRE(
+        frame->nb_samples ==
+        channel_cycle[(tick + static_cast<std::size_t>(initial_still)) % 5]);
     REQUIRE(frame->pts == expected);
     const auto* data = reinterpret_cast<const std::int32_t*>(frame->data[0]);
     for (int n = 0; n < frame->nb_samples; ++n)
@@ -590,7 +593,7 @@ TEST_CASE("短于 preroll 的源和空源正常 EOF 不会等待四帧",
   scheduler.Stop();
   REQUIRE(output.errors == 0);
   REQUIRE(output.ended == 1);
-  output.StripInitialStill(frames);
+  output.StripInitialStill(static_cast<std::size_t>(frames));
   REQUIRE(output.video.size() == static_cast<std::size_t>(frames));
 }
 
@@ -792,7 +795,7 @@ TEST_CASE("源临时 underflow 重复画面但同一 tick 音频为静音且恢�
   REQUIRE(silent >= 1);
   REQUIRE(pictures.size() == 36);
   for (std::size_t n = 0; n < pictures.size(); ++n)
-    REQUIRE(pictures[n] == 16 + n);
+    REQUIRE(pictures[n] == 16 + static_cast<int>(n));
 }
 
 TEST_CASE("仅音频源按 cadence 排空真实尾样本并补足最后一个 channel 块",

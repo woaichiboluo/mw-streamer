@@ -243,7 +243,7 @@ std::map<AVMediaType, DecodedTrack> DecodeRecording(const std::string& path) {
       track.sample_rate = frame->sample_rate;
       track.samples += frame->nb_samples;
       REQUIRE(frame->best_effort_timestamp != AV_NOPTS_VALUE);
-      const double pts = frame->best_effort_timestamp *
+      const double pts = static_cast<double>(frame->best_effort_timestamp) *
                          av_q2d(format->streams[index]->time_base);
       track.first = std::min(track.first, pts);
       const double duration =

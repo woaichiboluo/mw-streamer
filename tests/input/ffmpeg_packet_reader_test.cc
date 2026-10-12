@@ -54,7 +54,8 @@ class PacketSource {
     packet->duration = 5;
     packet->stream_index = static_cast<int>(index % 2);
     packet->flags = index % 3 == 0 ? AV_PKT_FLAG_KEY : 0;
-    std::memset(packet->data, static_cast<int>((index + 1) % 256), result);
+    std::memset(packet->data, static_cast<int>((index + 1) % 256),
+                static_cast<std::size_t>(result));
     return 0;
   }
 
@@ -112,7 +113,7 @@ TEST_CASE("Packet 读取器跨 EAGAIN 保留原包顺序并排空 EOF",
   FfmpegPacketReader reader([&](auto& packet) { return source.Read(packet); },
                             [&] { source.Cancel(); }, 32);
   ffmpeg::Packet packet;
-  for (const auto [index, size] :
+  for (const auto& [index, size] :
        std::vector<std::pair<std::size_t, int>>{{1, 4}, {3, 3}, {4, 2}}) {
     REQUIRE(reader.Pop(packet));
     CheckPacket(packet, index, size);
@@ -141,7 +142,7 @@ TEST_CASE("Packet 读取器暂时 ENOMEM 重试且成功读包重置计数",
   FfmpegPacketReader reader([&](auto& packet) { return source.Read(packet); },
                             [&] { source.Cancel(); }, 32);
   ffmpeg::Packet packet;
-  for (const auto [index, size] : std::vector<std::pair<std::size_t, int>>{
+  for (const auto& [index, size] : std::vector<std::pair<std::size_t, int>>{
            {0, 3}, {second, 4}, {third, 2}}) {
     REQUIRE(reader.Pop(packet));
     CheckPacket(packet, index, size);

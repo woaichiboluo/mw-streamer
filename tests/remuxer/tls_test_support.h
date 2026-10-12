@@ -286,7 +286,7 @@ inline Response VerifiedHttpGet(const std::string& url,
     Check(bool(connection), "TLS client connection creation failed");
     Check(SSL_set_fd(connection.get(), static_cast<int>(socket.get())) == 1,
           "TLS client socket binding failed");
-    const auto name = expected_name.empty() ? host : expected_name;
+    auto name = expected_name.empty() ? host : expected_name;
     in_addr numeric{};
     if (inet_pton(AF_INET, name.c_str(), &numeric) == 1) {
       Check(X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(connection.get()),
@@ -295,7 +295,8 @@ inline Response VerifiedHttpGet(const std::string& url,
     } else {
       Check(X509_VERIFY_PARAM_set1_host(SSL_get0_param(connection.get()),
                                         name.c_str(), 0) == 1 &&
-                SSL_set_tlsext_host_name(connection.get(), name.c_str()) == 1,
+                SSL_ctrl(connection.get(), SSL_CTRL_SET_TLSEXT_HOSTNAME,
+                         TLSEXT_NAMETYPE_host_name, name.data()) == 1,
             "TLS hostname verification setup failed");
     }
     for (;;) {
@@ -318,14 +319,20 @@ inline Response VerifiedHttpGet(const std::string& url,
   while (sent < request.size()) {
     ERR_clear_error();
     const auto size = static_cast<int>(request.size() - sent);
+#if defined(_WIN32)
+    const auto socket_size = size;
+#else
+    const auto socket_size = static_cast<std::size_t>(size);
+#endif
     const auto result =
         tls ? SSL_write(connection.get(), request.data() + sent, size)
-            : send(socket.get(), request.data() + sent, size, 0);
+            : send(socket.get(), request.data() + sent, socket_size, 0);
     if (result > 0) {
-      sent += result;
+      sent += static_cast<std::size_t>(result);
     } else {
       const auto error =
-          tls ? SSL_get_error(connection.get(), result) : SSL_ERROR_WANT_WRITE;
+          tls ? SSL_get_error(connection.get(), static_cast<int>(result))
+              : SSL_ERROR_WANT_WRITE;
       Check(error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE,
             "TLS HTTP request write failed");
       Wait(socket.get(), error == SSL_ERROR_WANT_WRITE, deadline);
@@ -338,7 +345,7 @@ inline Response VerifiedHttpGet(const std::string& url,
     const auto result = tls ? SSL_read(connection.get(), buffer, sizeof(buffer))
                             : recv(socket.get(), buffer, sizeof(buffer), 0);
     if (result > 0) {
-      response.append(buffer, result);
+      response.append(buffer, static_cast<std::size_t>(result));
       const auto headers_end = response.find("\r\n\r\n");
       const auto content_length = response.find("Content-Length:");
       if (headers_end != std::string::npos && content_length < headers_end) {
@@ -349,7 +356,8 @@ inline Response VerifiedHttpGet(const std::string& url,
       break;
     } else {
       const auto error =
-          tls ? SSL_get_error(connection.get(), result) : SSL_ERROR_WANT_READ;
+          tls ? SSL_get_error(connection.get(), static_cast<int>(result))
+              : SSL_ERROR_WANT_READ;
       if (error == SSL_ERROR_ZERO_RETURN) break;
       Check(error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE,
             "TLS HTTP response read failed");

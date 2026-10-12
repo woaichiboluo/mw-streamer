@@ -132,9 +132,12 @@ TEST_CASE("Encoder 将原始 S32 音频转换成 AAC 原生格式并保留源帧
             reinterpret_cast<const float*>(frame->extended_data[channel]);
         for (int frequency = 0; frequency < 2; ++frequency) {
           const double hz = frequency == 0 ? 1500.0 : 3000.0;
-          const double phase = 2.0 * kPi * hz * position / kRate;
-          sine[channel][frequency] += data[sample] * std::sin(phase);
-          cosine[channel][frequency] += data[sample] * std::cos(phase);
+          const double phase =
+              2.0 * kPi * hz * static_cast<double>(position) / kRate;
+          sine[channel][frequency] +=
+              static_cast<double>(data[sample]) * std::sin(phase);
+          cosine[channel][frequency] +=
+              static_cast<double>(data[sample]) * std::cos(phase);
         }
       }
     }
