@@ -1,5 +1,5 @@
 add_executable(mw_encoder_tests encoder_test.cc encoder_timing_test.cc
-    encoder_gpu_test.cc)
+    encoder_gpu_test.cc encoder_sample_format_test.cc)
 target_compile_definitions(mw_encoder_tests PRIVATE
     MW_STREAMER_ENCODER_TEST_DATA_DIR="${MW_STREAMER_TEST_DATA_DIR}")
 target_link_libraries(mw_encoder_tests PRIVATE

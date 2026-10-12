@@ -26,7 +26,6 @@ namespace {
 
 namespace ffmpeg = mw::streamer::ffmpeg;
 namespace fs = std::filesystem;
-constexpr AVRational kNanoseconds{1, 1000000000};
 constexpr AVRational kMilliseconds{1, 1000};
 
 class LoggedRuntime final {
@@ -93,10 +92,12 @@ void EncodeFixture(encoder_test::Capture& capture) {
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   encoder.Start(
       config, {encoder_test::VideoStream(), encoder_test::AudioStream()}, cpu);
-  REQUIRE(encoder.SubmitAudio(encoder_test::AudioFrame(3072)));
   for (int frame = 0; frame < 10; ++frame) {
-    REQUIRE(encoder.SubmitVideo(encoder_test::VideoFrame(frame)));
-    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    REQUIRE(encoder.SubmitFrame(encoder_test::Frame(
+        encoder_test::VideoFrame(frame),
+        encoder_test::AudioFrame(960,
+                                 encoder_test::kAudioStart + frame * 960))));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
   encoder.Drain();
   REQUIRE(capture.Wait());
@@ -104,8 +105,7 @@ void EncodeFixture(encoder_test::Capture& capture) {
   REQUIRE(capture.errors == 0);
   REQUIRE(capture.callback_error.empty());
   REQUIRE(capture.streams.size() == 2);
-  REQUIRE(capture.packets.size() == capture.dts_ns.size());
-  REQUIRE(capture.packets.size() == 14);
+  REQUIRE(capture.packets.size() == 21);
 }
 
 struct Totals final {
@@ -127,7 +127,10 @@ std::vector<std::size_t> Order(const encoder_test::Capture& capture) {
   std::vector<std::size_t> order(capture.packets.size());
   std::iota(order.begin(), order.end(), std::size_t{0});
   std::stable_sort(order.begin(), order.end(), [&](auto left, auto right) {
-    return capture.dts_ns[left] < capture.dts_ns[right];
+    return av_compare_ts(capture.packets[left]->dts,
+                         capture.packets[left]->time_base,
+                         capture.packets[right]->dts,
+                         capture.packets[right]->time_base) < 0;
   });
   return order;
 }
@@ -227,8 +230,7 @@ void CheckInfo(const std::string& line) {
 }
 
 void CheckSummary(const std::string& line, const Totals& accepted,
-                  const Totals& handed_off, const Totals& discarded = {},
-                  int errors = 0, int rejected = 0) {
+                  const Totals& handed_off, int errors = 0, int rejected = 0) {
   CHECK(line.find("counts=since_start") != std::string::npos);
   CHECK(Integer(line, "accepted_packets") ==
         static_cast<std::int64_t>(accepted.packets));
@@ -242,10 +244,6 @@ void CheckSummary(const std::string& line, const Totals& accepted,
         static_cast<std::int64_t>(handed_off.video));
   CHECK(Integer(line, "audio_packets") ==
         static_cast<std::int64_t>(handed_off.audio));
-  CHECK(Integer(line, "startup_discarded_packets") ==
-        static_cast<std::int64_t>(discarded.packets));
-  CHECK(Integer(line, "startup_discarded_bytes") ==
-        static_cast<std::int64_t>(discarded.bytes));
   CHECK(Integer(line, "aborted_packets") == 0);
   CHECK(Integer(line, "aborted_bytes") == 0);
   CHECK(Integer(line, "rejected_packets") == rejected);
@@ -273,8 +271,8 @@ void CheckHandoffs(const std::string& text,
   std::int64_t minimum = 0;
   for (const auto& packet : capture.packets) {
     minimum = std::min(
-        {minimum, av_rescale_q(packet->pts, packet->time_base, kNanoseconds),
-         av_rescale_q(packet->dts, packet->time_base, kNanoseconds)});
+        {minimum, av_rescale_q(packet->pts, packet->time_base, kMilliseconds),
+         av_rescale_q(packet->dts, packet->time_base, kMilliseconds)});
   }
   std::vector<bool> seen(capture.packets.size(), false);
   auto previous = std::numeric_limits<std::int64_t>::min();
@@ -295,14 +293,11 @@ void CheckHandoffs(const std::string& text,
     const auto time_base = packet->get()->time_base;
     CHECK(line.find("time_base=" + std::to_string(time_base.num) + "/" +
                     std::to_string(time_base.den)) != std::string::npos);
-    const auto media_pts = av_rescale_q(pts, time_base, kNanoseconds);
-    const auto media_dts = av_rescale_q(dts, time_base, kNanoseconds);
-    CHECK(Integer(line, "media_pts_ns") == media_pts);
-    CHECK(Integer(line, "media_dts_ns") == media_dts);
-    CHECK(Integer(line, "zlm_pts_ms") ==
-          av_rescale_q(media_pts - minimum, kNanoseconds, kMilliseconds));
-    CHECK(Integer(line, "zlm_dts_ms") ==
-          av_rescale_q(media_dts - minimum, kNanoseconds, kMilliseconds));
+    const auto media_pts = av_rescale_q(pts, time_base, kMilliseconds);
+    const auto media_dts = av_rescale_q(dts, time_base, kMilliseconds);
+    CHECK(line.find("media_pts_ns=") == std::string::npos);
+    CHECK(Integer(line, "zlm_pts_ms") == media_pts - minimum);
+    CHECK(Integer(line, "zlm_dts_ms") == media_dts - minimum);
     CHECK(media_dts >= previous);
     previous = media_dts;
     for (const auto* field :
@@ -335,8 +330,7 @@ TEST_CASE("公开AsyncRemuxer性能info trace off实际排空统计且日志不�
     // demand information, and must not be counted as a lost encoded packet.
     for (std::size_t position = 0; position < order.size(); ++position) {
       const auto index = order[position];
-      REQUIRE(
-          remuxer.SubmitPacket(capture.packets[index], capture.dts_ns[index]));
+      REQUIRE(remuxer.SubmitPacket(capture.packets[index]));
       totals.Add(capture.packets[index]);
       if (level == "info" && position == 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2050));
@@ -360,7 +354,6 @@ TEST_CASE("公开AsyncRemuxer性能info trace off实际排空统计且日志不�
   CheckInfo(summaries.front());
   CHECK(Integer(summaries.front(), "errors") == 0);
   CHECK(Integer(summaries.front(), "pending_packets") == 0);
-  CHECK(Integer(summaries.front(), "startup_discarded_total") == 0);
   if (level == "info") {
     REQUIRE_FALSE(Lines(text, "info", "report=interval").empty());
     CHECK(Lines(text, "trace").empty());
@@ -393,8 +386,7 @@ TEST_CASE("AsyncRemuxer性能复用会话累计清零且重复Stop不产生多�
                                  encoder_test::VideoStream().stream_index ||
                              totals[session].packets == 2))
           continue;
-        REQUIRE(remuxer.SubmitPacket(capture.packets[index],
-                                     capture.dts_ns[index]));
+        REQUIRE(remuxer.SubmitPacket(capture.packets[index]));
         totals[session].Add(capture.packets[index]);
       }
       remuxer.Drain();
@@ -413,14 +405,13 @@ TEST_CASE("AsyncRemuxer性能复用会话累计清零且重复Stop不产生多�
   CHECK(totals[1].packets == 2);
 }
 
-TEST_CASE("AsyncRemuxer性能区分EOF缺轨启动淘汰和非法包拒绝",
+TEST_CASE("AsyncRemuxer性能记录EOF缺轨保留全部包和非法包拒绝",
           "[performance][remuxer][async][accounting]") {
   LoggedRuntime logging("trace");
   encoder_test::Capture capture;
   EncodeFixture(capture);
   Totals accepted;
   Totals handed_off;
-  Totals discarded;
   int expected_errors = 0;
   int expected_rejected = 0;
   std::atomic<int> ended{0};
@@ -434,33 +425,30 @@ TEST_CASE("AsyncRemuxer性能区分EOF缺轨启动淘汰和非法包拒绝",
         if (capture.packets[index]->stream_index !=
             encoder_test::AudioStream().stream_index)
           continue;
-        REQUIRE(remuxer.SubmitPacket(capture.packets[index],
-                                     capture.dts_ns[index]));
+        REQUIRE(remuxer.SubmitPacket(capture.packets[index]));
         accepted.Add(capture.packets[index]);
         handed_off.Add(capture.packets[index]);
       }
     }
-    SECTION("EOF没有首个视频关键帧时计入启动淘汰") {
+    SECTION("EOF视频首包非关键帧仍全部交给SDK") {
       for (const auto index : Order(capture)) {
         if (capture.packets[index]->stream_index !=
             encoder_test::VideoStream().stream_index)
           continue;
         auto packet = capture.packets[index].Clone();
         packet->flags &= ~AV_PKT_FLAG_KEY;
-        REQUIRE(remuxer.SubmitPacket(packet, capture.dts_ns[index]));
+        REQUIRE(remuxer.SubmitPacket(packet));
         accepted.Add(packet);
-        discarded.Add(packet);
+        handed_off.Add(packet);
       }
     }
     SECTION("非法包不被接受且不污染后续有效包统计") {
       auto invalid = capture.packets.front().Clone();
       invalid->stream_index = 99;
-      REQUIRE_THROWS_AS(remuxer.SubmitPacket(invalid, capture.dts_ns.front()),
-                        std::invalid_argument);
+      REQUIRE_THROWS_AS(remuxer.SubmitPacket(invalid), std::invalid_argument);
       expected_errors = 1;
       for (const auto index : Order(capture)) {
-        REQUIRE(remuxer.SubmitPacket(capture.packets[index],
-                                     capture.dts_ns[index]));
+        REQUIRE(remuxer.SubmitPacket(capture.packets[index]));
         accepted.Add(capture.packets[index]);
         handed_off.Add(capture.packets[index]);
       }
@@ -475,13 +463,11 @@ TEST_CASE("AsyncRemuxer性能区分EOF缺轨启动淘汰和非法包拒绝",
   const auto info = Lines(text, "info", "report=summary");
   REQUIRE(info.size() == 1);
   CHECK(Integer(info.front(), "errors") == expected_errors);
-  CHECK(Integer(info.front(), "startup_discarded_total") ==
-        static_cast<std::int64_t>(discarded.packets));
   CHECK(Integer(info.front(), "pending_packets") == 0);
   const auto details = Lines(text, "trace", "report=summary");
   REQUIRE(details.size() == 1);
-  CheckSummary(details.front(), accepted, handed_off, discarded,
-               expected_errors, expected_rejected);
+  CheckSummary(details.front(), accepted, handed_off, expected_errors,
+               expected_rejected);
 }
 
 TEST_CASE("AsyncRemuxer转换失败将已取出的在途编码包计入中止而不冒充交付",
@@ -501,7 +487,6 @@ TEST_CASE("AsyncRemuxer转换失败将已取出的在途编码包计入中止而
                (packet->flags & AV_PKT_FLAG_KEY);
       });
   REQUIRE(key != capture.packets.end());
-  const auto index = static_cast<std::size_t>(key - capture.packets.begin());
   auto damaged = key->Clone();
   ffmpeg::FfmpegException::throwIfError(av_packet_make_writable(damaged.get()),
                                         "独立损坏测试包的负载");
@@ -519,7 +504,7 @@ TEST_CASE("AsyncRemuxer转换失败将已取出的在途编码包计入中止而
     // Metadata passes admission. With one declared video track PopReady
     // removes this key packet before the adapter rejects its zeroed NAL data.
     // Counting only the remaining interleaver queue would lose this abort.
-    REQUIRE(remuxer.SubmitPacket(damaged, capture.dts_ns[index]));
+    REQUIRE(remuxer.SubmitPacket(damaged));
     remuxer.Drain();
     remuxer.Stop();
     remuxer.Stop();
@@ -532,7 +517,6 @@ TEST_CASE("AsyncRemuxer转换失败将已取出的在途编码包计入中止而
   const auto info = Lines(text, "info", "report=summary");
   REQUIRE(info.size() == 1);
   CHECK(Integer(info.front(), "errors") >= 1);
-  CHECK(Integer(info.front(), "startup_discarded_total") == 0);
   CHECK(Integer(info.front(), "pending_packets") == 0);
   const auto details = Lines(text, "trace", "report=summary");
   REQUIRE(details.size() == 1);
@@ -541,8 +525,6 @@ TEST_CASE("AsyncRemuxer转换失败将已取出的在途编码包计入中止而
   CHECK(Integer(summary, "accepted_bytes") == bytes);
   CHECK(Integer(summary, "handed_off_packets") == 0);
   CHECK(Integer(summary, "payload_bytes") == 0);
-  CHECK(Integer(summary, "startup_discarded_packets") == 0);
-  CHECK(Integer(summary, "startup_discarded_bytes") == 0);
   CHECK(Integer(summary, "aborted_packets") == 1);
   CHECK(Integer(summary, "aborted_bytes") == bytes);
   CHECK(Integer(summary, "rejected_packets") == 0);

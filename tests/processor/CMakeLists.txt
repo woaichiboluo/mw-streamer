@@ -28,4 +28,4 @@ target_link_libraries(mw_processor_network_probe PRIVATE mw::streamer fmt::fmt)
 # Manual recording of scheduled Processor output, with its original A/V timing.
 add_executable(mw_processor_record_probe processor_record_probe.cc)
 target_link_libraries(mw_processor_record_probe PRIVATE
-    mw::streamer FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil fmt::fmt)
+    mw::streamer FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil FFmpeg::swresample fmt::fmt)

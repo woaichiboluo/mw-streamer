@@ -68,6 +68,24 @@ class RemuxPipeline::Impl final {
 
   ~Impl() { Stop(); }
 
+  void SetOnSelectStreams(OnSelectStreams callback) {
+    std::lock_guard<std::mutex> control(control_);
+    RequireConfigurable();
+    if (!callback) {
+      input_.SetOnSelectStreams({});
+      return;
+    }
+    input_.SetOnSelectStreams(
+        [this, callback = std::move(callback)](const auto& streams) {
+          try {
+            return callback(streams);
+          } catch (...) {
+            StartupFailed("input", std::current_exception());
+            throw;
+          }
+        });
+  }
+
   void SetOnReady(OnReady callback) {
     std::lock_guard<std::mutex> control(control_);
     RequireConfigurable();
@@ -273,6 +291,16 @@ class RemuxPipeline::Impl final {
     try {
       std::unique_lock<std::mutex> outputs(outputs_);
       if (Finishing()) return;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (configured_) {
+          if (ready_info_.streams != streams) {
+            throw std::invalid_argument(
+                "RemuxPipeline 输出不支持运行中改变轨道配置，请重新启动管线");
+          }
+          return;
+        }
+      }
       remuxer_.Start(streams);
       RemuxPipelineReadyInfo info;
       info.streams = streams;
@@ -383,6 +411,9 @@ class RemuxPipeline::Impl final {
 RemuxPipeline::RemuxPipeline(RemuxPipelineConfig config)
     : impl_(std::make_unique<Impl>(std::move(config))) {}
 RemuxPipeline::~RemuxPipeline() = default;
+void RemuxPipeline::SetOnSelectStreams(OnSelectStreams callback) {
+  impl_->SetOnSelectStreams(std::move(callback));
+}
 void RemuxPipeline::SetOnReady(OnReady callback) {
   impl_->SetOnReady(std::move(callback));
 }

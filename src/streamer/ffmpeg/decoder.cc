@@ -17,8 +17,18 @@ const AVCodec* FindDecoder(const StreamInfo& stream, AVMediaType type,
     throw std::invalid_argument("解码器类型与输入轨道类型不匹配");
   }
   const std::string name(decoder_name);
-  const auto* codec = name.empty() ? avcodec_find_decoder(parameters->codec_id)
-                                   : avcodec_find_decoder_by_name(name.c_str());
+  const AVCodec* codec = nullptr;
+  if (!name.empty()) {
+    codec = avcodec_find_decoder_by_name(name.c_str());
+  } else {
+    // Prefer libvpx when available to preserve WebM alpha decoding.
+    if (parameters->codec_id == AV_CODEC_ID_VP9) {
+      codec = avcodec_find_decoder_by_name("libvpx-vp9");
+    } else if (parameters->codec_id == AV_CODEC_ID_VP8) {
+      codec = avcodec_find_decoder_by_name("libvpx");
+    }
+    if (!codec) codec = avcodec_find_decoder(parameters->codec_id);
+  }
   if (!codec) {
     throw FfmpegException(AVERROR_DECODER_NOT_FOUND, "查找解码器 " + name);
   }
@@ -42,9 +52,43 @@ Decoder::Decoder(const StreamInfo& stream, AVMediaType type,
       "avcodec_parameters_to_context");
   context->pkt_timebase = time_base_;
   context->thread_count = 0;
+  if (type == AVMEDIA_TYPE_VIDEO) {
+    context->framerate = stream.codec_parameters.get()->framerate;
+    context->sample_aspect_ratio =
+        stream.codec_parameters.get()->sample_aspect_ratio;
+  }
 }
 
 Decoder::~Decoder() { performance_.Stop(); }
+
+std::int64_t Decoder::FrameEndPts(const Frame& frame,
+                                  int parser_repeat_pict) const noexcept {
+  if (!frame.get() || frame->pts == AV_NOPTS_VALUE) return AV_NOPTS_VALUE;
+  const auto* codec = context_.get();
+  auto duration = frame->duration;
+  if (duration <= 0) {
+    if (codec->codec_type == AVMEDIA_TYPE_VIDEO && codec->framerate.num > 0 &&
+        codec->framerate.den > 0) {
+      const int ticks_per_frame =
+          codec->codec_descriptor &&
+                  (codec->codec_descriptor->props & AV_CODEC_PROP_FIELDS)
+              ? 2
+              : 1;
+      const int ticks =
+          parser_repeat_pict >= 0 ? parser_repeat_pict + 1 : ticks_per_frame;
+      duration = static_cast<std::int64_t>(AV_TIME_BASE) *
+                 codec->framerate.den * ticks / codec->framerate.num /
+                 ticks_per_frame;
+      duration =
+          av_rescale_q(duration, AVRational{1, AV_TIME_BASE}, time_base_);
+    } else if (codec->codec_type == AVMEDIA_TYPE_AUDIO &&
+               codec->sample_rate > 0) {
+      duration = av_rescale_q(frame->nb_samples,
+                              AVRational{1, codec->sample_rate}, time_base_);
+    }
+  }
+  return duration > 0 ? frame->pts + duration : AV_NOPTS_VALUE;
+}
 
 AVCodecContext* Decoder::context() noexcept { return context_.get(); }
 
@@ -95,6 +139,9 @@ VideoDecoder::VideoDecoder(const StreamInfo& stream,
     // Frame threads add decode surfaces; automatic CPU threading can exceed
     // NVDEC's surface limit. CUDA performs decoding on the device.
     codec_context->thread_count = 2;
+    // Input's asynchronous decoder retains up to eight additional frames.
+    // Reserve those surfaces before opening the fixed-size hardware pool.
+    codec_context->extra_hw_frames = 8;
   }
 
   Open();

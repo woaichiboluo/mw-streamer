@@ -21,6 +21,7 @@ extern "C" {
 #include <libavutil/mathematics.h>
 }
 
+#include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/init/init.h"
 #include "mw/streamer/input/ffmpeg_input.h"
 #include "mw/streamer/platform/platform.h"
@@ -47,6 +48,17 @@ int64_t Pts(const ffmpeg::Frame& frame) {
 }
 int64_t SamplesNs(int samples) {
   return av_rescale_q(samples, {1, 48000}, kNs);
+}
+
+float ChannelZero(const AVFrame& frame, int sample) {
+  if (frame.format == AV_SAMPLE_FMT_FLTP)
+    return reinterpret_cast<const float*>(frame.extended_data[0])[sample];
+  if (frame.format == AV_SAMPLE_FMT_S32)
+    return static_cast<float>(
+        reinterpret_cast<const std::int32_t*>(
+            frame.extended_data[0])[sample * frame.ch_layout.nb_channels] /
+        2147483648.0);
+  throw std::runtime_error("PCM comparison requires FLTP or packed S32");
 }
 
 struct Errors {
@@ -137,11 +149,11 @@ struct Probe {
             frame->nb_samples,
             frame->sample_rate,
             frame->format};
-    if (!video && frame->format == AV_SAMPLE_FMT_FLTP) {
-      const auto* samples =
-          reinterpret_cast<const float*>(frame->extended_data[0]);
+    if (!video && (frame->format == AV_SAMPLE_FMT_FLTP ||
+                   frame->format == AV_SAMPLE_FMT_S32)) {
       for (int i = 0; i < frame->nb_samples; ++i) {
-        row.channel0_peak = std::max(row.channel0_peak, std::abs(samples[i]));
+        row.channel0_peak =
+            std::max(row.channel0_peak, std::abs(ChannelZero(*frame.get(), i)));
       }
     }
     return row;
@@ -195,7 +207,7 @@ struct Probe {
            sample >= static_cast<int>(pcm[chunk]->samples.size())) {
       sample -= static_cast<int>(pcm[chunk]->samples.size());
       // RTMP timestamps are millisecond-quantized. Allow that rounding at a
-      // frame boundary; all 128 PCM values must still match exactly.
+      // frame boundary; all 128 PCM values must match within S32 quantization.
       if (chunk + 1 < pcm.size() &&
           std::abs(pcm[chunk + 1]->pts - pcm[chunk]->pts -
                    SamplesNs(static_cast<int>(pcm[chunk]->samples.size()))) >
@@ -210,12 +222,16 @@ struct Probe {
   }
 
   void AudioSource(Row& row, const ffmpeg::Frame& frame) {
-    if (frame->format != AV_SAMPLE_FMT_FLTP || frame->sample_rate != 48000) {
+    if ((frame->format != AV_SAMPLE_FMT_FLTP &&
+         frame->format != AV_SAMPLE_FMT_S32) ||
+        frame->sample_rate != 48000) {
       row.status = "unsupported";
       return;
     }
-    const auto* samples =
-        reinterpret_cast<const float*>(frame->extended_data[0]);
+    std::vector<float> samples;
+    samples.reserve(frame->nb_samples);
+    for (int index = 0; index < frame->nb_samples; ++index)
+      samples.push_back(ChannelZero(*frame.get(), index));
     if (frame->nb_samples < 128) {
       row.status = "short";
       return;
@@ -260,7 +276,7 @@ struct Probe {
         float sample = 0;
         int64_t sample_pts = 0;
         if (!Reference(chunk, candidate + i, sample, sample_pts) ||
-            sample != samples[anchor + i]) {
+            std::abs(sample - samples[anchor + i]) > 1.0f / 1073741824.0f) {
           equal = false;
           break;
         }
@@ -367,7 +383,7 @@ bool Report(const Probe& probe) {
       "audio_reference={} audio_matches={} silence={} short={} lost_audio={} "
       "lost_video={} video_without_near_audio={} gpu_context_ok={}\n",
       probe.unsupported ? "UNSUPPORTED: requires input 48000 Hz FLTP"
-                        : "exact PCM",
+                        : "PCM, allowing S32 quantization only",
       audio.size(), silent, short_blocks, lost_audio, lost_video, no_audio_pair,
       probe.gpu_ok);
   fmt::print(
@@ -378,7 +394,7 @@ bool Report(const Probe& probe) {
       skew.size(), Percentile(skew, 1), Percentile(skew, 0.95));
   fmt::print(
       "FrameMetrics measure pipeline-added timestamp skew using unchanged "
-      "buffers/PCM. "
+      "video buffers and PCM matched within S32 quantization. "
       "The external source's original A/V sync is unknown; this does not "
       "measure lip sync "
       "or playback-device latency. Silence and unmatched PCM are not inferred "
@@ -454,6 +470,7 @@ int main(int argc, char* argv[]) {
     Probe probe;
     std::atomic<bool> ready{false}, failed{false}, ended{false};
     std::atomic<int> rejected_video{0}, rejected_audio{0};
+    bool scheduler_started = false;
     ffmpeg::HwDeviceContext device(backend == "cuda"
                                        ? ffmpeg::HwDeviceType::kCuda
                                        : ffmpeg::HwDeviceType::kCpu);
@@ -464,44 +481,55 @@ int main(int argc, char* argv[]) {
             : nullptr;
     mw::streamer::Processor processor;
     mw::streamer::Scheduler scheduler;
-    scheduler.SetOnVideo([&](const ffmpeg::Frame& frame) {
+    scheduler.SetOnFrame([&](const mw::streamer::MediaFrame& frame) {
       const auto wall = Now();
       errors.Capture([&] {
-        auto processed = processor.ProcessVideo(frame);
-        probe.Output(processed, wall);
-      });
-    });
-    scheduler.SetOnAudio([&](const ffmpeg::Frame& frame) {
-      const auto wall = Now();
-      errors.Capture([&] {
-        auto processed = processor.ProcessAudio(frame);
-        probe.Output(processed, wall);
+        if (frame.video)
+          probe.Output(processor.ProcessVideo(*frame.video), wall);
+        if (frame.audio)
+          probe.Output(processor.ProcessAudio(*frame.audio), wall);
       });
     });
     // Keep both Processor filters unset: default Frame::Ref() pass-through.
     processor.SetOnEnded([&] { ended.store(true); });
     scheduler.SetOnEnded([&] { processor.End(); });
-    mw::streamer::FfmpegInputConfig input_config;
-    input_config.auto_reconnect = false;
-    mw::streamer::FfmpegInput input(device, input_config);
-    input.SetOnReady([&](const auto& streams) {
+    scheduler.SetOnReady([&](const auto& streams) {
       errors.Capture([&] {
-        ready.store(processor.Start(streams, device) &&
-                    scheduler.Start(streams));
+        ready.store(processor.Start(streams, device));
         if (!ready.load()) failed.store(true);
       });
     });
-    input.SetOnFrame([&](int, const ffmpeg::Frame& frame) {
-      const auto wall = Now();
+    scheduler.SetOnError([&](int code, std::string_view message) {
+      errors.Capture([&] { throw ffmpeg::FfmpegException(code, message); });
+    });
+    mw::streamer::FfmpegInputConfig input_config;
+    input_config.auto_reconnect = false;
+    mw::streamer::FfmpegInput input(device, input_config);
+    input.SetOnDecodedReady([&](const auto& source) {
       errors.Capture([&] {
-        auto tracked = probe.Input(frame, wall);
-        const bool accepted = frame->width > 0 ? scheduler.SubmitVideo(tracked)
-                                               : scheduler.SubmitAudio(tracked);
+        auto observed = source;
+        for (auto& track : observed.tracks) {
+          const auto receive = track.try_receive;
+          track.try_receive = [&, receive](ffmpeg::Frame& frame) {
+            if (!receive(frame)) return false;
+            frame = probe.Input(frame, Now());
+            return true;
+          };
+        }
+        const bool accepted = scheduler_started
+                                  ? scheduler.QueueSource(observed)
+                                  : scheduler.Start(observed);
         if (!accepted) {
-          if (frame->width > 0)
-            ++rejected_video;
-          else
-            ++rejected_audio;
+          for (const auto& track : source.tracks) {
+            if (track.stream.codec_parameters.get()->codec_type ==
+                AVMEDIA_TYPE_VIDEO)
+              ++rejected_video;
+            else
+              ++rejected_audio;
+          }
+          failed.store(true);
+        } else {
+          scheduler_started = true;
         }
       });
     });
@@ -520,13 +548,15 @@ int main(int argc, char* argv[]) {
     while (!failed.load() && !ended.load() && !errors.detected.load() &&
            Clock::now() < deadline)
       std::this_thread::sleep_for(10ms);
+    scheduler.RequestStop();
     input.Stop();
     scheduler.Stop();
     processor.Stop();
     if (argc > 4) Save(argv[4], probe);
     errors.Rethrow();
     fmt::print(
-        "rejected_video={} rejected_audio={} ready={} failed={} ended={}\n",
+        "rejected_video_sources={} rejected_audio_sources={} ready={} "
+        "failed={} ended={}\n",
         rejected_video.load(), rejected_audio.load(), ready.load(),
         failed.load(), ended.load());
     const bool measured = Report(probe);

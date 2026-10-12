@@ -16,27 +16,33 @@ namespace mw::streamer {
 struct MW_STREAMER_API BatchPipelineConfig {
   BatchPipelineConfig();
 
-  // Defaults to kBatch at 8x delivery speed. Other modes are rejected; Input's
-  // existing playback_speed range, decoder selection and options apply.
+  // Defaults to kBatch. Other modes are rejected; Input reads and decodes at
+  // full speed, subject to downstream backpressure.
   FfmpegInputConfig input;
+  // Limits each track's delivery to the synchronous processor without altering
+  // media PTS, duration, time_base or audio sample_rate. Each new generation
+  // starts its delivery clock again. Must be finite and in [0.5, 8.0].
+  double playback_speed = 8.0;
 };
 
 struct BatchPipelineReadyInfo {
   // Original input track descriptions, retained after stopping. Each decoded
-  // Frame supplies its actual format, sample_rate and nanosecond time_base.
+  // Frame supplies its actual format, sample_rate and source time_base.
   std::vector<ffmpeg::StreamInfo> streams;
 };
 
 // One independent Input(kBatch) -> BatchProcessor session, without Scheduler.
 // Requires Init before Start and destruction before Shutdown. Configure
 // callbacks before Start. OnReady/frame callbacks run synchronously on the
-// input worker; OnEnded/OnStop run after Input has been joined. Processor
+// input worker; OnReady repeats with the current streams on each reopen.
+// OnEnded/OnStop run after Input has been joined. Processor
 // callbacks must consume their own exceptions, as required by BatchProcessor's
 // noexcept contract. State callback exceptions are caught and logged. Callbacks
 // may query snapshots but must not call lifecycle/configuration methods or
 // destroy this object.
 class MW_STREAMER_API BatchPipeline final {
  public:
+  using OnSelectStreams = FfmpegInput::OnSelectStreams;
   using OnReady = BatchProcessor::OnReady;
   using OnVideo = BatchProcessor::OnVideo;
   using OnAudio = BatchProcessor::OnAudio;
@@ -56,6 +62,9 @@ class MW_STREAMER_API BatchPipeline final {
   BatchPipeline(BatchPipeline&&) = delete;
   BatchPipeline& operator=(BatchPipeline&&) = delete;
 
+  // Before Start, choose source indices from all audio/video descriptions.
+  // An empty callback restores Input's first-video/first-audio default.
+  void SetOnSelectStreams(OnSelectStreams callback);
   void SetOnReady(OnReady callback);
   void SetOnVideo(OnVideo callback);
   void SetOnAudio(OnAudio callback);

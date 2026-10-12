@@ -359,43 +359,52 @@ int main(int argc, char* argv[]) {
                                        : ffmpeg::HwDeviceType::kCpu);
     mw::streamer::Processor processor;
     mw::streamer::Scheduler scheduler;
-    scheduler.SetOnVideo([&](const ffmpeg::Frame& frame) {
+    scheduler.SetOnFrame([&](const mw::streamer::MediaFrame& frame) {
       const auto wall = ClockNs();
       errors.Capture([&] {
-        auto processed = processor.ProcessVideo(frame);
-        output_events.Video(processed, wall);
-      });
-    });
-    scheduler.SetOnAudio([&](const ffmpeg::Frame& frame) {
-      const auto wall = ClockNs();
-      errors.Capture([&] {
-        auto processed = processor.ProcessAudio(frame);
-        output_events.Audio(processed, wall);
+        if (frame.video) {
+          auto processed = processor.ProcessVideo(*frame.video);
+          output_events.Video(processed, wall);
+        }
+        if (frame.audio) {
+          auto processed = processor.ProcessAudio(*frame.audio);
+          output_events.Audio(processed, wall, false);
+        }
       });
     });
     // No Processor filters are configured: both use the default Frame::Ref().
     processor.SetOnEnded([&] { ended.store(true); });
     scheduler.SetOnEnded([&] { processor.End(); });
-    mw::streamer::FfmpegInputConfig input_config;
-    input_config.auto_reconnect = false;
-    mw::streamer::FfmpegInput input(device, input_config);
-    input.SetOnReady([&](const auto& streams) {
+    scheduler.SetOnReady([&](const auto& streams) {
       errors.Capture([&] {
-        ready.store(processor.Start(streams, device) &&
-                    scheduler.Start(streams));
+        ready.store(processor.Start(streams, device));
         if (!ready.load()) failed.store(true);
       });
     });
-    input.SetOnFrame([&](int, const ffmpeg::Frame& frame) {
-      const auto wall = ClockNs();
+    scheduler.SetOnError([&](int code, std::string_view message) {
+      errors.Capture([&] { throw ffmpeg::FfmpegException(code, message); });
+    });
+    mw::streamer::FfmpegInputConfig input_config;
+    input_config.auto_reconnect = false;
+    mw::streamer::FfmpegInput input(device, input_config);
+    input.SetOnDecodedReady([&](const auto& source) {
       errors.Capture([&] {
-        if (frame->width > 0) {
-          input_events.Video(frame, wall);
-          if (!scheduler.SubmitVideo(frame)) failed.store(true);
-        } else {
-          input_events.Audio(frame, wall, false);
-          if (!scheduler.SubmitAudio(frame)) failed.store(true);
+        auto observed = source;
+        for (auto& track : observed.tracks) {
+          const auto receive = track.try_receive;
+          const bool video = track.stream.codec_parameters.get()->codec_type ==
+                             AVMEDIA_TYPE_VIDEO;
+          track.try_receive = [&, receive, video](ffmpeg::Frame& frame) {
+            if (!receive(frame)) return false;
+            const auto wall = ClockNs();
+            if (video)
+              input_events.Video(frame, wall);
+            else
+              input_events.Audio(frame, wall, false);
+            return true;
+          };
         }
+        if (!scheduler.Start(observed)) failed.store(true);
       });
     });
     input.SetOnStateChanged([&](mw::streamer::InputState state, int error,
@@ -417,6 +426,7 @@ int main(int argc, char* argv[]) {
         break;
       std::this_thread::sleep_for(10ms);
     }
+    scheduler.RequestStop();
     input.Stop();
     scheduler.Stop();
     processor.Stop();
@@ -425,7 +435,8 @@ int main(int argc, char* argv[]) {
     if (argc > 4) Save(argv[4], input_events, output_events);
     errors.Rethrow();
     fmt::print(
-        "Wall values reconstruct sample delivery from callback timing; "
+        "Input observations occur when native decoder queues are pulled. "
+        "Output wall values use channel block-start timing; "
         "this is not playback-device latency measurement.\n");
     const auto pts_reference = output_result.pts.empty() ? "unmeasurable"
                                : Percentile(output_result.pts, 1) <= 41

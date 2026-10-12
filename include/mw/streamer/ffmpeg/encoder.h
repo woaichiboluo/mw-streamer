@@ -27,6 +27,8 @@ struct MW_STREAMER_API VideoEncoderConfig {
   std::int64_t bit_rate = 0;
   int gop_size = 60;
   int max_b_frames = 0;
+  // FF_THREAD_* mask applied before open. 0 retains FFmpeg's default.
+  int thread_type = 0;
   bool global_header = true;
   AVRational sample_aspect_ratio{1, 1};
   AVColorRange color_range = AVCOL_RANGE_UNSPECIFIED;
@@ -42,6 +44,8 @@ struct MW_STREAMER_API AudioEncoderConfig {
   // Borrowed during construction; the encoder owns a deep copy of the layout.
   AVChannelLayout channel_layout = AV_CHANNEL_LAYOUT_STEREO;
   std::int64_t bit_rate = 128000;
+  // FF_THREAD_* mask applied before open. 0 retains FFmpeg's default.
+  int thread_type = 0;
   bool global_header = true;
 };
 

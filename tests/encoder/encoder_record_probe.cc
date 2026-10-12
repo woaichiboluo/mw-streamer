@@ -70,7 +70,7 @@ class Recording final {
     encoder_.SetOnReady([this](const auto& streams) noexcept {
       Capture([&] { Open(streams); });
     });
-    encoder_.SetOnPacket([this](const auto& packet, std::int64_t) noexcept {
+    encoder_.SetOnPacket([this](const auto& packet) noexcept {
       Capture([&] { Write(packet); });
     });
     encoder_.SetOnEnded([this]() noexcept {
@@ -81,35 +81,36 @@ class Recording final {
     encoder_.SetOnError([this](int error, std::string_view message) noexcept {
       Capture([&] { throw ffmpeg::FfmpegException(error, message); });
     });
-    scheduler_.SetOnVideo([this](const auto& frame) noexcept {
-      Capture([&] {
-        if (!encoder_.SubmitVideo(processor_.ProcessVideo(frame))) {
-          throw std::runtime_error("编码器拒绝视频帧");
-        }
-        ++video_frames_;
-      });
-    });
-    scheduler_.SetOnAudio([this](const auto& frame) noexcept {
-      Capture([&] {
-        if (!encoder_.SubmitAudio(processor_.ProcessAudio(frame))) {
-          throw std::runtime_error("编码器拒绝音频帧");
-        }
-        ++audio_frames_;
-      });
-    });
+    scheduler_.SetOnFrame(
+        [this](const mw::streamer::MediaFrame& frame) noexcept {
+          Capture([&] {
+            mw::streamer::MediaFrame processed;
+            if (frame.video) {
+              processed.video = processor_.ProcessVideo(*frame.video);
+              ++video_frames_;
+            }
+            if (frame.audio) {
+              processed.audio = processor_.ProcessAudio(*frame.audio);
+              ++audio_frames_;
+            }
+            if (!encoder_.SubmitFrame(processed)) {
+              throw std::runtime_error("编码器拒绝媒体帧");
+            }
+          });
+        });
     scheduler_.SetOnEnded([this]() noexcept {
       processor_.End();
       encoder_.Drain();
     });
-    input_.SetOnReady([this](const auto& streams) noexcept {
+    scheduler_.SetOnError([this](int code, std::string_view message) noexcept {
+      Capture([&] { throw ffmpeg::FfmpegException(code, message); });
+    });
+    scheduler_.SetOnReady([this](const auto& streams) noexcept {
       Capture([&] {
         auto encoding_streams = streams;
         for (auto& stream : encoding_streams) {
           auto* parameters = stream.codec_parameters.get();
-          if (parameters->codec_type == AVMEDIA_TYPE_AUDIO) {
-            parameters->format = AV_SAMPLE_FMT_FLTP;
-            parameters->sample_rate = 48000;
-          } else if (device_.get()) {
+          if (parameters->codec_type == AVMEDIA_TYPE_VIDEO && device_.get()) {
             const auto* description = av_pix_fmt_desc_get(
                 static_cast<AVPixelFormat>(parameters->format));
             if (!description || description->nb_components != 3 ||
@@ -130,17 +131,13 @@ class Recording final {
         }
         encoder_.Start(config_, encoding_streams, device_);
         Rethrow();
-        if (!scheduler_.Start(streams)) {
-          throw std::runtime_error("Scheduler 初始化失败");
-        }
         ready_.store(true);
       });
     });
-    input_.SetOnFrame([this](int, const auto& frame) noexcept {
+    input_.SetOnDecodedReady([this](const auto& source) noexcept {
       Capture([&] {
-        const bool accepted = frame->width > 0 ? scheduler_.SubmitVideo(frame)
-                                               : scheduler_.SubmitAudio(frame);
-        if (!accepted) throw std::runtime_error("Scheduler 拒绝解码帧");
+        if (!scheduler_.Start(source))
+          throw std::runtime_error("Scheduler 拒绝解码源");
       });
     });
     input_.SetOnStateChanged([this](mw::streamer::InputState state, int error,
@@ -182,9 +179,21 @@ class Recording final {
         wake_.wait_until(lock, deadline);
       }
     }
+    bool eof;
+    {
+      std::lock_guard lock(state_mutex_);
+      eof = input_ended_;
+    }
+    if (!eof) scheduler_.RequestStop();
     input_.Stop();
     if (ready_.load() && !failed_.load()) {
-      scheduler_.Drain();
+      if (eof) {
+        scheduler_.Drain();
+      } else {
+        scheduler_.Stop();
+        processor_.Stop();
+        encoder_.Drain();
+      }
       std::unique_lock lock(state_mutex_);
       if (!wake_.wait_for(lock, 30s,
                           [&] { return encoded_ended_ || failed_.load(); })) {
@@ -227,6 +236,7 @@ class Recording final {
   }
 
   void Stop() noexcept {
+    scheduler_.RequestStop();
     input_.Stop();
     scheduler_.Stop();
     processor_.Stop();

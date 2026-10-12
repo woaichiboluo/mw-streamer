@@ -23,14 +23,17 @@ struct Track {
   std::atomic<std::uint64_t> frames{0};
   std::atomic<std::int64_t> first{0}, end{0};
   std::atomic<int> sample_rate{0};
+  std::atomic<double> time_base{0};
 
   void Consume(const mw::streamer::ffmpeg::Frame& frame) noexcept {
     if (frames.fetch_add(1) == 0) first = frame->pts;
     end = frame->pts + frame->duration;
+    time_base = av_q2d(frame->time_base);
     if (frame->sample_rate > 0) sample_rate = frame->sample_rate;
   }
   double MediaSeconds() const noexcept {
-    return frames.load() ? static_cast<double>(end.load() - first.load()) / 1e9
+    return frames.load() ? static_cast<double>(end.load() - first.load()) *
+                               time_base.load()
                          : 0.0;
   }
 };
@@ -80,7 +83,6 @@ int main(int argc, char** argv) {
     const bool cuda = backend == "cuda";
     mw::streamer::LivePipelineConfig config;
     config.input.loop = mode == "loop";
-    config.input.playback_speed = 1.0;
     if (argc > 9 && argv[9][0]) config.input.options["user_agent"] = argv[9];
     for (int i = 10; i < argc; ++i) {
       const std::string option = argv[i];
@@ -182,14 +184,14 @@ int main(int argc, char** argv) {
         "startup_seconds={:.6f} processing_seconds={:.6f} stop_ms={:.3f} "
         "video_frames={} audio_frames={} video_media_seconds={:.6f} "
         "audio_media_seconds={:.6f} video_fps={:.3f} audio_sample_rate={} "
-        "cuda_frames={} backend={} loop={} playback_speed={} "
+        "cuda_frames={} backend={} loop={} "
         "end_order={} stop_order={}\n",
         StateName(status.state), ready.load(), ended.load(), stopped.load(),
         startup, processed, stop_ms, video.frames.load(), audio.frames.load(),
         video.MediaSeconds(), audio.MediaSeconds(),
         video.frames.load() / processed, audio.sample_rate.load(),
-        cuda_frames.load(), backend, config.input.loop,
-        config.input.playback_speed, end_order.load(), stop_order.load());
+        cuda_frames.load(), backend, config.input.loop, end_order.load(),
+        stop_order.load());
     if (status.state == PipelineState::kFailed || invalid.load() ||
         (cuda && cuda_frames.load() != video.frames.load())) {
       fmt::print(stderr, "{}: {}\n", status.error_source, status.error_message);

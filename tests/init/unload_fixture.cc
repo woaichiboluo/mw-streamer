@@ -50,30 +50,31 @@ extern "C" MW_EXPORT int RunLifecycle(const char* sample_path,
         }
         changed.notify_all();
       };
-      output.SetOnVideo([&](const mw::streamer::ffmpeg::Frame& frame) {
-        auto processed = processor.ProcessVideo(frame);
-        observe(processed);
-      });
-      output.SetOnAudio([&](const mw::streamer::ffmpeg::Frame& frame) {
-        auto processed = processor.ProcessAudio(frame);
-        observe(processed);
+      output.SetOnFrame([&](const mw::streamer::MediaFrame& frame) {
+        if (frame.video) observe(processor.ProcessVideo(*frame.video));
+        if (frame.audio) observe(processor.ProcessAudio(*frame.audio));
       });
       output.SetOnEnded([&] { processor.End(); });
+      output.SetOnReady([&](const auto& streams) {
+        if (!processor.Start(streams, cpu)) {
+          std::lock_guard<std::mutex> lock(mutex);
+          failed = true;
+          changed.notify_all();
+        }
+      });
+      output.SetOnError([&](int, std::string_view) {
+        std::lock_guard<std::mutex> lock(mutex);
+        failed = true;
+        changed.notify_all();
+      });
       mw::streamer::FfmpegInput input;
-      input.SetOnReady([&](const auto& streams) {
-        if (!processor.Start(streams, cpu) || !output.Start(streams)) {
+      input.SetOnDecodedReady([&](const auto& source) {
+        if (!output.Start(source)) {
           {
             std::lock_guard<std::mutex> lock(mutex);
             failed = true;
           }
           changed.notify_all();
-        }
-      });
-      input.SetOnFrame([&](int, const mw::streamer::ffmpeg::Frame& frame) {
-        if (frame->nb_samples > 0) {
-          output.SubmitAudio(frame);
-        } else {
-          output.SubmitVideo(frame);
         }
       });
       input.SetOnStateChanged(
@@ -94,6 +95,7 @@ extern "C" MW_EXPORT int RunLifecycle(const char* sample_path,
         completed = changed.wait_for(lock, std::chrono::seconds(8),
                                      [&] { return received || failed; });
       }
+      output.RequestStop();
       input.Stop();
       output.Stop();
       processor.Stop();

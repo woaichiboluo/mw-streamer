@@ -125,9 +125,8 @@ int Probe(std::string_view url, int seconds, bool loop,
           result.streams.begin(), result.streams.end(),
           [&](const auto& item) { return item.info.stream_index == index; });
       if (stream == result.streams.end() || !frame.get() || !frame->data[0] ||
-          !frame->buf[0] || frame->pts == AV_NOPTS_VALUE ||
-          av_cmp_q(frame->time_base, AVRational{1, 1000000000}) != 0 ||
-          frame->pkt_dts != AV_NOPTS_VALUE) {
+          !frame->buf[0] || frame->pts != frame->best_effort_timestamp ||
+          av_cmp_q(frame->time_base, stream->info.time_base) != 0) {
         result.invalid_frame = true;
         return;
       }

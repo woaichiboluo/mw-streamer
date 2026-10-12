@@ -2,9 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cmath>
 #include <cstring>
-#include <deque>
 #include <exception>
 #include <limits>
 #include <stdexcept>
@@ -18,17 +16,10 @@ extern "C" {
 #include "mw/streamer/ffmpeg/decoder.h"
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/ffmpeg/packet.h"
-#include "mw/streamer/input/ffmpeg_input_timing.h"
+#include "mw/streamer/input/ffmpeg_frame_decoder.h"
+#include "mw/streamer/input/ffmpeg_packet_reader.h"
 
 namespace mw::streamer {
-namespace internal {
-
-std::chrono::steady_clock::time_point SystemTimeBase() noexcept {
-  static const auto epoch = std::chrono::steady_clock::now();
-  return epoch;
-}
-
-}  // namespace internal
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -99,133 +90,88 @@ void InvokeCallback(const Callback& callback, Args&&... args) noexcept {
 
 }  // namespace
 
-// One pending frame per track lets Input schedule interleaved audio/video.
-// Packet queues and timestamp synthesis belong to this delivery layer.
+// Each decoder owns its raw frame queue. Source media fields are never mapped
+// to a playback clock; downstream consumers choose their own delivery cadence.
 struct FfmpegInput::Track {
-  Track(std::unique_ptr<ffmpeg::Decoder> decoder,
-        const ffmpeg::StreamInfo& stream, AVRational frame_rate,
-        bool wait_for_keyframe, std::int64_t last_duration_ns)
-      : decoder_(std::move(decoder)),
-        timing_(stream.time_base, frame_rate,
-                stream.codec_parameters.get()->codec_type == AVMEDIA_TYPE_AUDIO,
-                last_duration_ns),
-        stream_index_(stream.stream_index),
-        wait_for_keyframe_(wait_for_keyframe &&
-                           stream.codec_parameters.get()->codec_type ==
-                               AVMEDIA_TYPE_VIDEO) {}
+  Track(FfmpegInput& input, std::unique_ptr<ffmpeg::Decoder> decoder,
+        const ffmpeg::StreamInfo& stream)
+      : stream_index_(stream.stream_index),
+        description_(stream),
+        decoder_(
+            std::move(decoder),
+            [&input](std::size_t bytes) {
+              if (input.packet_reader_) input.packet_reader_->Release(bytes);
+            },
+            [&input] { input.wake_.notify_all(); },
+            [this] { return parser_repeat_pict_.load(); }) {}
 
-  void Push(ffmpeg::Packet packet) {
-    queued_bytes_ += static_cast<std::size_t>(packet->size);
-    packets_.push_back(std::move(packet));
-  }
-
-  void Prepare(bool input_eof, FfmpegInput& input) {
-    if (ready_ || ended_) {
-      return;
-    }
-    for (;;) {
-      const auto result = decoder_->ReceiveFrame(frame_);
-      if (result == ffmpeg::DecodeResult::kFrame) {
-        timing_.Update(*frame_.get());
-        ready_ = true;
-        return;
-      }
-      if (result == ffmpeg::DecodeResult::kEnd) {
-        MW_LOG_TRACE("streamer", "Input 轨道解码结束: stream={}",
-                     stream_index_);
-        ended_ = true;
-        return;
-      }
-      if (!packets_.empty()) {
-        // Receive returned kNeedInput, so Send cannot also return EAGAIN.
-        input.SubmitPacket(packets_.front(), decoder_.get());
-        queued_bytes_ -= static_cast<std::size_t>(packets_.front()->size);
-        packets_.pop_front();
-      } else if (input_eof && !drain_sent_) {
-        MW_LOG_TRACE("streamer", "Input 轨道开始排空解码器: stream={}",
-                     stream_index_);
-        if (!decoder_->Drain()) {
-          throw ffmpeg::FfmpegException(AVERROR_BUG, "解码器拒绝 EOF 输入");
-        }
-        drain_sent_ = true;
-      } else {
-        return;
-      }
+  void Push(ffmpeg::Packet packet) { decoder_.Push(std::move(packet)); }
+  void Prepare() {
+    if (ready_ || ended_) return;
+    if (decoder_.TryReceive(frame_)) {
+      ready_ = true;
+    } else if (decoder_.finished()) {
+      ended_ = true;
     }
   }
-
-  bool ShouldDeliver() {
-    if (wait_for_keyframe_) {
-      if (!(frame_->flags & AV_FRAME_FLAG_KEY)) {
-        return false;
-      }
-      wait_for_keyframe_ = false;
-      MW_LOG_DEBUG("streamer", "Input 轨道收到首个关键帧: stream={}, pts_ns={}",
-                   stream_index_, timing_.pts_ns());
-    }
+  void Finish() noexcept { decoder_.Finish(); }
+  bool TryReceive(ffmpeg::Frame& frame) {
+    if (!decoder_.TryReceive(frame)) return false;
+    ++pulled_frames_;
     return true;
   }
-
-  const ffmpeg::Frame& OutputFrame(const internal::PlaybackClock& playback,
-                                   InputMode mode) {
-    if (mode == InputMode::kLive) {
-      frame_->pts = playback.Timestamp(timing_.pts_ns());
-      frame_->duration = playback.ScaleTime(timing_.duration_ns());
-      if (frame_->nb_samples > 0) {
-        const auto rate = av_rescale_q(frame_->sample_rate, playback.speed(),
-                                       AVRational{1, 1});
-        if (rate <= 0 || rate > std::numeric_limits<int>::max()) {
-          throw std::invalid_argument("倍速音频采样率超出有效范围");
-        }
-        frame_->sample_rate = static_cast<int>(rate);
-      }
-    } else {
-      frame_->pts = timing_.pts_ns();
-      frame_->duration = timing_.duration_ns();
+  void CheckEnd() {
+    decoder_.ThrowIfFailed();
+    if (decoder_.finished() && !ended_) {
+      source_end_pts_.store(decoder_.end_pts());
+      ended_ = true;
     }
-    frame_->time_base = {1, 1000000000};
-    frame_->pkt_dts = AV_NOPTS_VALUE;
-    return frame_;
   }
-
+  bool source_finished() const noexcept { return decoder_.finished(); }
+  std::int64_t source_end_pts() const noexcept {
+    const auto live = decoder_.end_pts();
+    return live != AV_NOPTS_VALUE ? live : source_end_pts_.load();
+  }
+  bool has_pulled_frames() const noexcept { return pulled_frames_.load() != 0; }
+  void Stop() noexcept { decoder_.Stop(); }
+  bool wants_packet() const noexcept { return decoder_.wants_packet(); }
+  bool blocked() const noexcept {
+    return ended_ ||
+           (ready_ ? decoder_.blocked() : decoder_.waiting_for_packet());
+  }
+  void SnapshotParser(int repeat_pict) noexcept {
+    parser_repeat_pict_.store(repeat_pict);
+  }
+  const ffmpeg::Frame& media_frame() const noexcept { return frame_; }
   void Consume() noexcept {
     ready_ = false;
     frame_.Unref();
   }
-
-  void Flush() noexcept {
-    MW_LOG_TRACE("streamer",
-                 "Input 轨道清空解码器和 Packet 缓存: stream={}, bytes={}",
-                 stream_index_, queued_bytes_);
-    decoder_->Flush();
-    frame_.Unref();
-    packets_.clear();
-    timing_.Flush();
-    queued_bytes_ = 0;
-    ready_ = false;
-    ended_ = false;
-    drain_sent_ = false;
-  }
-
   bool ready() const noexcept { return ready_; }
   bool ended() const noexcept { return ended_; }
+  bool AnnounceEnd() noexcept {
+    if (!ended_ || end_announced_) return false;
+    end_announced_ = true;
+    return true;
+  }
   int stream_index() const noexcept { return stream_index_; }
-  std::int64_t pts_ns() const noexcept { return timing_.pts_ns(); }
-  std::int64_t next_pts_ns() const noexcept { return timing_.next_pts_ns(); }
-  std::int64_t duration_ns() const noexcept { return timing_.duration_ns(); }
-  std::size_t queued_bytes() const noexcept { return queued_bytes_; }
+  const ffmpeg::StreamInfo& description() const noexcept {
+    return description_;
+  }
+  std::int64_t end_pts() const noexcept { return decoder_.end_pts(); }
+  std::size_t queued_bytes() const noexcept { return decoder_.queued_bytes(); }
 
  private:
-  std::unique_ptr<ffmpeg::Decoder> decoder_;
-  ffmpeg::Frame frame_;
-  std::deque<ffmpeg::Packet> packets_;
-  internal::FrameTiming timing_;
   int stream_index_;
-  bool wait_for_keyframe_;
+  ffmpeg::StreamInfo description_;
+  std::atomic<int> parser_repeat_pict_{-1};
+  std::atomic<std::uint64_t> pulled_frames_{0};
+  std::atomic<std::int64_t> source_end_pts_{AV_NOPTS_VALUE};
+  internal::FfmpegFrameDecoder decoder_;
+  ffmpeg::Frame frame_;
   bool ready_ = false;
   bool ended_ = false;
-  bool drain_sent_ = false;
-  std::size_t queued_bytes_ = 0;
+  bool end_announced_ = false;
 };
 
 FfmpegInput::FfmpegInput(FfmpegInputConfig config)
@@ -233,19 +179,14 @@ FfmpegInput::FfmpegInput(FfmpegInputConfig config)
   if ((config_.mode != InputMode::kLive && config_.mode != InputMode::kRemux &&
        config_.mode != InputMode::kBatch) ||
       config_.max_retries < -1 || config_.retry_interval.count() <= 0 ||
-      config_.open_timeout.count() <= 0 || config_.read_timeout.count() <= 0 ||
-      config_.max_packet_buffer_bytes == 0 ||
-      !std::isfinite(config_.playback_speed) || config_.playback_speed < 0.5 ||
-      config_.playback_speed > 8.0) {
-    MW_LOG_ERROR(
-        "streamer",
-        "Input 配置无效: mode={}, max_retries={}, retry_ms={}, "
-        "open_timeout_ms={}, "
-        "read_timeout_ms={}, packet_buffer_bytes={}, playback_speed={}",
-        static_cast<int>(config_.mode), config_.max_retries,
-        config_.retry_interval.count(), config_.open_timeout.count(),
-        config_.read_timeout.count(), config_.max_packet_buffer_bytes,
-        config_.playback_speed);
+      config_.open_timeout.count() <= 0 || config_.read_timeout.count() <= 0) {
+    MW_LOG_ERROR("streamer",
+                 "Input 配置无效: mode={}, max_retries={}, retry_ms={}, "
+                 "open_timeout_ms={}, "
+                 "read_timeout_ms={}, packet_buffer_bytes={}",
+                 static_cast<int>(config_.mode), config_.max_retries,
+                 config_.retry_interval.count(), config_.open_timeout.count(),
+                 config_.read_timeout.count(), config_.max_packet_buffer_bytes);
     throw std::invalid_argument("FFmpeg Input 配置无效");
   }
 }
@@ -262,12 +203,28 @@ void FfmpegInput::SetOnReady(OnReady callback) {
   on_ready_ = std::move(callback);
 }
 
+void FfmpegInput::SetOnSelectStreams(OnSelectStreams callback) {
+  on_select_streams_ = std::move(callback);
+}
+
 void FfmpegInput::SetOnPacket(OnPacket callback) {
   on_packet_ = std::move(callback);
 }
 
 void FfmpegInput::SetOnFrame(OnFrame callback) {
+  if (callback && on_decoded_ready_)
+    throw std::logic_error("Input 不能同时配置自动交付和按轨读取");
   on_frame_ = std::move(callback);
+}
+
+void FfmpegInput::SetOnDecodedReady(OnDecodedReady callback) {
+  if (callback && on_frame_)
+    throw std::logic_error("Input 不能同时配置自动交付和按轨读取");
+  on_decoded_ready_ = std::move(callback);
+}
+
+void FfmpegInput::SetOnTrackEnded(OnTrackEnded callback) {
+  on_track_ended_ = std::move(callback);
 }
 
 void FfmpegInput::SetOnStateChanged(OnStateChanged callback) {
@@ -291,7 +248,10 @@ void FfmpegInput::Start(std::string_view url) {
     throw std::logic_error("Input 已经启动");
   }
   JoinWorkers();
-  performance_.Start(this);
+  {
+    std::lock_guard<std::mutex> performance_lock(performance_mutex_);
+    performance_.Start(this);
+  }
   ready_streams_.clear();
   generation_ = 0;
   url_ = url;
@@ -301,15 +261,16 @@ void FfmpegInput::Start(std::string_view url) {
     std::lock_guard<std::mutex> wait_lock(wait_mutex_);
     seek_position_.reset();
     stop_requested_.store(false);
+    read_stop_requested_.store(false);
   }
   retries_ = 0;
   state_.store(InputState::kConnecting);
   MW_LOG_INFO("streamer",
-              "Input[{}] 开始启动: protocol={}, mode={}, playback_speed={}, "
+              "Input[{}] 开始启动: protocol={}, mode={}, "
               "video_device={}, loop={}, "
               "auto_reconnect={}, max_retries={}",
               static_cast<const void*>(this), protocol ? protocol : "unknown",
-              ModeName(config_.mode), config_.playback_speed,
+              ModeName(config_.mode),
               video_device_ && video_device_->get() ? "cuda" : "cpu",
               config_.loop, config_.auto_reconnect, config_.max_retries);
   try {
@@ -364,6 +325,7 @@ void FfmpegInput::StopWorkers(bool notify) {
     std::lock_guard<std::mutex> wait_lock(wait_mutex_);
     stop_requested_.store(true);
     seek_position_.reset();
+    if (packet_reader_) packet_reader_->RequestStop();
   }
   wake_.notify_all();
   JoinWorkers();
@@ -426,7 +388,7 @@ void FfmpegInput::NotifyState(InputState state, int error,
 int FfmpegInput::InterruptCallback(void* opaque) {
   const auto* input = static_cast<const FfmpegInput*>(opaque);
   const auto deadline = input->io_deadline_ns_.load();
-  return input->stop_requested_.load() ||
+  return input->stop_requested_.load() || input->read_stop_requested_.load() ||
          (deadline != 0 && NowNs() >= deadline);
 }
 
@@ -437,7 +399,10 @@ void FfmpegInput::SetIoDeadline(std::chrono::milliseconds timeout) {
 }
 
 void FfmpegInput::OpenAttempt() {
-  performance_.SegmentReset();
+  {
+    std::lock_guard<std::mutex> performance_lock(performance_mutex_);
+    performance_.SegmentReset();
+  }
   MW_LOG_DEBUG(
       "streamer", "Input[{}] 开始打开输入: retry={}, open_timeout_ms={}",
       static_cast<const void*>(this), retries_, config_.open_timeout.count());
@@ -449,18 +414,41 @@ void FfmpegInput::OpenAttempt() {
   format_->interrupt_callback = {&FfmpegInput::InterruptCallback, this};
   SetIoDeadline(config_.open_timeout);
   AVDictionary* options = nullptr;
-  const char* protocol = FindInputProtocol(url_.c_str());
-  // Servers can filter HEVC out unless the RTMP connect advertises hvc1.
-  int result = 0;
-  if (protocol && std::strncmp(protocol, "rtmp", 4) == 0) {
-    result = av_dict_set(&options, "rtmp_enhanced_codecs", "hvc1", 0);
+  const AVInputFormat* input_format = nullptr;
+  std::string input_url = url_;
+  const auto separator = url_.find("://");
+  const auto scheme = separator == std::string::npos
+                          ? std::string{}
+                          : url_.substr(0, separator);
+  if (scheme == "dshow" || scheme == "v4l2" || scheme == "iec61883") {
+    input_format = av_find_input_format(scheme.c_str());
+    if (!input_format) {
+      throw ffmpeg::FfmpegException(AVERROR_DEMUXER_NOT_FOUND,
+                                    "查找输入格式 " + scheme);
+    }
+    input_url = url_.substr(separator + 3);
   }
+  int result = 0;
+  const auto set_option = [&](const char* key, const char* value) {
+    if (result >= 0) result = av_dict_set(&options, key, value, 0);
+  };
+  if (scheme == "http" || scheme == "https") {
+    set_option("multiple_requests", "1");
+    set_option("reconnect", "1");
+    set_option("reconnect_streamed", "1");
+    set_option("reconnect_delay_max", "120");
+    set_option("referer", url_.c_str());
+  } else if (scheme == "rtmp" || scheme == "rtmps") {
+    set_option("rtmp_live", "live");
+  }
+  if (!input_format) set_option("rw_timeout", "60000000");
   for (const auto& [key, value] : config_.options) {
     if (result < 0) break;
     result = av_dict_set(&options, key.c_str(), value.c_str(), 0);
   }
   if (result >= 0) {
-    result = avformat_open_input(&format_, url_.c_str(), nullptr, &options);
+    result = avformat_open_input(&format_, input_url.c_str(), input_format,
+                                 &options);
   }
   if (result >= 0) {
     const AVDictionaryEntry* unused = nullptr;
@@ -479,26 +467,28 @@ void FfmpegInput::OpenAttempt() {
   MW_LOG_DEBUG("streamer", "Input[{}] 轨道探测完成: streams={}",
                static_cast<const void*>(this), format_->nb_streams);
 
-  // Select one video and one audio stream from the input.
-  int video_index = -1;
-  for (const auto type : {AVMEDIA_TYPE_VIDEO, AVMEDIA_TYPE_AUDIO}) {
-    const int related = type == AVMEDIA_TYPE_AUDIO ? video_index : -1;
-    const int index =
-        av_find_best_stream(format_, type, -1, related, nullptr, 0);
-    if (index == AVERROR_STREAM_NOT_FOUND) {
-      continue;
-    }
-    ffmpeg::FfmpegException::throwIfError(index, "av_find_best_stream");
-    if (type == AVMEDIA_TYPE_VIDEO) {
-      video_index = index;
-    }
+  PrepareStreams();
+  CreateDecoders();
+}
+
+void FfmpegInput::PrepareStreams() {
+  std::vector<ffmpeg::StreamInfo> available;
+  // Demux all packets, but construct decoders only for requested sources.
+  for (unsigned int index = 0; index < format_->nb_streams; ++index) {
     auto* stream = format_->streams[index];
+    const auto type = stream->codecpar->codec_type;
+    if (type != AVMEDIA_TYPE_VIDEO && type != AVMEDIA_TYPE_AUDIO) continue;
     ffmpeg::StreamInfo info{stream->index,
                             ffmpeg::CodecParameters(*stream->codecpar),
                             stream->time_base};
-    info.Validate();
+    info.disposition = stream->disposition;
+    const AVDictionaryEntry* entry = nullptr;
+    while ((entry = av_dict_get(stream->metadata, "", entry,
+                                AV_DICT_IGNORE_SUFFIX))) {
+      info.metadata.emplace(entry->key, entry->value);
+    }
     MW_LOG_DEBUG("streamer",
-                 "Input[{}] 选择轨道: stream={}, type={}, codec={}, format={}, "
+                 "Input[{}] 描述轨道: stream={}, type={}, codec={}, format={}, "
                  "time_base={}/{}, size={}x{}, fps={}/{}, sample_rate={}, "
                  "channels={}",
                  static_cast<const void*>(this), info.stream_index,
@@ -509,20 +499,77 @@ void FfmpegInput::OpenAttempt() {
                  stream->codecpar->height, stream->codecpar->framerate.num,
                  stream->codecpar->framerate.den, stream->codecpar->sample_rate,
                  stream->codecpar->ch_layout.nb_channels);
-    streams_.push_back(std::move(info));
+    available.push_back(std::move(info));
   }
-  if (!ready_streams_.empty() && ready_streams_ != streams_) {
-    throw std::runtime_error("Input 轨道配置已改变，停止读取");
-  }
-  if (streams_.empty()) {
+  if (available.empty()) {
     throw ffmpeg::FfmpegException(AVERROR_STREAM_NOT_FOUND,
                                   "Input 没有音视频轨道");
   }
+  std::vector<int> indices;
+  if (on_select_streams_) {
+    // Selection is part of preparation, rather than a best-effort notification.
+    indices = on_select_streams_(available);
+  } else {
+    for (const auto type : {AVMEDIA_TYPE_VIDEO, AVMEDIA_TYPE_AUDIO}) {
+      for (const auto& info : available) {
+        if (info.codec_parameters.get()->codec_type != type) continue;
+        indices.push_back(info.stream_index);
+        break;
+      }
+    }
+  }
+  if (indices.empty()) throw std::invalid_argument("Input 选轨结果不能为空");
+  std::vector<ffmpeg::StreamInfo> selected;
+  for (const auto index : indices) {
+    const auto found = std::find_if(
+        available.begin(), available.end(),
+        [&](const auto& info) { return info.stream_index == index; });
+    if (found == available.end())
+      throw std::invalid_argument("Input 选轨索引不存在");
+    if (std::any_of(selected.begin(), selected.end(), [&](const auto& info) {
+          return info.stream_index == index;
+        }))
+      throw std::invalid_argument("Input 选轨索引不能重复");
+    found->Validate();
+    if (found->codec_parameters.get()->codec_type == AVMEDIA_TYPE_AUDIO &&
+        found->codec_parameters.get()->ch_layout.nb_channels == 0)
+      throw std::invalid_argument("Input 所选音轨没有有效声道");
+    selected.push_back(*found);
+  }
+  streams_ = std::move(selected);
+}
+
+void FfmpegInput::CreateDecoders() {
   // Compare the full selected stream set before opening any new decoder.
   if (config_.mode != InputMode::kRemux) {
     for (const auto& info : streams_) {
       auto* stream = format_->streams[info.stream_index];
       const auto type = info.codec_parameters.get()->codec_type;
+      if (stop_requested_.load()) return;
+      auto decoder_stream = info;
+      if (type == AVMEDIA_TYPE_VIDEO) {
+        auto* parameters = decoder_stream.codec_parameters.get();
+        parameters->framerate = av_guess_frame_rate(nullptr, stream, nullptr);
+        parameters->sample_aspect_ratio =
+            av_guess_sample_aspect_ratio(nullptr, stream, nullptr);
+        const auto alpha = info.metadata.find("alpha_mode");
+        if (alpha != info.metadata.end() && !alpha->second.empty() &&
+            alpha->second.front() == '1') {
+          switch (parameters->format) {
+            case AV_PIX_FMT_YUV420P:
+              parameters->format = AV_PIX_FMT_YUVA420P;
+              break;
+            case AV_PIX_FMT_YUV422P:
+              parameters->format = AV_PIX_FMT_YUVA422P;
+              break;
+            case AV_PIX_FMT_YUV444P:
+              parameters->format = AV_PIX_FMT_YUVA444P;
+              break;
+            default:
+              break;
+          }
+        }
+      }
       const auto& decoder_name = type == AVMEDIA_TYPE_VIDEO
                                      ? config_.video_decoder_name
                                      : config_.audio_decoder_name;
@@ -535,82 +582,119 @@ void FfmpegInput::OpenAttempt() {
       if (type == AVMEDIA_TYPE_VIDEO) {
         if (video_device_) {
           decoder = std::make_unique<ffmpeg::VideoDecoder>(
-              info, *video_device_, config_.video_decoder_name);
+              decoder_stream, *video_device_, config_.video_decoder_name);
         } else {
           decoder = std::make_unique<ffmpeg::VideoDecoder>(
-              info, config_.video_decoder_name);
+              decoder_stream, config_.video_decoder_name);
         }
       } else {
         decoder = std::make_unique<ffmpeg::AudioDecoder>(
-            info, config_.audio_decoder_name);
+            decoder_stream, config_.audio_decoder_name);
       }
-      tracks_.push_back(std::make_unique<Track>(
-          std::move(decoder), info,
-          av_guess_frame_rate(format_, stream, nullptr), network_source_,
-          type == AVMEDIA_TYPE_VIDEO ? video_last_duration_ns_ : 0));
+      tracks_.push_back(
+          std::make_shared<Track>(*this, std::move(decoder), decoder_stream));
     }
-  }
-  // Let demuxers (notably HLS) stop fetching unselected variants/tracks.
-  for (unsigned int index = 0; index < format_->nb_streams; ++index) {
-    const bool selected =
-        std::any_of(streams_.begin(), streams_.end(), [&](const auto& stream) {
-          return stream.stream_index == static_cast<int>(index);
-        });
-    format_->streams[index]->discard =
-        selected ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
   }
 }
 
 void FfmpegInput::ReportPerformance(bool final) {
-  if (!performance_.Sample(final)) return;
   std::size_t buffered = 0;
-  for (const auto& track : tracks_) buffered += track->queued_bytes();
+  std::size_t high_water = 0;
+  if (packet_reader_) {
+    buffered = packet_reader_->outstanding_bytes();
+    high_water = packet_reader_->high_water_bytes();
+  } else {
+    for (const auto& track : tracks_) buffered += track->queued_bytes();
+  }
+  std::lock_guard<std::mutex> performance_lock(performance_mutex_);
+  performance_.Queued(high_water);
+  if (!performance_.Sample(final)) return;
   performance_.Report(generation_, state(), buffered);
 }
 
-void FfmpegInput::WaitForPlayback(std::unique_lock<std::mutex>& lock,
-                                  Clock::time_point deadline) {
-  performance_.BeginWait();
-  wake_.wait_until(lock, deadline, [this] {
-    return stop_requested_.load() || seek_position_.has_value();
-  });
-  performance_.EndWait();
-  ReportPerformance();
-}
-
-bool FfmpegInput::ReadPacket(ffmpeg::Packet& packet) {
-  while (!stop_requested_.load()) {
+int FfmpegInput::ReadSelectedPacket(ffmpeg::Packet& packet) {
+  while (!stop_requested_.load() && !read_stop_requested_.load()) {
     SetIoDeadline(config_.read_timeout);
-    performance_.BeginRead();
-    const int result = av_read_frame(format_, packet.get());
-    io_deadline_ns_.store(0);
-    performance_.Read(*packet.get(), result, stop_requested_.load(), streams_);
-    ReportPerformance();
-    if (result == AVERROR_EOF) {
-      MW_LOG_DEBUG("streamer", "Input[{}] 读到 EOF: generation={}",
-                   static_cast<const void*>(this), generation_);
-      input_eof_ = true;
-      return false;
+    {
+      std::lock_guard<std::mutex> performance_lock(performance_mutex_);
+      performance_.BeginRead();
     }
-    ffmpeg::FfmpegException::throwIfError(result, "av_read_frame");
-    const bool selected =
-        std::any_of(streams_.begin(), streams_.end(), [&](const auto& stream) {
-          return stream.stream_index == packet->stream_index;
-        });
-    if (packet->size > 0 && selected) {
-      return !stop_requested_.load();
+    int result = av_read_frame(format_, packet.get());
+    const auto deadline = io_deadline_ns_.exchange(0);
+    // Distinguish deadline expiry from cancellation before the reader handles
+    // AVERROR_EXIT so network timeouts retain the retry policy.
+    if (result == AVERROR_EXIT && deadline && NowNs() >= deadline &&
+        !stop_requested_.load() && !read_stop_requested_.load())
+      result = AVERROR(ETIMEDOUT);
+    {
+      std::lock_guard<std::mutex> performance_lock(performance_mutex_);
+      performance_.Read(*packet.get(), result,
+                        stop_requested_.load() || read_stop_requested_.load(),
+                        streams_);
+    }
+    if (result < 0) return result;
+    for (const auto& track : tracks_) {
+      if (track->stream_index() != packet->stream_index) continue;
+      const auto* parser =
+          av_stream_get_parser(format_->streams[packet->stream_index]);
+      track->SnapshotParser(parser ? parser->repeat_pict : -1);
+      break;
+    }
+    if (packet->size > 0) {
+      return 0;
     }
     packet.Unref();
   }
-  return false;
+  return AVERROR_EXIT;
 }
 
-void FfmpegInput::SubmitPacket(const ffmpeg::Packet& packet,
-                               ffmpeg::Decoder* decoder) {
-  InvokeCallback(on_packet_, generation_, packet);
-  if (decoder && !decoder->SendPacket(packet)) {
-    throw ffmpeg::FfmpegException(AVERROR_BUG, "解码器同时拒绝输入和输出");
+bool FfmpegInput::ReadPacket(ffmpeg::Packet& packet) {
+  if (!packet_reader_) return false;
+  const bool received = packet_reader_->Pop(packet);
+  ReportPerformance();
+  if (!received && !stop_requested_.load()) input_eof_ = true;
+  return received;
+}
+
+void FfmpegInput::StartReadAhead() {
+  if (stop_requested_.load()) return;
+  read_stop_requested_.store(false);
+  auto reader = std::make_unique<internal::FfmpegPacketReader>(
+      [this](auto& packet) { return ReadSelectedPacket(packet); },
+      [this] { read_stop_requested_.store(true); },
+      config_.max_packet_buffer_bytes
+          ? config_.max_packet_buffer_bytes
+          : std::numeric_limits<std::size_t>::max());
+  {
+    std::lock_guard<std::mutex> lock(wait_mutex_);
+    if (!stop_requested_.load()) {
+      packet_reader_ = std::move(reader);
+      return;
+    }
   }
+  reader->Stop();
+}
+
+void FfmpegInput::StopReadAhead() noexcept {
+  std::unique_ptr<internal::FfmpegPacketReader> reader;
+  {
+    std::lock_guard<std::mutex> lock(wait_mutex_);
+    reader = std::move(packet_reader_);
+  }
+  if (reader) {
+    reader->Stop();
+    std::lock_guard<std::mutex> performance_lock(performance_mutex_);
+    performance_.Queued(reader->high_water_bytes());
+  }
+  read_stop_requested_.store(false);
+}
+
+void FfmpegInput::SubmitPacket(const ffmpeg::Packet& packet) {
+  if (std::none_of(streams_.begin(), streams_.end(), [&](const auto& stream) {
+        return stream.stream_index == packet->stream_index;
+      }))
+    return;
+  InvokeCallback(on_packet_, generation_, packet);
 }
 
 void FfmpegInput::PlayPackets(bool initialized) {
@@ -621,7 +705,14 @@ void FfmpegInput::PlayPackets(bool initialized) {
     if (!ReadPacket(packet)) {
       break;
     }
-    SubmitPacket(packet, nullptr);
+    const bool media =
+        std::any_of(streams_.begin(), streams_.end(), [&](const auto& stream) {
+          return stream.stream_index == packet->stream_index;
+        });
+    SubmitPacket(packet);
+    if (packet_reader_)
+      packet_reader_->Release(static_cast<std::size_t>(packet->size));
+    if (!media) continue;
     received = true;
     retries_ = 0;
     if (state() != InputState::kConnected) {
@@ -633,51 +724,46 @@ void FfmpegInput::PlayPackets(bool initialized) {
   }
 }
 
-bool FfmpegInput::PrepareFrames() {
-  while (!stop_requested_.load()) {
-    bool ready = true;
-    bool has_frame = false;
-    for (const auto& decoder : tracks_) {
-      if (stop_requested_.load()) {
-        return false;
-      }
-      decoder->Prepare(input_eof_, *this);
-      ready = ready && (decoder->ready() || decoder->ended());
-      has_frame = has_frame || decoder->ready();
-    }
-    if (ready) {
-      return has_frame;
-    }
-    if (input_eof_) {
-      throw ffmpeg::FfmpegException(AVERROR_INVALIDDATA, "decoder EOF drain");
-    }
+bool FfmpegInput::PumpPackets() {
+  if (!packet_reader_ || input_eof_ || stop_requested_.load()) return false;
+  bool progress = false;
+  while (!stop_requested_.load() && !HasSeekRequest() &&
+         std::any_of(tracks_.begin(), tracks_.end(),
+                     [](const auto& track) { return track->wants_packet(); })) {
     ffmpeg::Packet packet;
-    if (!ReadPacket(packet)) {
-      continue;
+    bool received = false;
+    try {
+      received = packet_reader_->TryPop(packet);
+    } catch (...) {
+      // Already-dispatched packets belong to this attempt. Drain their frames
+      // before retrying or failing, preserving the original read exception.
+      read_error_ = std::current_exception();
+      input_eof_ = true;
+      for (const auto& track : tracks_) track->Finish();
+      return true;
     }
-    for (const auto& decoder : tracks_) {
-      if (decoder->stream_index() != packet->stream_index) {
-        continue;
+    if (!received) {
+      if (packet_reader_->finished()) {
+        input_eof_ = true;
+        for (const auto& track : tracks_) track->Finish();
+        progress = true;
       }
-      std::size_t buffered = 0;
-      for (const auto& track : tracks_) {
-        buffered += track->queued_bytes();
-      }
-      if (static_cast<std::size_t>(packet->size) >
-          config_.max_packet_buffer_bytes - buffered) {
-        MW_LOG_DEBUG("streamer",
-                     "Input[{}] Packet 缓存超限: stream={}, buffered_bytes={}, "
-                     "packet_bytes={}, limit_bytes={}",
-                     static_cast<const void*>(this), packet->stream_index,
-                     buffered, packet->size, config_.max_packet_buffer_bytes);
-        throw std::length_error("Input 轨道 Packet 缓存超过字节上限");
-      }
-      performance_.Queued(buffered + static_cast<std::size_t>(packet->size));
-      decoder->Push(std::move(packet));
       break;
     }
+    SubmitPacket(packet);
+    bool dispatched = false;
+    for (const auto& track : tracks_) {
+      if (track->stream_index() == packet->stream_index) {
+        track->Push(std::move(packet));
+        dispatched = true;
+        break;
+      }
+    }
+    if (!dispatched)
+      packet_reader_->Release(static_cast<std::size_t>(packet->size));
+    progress = true;
   }
-  return false;
+  return progress;
 }
 
 bool FfmpegInput::HasSeekRequest() {
@@ -697,187 +783,193 @@ bool FfmpegInput::ApplySeek() {
   if (!position) {
     return false;
   }
-  performance_.Seek();
-  // Tracks are selected video-first; audio-only input uses its audio stream.
-  const int index = streams_.front().stream_index;
-  MW_LOG_DEBUG("streamer", "Input[{}] 执行 Seek: stream={}, position_ms={}",
-               static_cast<const void*>(this), index, position->count());
-  auto timestamp =
-      av_rescale_q(position->count(), AVRational{1, 1000}, AV_TIME_BASE_Q);
-  if (format_->start_time != AV_NOPTS_VALUE) {
-    timestamp += format_->start_time;
+  // Stop all codec users before releasing their shared packet reservations.
+  for (const auto& track : tracks_) track->Stop();
+  StopReadAhead();
+  {
+    std::lock_guard<std::mutex> performance_lock(performance_mutex_);
+    performance_.Seek();
   }
-  timestamp = av_rescale_q(timestamp, AV_TIME_BASE_Q,
-                           format_->streams[index]->time_base);
-  SetIoDeadline(config_.read_timeout);
-  const int result =
-      av_seek_frame(format_, index, timestamp, AVSEEK_FLAG_BACKWARD);
-  io_deadline_ns_.store(0);
-  if (result >= 0) {
+  tracks_.clear();
+  if (position->count() == 0) {
+    // Reopen at the start to support formats that cannot seek to zero.
+    avformat_close_input(&format_);
+    streams_.clear();
+    OpenAttempt();
+    ready_streams_ = streams_;
     ++generation_;
-    MW_LOG_INFO("streamer",
-                "Input[{}] Seek 完成: position_ms={}, generation={}",
-                static_cast<const void*>(this), position->count(), generation_);
+    InvokeCallback(on_ready_, ready_streams_);
+  } else {
+    auto timestamp =
+        av_rescale_q(position->count(), AVRational{1, 1000}, AV_TIME_BASE_Q);
+    if (format_->start_time != AV_NOPTS_VALUE) timestamp += format_->start_time;
+    SetIoDeadline(config_.read_timeout);
+    const int result = avformat_seek_file(
+        format_, -1, std::numeric_limits<std::int64_t>::min(), timestamp,
+        timestamp, 0);
+    io_deadline_ns_.store(0);
+    ffmpeg::FfmpegException::throwIfError(result, "avformat_seek_file");
+    // Recreate decoders so seeking does not retain prior codec state.
+    PrepareStreams();
+    CreateDecoders();
+    ++generation_;
+    ready_streams_ = streams_;
+    InvokeCallback(on_ready_, ready_streams_);
   }
-  if (result < 0 && !stop_requested_.load()) {
-    // A failed seek still flushes decoding and resumes reading.
-    MW_LOG_WARNING("streamer",
-                   "Input[{}] Seek 失败，清空解码器后继续读取: position_ms={}, "
-                   "error={}, reason={}",
-                   static_cast<const void*>(this), position->count(), result,
-                   ffmpeg::AvErrorStr(result));
-  }
-  for (const auto& track : tracks_) {
-    track->Flush();
-  }
+  MW_LOG_INFO("streamer", "Input[{}] Seek 完成: position_ms={}, generation={}",
+              static_cast<const void*>(this), position->count(), generation_);
   input_eof_ = false;
+  read_error_ = nullptr;
+  const auto start_time_us =
+      (format_->start_time == AV_NOPTS_VALUE ? 0 : format_->start_time) +
+      position->count() * 1000;
+  AnnounceDecodedSource(start_time_us, true);
+  StartReadAhead();
   return true;
 }
 
-void FfmpegInput::PlayAttempt(internal::PlaybackClock& playback,
-                              bool first_attempt) {
-  const bool initialized = !ready_streams_.empty();
-  if (initialized) {
-    ++generation_;
-    MW_LOG_DEBUG("streamer", "Input[{}] 恢复交付: generation={}, mode={}",
-                 static_cast<const void*>(this), generation_,
-                 ModeName(config_.mode));
-  } else {
-    ready_streams_ = streams_;
-    MW_LOG_INFO("streamer", "Input[{}] 轨道就绪: tracks={}, mode={}",
-                static_cast<const void*>(this), ready_streams_.size(),
-                ModeName(config_.mode));
-    InvokeCallback(on_ready_, ready_streams_);
+void FfmpegInput::AnnounceDecodedSource(std::int64_t start_time_us,
+                                        bool flush) {
+  if (on_decoded_ready_) {
+    source_completed_frames_ = std::make_shared<std::atomic<std::int64_t>>(-1);
+    DecodedInputSource source;
+    source.start_time_us = start_time_us;
+    source.media_origin_us =
+        format_->start_time == AV_NOPTS_VALUE ? 0 : format_->start_time;
+    source.loop = config_.loop;
+    source.flush = flush;
+    if (format_->duration > 0) {
+      const auto origin =
+          format_->start_time == AV_NOPTS_VALUE ? 0 : format_->start_time;
+      source.duration_us = std::max<std::int64_t>(
+          0, format_->duration - (start_time_us - origin));
+    }
+    source.complete = [completed = source_completed_frames_](auto count) {
+      if (count < 0) throw std::invalid_argument("输入段 frame 计数不能为负");
+      std::int64_t pending = -1;
+      completed->compare_exchange_strong(pending, count);
+    };
+    for (const auto& track : tracks_) {
+      source.tracks.push_back(
+          {track->description(),
+           [track](auto& frame) { return track->TryReceive(frame); },
+           [track] { return track->source_finished(); },
+           [track] { return track->source_end_pts(); }});
+    }
+    InvokeCallback(on_decoded_ready_, source);
   }
+}
+
+std::int64_t FfmpegInput::PlayAttempt() {
+  const bool initialized = !ready_streams_.empty();
+  if (initialized) ++generation_;
+  ready_streams_ = streams_;
+  InvokeCallback(on_ready_, ready_streams_);
+  AnnounceDecodedSource(
+      format_->start_time == AV_NOPTS_VALUE ? 0 : format_->start_time);
+  StartReadAhead();
   if (config_.mode == InputMode::kRemux) {
     PlayPackets(initialized);
-    return;
+    // Remux has no decoded channel-frame producer.
+    return 0;
   }
-  const bool prepared = PrepareFrames();
-  if (stop_requested_.load()) {
-    return;
-  }
-  if (!prepared) {
-    if (config_.loop || initialized) {
-      throw ffmpeg::FfmpegException(AVERROR_EOF, "恢复输入未解码出音视频帧");
-    }
-    return;
-  }
-  const auto next_pts = [this] {
-    auto pts = std::numeric_limits<std::int64_t>::max();
-    for (const auto& track : tracks_) {
-      if (track->ready()) {
-        pts = std::min(pts, track->pts_ns());
-      }
-    }
-    return pts;
+  bool received = false;
+  std::int64_t delivered = 0;
+  const auto has_video = [this] {
+    return std::any_of(streams_.begin(), streams_.end(),
+                       [](const auto& stream) {
+                         return stream.codec_parameters.get()->codec_type ==
+                                AVMEDIA_TYPE_VIDEO;
+                       });
   };
-  if (first_attempt) {
-    // Establish the output timestamp anchor after preparing the first frames.
-    // User initialization and initial decoding must not add timestamp lateness.
-    playback = internal::PlaybackClock(
-        next_pts(), Clock::now(), internal::SystemTimeBase(),
-        av_d2q(config_.playback_speed, std::numeric_limits<int>::max()));
-  } else {
-    playback.BeginLoop(next_pts());
-  }
-  retries_ = 0;
-  if (state() != InputState::kConnected) {
-    NotifyState(InputState::kConnected);
-  }
-  if (first_attempt) {
-    playback.StartDelivery(Clock::now());
-  }
-  for (;;) {
-    if (stop_requested_.load()) {
-      return;
+  while (!stop_requested_.load()) {
+    if (HasSeekRequest() && ApplySeek()) {
+      delivered = 0;
     }
-    bool has_frames = true;
-    if (ApplySeek()) {
-      has_frames = PrepareFrames();
-      if (stop_requested_.load()) {
-        return;
-      }
-      if (has_frames) {
-        playback.Seek(next_pts());
-      }
-    }
-    if (has_frames) {
-      {
-        std::unique_lock<std::mutex> lock(wait_mutex_);
-        WaitForPlayback(lock, playback.deadline());
-        if (stop_requested_.load()) {
-          return;
-        }
-        if (seek_position_) {
-          continue;
-        }
-      }
-      // Deliver both tracks if due together before reading more input. A read
-      // needed for one track must not postpone the other's already-ready frame.
-      for (const auto& decoder : tracks_) {
-        if (stop_requested_.load()) {
-          return;
-        }
-        if (HasSeekRequest()) {
-          break;
-        }
-        if (decoder->ready() && playback.CanDeliver(decoder->pts_ns())) {
-          // Non-key video still advances the shared media clock.
-          if (decoder->ShouldDeliver()) {
-            InvokeCallback(on_frame_, decoder->stream_index(),
-                           decoder->OutputFrame(playback, config_.mode));
-          }
-          decoder->Consume();
-        }
-      }
-      if (HasSeekRequest()) {
-        continue;
-      }
-      has_frames = PrepareFrames();
-    }
-    if (!has_frames) {
-      std::int64_t end_pts = 0;
+    if (source_completed_frames_ && source_completed_frames_->load() >= 0) {
       for (const auto& track : tracks_) {
-        end_pts = std::max(end_pts, track->next_pts_ns());
-      }
-      std::unique_lock<std::mutex> lock(wait_mutex_);
-      if (config_.loop && !stop_requested_.load()) {
-        // Advance the old deadline by max(next_pts) - old clock PTS.
-        WaitForPlayback(lock, playback.LoopDeadline(end_pts));
-      }
-      if (!stop_requested_.load()) {
-        if (seek_position_) {
-          continue;
+        if (track->has_pulled_frames()) {
+          retries_ = 0;
+          if (state() != InputState::kConnected)
+            NotifyState(InputState::kConnected);
         }
-        // Commit EOF under the same lock as Seek submission. Later requests
-        // observe ended input, or apply to the next committed loop cycle.
-        if (config_.loop) {
-          playback.EndLoop(end_pts);
-          for (const auto& track : tracks_) {
-            if (format_->streams[track->stream_index()]->codecpar->codec_type ==
-                AVMEDIA_TYPE_VIDEO) {
-              video_last_duration_ns_ = track->duration_ns();
-            }
-          }
-        }
-        if (!config_.loop) {
-          state_.store(InputState::kEnded);
-        }
+        track->CheckEnd();
+        if (track->AnnounceEnd() && !read_error_)
+          InvokeCallback(on_track_ended_, track->stream_index(),
+                         track->source_end_pts());
       }
-      return;
+      if (read_error_) std::rethrow_exception(read_error_);
+      return source_completed_frames_->load();
     }
-    playback.Advance(next_pts());
+    bool progress = PumpPackets();
+    bool ended = true;
+    for (const auto& track : tracks_) {
+      if (stop_requested_.load() || HasSeekRequest()) break;
+      if (on_decoded_ready_) {
+        track->CheckEnd();
+        if (track->has_pulled_frames()) {
+          received = true;
+          retries_ = 0;
+          if (state() != InputState::kConnected)
+            NotifyState(InputState::kConnected);
+        }
+      } else
+        track->Prepare();
+      if (track->ready()) {
+        retries_ = 0;
+        if (state() != InputState::kConnected)
+          NotifyState(InputState::kConnected);
+        InvokeCallback(on_frame_, track->stream_index(), track->media_frame());
+        if (has_video() ? track->media_frame()->width > 0
+                        : track->media_frame()->nb_samples > 0)
+          ++delivered;
+        track->Consume();
+        received = progress = true;
+      }
+      if (track->AnnounceEnd()) {
+        if (!read_error_) {
+          InvokeCallback(on_track_ended_, track->stream_index(),
+                         track->end_pts());
+        }
+        progress = true;
+      }
+      ended = ended && track->ended();
+    }
+    if (stop_requested_.load()) return delivered;
+    if (HasSeekRequest()) continue;
+    if (ended) {
+      if (read_error_) std::rethrow_exception(read_error_);
+      if (!received && (config_.loop || initialized)) {
+        throw ffmpeg::FfmpegException(AVERROR_EOF, "恢复输入未解码出音视频帧");
+      }
+      if (!on_decoded_ready_) return delivered;
+    }
+    if (!on_decoded_ready_ &&
+        std::all_of(tracks_.begin(), tracks_.end(),
+                    [](const auto& track) { return track->blocked(); }) &&
+        packet_reader_ && packet_reader_->budget_blocked()) {
+      throw std::length_error("Input 轨道 Packet 缓存超过字节上限");
+    }
+    ReportPerformance();
+    if (!progress) {
+      std::unique_lock<std::mutex> lock(wait_mutex_);
+      wake_.wait_for(lock, std::chrono::milliseconds(1));
+    }
   }
+  return delivered;
 }
 
 void FfmpegInput::ClearAttempt() noexcept {
   MW_LOG_TRACE("streamer", "Input[{}] 释放本轮输入与解码器资源",
                static_cast<const void*>(this));
+  for (const auto& track : tracks_) track->Stop();
+  StopReadAhead();
   tracks_.clear();
+  source_completed_frames_.reset();
   streams_.clear();
   avformat_close_input(&format_);
   input_eof_ = false;
+  read_error_ = nullptr;
   io_deadline_ns_.store(0);
 }
 
@@ -892,26 +984,25 @@ void FfmpegInput::RunMedia() {
   bool retryable = true;
   bool ended = false;
   try {
-    video_last_duration_ns_ = 0;
-    internal::PlaybackClock playback(0, {}, internal::SystemTimeBase());
-    bool first_attempt = true;
     NotifyState(InputState::kConnecting);
     while (!stop_requested_.load()) {
       OpenAttempt();
-      PlayAttempt(playback, first_attempt);
+      const auto frames = PlayAttempt();
       if (stop_requested_.load()) {
         break;
       }
-      if (!config_.loop) {
+      if (!config_.loop || (config_.mode != InputMode::kRemux && frames <= 2)) {
         ended = true;
         break;
       }
       MW_LOG_DEBUG("streamer",
                    "Input[{}] EOF 循环，重新打开输入: generation={}",
                    static_cast<const void*>(this), generation_);
-      performance_.Loop();
+      {
+        std::lock_guard<std::mutex> performance_lock(performance_mutex_);
+        performance_.Loop();
+      }
       ClearAttempt();
-      first_attempt = false;
     }
   } catch (const ffmpeg::FfmpegException& error) {
     error_code = error.error_code();
@@ -1015,7 +1106,10 @@ void FfmpegInput::RunReconnect(int error, std::string message) {
     if (!stop_requested_.load()) {
       MW_LOG_INFO("streamer", "Input[{}] 开始重连: retry={}",
                   static_cast<const void*>(this), retries_);
-      performance_.Reconnect();
+      {
+        std::lock_guard<std::mutex> performance_lock(performance_mutex_);
+        performance_.Reconnect();
+      }
       media_thread_ = std::thread(&FfmpegInput::RunMedia, this);
     }
   } catch (const std::exception& exception) {

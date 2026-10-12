@@ -24,9 +24,8 @@ namespace {
 
 namespace ffmpeg = mw::streamer::ffmpeg;
 using namespace std::chrono_literals;
-constexpr AVRational kNanoseconds{1, 1000000000};
-constexpr std::int64_t kStartNs = 23000000000;
-constexpr std::int64_t kFrameDurationNs = 100000000;
+constexpr AVRational kFrameTimeBase{1, 10};
+constexpr std::int64_t kStart = 230;
 
 struct CloseInput {
   void operator()(AVFormatContext* input) const {
@@ -102,10 +101,9 @@ std::vector<ffmpeg::Frame> ReadFrames(const ffmpeg::HwDeviceContext& device,
       REQUIRE(frames[index]->format == AV_PIX_FMT_YUV420P);
       REQUIRE(frames[index]->hw_frames_ctx == nullptr);
     }
-    frames[index]->time_base = kNanoseconds;
-    frames[index]->pts =
-        kStartNs + static_cast<std::int64_t>(index) * kFrameDurationNs;
-    frames[index]->duration = kFrameDurationNs;
+    frames[index]->time_base = kFrameTimeBase;
+    frames[index]->pts = kStart + static_cast<std::int64_t>(index);
+    frames[index]->duration = 1;
   }
   return frames;
 }
@@ -217,7 +215,6 @@ struct Capture {
   std::condition_variable wake;
   std::vector<ffmpeg::StreamInfo> streams;
   std::vector<ffmpeg::Packet> packets;
-  std::vector<std::int64_t> dts_ns;
   std::string error;
   int ended = 0;
 };
@@ -271,7 +268,7 @@ TEST_CASE("软硬解码交叉编码机械上传下载并保留共享CUDA设备�
   std::vector<FrameSnapshot> snapshots;
   for (const auto& frame : input_frames) snapshots.push_back(Snapshot(frame));
 
-  stream.time_base = kNanoseconds;
+  stream.time_base = kFrameTimeBase;
   const int source_format = stream.codec_parameters.get()->format;
   mw::streamer::EncoderConfig config;
   config.video_pixel_format = gpu_input ? AV_PIX_FMT_NV12 : AV_PIX_FMT_NONE;
@@ -292,10 +289,9 @@ TEST_CASE("软硬解码交叉编码机械上传下载并保留共享CUDA设备�
   Capture capture;
   mw::streamer::Encoder encoder;
   encoder.SetOnReady([&](const auto& streams) { capture.streams = streams; });
-  encoder.SetOnPacket([&](const ffmpeg::Packet& packet, std::int64_t dts_ns) {
+  encoder.SetOnPacket([&](const ffmpeg::Packet& packet) {
     std::lock_guard lock(capture.mutex);
     capture.packets.push_back(packet.Ref());
-    capture.dts_ns.push_back(dts_ns);
     capture.wake.notify_all();
   });
   encoder.SetOnEnded([&] {
@@ -313,7 +309,7 @@ TEST_CASE("软硬解码交叉编码机械上传下载并保留共享CUDA设备�
   CHECK(stream.codec_parameters.get()->format == source_format);
   REQUIRE(capture.streams.size() == 1);
   for (std::size_t index = 0; index < input_frames.size(); ++index) {
-    REQUIRE(encoder.SubmitVideo(input_frames[index]));
+    REQUIRE(encoder.SubmitFrame({input_frames[index], std::nullopt}));
     std::unique_lock lock(capture.mutex);
     REQUIRE(capture.wake.wait_for(lock, 10s, [&] {
       return capture.packets.size() > index || !capture.error.empty();
@@ -338,10 +334,8 @@ TEST_CASE("软硬解码交叉编码机械上传下载并保留共享CUDA设备�
   for (std::size_t index = 0; index < capture.packets.size(); ++index) {
     const auto& packet = capture.packets[index];
     CHECK(packet->stream_index == output_stream.stream_index);
-    CHECK(av_rescale_q(packet->pts, packet->time_base, kNanoseconds) ==
-          static_cast<std::int64_t>(index) * kFrameDurationNs);
-    CHECK(capture.dts_ns[index] ==
-          kStartNs + static_cast<std::int64_t>(index) * kFrameDurationNs);
+    CHECK(av_rescale_q(packet->pts, packet->time_base, kFrameTimeBase) ==
+          static_cast<std::int64_t>(index));
   }
   const auto decoded = DecodePackets(output_stream, capture.packets);
   REQUIRE(decoded.size() == input_frames.size());
@@ -351,8 +345,7 @@ TEST_CASE("软硬解码交叉编码机械上传下载并保留共享CUDA设备�
     CHECK(PixelHash(cpu_frames[index]) == cpu_hashes[index]);
     CHECK(PixelHash(Download(gpu_frames[index])) == hashes[index]);
     CHECK(av_rescale_q(decoded[index]->pts, decoded[index]->time_base,
-                       kNanoseconds) ==
-          static_cast<std::int64_t>(index) * kFrameDurationNs);
+                       kFrameTimeBase) == static_cast<std::int64_t>(index));
     const auto errors = PixelError(
         gpu_input ? gpu_references[index] : cpu_frames[index], decoded[index]);
     for (std::size_t plane = 0; plane < errors.size(); ++plane) {
@@ -376,7 +369,7 @@ TEST_CASE("外层CUDA编码支持CBR和带峰值上限的VBR", "[.][encoder][cud
   ffmpeg::HwDeviceContext device(ffmpeg::HwDeviceType::kCuda);
   ffmpeg::StreamInfo stream;
   const auto frames = ReadFrames(device, stream);
-  stream.time_base = kNanoseconds;
+  stream.time_base = kFrameTimeBase;
   const int source_format = stream.codec_parameters.get()->format;
   mw::streamer::EncoderConfig config;
   config.video_pixel_format = AV_PIX_FMT_NV12;
@@ -391,10 +384,10 @@ TEST_CASE("外层CUDA编码支持CBR和带峰值上限的VBR", "[.][encoder][cud
   Capture capture;
   mw::streamer::Encoder encoder;
   encoder.SetOnReady([&](const auto& streams) { capture.streams = streams; });
-  encoder.SetOnPacket([&](const ffmpeg::Packet& packet, std::int64_t dts_ns) {
+  encoder.SetOnPacket([&](const ffmpeg::Packet& packet) {
     std::lock_guard lock(capture.mutex);
     capture.packets.push_back(packet.Ref());
-    capture.dts_ns.push_back(dts_ns);
+    capture.wake.notify_all();
   });
   encoder.SetOnEnded([&] {
     std::lock_guard lock(capture.mutex);
@@ -414,7 +407,12 @@ TEST_CASE("外层CUDA编码支持CBR和带峰值上限的VBR", "[.][encoder][cud
   CHECK(av_cmp_q(output.codec_parameters.get()->framerate, config.fps) == 0);
   constexpr std::size_t kFrames = 5;
   for (std::size_t index = 0; index < kFrames; ++index) {
-    REQUIRE(encoder.SubmitVideo(frames[index]));
+    REQUIRE(encoder.SubmitFrame({frames[index], std::nullopt}));
+    std::unique_lock lock(capture.mutex);
+    REQUIRE(capture.wake.wait_for(lock, 10s, [&] {
+      return capture.packets.size() > index || !capture.error.empty();
+    }));
+    REQUIRE(capture.error.empty());
   }
   encoder.Drain();
   {
@@ -431,12 +429,10 @@ TEST_CASE("外层CUDA编码支持CBR和带峰值上限的VBR", "[.][encoder][cud
     const auto& packet = capture.packets[index];
     CHECK(packet->size > 0);
     CHECK(packet->stream_index == output.stream_index);
-    CHECK(av_rescale_q(packet->pts, packet->time_base, kNanoseconds) ==
-          static_cast<std::int64_t>(index) * kFrameDurationNs);
-    CHECK(av_rescale_q(packet->dts, packet->time_base, kNanoseconds) ==
-          static_cast<std::int64_t>(index) * kFrameDurationNs);
-    CHECK(capture.dts_ns[index] ==
-          kStartNs + static_cast<std::int64_t>(index) * kFrameDurationNs);
+    CHECK(av_rescale_q(packet->pts, packet->time_base, kFrameTimeBase) ==
+          static_cast<std::int64_t>(index));
+    CHECK(av_rescale_q(packet->dts, packet->time_base, kFrameTimeBase) ==
+          static_cast<std::int64_t>(index));
   }
   CHECK(DecodePackets(output, capture.packets).size() == kFrames);
 }

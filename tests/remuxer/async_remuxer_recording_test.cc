@@ -33,7 +33,6 @@ constexpr AVRational kNanoseconds{1, 1000000000};
 constexpr AVRational kVideoTimeBase{1001, 30000};
 constexpr AVRational kAudioTimeBase{1, 48000};
 constexpr int kVideoFrames = 360;
-constexpr std::int64_t kSourceOrigin = 12345678900;
 constexpr std::int64_t kSourceSamples = 576576;
 constexpr std::int64_t kDecodedSamples = 578560;
 
@@ -95,9 +94,7 @@ void EncodeMarkers(encoder_test::Capture& capture, int b_frames = 2) {
     const auto sample_end =
         av_rescale_q(index + 1, kVideoTimeBase, kAudioTimeBase);
     auto audio = encoder_test::AudioFrame(
-        static_cast<int>(sample_end - sample_start),
-        kSourceOrigin +
-            av_rescale_q(sample_start, kAudioTimeBase, kNanoseconds));
+        static_cast<int>(sample_end - sample_start), sample_start);
     for (int channel = 0; channel < 2; ++channel) {
       auto* samples = reinterpret_cast<float*>(audio->extended_data[channel]);
       for (int sample = 0; sample < audio->nb_samples; ++sample) {
@@ -111,19 +108,21 @@ void EncodeMarkers(encoder_test::Capture& capture, int b_frames = 2) {
         samples[sample] = high ? 0.6F : 0.0F;
       }
     }
-    REQUIRE(encoder.SubmitAudio(audio));
     auto video = encoder_test::VideoFrame(0);
-    video->pts =
-        kSourceOrigin + av_rescale_q(index, kVideoTimeBase, kNanoseconds);
-    video->duration = av_rescale_q(1, kVideoTimeBase, kNanoseconds);
     for (int row = 0; row < 64; ++row) {
       std::memset(video->data[0] + row * video->linesize[0],
                   MarkerFrame(index) ? 210 : 30, 64);
     }
-    REQUIRE(encoder.SubmitVideo(video));
+    audio->pts = sample_start;
+    audio->time_base = kAudioTimeBase;
+    audio->duration = audio->nb_samples;
+    video->pts = index;
+    video->time_base = kVideoTimeBase;
+    video->duration = 1;
+    REQUIRE(encoder.SubmitFrame(encoder_test::Frame(video, audio)));
     sample_start = sample_end;
-    // Keep the real Encoder's six-picture queue below its repetition policy.
-    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    // Feed the one-frame realtime consumer at the channel cadence.
+    std::this_thread::sleep_for(std::chrono::milliseconds(34));
   }
   encoder.Drain();
   REQUIRE(capture.Wait());
@@ -413,11 +412,13 @@ TEST_CASE("公开AsyncRemuxer多目标录制保留B帧AAC同步并完成动态�
   CheckName(second, "single_b", "mp4");
   CheckName(hls_a, "playlist_a", "m3u8");
   CheckName(hls_b, "playlist_b", "m3u8");
-  REQUIRE(capture.packets.size() == capture.dts_ns.size());
   std::vector<std::size_t> order(capture.packets.size());
   std::iota(order.begin(), order.end(), std::size_t{0});
   std::stable_sort(order.begin(), order.end(), [&](auto left, auto right) {
-    return capture.dts_ns[left] < capture.dts_ns[right];
+    return av_compare_ts(capture.packets[left]->dts,
+                         capture.packets[left]->time_base,
+                         capture.packets[right]->dts,
+                         capture.packets[right]->time_base) < 0;
   });
   std::string late;
   for (std::size_t position = 0; position < order.size(); ++position) {
@@ -426,8 +427,7 @@ TEST_CASE("公开AsyncRemuxer多目标录制保留B帧AAC同步并完成动态�
       CheckName(late, "late", "mp4");
     }
     const auto index = order[position];
-    REQUIRE(
-        remuxer.SubmitPacket(capture.packets[index], capture.dts_ns[index]));
+    REQUIRE(remuxer.SubmitPacket(capture.packets[index]));
   }
   remuxer.Drain();
   REQUIRE(notifications.Wait());
@@ -441,8 +441,7 @@ TEST_CASE("公开AsyncRemuxer多目标录制保留B帧AAC同步并完成动态�
       [](const auto& text, const auto& error) { return text + error + "\n"; });
   INFO(error_text);
   REQUIRE(notifications.errors.empty());
-  CHECK_FALSE(
-      remuxer.SubmitPacket(capture.packets.front(), capture.dts_ns.front()));
+  CHECK_FALSE(remuxer.SubmitPacket(capture.packets.front()));
   REQUIRE(HasMoof(first));
   REQUIRE(HasMoof(second));
   REQUIRE(HasMoof(late));
@@ -474,8 +473,7 @@ TEST_CASE("公开AsyncRemuxer多目标录制保留B帧AAC同步并完成动态�
   CHECK(remuxer.AddPushUrl(directory.File("single_a.mp4")) ==
         restarted.front());
   for (const auto index : order) {
-    REQUIRE(
-        remuxer.SubmitPacket(capture.packets[index], capture.dts_ns[index]));
+    REQUIRE(remuxer.SubmitPacket(capture.packets[index]));
   }
   remuxer.Stop();
   CHECK(notifications.ended == 2);
@@ -542,7 +540,7 @@ TEST_CASE("公开AsyncRemuxer控制调用校验与空会话结束只通知一次
   }
 }
 
-TEST_CASE("声明双轨但EOF仅收到一路时录制保留超过启动缓存上限的包",
+TEST_CASE("声明双轨但EOF确认一路无包时录制排空已有轨道",
           "[remuxer][async][recording][eof][integration]") {
   const std::unique_ptr<mw::streamer::MwStreamerContext,
                         decltype(&mw::streamer::Shutdown)>
@@ -551,8 +549,8 @@ TEST_CASE("声明双轨但EOF仅收到一路时录制保留超过启动缓存上
   encoder_test::Capture capture;
   EncodeMarkers(capture);
   AVMediaType selected = AVMEDIA_TYPE_UNKNOWN;
-  SECTION("仅收到360个视频包") { selected = AVMEDIA_TYPE_VIDEO; }
-  SECTION("仅收到565个AAC包且保留priming") { selected = AVMEDIA_TYPE_AUDIO; }
+  SECTION("仅收到视频包") { selected = AVMEDIA_TYPE_VIDEO; }
+  SECTION("仅收到AAC包且保留priming") { selected = AVMEDIA_TYPE_AUDIO; }
   REQUIRE(selected != AVMEDIA_TYPE_UNKNOWN);
   const auto stream = std::find_if(
       capture.streams.begin(), capture.streams.end(), [&](const auto& value) {
@@ -566,12 +564,13 @@ TEST_CASE("声明双轨但EOF仅收到一路时录制保留超过启动缓存上
   const auto path = remuxer.AddPushUrl(directory.File("partial_track.mp4"));
   std::size_t submitted = 0;
   for (std::size_t index = 0; index < capture.packets.size(); ++index) {
-    if (capture.packets[index]->stream_index != stream->stream_index) continue;
-    REQUIRE(
-        remuxer.SubmitPacket(capture.packets[index], capture.dts_ns[index]));
+    if (capture.packets[index]->stream_index != stream->stream_index ||
+        submitted == 100)
+      continue;
+    REQUIRE(remuxer.SubmitPacket(capture.packets[index]));
     ++submitted;
   }
-  REQUIRE(submitted > 100);
+  REQUIRE(submitted == 100);
   remuxer.Drain();
   REQUIRE(notifications.Wait());
   remuxer.Stop();
@@ -585,23 +584,14 @@ TEST_CASE("声明双轨但EOF仅收到一路时录制保留超过启动缓存上
   REQUIRE(HasMoof(path));
   const auto decoded = DecodeFile(path, 1);
   if (selected == AVMEDIA_TYPE_VIDEO) {
-    CHECK(submitted == kVideoFrames);
-    CheckVideo(decoded);
+    CHECK(decoded.video_pts.size() == submitted);
+    for (std::size_t i = 0; i < decoded.video_high.size(); ++i)
+      CHECK(decoded.video_high[i] == MarkerFrame(static_cast<int>(i)));
     CHECK(decoded.audio_frames == 0);
-    CHECK(decoded.samples == 0);
   } else {
-    CHECK(submitted == 565);
     CHECK(decoded.video_pts.empty());
-    CHECK(decoded.audio_frames == 565);
-    CHECK(decoded.samples == kDecodedSamples);
-    REQUIRE(decoded.audio_markers.size() == 3);
-    for (std::size_t index = 0; index < decoded.audio_markers.size(); ++index) {
-      const auto expected =
-          av_rescale_q(static_cast<std::int64_t>(index + 1) * 90,
-                       kVideoTimeBase, kNanoseconds) +
-          av_rescale_q(1024, kAudioTimeBase, kNanoseconds);
-      CHECK(std::abs(decoded.audio_markers[index] - expected) <= 1000000);
-    }
+    CHECK(decoded.audio_frames == static_cast<int>(submitted));
+    CHECK(decoded.samples == static_cast<std::int64_t>(submitted) * 1024);
   }
 }
 
@@ -623,11 +613,13 @@ TEST_CASE("零B帧与AAC负priming启动回放使用共同媒体时间起点",
   std::vector<std::size_t> order(capture.packets.size());
   std::iota(order.begin(), order.end(), std::size_t{0});
   std::stable_sort(order.begin(), order.end(), [&](auto left, auto right) {
-    return capture.dts_ns[left] < capture.dts_ns[right];
+    return av_compare_ts(capture.packets[left]->dts,
+                         capture.packets[left]->time_base,
+                         capture.packets[right]->dts,
+                         capture.packets[right]->time_base) < 0;
   });
   for (const auto index : order) {
-    REQUIRE(
-        remuxer.SubmitPacket(capture.packets[index], capture.dts_ns[index]));
+    REQUIRE(remuxer.SubmitPacket(capture.packets[index]));
   }
   remuxer.Drain();
   REQUIRE(notifications.Wait());

@@ -195,7 +195,7 @@ class PacketCollector final {
     input.SetOnPacket(
         [this, packet_hook](std::uint64_t generation, const auto& packet) {
           std::lock_guard<std::mutex> lock(mutex_);
-          valid &= ready == 1 && std::this_thread::get_id() == thread_;
+          valid &= ready >= 1 && std::this_thread::get_id() == thread_;
           packets.push_back(packet.Ref());
           generations.push_back(generation);
           try {
@@ -357,19 +357,11 @@ class PacketPause final {
 TEST_CASE("Input packet callbacks preserve native packets in all input modes",
           "[input][packet]") {
   auto mode = InputMode::kLive;
-  double playback_speed = 1.0;
   SECTION("Live mode delivers packets and frames") {}
-  SECTION("accelerated decoding preserves recording packets") {
-    playback_speed = 8.0;
-  }
-  SECTION("Batch mode preserves packets alongside accelerated media frames") {
+  SECTION("Batch mode preserves packets alongside original media frames") {
     mode = InputMode::kBatch;
-    playback_speed = 8.0;
   }
-  SECTION("Remux mode ignores decoder selection and playback speed") {
-    mode = InputMode::kRemux;
-    playback_speed = 0.5;
-  }
+  SECTION("Remux mode ignores decoder selection") { mode = InputMode::kRemux; }
   const auto reference = ReadRawMedia(PacketSamplePath());
   const auto expected = GroupPackets(reference.packets);
   REQUIRE(expected.size() == 2);
@@ -382,7 +374,6 @@ TEST_CASE("Input packet callbacks preserve native packets in all input modes",
   {
     FfmpegInputConfig config;
     config.mode = mode;
-    config.playback_speed = playback_speed;
     if (mode == InputMode::kRemux) {
       config.video_decoder_name = "missing_video_decoder";
       config.audio_decoder_name = "missing_audio_decoder";
@@ -425,7 +416,6 @@ TEST_CASE("Input packet callbacks can record a playable MP4 without decoding",
   PacketRecording recording;
   FfmpegInputConfig config;
   config.mode = InputMode::kRemux;
-  config.playback_speed = 8.0;
   FfmpegInput input(config);
   collector.Attach(
       input, [&](const auto& streams) { recording.Open(streams); },
@@ -483,7 +473,7 @@ TEST_CASE("Packet-only input executes Seek before reading subsequent packets",
   }
   CHECK(GroupPackets(after_seek) == GroupPackets(sought.packets));
   CHECK(collector.valid);
-  CHECK(collector.ready == 1);
+  CHECK(collector.ready == 2);
   CHECK(collector.frames == 0);
   CHECK(std::count(collector.states.begin(), collector.states.end(),
                    InputState::kEnded) == 1);
@@ -529,7 +519,7 @@ TEST_CASE("Packet-only loops keep original packets and advance generation",
     CHECK(GroupPackets(phase) == GroupPackets(source.packets));
   }
   CHECK(collector.valid);
-  CHECK(collector.ready == 1);
+  CHECK(collector.ready >= 2);
   CHECK(collector.frames == 0);
   CHECK(std::count(collector.states.begin(), collector.states.end(),
                    InputState::kConnecting) == 1);

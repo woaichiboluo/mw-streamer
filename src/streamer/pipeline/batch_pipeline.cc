@@ -1,9 +1,15 @@
 #include "mw/streamer/pipeline/batch_pipeline.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <exception>
+#include <map>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -23,29 +29,62 @@ FfmpegInputConfig InputConfig(const BatchPipelineConfig& config) {
   if (config.input.mode != InputMode::kBatch) {
     throw std::invalid_argument("BatchPipeline 需要 kBatch 输入模式");
   }
+  if (!std::isfinite(config.playback_speed) || config.playback_speed < 0.5 ||
+      config.playback_speed > 8.0) {
+    throw std::invalid_argument(
+        "BatchPipeline playback_speed 必须在 [0.5, 8.0]");
+  }
   return config.input;
 }
 
 }  // namespace
 
-BatchPipelineConfig::BatchPipelineConfig() {
-  input.mode = InputMode::kBatch;
-  input.playback_speed = 8.0;
-}
+BatchPipelineConfig::BatchPipelineConfig() { input.mode = InputMode::kBatch; }
 
 class BatchPipeline::Impl final {
  public:
   Impl(const ffmpeg::HwDeviceContext& video_device, BatchPipelineConfig config)
       : video_device_(video_device),
-        input_(video_device_, InputConfig(config)) {
+        input_(video_device_, InputConfig(config)),
+        playback_speed_(config.playback_speed) {
     input_.SetOnReady([this](const auto& streams) { Prepare(streams); });
-    input_.SetOnFrame([this](int, const auto& frame) { Consume(frame); });
+    input_.SetOnPacket([this](auto generation, const auto&) {
+      if (!generation_ || *generation_ != generation) {
+        generation_ = generation;
+        for (auto& [index, clock] : delivery_clocks_) {
+          clock.anchor.reset();
+          clock.ended = false;
+        }
+      }
+    });
+    input_.SetOnFrame(
+        [this](int index, const auto& frame) { Consume(index, frame); });
+    input_.SetOnTrackEnded(
+        [this](int index, auto end_pts) { EndTrack(index, end_pts); });
     input_.SetOnStateChanged([this](auto state, int code, auto message) {
       InputChanged(state, code, message);
     });
   }
 
   ~Impl() { Stop(); }
+
+  void SetOnSelectStreams(OnSelectStreams callback) {
+    std::lock_guard<std::mutex> control(control_);
+    RequireConfigurable();
+    if (!callback) {
+      input_.SetOnSelectStreams({});
+      return;
+    }
+    input_.SetOnSelectStreams(
+        [this, callback = std::move(callback)](const auto& streams) {
+          try {
+            return callback(streams);
+          } catch (...) {
+            StartupFailed("input", std::current_exception());
+            throw;
+          }
+        });
+  }
 
   void SetOnReady(OnReady callback) {
     std::lock_guard<std::mutex> control(control_);
@@ -98,6 +137,8 @@ class BatchPipeline::Impl final {
         ready_ = configured_ = finish_requested_ = false;
         finish_state_ = PipelineState::kStopped;
         startup_error_ = nullptr;
+        generation_.reset();
+        delivery_clocks_.clear();
       }
       ChangeState(PipelineState::kStarting);
       try {
@@ -233,14 +274,86 @@ class BatchPipeline::Impl final {
       }
       std::lock_guard<std::mutex> lock(mutex_);
       ready_info_.streams = streams;
+      delivery_clocks_.clear();
+      for (const auto& stream : streams) {
+        delivery_clocks_.emplace(stream.stream_index,
+                                 DeliveryClock{stream.time_base});
+      }
       configured_ = true;
     } catch (...) {
       StartupFailed("processor", std::current_exception());
     }
   }
 
-  void Consume(const ffmpeg::Frame& frame) {
-    if (Finishing()) return;
+  using Clock = std::chrono::steady_clock;
+  struct DeliveryClock {
+    AVRational time_base;
+    std::optional<long double> anchor;
+    Clock::time_point started;
+    std::int64_t end_pts = AV_NOPTS_VALUE;
+    bool ended = false;
+  };
+
+  Clock::time_point Deadline(const DeliveryClock& clock, std::int64_t pts,
+                             AVRational time_base) const {
+    if (!clock.anchor || pts == AV_NOPTS_VALUE || time_base.num <= 0 ||
+        time_base.den <= 0) {
+      return Clock::time_point::min();
+    }
+    const long double media_seconds =
+        static_cast<long double>(pts) * time_base.num / time_base.den;
+    const long double seconds =
+        (media_seconds - *clock.anchor) / playback_speed_;
+    if (seconds <= 0) return clock.started;
+    const auto available = Clock::time_point::max() - clock.started;
+    const auto delay =
+        seconds >= std::chrono::duration<long double>(available).count()
+            ? available
+            : std::chrono::duration_cast<Clock::duration>(
+                  std::chrono::duration<long double>(seconds));
+    return clock.started + delay;
+  }
+
+  bool WaitForDelivery(int stream_index, const ffmpeg::Frame& frame) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (finish_requested_) return false;
+    if (frame->pts == AV_NOPTS_VALUE || frame->time_base.num <= 0 ||
+        frame->time_base.den <= 0) {
+      return true;
+    }
+    const long double media_seconds = static_cast<long double>(frame->pts) *
+                                      frame->time_base.num /
+                                      frame->time_base.den;
+    auto& clock = delivery_clocks_.at(stream_index);
+    if (!clock.anchor) {
+      clock.anchor = media_seconds;
+      clock.started = Clock::now();
+    }
+    return !changed_.wait_until(lock,
+                                Deadline(clock, frame->pts, frame->time_base),
+                                [this] { return finish_requested_; });
+  }
+
+  void EndTrack(int stream_index, std::int64_t end_pts) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (finish_requested_) return;
+    const auto track = delivery_clocks_.find(stream_index);
+    if (track == delivery_clocks_.end()) return;
+    auto& ended = track->second;
+    ended.end_pts = end_pts;
+    ended.ended = true;
+    auto due = Clock::time_point::min();
+    for (const auto& [index, clock] : delivery_clocks_) {
+      if (!clock.ended) return;
+      due = std::max(due, Deadline(clock, clock.end_pts, clock.time_base));
+    }
+    // Preserve the final frame's duration before EOF or the next loop. Waiting
+    // only at frame PTS would make a one-frame loop run without a rate limit.
+    changed_.wait_until(lock, due, [this] { return finish_requested_; });
+  }
+
+  void Consume(int stream_index, const ffmpeg::Frame& frame) {
+    if (!WaitForDelivery(stream_index, frame)) return;
     if (frame->nb_samples > 0) {
       processor_.ProcessAudio(frame);
     } else {
@@ -306,6 +419,10 @@ class BatchPipeline::Impl final {
 
   ffmpeg::HwDeviceContext video_device_;
   FfmpegInput input_;
+  const double playback_speed_;
+  // Updated only by the serialized input callbacks, or before a new Start.
+  std::optional<std::uint64_t> generation_;
+  std::map<int, DeliveryClock> delivery_clocks_;
   BatchProcessor processor_;
   std::mutex control_;
   std::mutex notifications_;
@@ -330,6 +447,9 @@ BatchPipeline::BatchPipeline(const ffmpeg::HwDeviceContext& video_device,
                              BatchPipelineConfig config)
     : impl_(std::make_unique<Impl>(video_device, std::move(config))) {}
 BatchPipeline::~BatchPipeline() = default;
+void BatchPipeline::SetOnSelectStreams(OnSelectStreams callback) {
+  impl_->SetOnSelectStreams(std::move(callback));
+}
 void BatchPipeline::SetOnReady(OnReady callback) {
   impl_->SetOnReady(std::move(callback));
 }

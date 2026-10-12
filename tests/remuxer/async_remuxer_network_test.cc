@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -44,9 +45,9 @@ class Runtime final {
  public:
   explicit Runtime(bool debug = false,
                    const tls_test::CertFixture* certificate = nullptr,
-                   bool trust_certificate = true) {
+                   bool trust_certificate = true, int poller_threads = 2) {
     mw::streamer::InitConfig config;
-    config.event_poller_threads = 2;
+    config.event_poller_threads = poller_threads;
     config.work_threads = 1;
     config.enable_cpu_affinity = false;
     config.log.console_enabled = 0;
@@ -91,9 +92,13 @@ Encoded Encode() {
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   encoder.Start(
       config, {encoder_test::VideoStream(), encoder_test::AudioStream()}, cpu);
-  REQUIRE(encoder.SubmitAudio(encoder_test::AudioFrame(48000)));
-  for (int index = 0; index < 50; ++index)
-    REQUIRE(encoder.SubmitVideo(encoder_test::VideoFrame(index)));
+  for (int index = 0; index < 50; ++index) {
+    REQUIRE(encoder.SubmitFrame(encoder_test::Frame(
+        encoder_test::VideoFrame(index),
+        encoder_test::AudioFrame(960,
+                                 encoder_test::kAudioStart + index * 960))));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
   encoder.Drain();
   REQUIRE(capture.Wait());
   encoder.Stop();
@@ -103,19 +108,24 @@ Encoded Encode() {
   for (std::size_t index = 0; index < capture.packets.size(); ++index)
     order.push_back(index);
   std::stable_sort(order.begin(), order.end(), [&](auto left, auto right) {
-    return capture.dts_ns[left] < capture.dts_ns[right];
+    return av_compare_ts(capture.packets[left]->dts,
+                         capture.packets[left]->time_base,
+                         capture.packets[right]->dts,
+                         capture.packets[right]->time_base) < 0;
   });
   Encoded output;
   output.streams = std::move(capture.streams);
   for (const auto index : order) {
     output.packets.push_back(std::move(capture.packets[index]));
-    output.clocks.push_back(capture.dts_ns[index]);
+    output.clocks.push_back(av_rescale_q(output.packets.back()->dts,
+                                         output.packets.back()->time_base,
+                                         AVRational{1, 1000000000}));
   }
   return output;
 }
 
-// Replay actual encoded GOPs while increasing both native media ticks and the
-// synchronized ordering clock. Condition-variable pacing is cancellable.
+// Replay actual encoded GOPs. Native packet DTS is converted only for the
+// cancellable wall-clock pacing used by this network test.
 template <typename Remuxer>
 class Replay final {
  public:
@@ -152,14 +162,13 @@ class Replay final {
               return;
           }
           auto packet = encoded_.packets[index].Ref();
-          const auto ticks = av_rescale_q(shift, encoder_test::kNanoseconds,
-                                          packet->time_base);
+          const auto ticks =
+              av_rescale_q(shift, AVRational{1, 1000000000}, packet->time_base);
           packet->pts += ticks;
           packet->dts += ticks;
           bool accepted;
           if constexpr (std::is_same_v<Remuxer, AsyncRemuxer>) {
-            accepted =
-                remuxer_.SubmitPacket(packet, encoded_.clocks[index] + shift);
+            accepted = remuxer_.SubmitPacket(packet);
           } else {
             accepted = remuxer_.SubmitPacket(0, packet);
           }
@@ -899,6 +908,112 @@ TEST_CASE("运行中添加本地RTSP发布保留媒体源身份和时间线",
   CHECK(replay.valid());
   remuxer.Stop();
   REQUIRE_NOTHROW(RtspServer{port});
+}
+
+TEST_CASE("AsyncRemuxer单包交付背压在Drain和Stop时解除",
+          "[remuxer][async][backpressure]") {
+  Runtime runtime(false, nullptr, true, 1);
+  const auto encoded = Encode();
+  REQUIRE(encoded.packets.size() >= 2);
+  AsyncRemuxer remuxer;
+  remuxer.Start(encoded.streams);
+  encoder_test::Gate gate;
+  encoder_test::ReleaseGate release{gate};
+  toolkit::EventPollerPool::Instance().getPoller()->async(
+      [&] { gate.Enter(); });
+  REQUIRE(gate.Wait());
+  REQUIRE(remuxer.SubmitPacket(encoded.packets.front()));
+  auto submit = std::async(std::launch::async, [&] {
+    return remuxer.SubmitPacket(encoded.packets[1]);
+  });
+  encoder_test::ReleaseGate release_submit{gate};
+  CHECK(submit.wait_for(100ms) == std::future_status::timeout);
+  SECTION("Drain拒绝等待中的新包且排空已接受包") {
+    remuxer.Drain();
+    CHECK(submit.wait_for(2s) == std::future_status::ready);
+    CHECK_FALSE(submit.get());
+    gate.Release();
+    remuxer.Stop();
+  }
+  SECTION("Stop等待已接收包同时解除未接收包背压") {
+    auto stop = std::async(std::launch::async, [&] { remuxer.Stop(); });
+    encoder_test::ReleaseGate release_stop{gate};
+    CHECK(submit.wait_for(2s) == std::future_status::ready);
+    CHECK_FALSE(submit.get());
+    CHECK(stop.wait_for(100ms) == std::future_status::timeout);
+    gate.Release();
+    CHECK(stop.wait_for(5s) == std::future_status::ready);
+    stop.get();
+  }
+}
+
+TEST_CASE("AsyncRemuxer启动缺轨超过十秒报告fatal并停止接受",
+          "[remuxer][async][startup]") {
+  Runtime runtime;
+  const auto encoded = Encode();
+  const auto video = std::find_if(
+      encoded.packets.begin(), encoded.packets.end(), [](const auto& packet) {
+        return packet->stream_index == encoder_test::VideoStream().stream_index;
+      });
+  REQUIRE(video != encoded.packets.end());
+  AsyncRemuxer remuxer;
+  std::mutex mutex;
+  std::condition_variable changed;
+  int errors = 0;
+  int ended = 0;
+  std::string message;
+  remuxer.SetOnError(
+      [&](std::string_view target, int, std::string_view text) noexcept {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!target.empty()) return;
+        ++errors;
+        message = text;
+        changed.notify_all();
+      });
+  remuxer.SetOnEnded([&]() noexcept {
+    std::lock_guard<std::mutex> lock(mutex);
+    ++ended;
+    changed.notify_all();
+  });
+  remuxer.Start(encoded.streams);
+  REQUIRE(remuxer.SubmitPacket(*video));
+  auto later = video->Ref();
+  const auto ticks = av_rescale_q(12, AVRational{1, 1}, later->time_base);
+  later->pts += ticks;
+  later->dts += ticks;
+  REQUIRE(remuxer.SubmitPacket(later));
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    REQUIRE(changed.wait_for(lock, 5s, [&] { return errors != 0; }));
+  }
+  CHECK_FALSE(remuxer.SubmitPacket(later));
+  remuxer.Stop();
+  CHECK(errors == 1);
+  CHECK(ended == 1);
+  CHECK(message.find("10") != std::string::npos);
+}
+
+TEST_CASE("AsyncRemuxer拒绝在自身poller提交避免背压自锁",
+          "[remuxer][async][backpressure]") {
+  Runtime runtime(false, nullptr, true, 1);
+  const auto encoded = Encode();
+  AsyncRemuxer remuxer;
+  remuxer.Start(encoded.streams);
+  std::promise<bool> result;
+  auto complete = result.get_future();
+  toolkit::EventPollerPool::Instance().getPoller()->async([&] {
+    try {
+      remuxer.SubmitPacket(encoded.packets.front());
+      result.set_value(false);
+    } catch (const std::logic_error&) {
+      result.set_value(true);
+    } catch (...) {
+      result.set_exception(std::current_exception());
+    }
+  });
+  REQUIRE(complete.wait_for(5s) == std::future_status::ready);
+  CHECK(complete.get());
+  remuxer.Stop();
 }
 
 }  // namespace

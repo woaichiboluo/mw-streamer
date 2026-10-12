@@ -39,9 +39,12 @@ class MW_STREAMER_API AsyncRemuxer final {
   // Use Encoder::OnReady's encoded tracks, not the original input tracks.
   // Supports H264/H265 video and AAC audio, at most one track of each type.
   void Start(const std::vector<ffmpeg::StreamInfo>& streams);
-  // Safe for concurrent Encoder::OnPacket calls. Retains the packet; dts_ns is
-  // Encoder's synchronized ordering clock. No network congestion dropping.
-  bool SubmitPacket(const ffmpeg::Packet& packet, std::int64_t dts_ns);
+  // Retains native Encoder PTS/DTS and time base. The one-packet handoff
+  // blocks until the worker consumes its previous packet. Drain/Stop rejects
+  // blocked submissions; accepted packets are drained without dropping.
+  // Concurrent calls are safe, but each track must arrive in DTS order.
+  // Calling on this remuxer's output poller throws to prevent self-wait.
+  bool SubmitPacket(const ffmpeg::Packet& packet);
   // Before Start, registers an output without creating resources; during a
   // session, activates it synchronously. Network URLs retry automatically.
   // Local .mp4/.m3u8 paths gain _YYYY_MM_DD_HH_MM_SS_id before their extension.

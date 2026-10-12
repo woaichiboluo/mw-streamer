@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <future>
+#include <stdexcept>
 
 #include "encoder_test_support.h"
 
@@ -13,9 +14,9 @@ ffmpeg::Frame Nv12VideoFrame(int index) {
   frame->width = 64;
   frame->height = 64;
   frame->format = AV_PIX_FMT_NV12;
-  frame->time_base = kNanoseconds;
-  frame->pts = kStart + index * kFrameInterval;
-  frame->duration = kFrameInterval;
+  frame->time_base = kVideoTimeBase;
+  frame->pts = kVideoStart + index;
+  frame->duration = 1;
   ffmpeg::FfmpegException::throwIfError(av_frame_get_buffer(frame.get(), 0),
                                         "分配 NV12 视频测试帧");
   for (int plane = 0; plane < 2; ++plane) {
@@ -47,7 +48,8 @@ TEST_CASE("视频像素格式默认沿用轨道且显式配置优先",
   encoder.Start(config, {source}, cpu);
   CHECK(source.codec_parameters.get()->format == source_format);
   for (int index = 0; index < 3; ++index) {
-    REQUIRE(encoder.SubmitVideo(Nv12VideoFrame(index)));
+    REQUIRE(encoder.SubmitFrame(Video(Nv12VideoFrame(index))));
+    REQUIRE(capture.WaitPackets(index + 1));
   }
   encoder.Drain();
   REQUIRE(capture.Wait());
@@ -87,7 +89,7 @@ TEST_CASE("无效视频像素格式启动失败后可重新启动",
   CHECK(capture.ready == 0);
   CHECK(capture.errors == 0);
   REQUIRE_NOTHROW(encoder.Start(Config(), {VideoStream()}, cpu));
-  REQUIRE(encoder.SubmitVideo(VideoFrame(0)));
+  REQUIRE(encoder.SubmitFrame(Video(VideoFrame(0))));
   encoder.Drain();
   REQUIRE(capture.Wait());
   encoder.Stop();
@@ -110,7 +112,7 @@ TEST_CASE("显式视频像素格式不会自动转换不匹配的输入帧",
   auto config = Config();
   config.video_pixel_format = AV_PIX_FMT_NV12;
   encoder.Start(config, {VideoStream()}, cpu);
-  REQUIRE(encoder.SubmitVideo(VideoFrame(0)));
+  REQUIRE(encoder.SubmitFrame(Video(VideoFrame(0))));
   REQUIRE(capture.Wait());
   encoder.Stop();
   CHECK(capture.errors == 1);
@@ -136,14 +138,14 @@ TEST_CASE("编码器启动提供输出轨道并允许停止后重新启动",
     CHECK(stream.codec_parameters.get()->width == 64);
     CHECK(stream.codec_parameters.get()->height == 64);
     CHECK(stream.time_base.num > 0);
-    REQUIRE(encoder.SubmitVideo(VideoFrame(0)));
+    REQUIRE(encoder.SubmitFrame(Video(VideoFrame(0))));
     encoder.Drain();
     REQUIRE(capture.Wait());
     encoder.Stop();
     CHECK(capture.ended == 1);
     CHECK(capture.errors == 0);
     const auto count = capture.packets.size();
-    CHECK_FALSE(encoder.SubmitVideo(VideoFrame(1)));
+    CHECK_FALSE(encoder.SubmitFrame(Video(VideoFrame(1))));
     encoder.Drain();
     encoder.Stop();
     CHECK(capture.packets.size() == count);
@@ -156,19 +158,25 @@ TEST_CASE("编码器启动提供输出轨道并允许停止后重新启动",
 TEST_CASE("无媒体帧的编码会话只通知一次结束", "[encoder][lifecycle]") {
   for (const auto& streams : std::vector<std::vector<ffmpeg::StreamInfo>>{
            {}, {VideoStream()}, {AudioStream()}}) {
-    Capture capture;
-    Encoder encoder;
-    capture.Bind(encoder);
-    ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
-    encoder.Start(Config(), streams, cpu);
-    encoder.Drain();
-    REQUIRE(capture.Wait());
-    encoder.Stop();
-    encoder.Drain();
-    CHECK(capture.ready == 1);
-    CHECK(capture.ended == 1);
-    CHECK(capture.errors == 0);
-    CHECK(capture.packets.empty());
+    for (bool drain_first : {false, true}) {
+      INFO("tracks=" << streams.size() << " drain_first=" << drain_first);
+      Capture capture;
+      Encoder encoder;
+      capture.Bind(encoder);
+      ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
+      encoder.Start(Config(), streams, cpu);
+      if (drain_first) {
+        encoder.Drain();
+        REQUIRE(capture.Wait());
+      }
+      encoder.Stop();
+      encoder.Stop();
+      encoder.Drain();
+      CHECK(capture.ready == 1);
+      CHECK(capture.ended == 1);
+      CHECK(capture.errors == 0);
+      CHECK(capture.packets.empty());
+    }
   }
 }
 
@@ -206,18 +214,18 @@ TEST_CASE("编码错误通知一次且不会当作自然结束", "[encoder][life
   capture.Bind(encoder);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   encoder.Start(Config(), {VideoStream(), AudioStream()}, cpu);
-  REQUIRE(encoder.SubmitAudio(AudioFrame(2048)));
   auto malformed = VideoFrame(0);
   malformed->width = 32;
-  REQUIRE(encoder.SubmitVideo(malformed));
+  REQUIRE(encoder.SubmitFrame(Frame(malformed, AudioFrame(2048))));
   REQUIRE(capture.Wait());
   encoder.Stop();
   CHECK(capture.errors == 1);
   CHECK(capture.ended == 0);
-  CHECK_FALSE(encoder.SubmitVideo(VideoFrame(1)));
+  CHECK_FALSE(encoder.SubmitFrame(Video(VideoFrame(1))));
 }
 
-TEST_CASE("Stop等待正在执行的Packet回调退出", "[encoder][lifecycle]") {
+TEST_CASE("Stop 等待 Packet 回调并排空已接收的 frame",
+          "[encoder][lifecycle][stop][backpressure]") {
   Gate gate;
   Capture capture;
   Encoder encoder;
@@ -225,8 +233,9 @@ TEST_CASE("Stop等待正在执行的Packet回调退出", "[encoder][lifecycle]")
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   encoder.Start(Config(), {VideoStream()}, cpu);
   ReleaseGate release_before_encoder_destruction{gate};
-  REQUIRE(encoder.SubmitVideo(VideoFrame(0)));
+  REQUIRE(encoder.SubmitFrame(Video(VideoFrame(0))));
   REQUIRE(gate.Wait());
+  REQUIRE(encoder.SubmitFrame(Video(VideoFrame(1))));
   std::promise<void> stop_started;
   auto stop = std::async(std::launch::async, [&] {
     stop_started.set_value();
@@ -239,13 +248,22 @@ TEST_CASE("Stop等待正在执行的Packet回调退出", "[encoder][lifecycle]")
   gate.Release();
   REQUIRE(stop.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
   stop.get();
-  CHECK(capture.packets.size() == 1);
-  CHECK(capture.ended == 0);
+  REQUIRE(capture.packets.size() == 2);
+  CHECK(capture.packets[0]->pts == 0);
+  CHECK(capture.packets[1]->pts == 1);
+  CHECK(capture.ended == 1);
   CHECK(capture.errors == 0);
-  CHECK_FALSE(encoder.SubmitVideo(VideoFrame(1)));
+  CHECK_FALSE(encoder.SubmitFrame(Video(VideoFrame(2))));
+  encoder.Stop();
+  encoder.Drain();
+  CHECK(capture.packets.size() == 2);
+  CHECK(capture.ended == 1);
+  ffmpeg::VideoDecoder decoder(capture.streams.front());
+  CHECK(Decode(decoder, capture.packets, capture.streams.front().stream_index)
+            .size() == 2);
 }
 
-TEST_CASE("双轨会话缺失首个音频或视频时仍能排空结束", "[encoder][lifecycle]") {
+TEST_CASE("双轨编码会话拒绝缺失半个 channel frame", "[encoder][lifecycle]") {
   for (bool only_video : {false, true}) {
     INFO("only_video=" << only_video);
     Capture capture;
@@ -254,9 +272,11 @@ TEST_CASE("双轨会话缺失首个音频或视频时仍能排空结束", "[enco
     ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
     encoder.Start(Config(), {VideoStream(), AudioStream()}, cpu);
     if (only_video) {
-      REQUIRE(encoder.SubmitVideo(VideoFrame(0)));
+      CHECK_THROWS_AS(encoder.SubmitFrame(Video(VideoFrame(0))),
+                      std::invalid_argument);
     } else {
-      REQUIRE(encoder.SubmitAudio(AudioFrame(2048)));
+      CHECK_THROWS_AS(encoder.SubmitFrame(Audio(AudioFrame(2048))),
+                      std::invalid_argument);
     }
     encoder.Drain();
     REQUIRE(capture.Wait());
@@ -294,7 +314,7 @@ TEST_CASE("CBR合法配置可编码且不接受矛盾峰值码率", "[encoder][c
   config.max_bit_rate = config.video_bit_rate;
   config.video_options.erase("crf");
   REQUIRE_NOTHROW(encoder.Start(config, {VideoStream()}, cpu));
-  REQUIRE(encoder.SubmitVideo(VideoFrame(0)));
+  REQUIRE(encoder.SubmitFrame(Video(VideoFrame(0))));
   encoder.Drain();
   REQUIRE(capture.Wait());
   encoder.Stop();
@@ -318,6 +338,119 @@ TEST_CASE("拼错的编码器扩展选项在初始化时明确失败",
   CHECK(capture.ended == 0);
   CHECK(capture.errors == 0);
   CHECK(capture.packets.empty());
+}
+
+TEST_CASE("Stop 排空期间的 Packet 致命错误取消排队 frame",
+          "[encoder][lifecycle][stop][error][backpressure]") {
+  Gate gate;
+  Capture capture;
+  Encoder encoder;
+  capture.Bind(encoder);
+  encoder.SetOnPacket([&](const auto& packet) {
+    {
+      std::lock_guard lock(capture.mutex);
+      capture.packets.push_back(packet.Ref());
+      capture.wake.notify_all();
+    }
+    gate.Enter();
+    throw std::runtime_error("测试 Packet 消费失败");
+  });
+  ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
+  encoder.Start(Config(), {VideoStream()}, cpu);
+  ReleaseGate release_before_encoder_destruction{gate};
+  REQUIRE(encoder.SubmitFrame(Video(VideoFrame(0))));
+  REQUIRE(gate.Wait());
+  REQUIRE(encoder.SubmitFrame(Video(VideoFrame(1))));
+  std::promise<void> stop_started;
+  auto stop = std::async(std::launch::async, [&] {
+    stop_started.set_value();
+    encoder.Stop();
+  });
+  ReleaseGate release_before_future_destruction{gate};
+  stop_started.get_future().wait();
+  CHECK(stop.wait_for(std::chrono::milliseconds(50)) ==
+        std::future_status::timeout);
+  gate.Release();
+  REQUIRE(stop.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+  stop.get();
+  REQUIRE(capture.packets.size() == 1);
+  CHECK(capture.packets.front()->pts == 0);
+  CHECK(capture.errors == 1);
+  CHECK(capture.ended == 0);
+  CHECK_FALSE(encoder.SubmitFrame(Video(VideoFrame(2))));
+  encoder.Stop();
+  encoder.Drain();
+  CHECK(capture.errors == 1);
+  CHECK(capture.ended == 0);
+  CHECK(capture.packets.size() == 1);
+}
+
+TEST_CASE("Stop 等待 OnEnded 回调并拒绝结束期间的新 frame",
+          "[encoder][lifecycle][stop][callback]") {
+  Gate gate;
+  Capture capture;
+  Encoder encoder;
+  capture.Bind(encoder);
+  encoder.SetOnEnded([&]() noexcept {
+    gate.Enter();
+    std::lock_guard lock(capture.mutex);
+    ++capture.ended;
+    capture.wake.notify_all();
+  });
+  ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
+  encoder.Start(Config(), {VideoStream()}, cpu);
+  ReleaseGate release_before_encoder_destruction{gate};
+  REQUIRE(encoder.SubmitFrame(Video(VideoFrame(0))));
+  auto stop = std::async(std::launch::async, [&] { encoder.Stop(); });
+  ReleaseGate release_before_future_destruction{gate};
+  REQUIRE(gate.Wait());
+  CHECK(stop.wait_for(std::chrono::milliseconds(50)) ==
+        std::future_status::timeout);
+  CHECK_FALSE(encoder.SubmitFrame(Video(VideoFrame(1))));
+  gate.Release();
+  REQUIRE(stop.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+  stop.get();
+  REQUIRE(capture.packets.size() == 1);
+  CHECK(capture.packets.front()->pts == 0);
+  CHECK(capture.ended == 1);
+  CHECK(capture.errors == 0);
+  encoder.Stop();
+  encoder.Drain();
+  CHECK(capture.packets.size() == 1);
+  CHECK(capture.ended == 1);
+  CHECK(capture.errors == 0);
+}
+
+TEST_CASE("OnReady 异常执行启动回滚且允许停止后重新启动",
+          "[encoder][lifecycle][stop][configuration][callback]") {
+  Capture capture;
+  Encoder encoder;
+  capture.Bind(encoder);
+  int ready_attempts = 0;
+  encoder.SetOnReady([&](const auto&) {
+    ++ready_attempts;
+    throw std::runtime_error("测试 Ready 初始化失败");
+  });
+  ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
+  CHECK_THROWS_AS(encoder.Start(Config(), {VideoStream(), AudioStream()}, cpu),
+                  std::runtime_error);
+  CHECK(ready_attempts == 1);
+  CHECK_FALSE(encoder.SubmitFrame(Frame(VideoFrame(0), AudioFrame(3008))));
+  encoder.Stop();
+  encoder.Drain();
+  CHECK(capture.ready == 0);
+  CHECK(capture.ended == 0);
+  CHECK(capture.errors == 0);
+  CHECK(capture.packets.empty());
+  capture.Bind(encoder);
+  REQUIRE_NOTHROW(encoder.Start(Config(), {VideoStream()}, cpu));
+  REQUIRE(encoder.SubmitFrame(Video(VideoFrame(0))));
+  encoder.Stop();
+  CHECK(capture.ready == 1);
+  CHECK(capture.ended == 1);
+  CHECK(capture.errors == 0);
+  REQUIRE(capture.packets.size() == 1);
+  CHECK(capture.packets.front()->pts == 0);
 }
 
 }  // namespace

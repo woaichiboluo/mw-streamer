@@ -126,9 +126,9 @@ Encoded MultiSliceVideo(const char* name) {
   frame->width = config.width;
   frame->height = config.height;
   frame->format = AV_PIX_FMT_YUV420P;
-  frame->time_base = encoder_test::kNanoseconds;
-  frame->pts = encoder_test::kStart;
-  frame->duration = encoder_test::kFrameInterval;
+  frame->time_base = encoder_test::kVideoTimeBase;
+  frame->pts = encoder_test::kVideoStart;
+  frame->duration = 1;
   ffmpeg::FfmpegException::throwIfError(av_frame_get_buffer(frame.get(), 0),
                                         "分配多slice视频测试帧");
   for (int plane = 0; plane < 3; ++plane) {

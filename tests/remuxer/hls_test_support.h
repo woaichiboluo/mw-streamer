@@ -82,7 +82,6 @@ inline std::uint16_t ReservePort() {
 struct Encoded final {
   std::vector<ffmpeg::StreamInfo> streams;
   std::vector<ffmpeg::Packet> packets;
-  std::vector<std::int64_t> clocks;
 };
 
 inline Encoded Encode() {
@@ -94,9 +93,13 @@ inline Encoded Encode() {
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   encoder.Start(
       config, {encoder_test::VideoStream(), encoder_test::AudioStream()}, cpu);
-  REQUIRE(encoder.SubmitAudio(encoder_test::AudioFrame(8 * 48000)));
-  for (int index = 0; index < 400; ++index)
-    REQUIRE(encoder.SubmitVideo(encoder_test::VideoFrame(index)));
+  for (int index = 0; index < 400; ++index) {
+    REQUIRE(encoder.SubmitFrame(encoder_test::Frame(
+        encoder_test::VideoFrame(index),
+        encoder_test::AudioFrame(960,
+                                 encoder_test::kAudioStart + index * 960))));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
   encoder.Drain();
   REQUIRE(capture.Wait());
   encoder.Stop();
@@ -106,13 +109,15 @@ inline Encoded Encode() {
   for (std::size_t index = 0; index < capture.packets.size(); ++index)
     order.push_back(index);
   std::stable_sort(order.begin(), order.end(), [&](auto left, auto right) {
-    return capture.dts_ns[left] < capture.dts_ns[right];
+    return av_compare_ts(capture.packets[left]->dts,
+                         capture.packets[left]->time_base,
+                         capture.packets[right]->dts,
+                         capture.packets[right]->time_base) < 0;
   });
   Encoded result;
   result.streams = std::move(capture.streams);
   for (const auto index : order) {
     result.packets.push_back(std::move(capture.packets[index]));
-    result.clocks.push_back(capture.dts_ns[index]);
   }
   return result;
 }
@@ -121,8 +126,7 @@ template <typename Remuxer>
 void Feed(Remuxer& remuxer, const Encoded& encoded) {
   for (std::size_t index = 0; index < encoded.packets.size(); ++index) {
     if constexpr (std::is_same_v<Remuxer, mw::streamer::AsyncRemuxer>) {
-      REQUIRE(
-          remuxer.SubmitPacket(encoded.packets[index], encoded.clocks[index]));
+      REQUIRE(remuxer.SubmitPacket(encoded.packets[index]));
     } else {
       REQUIRE(remuxer.SubmitPacket(0, encoded.packets[index]));
     }

@@ -18,8 +18,8 @@ namespace mw::streamer {
 struct MW_STREAMER_API RemuxPipelineConfig {
   RemuxPipelineConfig();
 
-  // Defaults to kRemux; other input modes are rejected. Decoder selection and
-  // playback_speed are ignored, as in FfmpegInput's kRemux mode.
+  // Defaults to kRemux; other input modes are rejected. Decoder selection is
+  // ignored, as in FfmpegInput's kRemux mode.
   FfmpegInputConfig input;
   SyncRemuxerConfig remuxer;
 };
@@ -37,9 +37,11 @@ struct RemuxPipelineReadyInfo {
 // Start and destruction before Shutdown. Configure callbacks before Start.
 // Callbacks run on internal threads (or the Start/Stop caller), may query
 // snapshots, and must not call lifecycle/configuration methods or destroy this
-// object. Callback exceptions are caught and logged.
+// object. Notification callback exceptions are caught and logged. Selector
+// exceptions fail the session and propagate through Start during startup.
 class MW_STREAMER_API RemuxPipeline final {
  public:
+  using OnSelectStreams = FfmpegInput::OnSelectStreams;
   using OnReady = std::function<void(const RemuxPipelineReadyInfo&)>;
   using OnStateChanged = std::function<void(const PipelineStatus&)>;
 
@@ -50,6 +52,9 @@ class MW_STREAMER_API RemuxPipeline final {
   RemuxPipeline(RemuxPipeline&&) = delete;
   RemuxPipeline& operator=(RemuxPipeline&&) = delete;
 
+  // Before Start, choose source indices from all audio/video descriptions.
+  // An empty callback restores Input's first-video/first-audio default.
+  void SetOnSelectStreams(OnSelectStreams callback);
   void SetOnReady(OnReady callback);
   void SetOnStateChanged(OnStateChanged callback);
 

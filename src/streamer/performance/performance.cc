@@ -114,9 +114,10 @@ void InputPerformance::Read(
   auto& counters = window_.counters();
   if (result == AVERROR_EOF) {
     ++counters.eof;
+  } else if (result == AVERROR(EAGAIN)) {
+    ++counters.again;
   } else if (result < 0 && !(result == AVERROR_EXIT && stopped)) {
     ++counters.errors;
-    if (result == AVERROR(EAGAIN)) ++counters.again;
   } else if (result >= 0 && packet.size > 0) {
     const auto selected =
         std::find_if(streams.begin(), streams.end(), [&](const auto& stream) {
@@ -419,45 +420,32 @@ void EncoderPerformance::Start(const void* instance, bool video,
   }
 }
 
-void EncoderPerformance::AcceptVideo(std::size_t queued_frames,
-                                     bool skipped_picture) noexcept {
-  if (!video_.active) return;
-  ++video_.accepted;
-  ++video_.pending;
-  video_.queued_frames = queued_frames;
-  if (skipped_picture) ++video_.skipped_picture;
-}
-
-void EncoderPerformance::AcceptAudio(int samples,
-                                     std::size_t queued_frames) noexcept {
-  if (!audio_.active) return;
-  ++audio_.accepted;
-  audio_.pending += static_cast<std::uint64_t>(samples);
-  audio_.queued_frames = queued_frames;
-}
-
-void EncoderPerformance::VideoDiscarded(std::size_t queued_frames) noexcept {
-  if (!video_.active) return;
-  if (video_.pending) --video_.pending;
-  ++video_.discarded_start;
-  video_.queued_frames = queued_frames;
+void EncoderPerformance::AcceptFrame(bool video, int audio_samples,
+                                     std::size_t queued_frames,
+                                     bool dropped) noexcept {
+  for (const bool is_video : {true, false}) {
+    auto& track = is_video ? video_ : audio_;
+    if (!track.active || (is_video ? !video : audio_samples <= 0)) continue;
+    ++track.accepted;
+    track.queued_frames = queued_frames;
+    const auto units = static_cast<std::uint64_t>(is_video ? 1 : audio_samples);
+    if (dropped) {
+      ++track.dropped_frames;
+      if (!is_video) track.dropped_samples += units;
+    } else {
+      track.pending += units;
+    }
+  }
 }
 
 void EncoderPerformance::AudioDequeued(std::size_t queued_frames) noexcept {
   if (audio_.active) audio_.queued_frames = queued_frames;
 }
 
-void EncoderPerformance::AudioDiscarded(int samples) noexcept {
-  if (!audio_.active) return;
-  audio_.pending -=
-      std::min(audio_.pending, static_cast<std::uint64_t>(samples));
-  audio_.discarded_start += static_cast<std::uint64_t>(samples);
-}
-
 void EncoderPerformance::Abandon(bool video) noexcept {
   auto& track = video ? video_ : audio_;
   if (!track.active) return;
-  track.discarded_start += track.pending;
+  track.aborted += track.pending;
   track.pending = 0;
   track.queued_frames = 0;
 }
@@ -469,7 +457,6 @@ EncoderPerformance::TimePoint EncoderPerformance::Begin(
 }
 
 void EncoderPerformance::Encoded(bool video, TimePoint started, int samples,
-                                 bool repeated,
                                  std::size_t queued_frames) noexcept {
   auto& track = video ? video_ : audio_;
   if (!track.active) return;
@@ -481,10 +468,7 @@ void EncoderPerformance::Encoded(bool video, TimePoint started, int samples,
   track.window.counters().samples += static_cast<std::uint64_t>(samples);
   const auto consumed = static_cast<std::uint64_t>(video ? 1 : samples);
   track.pending -= std::min(track.pending, consumed);
-  if (video) {
-    track.queued_frames = queued_frames;
-    if (repeated) ++track.repeated;
-  }
+  track.queued_frames = queued_frames;
   Report(video);
 }
 
@@ -524,42 +508,44 @@ void EncoderPerformance::Report(bool video, bool final) noexcept {
         module,
         "Encoder[{}] report={} input_fps={:.1f} encoded_fps={:.1f} "
         "payload_Mb_per_second={:.2f} queue_frames={} pending_frames={} "
-        "worker_mean_ms={:.2f} repeat_total={} skip_new_total={} errors={}",
+        "worker_mean_ms={:.2f} dropped_frames={} aborted_frames={} errors={}",
         instance_, final ? "summary" : "interval",
         PerformanceReport::Rate(accepted, seconds),
         PerformanceReport::Rate(overview.frames, seconds),
         PerformanceReport::Rate(static_cast<double>(overview.bytes) * 8.0 / 1e6,
                                 seconds),
-        track.queued_frames, track.pending, worker_ms, track.repeated,
-        track.skipped_picture, overview.errors);
+        track.queued_frames, track.pending, worker_ms, track.dropped_frames,
+        track.aborted, overview.errors);
   } else {
     MW_LOG_INFO(
         module,
         "Encoder[{}] report={} encoded_fps={:.1f} samples_per_second={:.0f} "
         "payload_Mb_per_second={:.2f} queue_frames={} pending_samples={} "
-        "worker_mean_ms={:.2f} errors={}",
+        "worker_mean_ms={:.2f} dropped_frames={} dropped_samples={} "
+        "aborted_samples={} errors={}",
         instance_, final ? "summary" : "interval",
         PerformanceReport::Rate(overview.frames, seconds),
         PerformanceReport::Rate(overview.samples, seconds),
         PerformanceReport::Rate(static_cast<double>(overview.bytes) * 8.0 / 1e6,
                                 seconds),
-        track.queued_frames, track.pending, worker_ms, overview.errors);
+        track.queued_frames, track.pending, worker_ms, track.dropped_frames,
+        track.dropped_samples, track.aborted, overview.errors);
   }
   if (track.trace_enabled) {
     const auto& total = report.total;
-    MW_LOG_TRACE(
-        module,
-        "Encoder[{}] final={} elapsed_s={:.3f} accepted={} encoded={} "
-        "samples={} packets={} payload_bytes={} repeated={} skipped_new={} "
-        "discarded_start_{}={} worker_calls={} worker_total_ms={:.3f} "
-        "worker_max_ms={:.3f} errors={} "
-        "worker_scope=frame_preparation_codec_packet_callback",
-        instance_, final, report.elapsed_seconds, track.accepted, total.frames,
-        total.samples, total.packets, total.bytes, track.repeated,
-        track.skipped_picture, video ? "frames" : "samples",
-        track.discarded_start, total.work_calls,
-        static_cast<double>(total.work_ns) / 1e6,
-        static_cast<double>(total.max_work_ns) / 1e6, total.errors);
+    MW_LOG_TRACE(module,
+                 "Encoder[{}] final={} elapsed_s={:.3f} accepted={} encoded={} "
+                 "samples={} packets={} payload_bytes={} dropped_frames={} "
+                 "dropped_samples={} aborted_{}={} worker_calls={} "
+                 "worker_total_ms={:.3f} "
+                 "worker_max_ms={:.3f} errors={} "
+                 "worker_scope=frame_preparation_codec_packet_callback",
+                 instance_, final, report.elapsed_seconds, track.accepted,
+                 total.frames, total.samples, total.packets, total.bytes,
+                 track.dropped_frames, track.dropped_samples,
+                 video ? "frames" : "samples", track.aborted, total.work_calls,
+                 static_cast<double>(total.work_ns) / 1e6,
+                 static_cast<double>(total.max_work_ns) / 1e6, total.errors);
   }
   if (final) track.active = false;
 }
@@ -597,7 +583,6 @@ RemuxPerformance::TimePoint RemuxPerformance::Begin() const noexcept {
 std::uint64_t RemuxPerformance::PendingPackets() const noexcept {
   auto remaining = counts_.accepted_packets;
   remaining -= std::min(remaining, window_.counters().packets);
-  remaining -= std::min(remaining, counts_.startup_packets);
   remaining -= std::min(remaining, counts_.aborted_packets);
   return remaining;
 }
@@ -605,7 +590,6 @@ std::uint64_t RemuxPerformance::PendingPackets() const noexcept {
 std::uint64_t RemuxPerformance::PendingBytes() const noexcept {
   auto remaining = counts_.accepted_bytes;
   remaining -= std::min(remaining, window_.counters().bytes);
-  remaining -= std::min(remaining, counts_.startup_bytes);
   remaining -= std::min(remaining, counts_.aborted_bytes);
   return remaining;
 }
@@ -621,13 +605,6 @@ void RemuxPerformance::Accepted(const AVPacket& packet) noexcept {
 
 void RemuxPerformance::Rejected() noexcept {
   if (active_) ++counts_.rejected_packets;
-}
-
-void RemuxPerformance::Discarded(std::uint64_t cumulative_packets,
-                                 std::uint64_t cumulative_bytes) noexcept {
-  if (!active_) return;
-  counts_.startup_packets = cumulative_packets;
-  counts_.startup_bytes = cumulative_bytes;
 }
 
 void RemuxPerformance::Error() noexcept {
@@ -654,8 +631,7 @@ void RemuxPerformance::Timing::Add(std::int64_t elapsed_ns) noexcept {
   interval_max_ns = std::max(interval_max_ns, elapsed_ns);
 }
 
-void RemuxPerformance::HandedOff(const AVPacket& packet, std::int64_t pts_ns,
-                                 std::int64_t dts_ns, std::uint64_t pts_ms,
+void RemuxPerformance::HandedOff(const AVPacket& packet, std::uint64_t pts_ms,
                                  std::uint64_t dts_ms, TimePoint queued_at,
                                  TimePoint convert_started,
                                  TimePoint mux_started,
@@ -678,14 +654,13 @@ void RemuxPerformance::HandedOff(const AVPacket& packet, std::int64_t pts_ns,
   MW_LOG_TRACE(
       "perf.remux",
       "Remuxer[{}] event=handoff stream_index={} raw_pts={} raw_dts={} "
-      "time_base={}/{} media_pts_ns={} media_dts_ns={} zlm_pts_ms={} "
+      "time_base={}/{} zlm_pts_ms={} "
       "zlm_dts_ms={} payload_bytes={} queue_wait_ms={:.3f} "
       "convert_ms={:.3f} mux_ms={:.3f} work_ms={:.3f}",
       instance_, packet.stream_index, packet.pts, packet.dts,
-      packet.time_base.num, packet.time_base.den, pts_ns, dts_ns, pts_ms,
-      dts_ms, packet.size, static_cast<double>(wait) / 1e6,
-      static_cast<double>(convert) / 1e6, static_cast<double>(mux) / 1e6,
-      static_cast<double>(work) / 1e6);
+      packet.time_base.num, packet.time_base.den, pts_ms, dts_ms, packet.size,
+      static_cast<double>(wait) / 1e6, static_cast<double>(convert) / 1e6,
+      static_cast<double>(mux) / 1e6, static_cast<double>(work) / 1e6);
 }
 
 void RemuxPerformance::Report(std::size_t queue_packets,
@@ -703,8 +678,6 @@ void RemuxPerformance::Report(std::size_t queue_packets,
   const auto accepted_bytes = counts_.accepted_bytes - previous_.accepted_bytes;
   const auto videos = counts_.video_packets - previous_.video_packets;
   const auto audios = counts_.audio_packets - previous_.audio_packets;
-  const auto startup = counts_.startup_packets - previous_.startup_packets;
-  const auto startup_bytes = counts_.startup_bytes - previous_.startup_bytes;
   const auto rejected = counts_.rejected_packets - previous_.rejected_packets;
   const auto aborted = counts_.aborted_packets - previous_.aborted_packets;
   const auto aborted_bytes = counts_.aborted_bytes - previous_.aborted_bytes;
@@ -735,7 +708,7 @@ void RemuxPerformance::Report(std::size_t queue_packets,
       "audio_pps={:.1f} payload_Mb_per_second={:.3f} pending_packets={} "
       "pending_MiB={:.3f} queue_wait_mean_ms={:.3f} interleave_mean_ms={:.3f} "
       "work_mean_ms={:.3f} "
-      "startup_discarded_total={} errors={}",
+      "errors={}",
       instance_, final ? "summary" : "interval", state,
       PerformanceReport::Rate(final ? counts_.accepted_packets : accepted,
                               seconds),
@@ -750,8 +723,7 @@ void RemuxPerformance::Report(std::size_t queue_packets,
       mean_ms(final ? timing_[kInterleave].total_ns
                     : interval_stage_ns[kInterleave],
               final ? counts_.interleave_calls : interleave_calls),
-      mean_ms(overview.work_ns, overview.work_calls), counts_.startup_packets,
-      overview.errors);
+      mean_ms(overview.work_ns, overview.work_calls), overview.errors);
   if (trace_enabled_) {
     MW_LOG_TRACE(
         "perf.remux",
@@ -759,7 +731,6 @@ void RemuxPerformance::Report(std::size_t queue_packets,
         "window_s={:.3f} accepted_packets={} accepted_bytes={} "
         "handed_off_packets={} payload_bytes={} video_packets={} "
         "audio_packets={} "
-        "startup_discarded_packets={} startup_discarded_bytes={} "
         "aborted_packets={} aborted_bytes={} rejected_packets={} errors={} "
         "pending_packets={} pending_bytes={} queue_packets={} queue_bytes={} "
         "in_flight_packets={} in_flight_bytes={} peak_pending_packets={} "
@@ -774,8 +745,6 @@ void RemuxPerformance::Report(std::size_t queue_packets,
         "interval_accepted_packets={} interval_accepted_bytes={} "
         "interval_handed_off_packets={} interval_payload_bytes={} "
         "interval_video_packets={} interval_audio_packets={} "
-        "interval_startup_discarded_packets={} "
-        "interval_startup_discarded_bytes={} "
         "interval_aborted_packets={} interval_aborted_bytes={} "
         "interval_rejected_packets={} interval_errors={} "
         "interval_interleave_calls={} interval_interleave_total_ms={:.3f} "
@@ -791,11 +760,10 @@ void RemuxPerformance::Report(std::size_t queue_packets,
         report.elapsed_seconds, report.interval_seconds,
         counts_.accepted_packets, counts_.accepted_bytes, report.total.packets,
         report.total.bytes, counts_.video_packets, counts_.audio_packets,
-        counts_.startup_packets, counts_.startup_bytes, counts_.aborted_packets,
-        counts_.aborted_bytes, counts_.rejected_packets, report.total.errors,
-        pending, pending_bytes, queue_packets, queue_bytes, in_flight,
-        in_flight_bytes, peak_pending_packets_, peak_pending_bytes_,
-        counts_.interleave_calls,
+        counts_.aborted_packets, counts_.aborted_bytes,
+        counts_.rejected_packets, report.total.errors, pending, pending_bytes,
+        queue_packets, queue_bytes, in_flight, in_flight_bytes,
+        peak_pending_packets_, peak_pending_bytes_, counts_.interleave_calls,
         static_cast<double>(timing_[kInterleave].total_ns) / 1e6,
         mean_ms(timing_[kInterleave].total_ns, counts_.interleave_calls),
         static_cast<double>(timing_[kInterleave].max_ns) / 1e6,
@@ -812,8 +780,8 @@ void RemuxPerformance::Report(std::size_t queue_packets,
         mean_ms(report.total.work_ns, report.total.work_calls),
         static_cast<double>(report.total.max_work_ns) / 1e6, accepted,
         accepted_bytes, report.interval.packets, report.interval.bytes, videos,
-        audios, startup, startup_bytes, aborted, aborted_bytes, rejected,
-        report.interval.errors, interleave_calls,
+        audios, aborted, aborted_bytes, rejected, report.interval.errors,
+        interleave_calls,
         static_cast<double>(interval_stage_ns[kInterleave]) / 1e6,
         mean_ms(interval_stage_ns[kInterleave], interleave_calls),
         static_cast<double>(timing_[kInterleave].interval_max_ns) / 1e6,
@@ -984,6 +952,8 @@ void SchedulerPerformance::DeliverAudio(std::size_t index, int samples,
   audio_performance_.delivered_source_samples +=
       static_cast<std::uint64_t>(copied);
   if (copied) ++audio_performance_.selected_new;
+  // Missing source samples may be silence or a held tail sample, depending on
+  // the scheduler's mixer policy; this counts padding rather than silence.
   audio_performance_.zero_fill_samples +=
       static_cast<std::uint64_t>(samples - copied);
 }
@@ -1081,7 +1051,7 @@ void SchedulerPerformance::Log(bool video, std::size_t video_queue,
     MW_LOG_INFO(
         "perf.scheduler",
         "Scheduler[{}] track=audio report={} samples_per_second={:.0f}/{} "
-        "queue_ms={:.1f} silence_ms_total={:.1f} dropped_ms_total={:.1f} "
+        "queue_ms={:.1f} padded_ms_total={:.1f} dropped_ms_total={:.1f} "
         "callback_mean_ms={:.3f}",
         instance_, final ? "summary" : "interval",
         PerformanceReport::Rate(static_cast<double>(overview.samples),
@@ -1103,7 +1073,7 @@ void SchedulerPerformance::Log(bool video, std::size_t video_queue,
         "selected_unit=source_payload_frames repeated=0 "
         "delivered_samples={} consumed_source_samples={} "
         "delivered_source_samples={} "
-        "zero_fill_samples={} underload_ticks={} "
+        "padded_samples={} underload_ticks={} "
         "dropped_queued_source_samples={} "
         "dropped_late_source_samples={} capacity_rejected_new={} "
         "capacity_rejected_samples={} "

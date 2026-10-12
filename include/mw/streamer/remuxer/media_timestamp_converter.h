@@ -18,90 +18,77 @@ extern "C" {
 namespace mw::streamer::internal {
 
 struct MediaTimestamps {
-  std::int64_t pts_ns;
-  std::int64_t dts_ns;
+  std::uint64_t pts_ms;
+  std::uint64_t dts_ms;
 };
 
-// Media timestamp normalization for already aligned encoder tracks.
-// Start with each track's first retained packet after startup selection. This
-// class does not select packets or interleave them; Encoder's synchronized
-// dts_ns remains a separate ordering clock, not the media DTS.
-// Serialize calls. Share one converter per muxer session across all targets.
+// Protocol adaptation only: preserve native timestamps until the ZLM boundary,
+// then apply one nonnegative millisecond shift shared by every track.
 class MediaTimestampConverter final {
  public:
   explicit MediaTimestampConverter(
-      const std::vector<ffmpeg::StreamInfo>& streams) {
-    for (const auto& stream : streams) {
-      stream.Validate();
-      if (std::any_of(tracks_.begin(), tracks_.end(), [&](const auto& track) {
-            return track.index == stream.stream_index;
-          })) {
-        throw std::invalid_argument("媒体时间转换的轨道索引重复");
-      }
-      tracks_.push_back({stream.stream_index,
-                         stream.codec_parameters.get()->codec_type,
-                         stream.time_base, std::nullopt});
+      const std::vector<ffmpeg::StreamInfo>& streams)
+      : streams_(streams) {
+    if (streams.empty()) throw std::invalid_argument("媒体轨道不能为空");
+    for (std::size_t i = 0; i < streams.size(); ++i) {
+      streams[i].Validate();
+      for (std::size_t j = 0; j < i; ++j)
+        if (streams[i].stream_index == streams[j].stream_index)
+          throw std::invalid_argument("媒体轨道索引重复");
     }
   }
 
-  // Preserves negative codec delay, PTS reordering and the input packet.
-  // Protocol-specific nonnegative shifting and millisecond conversion follow
-  // this step, using a common shift for audio and video.
-  MediaTimestamps Convert(const ffmpeg::Packet& packet) {
+  void Validate(const ffmpeg::Packet& packet) const {
     const auto* input = packet.get();
-    if (!input || input->pts == AV_NOPTS_VALUE ||
-        input->dts == AV_NOPTS_VALUE) {
-      throw std::invalid_argument("媒体时间转换需要有效 PTS 和 DTS");
-    }
-    const auto track = std::find_if(
-        tracks_.begin(), tracks_.end(),
-        [&](const auto& value) { return value.index == input->stream_index; });
-    if (track == tracks_.end() || input->time_base.num <= 0 ||
+    if (!input || input->pts == AV_NOPTS_VALUE || input->dts == AV_NOPTS_VALUE)
+      throw std::invalid_argument("媒体包需要有效 PTS 和 DTS");
+    const auto track =
+        std::find_if(streams_.begin(), streams_.end(), [&](const auto& stream) {
+          return stream.stream_index == input->stream_index;
+        });
+    if (track == streams_.end() || input->time_base.num <= 0 ||
         input->time_base.den <= 0 ||
-        av_cmp_q(input->time_base, track->time_base) != 0) {
-      throw std::invalid_argument("媒体时间转换的轨道或时间基不匹配");
-    }
-    const auto offset =
-        track->offset.value_or(track->type == AVMEDIA_TYPE_VIDEO
-                                   ? input->pts
-                                   : std::max<std::int64_t>(input->dts, 0));
-    const MediaTimestamps result{av_rescale_q(Subtract(input->pts, offset),
-                                              track->time_base, kNanoseconds),
-                                 av_rescale_q(Subtract(input->dts, offset),
-                                              track->time_base, kNanoseconds)};
-    if (result.pts_ns == AV_NOPTS_VALUE || result.dts_ns == AV_NOPTS_VALUE) {
-      throw std::overflow_error("媒体时间转换超出纳秒表示范围");
-    }
-    track->offset = offset;
-    return result;
+        av_cmp_q(input->time_base, track->time_base) != 0)
+      throw std::invalid_argument("媒体包轨道或时间基不匹配");
   }
 
-  // Only a new encoder/muxer session resets the origin. Adding an output or
-  // reconnecting an existing target does not reset it.
-  void Reset() noexcept {
-    for (auto& track : tracks_) track.offset.reset();
+  void Initialize(const std::vector<ffmpeg::Packet>& first_packets) {
+    if (shift_ms_) return;
+    std::int64_t minimum = 0;
+    for (const auto& packet : first_packets) {
+      Validate(packet);
+      minimum = std::min({minimum, Milliseconds(packet->pts, packet->time_base),
+                          Milliseconds(packet->dts, packet->time_base)});
+    }
+    shift_ms_ = -minimum;
+  }
+
+  bool initialized() const noexcept { return shift_ms_.has_value(); }
+
+  MediaTimestamps Convert(const ffmpeg::Packet& packet) const {
+    Validate(packet);
+    if (!shift_ms_) throw std::logic_error("媒体共同偏移尚未确定");
+    return {Shift(Milliseconds(packet->pts, packet->time_base)),
+            Shift(Milliseconds(packet->dts, packet->time_base))};
   }
 
  private:
-  struct Track {
-    int index;
-    AVMediaType type;
-    AVRational time_base;
-    std::optional<std::int64_t> offset;
-  };
-
-  static std::int64_t Subtract(std::int64_t timestamp, std::int64_t offset) {
-    if ((offset > 0 &&
-         timestamp < std::numeric_limits<std::int64_t>::min() + offset) ||
-        (offset < 0 &&
-         timestamp > std::numeric_limits<std::int64_t>::max() + offset)) {
-      throw std::overflow_error("媒体时间转换的起点平移溢出");
-    }
-    return timestamp - offset;
+  static std::int64_t Milliseconds(std::int64_t value, AVRational time_base) {
+    const auto result = av_rescale_q(value, time_base, AVRational{1, 1000});
+    if (result == std::numeric_limits<std::int64_t>::min() ||
+        result == std::numeric_limits<std::int64_t>::max())
+      throw std::overflow_error("媒体毫秒时间戳超出表示范围");
+    return result;
   }
-
-  static constexpr AVRational kNanoseconds{1, 1000000000};
-  std::vector<Track> tracks_;
+  std::uint64_t Shift(std::int64_t value) const {
+    if (value < -*shift_ms_)
+      throw std::invalid_argument("媒体时间戳早于共同输出起点");
+    if (value > std::numeric_limits<std::int64_t>::max() - *shift_ms_)
+      throw std::overflow_error("媒体共同偏移溢出");
+    return static_cast<std::uint64_t>(value + *shift_ms_);
+  }
+  std::vector<ffmpeg::StreamInfo> streams_;
+  std::optional<std::int64_t> shift_ms_;
 };
 
 }  // namespace mw::streamer::internal

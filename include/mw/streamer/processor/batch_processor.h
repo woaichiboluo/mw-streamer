@@ -21,7 +21,8 @@ class MW_STREAMER_API BatchProcessor final {
  public:
   // Receives the original input streams and the borrowed video device only for
   // this callback. Actual decoded properties and time_base belong to each
-  // Frame. false rejects the session.
+  // Frame; decoded timestamps retain the source stream's time_base. false
+  // rejects the session.
   using OnReady = std::function<bool(const std::vector<ffmpeg::StreamInfo>&,
                                      const ffmpeg::HwDeviceContext&)>;
   // Frames are borrowed for the callback; Ref() retains their buffers. No frame
@@ -45,8 +46,9 @@ class MW_STREAMER_API BatchProcessor final {
   void SetOnEnded(OnEnded callback) noexcept;
   void SetOnStop(OnStop callback) noexcept;
 
-  // Once per session, after Stop. Process frames only after Start succeeds and
-  // before End/Stop. Callback configuration is retained across sessions.
+  // Starts a session, or refreshes its input description after reopening the
+  // source. Process frames only after Start succeeds and before End/Stop.
+  // Callback configuration is retained across sessions.
   bool Start(const std::vector<ffmpeg::StreamInfo>& streams,
              const ffmpeg::HwDeviceContext& video_device) noexcept;
   void ProcessVideo(const ffmpeg::Frame& frame) noexcept;

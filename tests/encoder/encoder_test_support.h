@@ -7,6 +7,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "mw/streamer/encoder/encoder.h"
@@ -16,9 +17,21 @@
 namespace encoder_test {
 
 namespace ffmpeg = mw::streamer::ffmpeg;
-constexpr AVRational kNanoseconds{1, 1000000000};
-constexpr std::int64_t kStart = 10000000000;
-constexpr std::int64_t kFrameInterval = 20000000;
+constexpr AVRational kVideoTimeBase{1, 50};
+constexpr AVRational kAudioTimeBase{1, 48000};
+constexpr std::int64_t kVideoStart = 500;
+constexpr std::int64_t kAudioStart = 480000;
+
+inline mw::streamer::MediaFrame Video(ffmpeg::Frame frame) {
+  return {std::move(frame), std::nullopt};
+}
+inline mw::streamer::MediaFrame Audio(ffmpeg::Frame frame) {
+  return {std::nullopt, std::move(frame)};
+}
+inline mw::streamer::MediaFrame Frame(ffmpeg::Frame video,
+                                      ffmpeg::Frame audio) {
+  return {std::move(video), std::move(audio)};
+}
 
 inline mw::streamer::EncoderConfig Config() {
   mw::streamer::EncoderConfig config;
@@ -33,7 +46,7 @@ inline mw::streamer::EncoderConfig Config() {
 inline ffmpeg::StreamInfo VideoStream() {
   ffmpeg::StreamInfo stream;
   stream.stream_index = 4;
-  stream.time_base = kNanoseconds;
+  stream.time_base = kVideoTimeBase;
   auto* parameters = stream.codec_parameters.get();
   parameters->codec_type = AVMEDIA_TYPE_VIDEO;
   parameters->codec_id = AV_CODEC_ID_H264;
@@ -47,7 +60,7 @@ inline ffmpeg::StreamInfo VideoStream() {
 inline ffmpeg::StreamInfo AudioStream() {
   ffmpeg::StreamInfo stream;
   stream.stream_index = 7;
-  stream.time_base = kNanoseconds;
+  stream.time_base = kAudioTimeBase;
   auto* parameters = stream.codec_parameters.get();
   parameters->codec_type = AVMEDIA_TYPE_AUDIO;
   parameters->codec_id = AV_CODEC_ID_AAC;
@@ -62,9 +75,9 @@ inline ffmpeg::Frame VideoFrame(int index) {
   frame->width = 64;
   frame->height = 64;
   frame->format = AV_PIX_FMT_YUV420P;
-  frame->time_base = kNanoseconds;
-  frame->pts = kStart + index * kFrameInterval;
-  frame->duration = kFrameInterval;
+  frame->time_base = kVideoTimeBase;
+  frame->pts = kVideoStart + index;
+  frame->duration = 1;
   ffmpeg::FfmpegException::throwIfError(av_frame_get_buffer(frame.get(), 0),
                                         "分配视频测试帧");
   for (int plane = 0; plane < 3; ++plane) {
@@ -78,16 +91,16 @@ inline ffmpeg::Frame VideoFrame(int index) {
   return frame;
 }
 
-inline ffmpeg::Frame AudioFrame(int samples, std::int64_t start = kStart,
+inline ffmpeg::Frame AudioFrame(int samples, std::int64_t start = kAudioStart,
                                 int leading_samples = 0) {
   ffmpeg::Frame frame;
   frame->format = AV_SAMPLE_FMT_FLTP;
   frame->sample_rate = 48000;
   frame->nb_samples = samples;
   frame->ch_layout = AV_CHANNEL_LAYOUT_STEREO;
-  frame->time_base = kNanoseconds;
+  frame->time_base = kAudioTimeBase;
   frame->pts = start;
-  frame->duration = av_rescale_q(samples, {1, 48000}, kNanoseconds);
+  frame->duration = samples;
   ffmpeg::FfmpegException::throwIfError(av_frame_get_buffer(frame.get(), 0),
                                         "分配音频测试帧");
   for (int channel = 0; channel < 2; ++channel) {
@@ -139,7 +152,6 @@ struct Capture final {
   std::string callback_error;
   std::vector<ffmpeg::StreamInfo> streams;
   std::vector<ffmpeg::Packet> packets;
-  std::vector<std::int64_t> dts_ns;
 
   void Bind(mw::streamer::Encoder& encoder, Gate* first_packet = nullptr) {
     encoder.SetOnReady([this](const auto& value) noexcept {
@@ -151,14 +163,13 @@ struct Capture final {
         RecordCallbackFailure();
       }
     });
-    encoder.SetOnPacket([this, first_packet](const auto& value,
-                                             std::int64_t timestamp) noexcept {
+    encoder.SetOnPacket([this, first_packet](const auto& value) noexcept {
       bool first = false;
       try {
         std::lock_guard lock(mutex);
         first = packets.empty();
         packets.push_back(value.Ref());
-        dts_ns.push_back(timestamp);
+        wake.notify_all();
       } catch (...) {
         RecordCallbackFailure();
       }
@@ -179,6 +190,11 @@ struct Capture final {
     std::unique_lock lock(mutex);
     return wake.wait_for(lock, std::chrono::seconds(10),
                          [&] { return ended || errors; });
+  }
+  bool WaitPackets(std::size_t count) {
+    std::unique_lock lock(mutex);
+    return wake.wait_for(lock, std::chrono::seconds(10),
+                         [&] { return packets.size() >= count || errors; });
   }
   void RecordCallbackFailure() noexcept {
     std::lock_guard lock(mutex);

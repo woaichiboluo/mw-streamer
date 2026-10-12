@@ -136,6 +136,136 @@ std::uint64_t Field(const std::string& text, const std::string& module,
   return value;
 }
 
+TEST_CASE("编码实时整帧过载与取消分别统计且丢弃样本不计入积压",
+          "[performance][encoder]") {
+  const auto log_path =
+      std::filesystem::temp_directory_path() /
+      ("mw-perf-encoder-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()) +
+       ".log");
+  const auto log_name = log_path.string();
+  MwLogConfig config;
+  mw_log_default_config(&config);
+  config.console_enabled = 0;
+  config.rotating_file_enabled = 1;
+  config.rotating_file_path = log_name.c_str();
+  config.rotating_file_path_size = log_name.size();
+  const std::string modules =
+      "perf.encoder.video:trace;perf.encoder.audio:trace";
+  config.modules = modules.c_str();
+  config.modules_size = modules.size();
+  {
+    mw::log::Logging logging(config);
+    mw::streamer::internal::EncoderPerformance performance;
+    performance.Start(&performance, true, true);
+    performance.AcceptFrame(true, 800, 1, false);
+    performance.Encoded(true, performance.Begin(true), 0, 0);
+    performance.Encoded(false, performance.Begin(false), 800, 0);
+    performance.AcceptFrame(true, 801, 1, true);
+    performance.AcceptFrame(true, 802, 1, false);
+    performance.Abandon(true);
+    performance.Abandon(false);
+    performance.Finish();
+  }
+  std::ifstream file(log_path);
+  const std::string text((std::istreambuf_iterator<char>(file)), {});
+  for (const auto* module : {"perf.encoder.video", "perf.encoder.audio"}) {
+    CHECK(Field(text, module, "accepted") == 3);
+    CHECK(Field(text, module, "encoded") == 1);
+    CHECK(Field(text, module, "dropped_frames") == 1);
+  }
+  CHECK(Field(text, "perf.encoder.video", "aborted_frames") == 1);
+  CHECK(Field(text, "perf.encoder.video", "pending_frames") == 0);
+  CHECK(Field(text, "perf.encoder.audio", "dropped_samples") == 801);
+  CHECK(Field(text, "perf.encoder.audio", "aborted_samples") == 802);
+  CHECK(Field(text, "perf.encoder.audio", "pending_samples") == 0);
+  CHECK(text.find("discarded_start") == std::string::npos);
+  CHECK(text.find("skip_new") == std::string::npos);
+  CHECK(text.find("repeated=") == std::string::npos);
+  file.close();
+  std::filesystem::remove(log_path);
+}
+
+TEST_CASE("Input 读取统计区分暂时无数据、EOF、主动停止和真实错误",
+          "[performance][input][read]") {
+  const auto log_path =
+      std::filesystem::temp_directory_path() /
+      ("mw-perf-input-read-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()) +
+       ".log");
+  const auto log_name = log_path.string();
+  MwLogConfig config;
+  mw_log_default_config(&config);
+  config.console_enabled = 0;
+  config.rotating_file_enabled = 1;
+  config.rotating_file_path = log_name.c_str();
+  config.rotating_file_path_size = log_name.size();
+  const std::string modules = "perf.input:trace";
+  config.modules = modules.c_str();
+  config.modules_size = modules.size();
+  {
+    mw::log::Logging logging(config);
+    mw::streamer::internal::InputPerformance performance;
+    performance.Start(&performance);
+    std::vector<mw::streamer::ffmpeg::StreamInfo> streams(1);
+    streams[0].stream_index = 0;
+    streams[0].time_base = {1, 1000};
+    AVPacket packet{};
+    packet.stream_index = 0;
+    packet.size = 1024;
+    packet.pts = packet.dts = 0;
+
+    performance.BeginRead();
+    performance.Read(packet, AVERROR(EAGAIN), false, streams);
+    performance.BeginRead();
+    performance.Read(packet, 0, false, streams);
+    performance.BeginRead();
+    performance.Read(packet, AVERROR_EOF, false, streams);
+    performance.BeginRead();
+    performance.Read(packet, AVERROR_EXIT, true, streams);
+    REQUIRE(performance.Sample(true));
+    performance.Report(0, mw::streamer::InputState::kStopped, 0);
+
+    // A fresh session reports native failures independently of the clean stop.
+    performance.Start(&performance);
+    performance.BeginRead();
+    performance.Read(packet, AVERROR(EAGAIN), false, streams);
+    performance.BeginRead();
+    performance.Read(packet, 0, false, streams);
+    performance.BeginRead();
+    performance.Read(packet, AVERROR_EOF, false, streams);
+    performance.BeginRead();
+    performance.Read(packet, AVERROR_EXIT, true, streams);
+    performance.BeginRead();
+    performance.Read(packet, AVERROR(EIO), false, streams);
+    performance.BeginRead();
+    performance.Read(packet, AVERROR_EXIT, false, streams);
+    REQUIRE(performance.Sample(true));
+    performance.Report(0, mw::streamer::InputState::kFailed, 0);
+  }
+  std::ifstream file(log_path);
+  const std::string text((std::istreambuf_iterator<char>(file)), {});
+  const auto failure = text.find("state=kFailed");
+  REQUIRE(failure != std::string::npos);
+  const auto stopped = text.substr(0, failure);
+  CHECK(Field(stopped, "perf.input", "total_read_calls") == 4);
+  CHECK(Field(stopped, "perf.input", "total_read_again") == 1);
+  CHECK(Field(stopped, "perf.input", "total_packets") == 1);
+  CHECK(Field(stopped, "perf.input", "total_payload_bytes") == 1024);
+  CHECK(Field(stopped, "perf.input", "total_eof") == 1);
+  CHECK(Field(stopped, "perf.input", "total_read_errors") == 0);
+  CHECK(Field(text, "perf.input", "total_read_calls") == 6);
+  CHECK(Field(text, "perf.input", "total_read_again") == 1);
+  CHECK(Field(text, "perf.input", "total_packets") == 1);
+  CHECK(Field(text, "perf.input", "total_payload_bytes") == 1024);
+  CHECK(Field(text, "perf.input", "total_eof") == 1);
+  CHECK(Field(text, "perf.input", "total_read_errors") == 2);
+  file.close();
+  std::filesystem::remove(log_path);
+}
+
 TEST_CASE("实际Input解码调度日志匹配数据且模块可以独立关闭",
           "[performance][input]") {
   const std::string level = GENERATE("info", "trace", "off");
@@ -171,8 +301,10 @@ TEST_CASE("实际Input解码调度日志匹配数据且模块可以独立关闭"
   std::condition_variable changed;
   {
     mw::streamer::Scheduler scheduler;
-    scheduler.SetOnAudio([&](const auto& frame) noexcept {
-      output_samples += static_cast<std::uint64_t>(frame->nb_samples);
+    scheduler.SetOnFrame([&](const mw::streamer::MediaFrame& frame) noexcept {
+      if (frame.audio)
+        output_samples +=
+            static_cast<std::uint64_t>((*frame.audio)->nb_samples);
     });
     mw::streamer::FfmpegInputConfig input_config;
     input_config.auto_reconnect = false;
@@ -182,8 +314,22 @@ TEST_CASE("实际Input解码调度日志匹配数据且模块可以独立关闭"
       ended = true;
       changed.notify_all();
     });
-    input.SetOnReady([&](const auto& streams) noexcept {
-      if (!scheduler.Start(streams)) {
+    input.SetOnDecodedReady([&](const auto& source) {
+      auto counted = source;
+      for (auto& track : counted.tracks) {
+        auto read = std::move(track.try_receive);
+        track.try_receive = [&, read = std::move(read)](auto& frame) {
+          if (!read(frame)) return false;
+          if (frame->width > 0)
+            ++video_frames;
+          else {
+            ++audio_frames;
+            samples += static_cast<std::uint64_t>(frame->nb_samples);
+          }
+          return true;
+        };
+      }
+      if (!scheduler.Start(counted)) {
         std::lock_guard<std::mutex> lock(mutex);
         failed = true;
         changed.notify_all();
@@ -192,16 +338,6 @@ TEST_CASE("实际Input解码调度日志匹配数据且模块可以独立关闭"
     input.SetOnPacket([&](std::uint64_t, const auto& packet) noexcept {
       ++packets;
       bytes += static_cast<std::uint64_t>(packet->size);
-    });
-    input.SetOnFrame([&](int, const auto& frame) noexcept {
-      if (frame->width > 0) {
-        ++video_frames;
-        scheduler.SubmitVideo(frame);
-      } else {
-        ++audio_frames;
-        samples += static_cast<std::uint64_t>(frame->nb_samples);
-        scheduler.SubmitAudio(frame);
-      }
     });
     input.SetOnStateChanged([&](auto state, int, std::string_view) noexcept {
       if (state == mw::streamer::InputState::kEnded) scheduler.Drain();
@@ -263,7 +399,7 @@ TEST_CASE("实际Input解码调度日志匹配数据且模块可以独立关闭"
       CHECK(Field(text, "perf.scheduler", "delivered_samples") ==
             output_samples.load());
       CHECK(Field(text, "perf.scheduler", "delivered_source_samples") +
-                Field(text, "perf.scheduler", "zero_fill_samples") ==
+                Field(text, "perf.scheduler", "padded_samples") ==
             output_samples.load());
     } else {
       CHECK(text.find("[trace]") == std::string::npos);

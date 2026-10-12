@@ -1,6 +1,7 @@
 #include "mw/streamer/init/init.h"
 
 extern "C" {
+#include <libavdevice/avdevice.h>
 #include <libavformat/avformat.h>
 }
 
@@ -44,6 +45,7 @@ MwStreamerContext* Init(const InitConfig& config) {
   ffmpeg::FfmpegException::throwIfError(avformat_network_init(),
                                         "avformat_network_init");
   context->ffmpeg_network_initialized = true;
+  avdevice_register_all();
   mediakit::RuntimeConfig zlm_config;
   zlm_config.event_poller_threads = config.event_poller_threads;
   zlm_config.work_threads = config.work_threads;

@@ -145,8 +145,10 @@ TEST_CASE(
     return !wrong_device;
   });
   pipeline.SetOnVideo([&](const ffmpeg::Frame& frame) {
-    ++video;
-    if (frame->format != AV_PIX_FMT_CUDA || !frame->hw_frames_ctx) {
+    const int position = video++;
+    if (frame->format != AV_PIX_FMT_CUDA || !frame->hw_frames_ctx ||
+        frame->pts != position || frame->duration != 1 ||
+        av_cmp_q(frame->time_base, AVRational{1, 30}) != 0) {
       invalid_surface = true;
     } else {
       const auto* frames = reinterpret_cast<const AVHWFramesContext*>(

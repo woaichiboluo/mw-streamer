@@ -11,6 +11,8 @@ set(MW_STREAMER_SOURCES
     encoder/encoder.cc
     init/init.cc
     input/ffmpeg_input.cc
+    input/ffmpeg_frame_decoder.cc
+    input/ffmpeg_packet_reader.cc
     pipeline/batch_pipeline.cc
     pipeline/live_pipeline.cc
     pipeline/remux_pipeline.cc
@@ -65,6 +67,8 @@ foreach(streamer_target IN LISTS MW_STREAMER_TARGETS)
         PRIVATE
             ZLMediaKit::MediaKit
             FFmpeg::avformat
+            FFmpeg::avdevice
+            FFmpeg::avfilter
             FFmpeg::swresample
             Threads::Threads
             SRT::SRT

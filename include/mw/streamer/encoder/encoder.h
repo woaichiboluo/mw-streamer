@@ -16,6 +16,7 @@
 
 #include "mw/export.h"
 #include "mw/streamer/ffmpeg/encoder.h"
+#include "mw/streamer/media_frame.h"
 #include "mw/streamer/performance/performance.h"
 
 namespace mw::streamer {
@@ -43,18 +44,17 @@ struct MW_STREAMER_API EncoderConfig {
   std::map<std::string, std::string> audio_options;
 };
 
-// One independent encoder worker per present audio/video track. Callbacks must
+// A real-time consumer of complete channel frames. Two fixed workers finish
+// encoding each frame's tracks before taking the next frame. Callbacks must
 // consume their own exceptions, and must not call Start, Drain or Stop.
 // Serialize Start/Stop externally; stop upstream delivery before Stop.
 class MW_STREAMER_API Encoder final {
  public:
   using OnReady = std::function<void(const std::vector<ffmpeg::StreamInfo>&)>;
-  // Packets use encoder time bases. dts_ns is the synchronized
-  // ordering clock, not the packet DTS in the media timeline.
+  // Packets retain encoder PTS/DTS and time bases, including codec delay.
   // Copy with Packet::Ref() to retain.
   // Audio and video callbacks may execute concurrently.
-  using OnPacket =
-      std::function<void(const ffmpeg::Packet&, std::int64_t dts_ns)>;
+  using OnPacket = std::function<void(const ffmpeg::Packet&)>;
   using OnEnded = std::function<void()>;
   using OnError = std::function<void(int, std::string_view)>;
 
@@ -76,25 +76,27 @@ class MW_STREAMER_API Encoder final {
   void Start(const EncoderConfig& config,
              const std::vector<ffmpeg::StreamInfo>& streams,
              const ffmpeg::HwDeviceContext& video_device);
-  // Retains buffers. Full video caches preserve output time slots by repeating
-  // the latest queued picture instead of accepting the new picture.
-  bool SubmitVideo(const ffmpeg::Frame& frame);
-  bool SubmitAudio(const ffmpeg::Frame& frame);
+  // Retains one complete channel frame. The real-time queue holds one frame,
+  // excluding the frame being encoded. A full queue drops the incoming frame
+  // but advances both track counters and returns true.
+  // False only rejects a closed/failed session. Input PTS is not a second
+  // clock: video frames/audio samples are counted at admission, before any
+  // drop.
+  bool SubmitFrame(const MediaFrame& frame);
   // Rejects new frames and drains queued samples/pictures and codec delay.
   // OnEnded fires once when both workers finish, including an empty session.
   void Drain() noexcept;
-  // Cancels queued work, joins workers and releases codecs. No callbacks run
-  // after returning. Callbacks are retained for a subsequent Start.
+  // Rejects new frames, drains accepted work and codec delay, then joins
+  // workers and releases codecs. Fatal failures cancel pending work instead.
+  // Normal Stop/destruction may call OnPacket and OnEnded; captured resources
+  // must remain alive until completion. No callbacks run after returning.
+  // Callbacks are retained for a subsequent Start.
   void Stop() noexcept;
 
  private:
-  struct VideoSlot {
-    ffmpeg::Frame frame;
-    std::int64_t timestamp_ns = 0;
-    std::uint64_t count = 1;
-    std::uint64_t consumed = 0;
-  };
-
+  friend class LivePipeline;
+  // Internal pipeline/startup failure cleanup, without a public cancel API.
+  void RequestCancel() noexcept;
   void RunVideo() noexcept;
   void RunAudio() noexcept;
   void EncodeFrame(ffmpeg::Encoder& encoder, const ffmpeg::Frame& frame,
@@ -125,15 +127,17 @@ class MW_STREAMER_API Encoder final {
   std::thread audio_thread_;
   std::unique_ptr<ffmpeg::VideoEncoder> video_encoder_;
   std::unique_ptr<ffmpeg::AudioEncoder> audio_encoder_;
-  std::deque<VideoSlot> video_frames_;
-  std::deque<ffmpeg::Frame> audio_frames_;
-  std::optional<std::int64_t> first_audio_ns_;
-  std::optional<std::int64_t> video_start_ns_;
-  std::int64_t audio_start_ns_ = 0;
-  std::optional<std::int64_t> video_dts_offset_ns_;
+  std::deque<MediaFrame> frames_;
+  std::optional<MediaFrame> active_frame_;
+  bool audio_pending_ = false;
+  bool audio_completed_ = true;
+  bool audio_finish_requested_ = false;
+  std::int64_t video_pts_ = 0;
+  std::int64_t audio_pts_ = 0;
   int video_stream_index_ = -1;
   int audio_stream_index_ = -1;
   AVSampleFormat audio_format_ = AV_SAMPLE_FMT_NONE;
+  AVSampleFormat audio_input_format_ = AV_SAMPLE_FMT_NONE;
   int audio_rate_ = 0;
   AVChannelLayout audio_layout_{};
   int audio_capabilities_ = 0;

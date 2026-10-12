@@ -1,6 +1,9 @@
 #ifndef MW_STREAMER_FFMPEG_STREAM_INFO_H_
 #define MW_STREAMER_FFMPEG_STREAM_INFO_H_
 
+#include <map>
+#include <string>
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/rational.h>
@@ -15,6 +18,10 @@ struct MW_STREAMER_API StreamInfo {
   int stream_index = -1;
   CodecParameters codec_parameters;
   AVRational time_base{0, 1};
+  // Original input stream metadata, used by downstream track selection and
+  // filter construction. Encoder-generated descriptions keep these empty.
+  int disposition = 0;
+  std::map<std::string, std::string> metadata{};
 
   // Compare track identity, time base and audio/video format properties.
   // Other codec metadata and extradata are ignored.

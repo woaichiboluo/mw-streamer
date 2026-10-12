@@ -219,15 +219,15 @@ class EncoderPerformance final {
   using TimePoint = PerformanceWindow::TimePoint;
 
   void Start(const void* instance, bool video, bool audio) noexcept;
-  void AcceptVideo(std::size_t queued_frames, bool skipped_picture) noexcept;
-  void AcceptAudio(int samples, std::size_t queued_frames) noexcept;
-  void VideoDiscarded(std::size_t queued_frames) noexcept;
+  // Accepted counts submissions, including complete channel frames dropped
+  // when the realtime queue is full. Dropped work never becomes pending.
+  void AcceptFrame(bool video, int audio_samples, std::size_t queued_frames,
+                   bool dropped) noexcept;
   void AudioDequeued(std::size_t queued_frames) noexcept;
-  void AudioDiscarded(int samples) noexcept;
   void Abandon(bool video) noexcept;
   TimePoint Begin(bool video) const noexcept;
   void Encoded(bool video, TimePoint started, int samples = 0,
-               bool repeated = false, std::size_t queued_frames = 0) noexcept;
+               std::size_t queued_frames = 0) noexcept;
   void Packet(bool video, int bytes) noexcept;
   void Error(bool video) noexcept;
   void Finish() noexcept;
@@ -237,9 +237,9 @@ class EncoderPerformance final {
     PerformanceWindow window;
     std::uint64_t accepted = 0;
     std::uint64_t previous_accepted = 0;
-    std::uint64_t skipped_picture = 0;
-    std::uint64_t repeated = 0;
-    std::uint64_t discarded_start = 0;
+    std::uint64_t dropped_frames = 0;
+    std::uint64_t dropped_samples = 0;
+    std::uint64_t aborted = 0;
     std::uint64_t pending = 0;
     std::size_t queued_frames = 0;
     bool enabled = false;
@@ -267,12 +267,9 @@ class RemuxPerformance final {
   TimePoint Begin() const noexcept;
   void Accepted(const AVPacket& packet) noexcept;
   void Rejected() noexcept;
-  void Discarded(std::uint64_t cumulative_packets,
-                 std::uint64_t cumulative_bytes) noexcept;
   void Error() noexcept;
   void Interleaved(TimePoint started, TimePoint finished) noexcept;
-  void HandedOff(const AVPacket& packet, std::int64_t pts_ns,
-                 std::int64_t dts_ns, std::uint64_t pts_ms,
+  void HandedOff(const AVPacket& packet, std::uint64_t pts_ms,
                  std::uint64_t dts_ms, TimePoint queued_at,
                  TimePoint convert_started, TimePoint mux_started,
                  TimePoint finished) noexcept;
@@ -287,8 +284,6 @@ class RemuxPerformance final {
     std::uint64_t accepted_bytes = 0;
     std::uint64_t video_packets = 0;
     std::uint64_t audio_packets = 0;
-    std::uint64_t startup_packets = 0;
-    std::uint64_t startup_bytes = 0;
     std::uint64_t aborted_packets = 0;
     std::uint64_t aborted_bytes = 0;
     std::uint64_t rejected_packets = 0;

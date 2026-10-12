@@ -110,7 +110,8 @@ void VideoEncoder::Configure(const VideoEncoderConfig& config) {
       !PositiveRatio(config.frame_rate) || !PositiveRatio(config.time_base) ||
       config.sample_aspect_ratio.num < 0 ||
       config.sample_aspect_ratio.den <= 0 || config.bit_rate < 0 ||
-      config.gop_size < 0 || config.max_b_frames < 0) {
+      config.gop_size < 0 || config.max_b_frames < 0 ||
+      (config.thread_type & ~(FF_THREAD_FRAME | FF_THREAD_SLICE))) {
     throw std::invalid_argument("视频编码器配置无效");
   }
   auto* codec_context = context();
@@ -123,6 +124,7 @@ void VideoEncoder::Configure(const VideoEncoderConfig& config) {
   codec_context->bit_rate = config.bit_rate;
   codec_context->gop_size = config.gop_size;
   codec_context->max_b_frames = config.max_b_frames;
+  if (config.thread_type) codec_context->thread_type = config.thread_type;
   codec_context->sample_aspect_ratio = config.sample_aspect_ratio;
   codec_context->color_range = config.color_range;
   codec_context->colorspace = config.color_space;
@@ -234,11 +236,13 @@ AudioEncoder::AudioEncoder(const AudioEncoderConfig& config,
     : Encoder(config.encoder_name, AVMEDIA_TYPE_AUDIO) {
   if (config.sample_rate <= 0 ||
       av_get_bytes_per_sample(config.sample_format) <= 0 ||
-      !av_channel_layout_check(&config.channel_layout) || config.bit_rate < 0) {
+      !av_channel_layout_check(&config.channel_layout) || config.bit_rate < 0 ||
+      (config.thread_type & ~(FF_THREAD_FRAME | FF_THREAD_SLICE))) {
     throw std::invalid_argument("音频编码器配置无效");
   }
   auto* codec_context = context();
   codec_context->sample_fmt = config.sample_format;
+  if (config.thread_type) codec_context->thread_type = config.thread_type;
   codec_context->sample_rate = config.sample_rate;
   codec_context->time_base = {1, config.sample_rate};
   codec_context->bit_rate = config.bit_rate;

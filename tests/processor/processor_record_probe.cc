@@ -21,8 +21,10 @@
 
 extern "C" {
 #include <libavformat/avformat.h>
+#include <libavutil/audio_fifo.h>
 #include <libavutil/mathematics.h>
 #include <libavutil/opt.h>
+#include <libswresample/swresample.h>
 }
 
 #include "mw/streamer/ffmpeg/codec_context.h"
@@ -72,6 +74,10 @@ struct FormatCloser {
 struct Options {
   AVDictionary* value = nullptr;
   ~Options() { av_dict_free(&value); }
+};
+
+struct FreeResampler {
+  void operator()(SwrContext* context) const noexcept { swr_free(&context); }
 };
 
 // Manual real-time experiment: callbacks never wait for an encoder. The bounded
@@ -229,7 +235,8 @@ class Recording {
     v->color_trc = video->color_trc;
     if (cuda) {
       if (video->format != AV_PIX_FMT_YUV420P &&
-          video->format != AV_PIX_FMT_YUVJ420P)
+          video->format != AV_PIX_FMT_YUVJ420P &&
+          video->format != AV_PIX_FMT_NV12)
         throw std::runtime_error(
             "CUDA record probe requires 8-bit 4:2:0 video");
       v->hw_device_ctx = av_buffer_ref(device_.get());
@@ -279,6 +286,18 @@ class Recording {
         !(audio_codec->capabilities & AV_CODEC_CAP_SMALL_LAST_FRAME))
       throw std::runtime_error(
           "AAC encoder must support 1024 and short EOS frames");
+    SwrContext* converter = nullptr;
+    ffmpeg::FfmpegException::throwIfError(
+        swr_alloc_set_opts2(&converter, &a->ch_layout, a->sample_fmt,
+                            a->sample_rate, &a->ch_layout, AV_SAMPLE_FMT_S32,
+                            a->sample_rate, 0, nullptr),
+        "Create recording audio format converter");
+    converter_.reset(converter);
+    ffmpeg::FfmpegException::throwIfError(swr_init(converter_.get()),
+                                          "Initialize recording converter");
+    audio_fifo_.reset(av_audio_fifo_alloc(
+        a->sample_fmt, a->ch_layout.nb_channels, a->frame_size));
+    if (!audio_fifo_) throw std::bad_alloc();
     video_stream_ = NewStream(v);
     if (cuda) video_stream_->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
     audio_stream_ = NewStream(a);
@@ -322,15 +341,44 @@ class Recording {
 
   void Audio(const ffmpeg::Frame& source) {
     const auto* context = audio_->get();
-    if (source->format != AV_SAMPLE_FMT_FLTP || source->sample_rate != 48000 ||
+    if (source->format != AV_SAMPLE_FMT_S32 || source->sample_rate != 48000 ||
         av_channel_layout_compare(&source->ch_layout, &context->ch_layout) !=
             0 ||
-        source->nb_samples <= 0 || source->nb_samples > context->frame_size)
-      throw std::runtime_error(
-          "Output audio must be 48000Hz FLTP, <=1024 samples");
-    auto frame = Prepare(source, context->time_base);
-    Encode(audio_->get(), audio_stream_, frame.get());
-    audio_samples_ += source->nb_samples;
+        source->nb_samples <= 0)
+      throw std::runtime_error("Scheduled audio must be 48000Hz packed S32");
+    const auto timed = Prepare(source, context->time_base);
+    if (audio_next_pts_ &&
+        timed->pts !=
+            *audio_next_pts_ + av_audio_fifo_size(audio_fifo_.get())) {
+      const int pending = av_audio_fifo_size(audio_fifo_.get());
+      if (pending > 0) EncodeAudio(pending);
+      audio_next_pts_ = timed->pts;
+    }
+    if (!audio_next_pts_) audio_next_pts_ = timed->pts;
+    ffmpeg::Frame converted;
+    converted->format = context->sample_fmt;
+    converted->sample_rate = context->sample_rate;
+    converted->nb_samples = source->nb_samples;
+    ffmpeg::FfmpegException::throwIfError(
+        av_channel_layout_copy(&converted->ch_layout, &context->ch_layout),
+        "Set recording audio layout");
+    ffmpeg::FfmpegException::throwIfError(
+        av_frame_get_buffer(converted.get(), 0), "Allocate converted audio");
+    const int samples = swr_convert(converter_.get(), converted->extended_data,
+                                    converted->nb_samples,
+                                    source->extended_data, source->nb_samples);
+    ffmpeg::FfmpegException::throwIfError(samples, "Convert recording audio");
+    ffmpeg::FfmpegException::throwIfError(
+        av_audio_fifo_realloc(audio_fifo_.get(),
+                              av_audio_fifo_size(audio_fifo_.get()) + samples),
+        "Grow recording audio FIFO");
+    if (av_audio_fifo_write(audio_fifo_.get(),
+                            reinterpret_cast<void**>(converted->extended_data),
+                            samples) != samples)
+      throw std::runtime_error("Write recording audio FIFO failed");
+    while (av_audio_fifo_size(audio_fifo_.get()) >= context->frame_size)
+      EncodeAudio(context->frame_size);
+    audio_samples_ += samples;
   }
 
   std::optional<Clock::time_point> StartedAt() {
@@ -351,6 +399,8 @@ class Recording {
 
   void Finish() {
     if (!header_written_) return;
+    const int remaining = av_audio_fifo_size(audio_fifo_.get());
+    if (remaining > 0) EncodeAudio(remaining);
     Encode(video_->get(), video_stream_, nullptr);
     Encode(audio_->get(), audio_stream_, nullptr);
     trailer_attempted_ = true;
@@ -364,6 +414,28 @@ class Recording {
   }
 
  private:
+  void EncodeAudio(int samples) {
+    auto* context = audio_->get();
+    ffmpeg::Frame frame;
+    frame->format = context->sample_fmt;
+    frame->sample_rate = context->sample_rate;
+    frame->nb_samples = samples;
+    frame->pts = *audio_next_pts_;
+    frame->duration = samples;
+    frame->time_base = context->time_base;
+    ffmpeg::FfmpegException::throwIfError(
+        av_channel_layout_copy(&frame->ch_layout, &context->ch_layout),
+        "Copy recording AAC layout");
+    ffmpeg::FfmpegException::throwIfError(av_frame_get_buffer(frame.get(), 0),
+                                          "Allocate recording AAC block");
+    if (av_audio_fifo_read(audio_fifo_.get(),
+                           reinterpret_cast<void**>(frame->extended_data),
+                           samples) != samples)
+      throw std::runtime_error("Read recording audio FIFO failed");
+    Encode(context, audio_stream_, frame.get());
+    *audio_next_pts_ += samples;
+  }
+
   AVStream* NewStream(const AVCodecContext* context) {
     auto* stream = avformat_new_stream(format_.get(), nullptr);
     if (!stream) throw std::bad_alloc();
@@ -430,6 +502,10 @@ class Recording {
   std::unique_ptr<AVFormatContext, FormatCloser> format_;
   std::unique_ptr<ffmpeg::CodecContext> video_;
   std::unique_ptr<ffmpeg::CodecContext> audio_;
+  std::unique_ptr<SwrContext, FreeResampler> converter_;
+  std::unique_ptr<AVAudioFifo, decltype(&av_audio_fifo_free)> audio_fifo_{
+      nullptr, &av_audio_fifo_free};
+  std::optional<std::int64_t> audio_next_pts_;
   AVStream* video_stream_ = nullptr;
   AVStream* audio_stream_ = nullptr;
   std::mutex origin_mutex_;
@@ -494,54 +570,54 @@ int main(int argc, char* argv[]) {
     output_config.video_frame_rate = {fps, 1};
     mw::streamer::Processor processor;
     mw::streamer::Scheduler output(output_config);
-    output.SetOnVideo([&](const ffmpeg::Frame& frame) noexcept {
+    output.SetOnFrame([&](const mw::streamer::MediaFrame& frame) noexcept {
       const auto started = Clock::now();
       errors.Capture([&] {
-        auto processed = processor.ProcessVideo(frame);
-        recording.Observe(processed);
-        if (video_encoder)
-          video_encoder->Submit(processed);
-        else
-          recording.Video(processed);
+        if (frame.video) {
+          auto processed = processor.ProcessVideo(*frame.video);
+          recording.Observe(processed);
+          if (video_encoder)
+            video_encoder->Submit(processed);
+          else
+            recording.Video(processed);
+        }
+        if (frame.audio) {
+          auto processed = processor.ProcessAudio(*frame.audio);
+          recording.Observe(processed);
+          if (audio_encoder)
+            audio_encoder->Submit(processed);
+          else
+            recording.Audio(processed);
+        }
       });
       const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                Clock::now() - started)
                                .count();
-      ++video_callbacks;
+      if (frame.video) ++video_callbacks;
       callback_ns += elapsed;
       max_callback_ns = std::max(max_callback_ns, elapsed);
       if (elapsed > 1000000000 / fps) ++late_callbacks;
     });
-    output.SetOnAudio([&](const ffmpeg::Frame& frame) noexcept {
-      errors.Capture([&] {
-        auto processed = processor.ProcessAudio(frame);
-        recording.Observe(processed);
-        if (audio_encoder)
-          audio_encoder->Submit(processed);
-        else
-          recording.Audio(processed);
-      });
-    });
     // Processor callbacks stay unset: both tracks use default Frame::Ref().
     processor.SetOnEnded([&]() noexcept { output_ended.store(true); });
     output.SetOnEnded([&]() noexcept { processor.End(); });
+    output.SetOnReady([&](const auto& streams) noexcept {
+      errors.Capture([&] {
+        recording.Open(streams);
+        ready.store(processor.Start(streams, device));
+        if (!ready.load()) throw std::runtime_error("Processor rejected Ready");
+      });
+    });
+    output.SetOnError([&](int code, std::string_view message) noexcept {
+      errors.Capture([&] { throw ffmpeg::FfmpegException(code, message); });
+    });
     mw::streamer::FfmpegInputConfig input_config;
     input_config.auto_reconnect = false;
     mw::streamer::FfmpegInput input(device, input_config);
-    input.SetOnReady([&](const auto& streams) noexcept {
+    input.SetOnDecodedReady([&](const auto& source) noexcept {
       errors.Capture([&] {
-        recording.Open(streams);
-        ready.store(processor.Start(streams, device) && output.Start(streams));
-        if (!ready.load())
-          throw std::runtime_error("Processor or Scheduler rejected Ready");
-      });
-    });
-    input.SetOnFrame([&](int, const ffmpeg::Frame& frame) noexcept {
-      errors.Capture([&] {
-        const bool accepted = frame->width > 0 ? output.SubmitVideo(frame)
-                                               : output.SubmitAudio(frame);
-        if (!accepted)
-          throw std::runtime_error("Scheduler rejected input frame");
+        if (!output.Start(source))
+          throw std::runtime_error("Scheduler rejected decoded source");
       });
     });
     input.SetOnStateChanged([&](mw::streamer::InputState state, int error,
@@ -559,13 +635,15 @@ int main(int argc, char* argv[]) {
         break;
       std::this_thread::sleep_for(10ms);
     }
+    const bool eof = input_ended.load() && !errors.failed.load();
+    if (!eof) output.RequestStop();
     input.Stop();
-    if (ready.load()) output.Drain();
+    if (eof && ready.load()) output.Drain();
     const auto drain_deadline = Clock::now() + 15s;
-    while (ready.load() && !output_ended.load() &&
+    while (eof && ready.load() && !output_ended.load() &&
            Clock::now() < drain_deadline)
       std::this_thread::sleep_for(10ms);
-    const bool drained = ready.load() && output_ended.load();
+    const bool drained = ready.load() && (!eof || output_ended.load());
     output.Stop();
     processor.Stop();
     const auto encoding_drain_started = Clock::now();

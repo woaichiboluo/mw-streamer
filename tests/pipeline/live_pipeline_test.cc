@@ -21,6 +21,8 @@
 #include <thread>
 #include <vector>
 
+#include "multitrack_fixture.h"
+
 extern "C" {
 #include <libavformat/avformat.h>
 }
@@ -89,8 +91,6 @@ LivePipelineConfig Config() {
   config.encoder.video_options = {{"preset", "ultrafast"}};
   // Preserve codec delay so EOF and active Stop must drain it.
   config.encoder.max_b_frames = 2;
-  config.scheduler.audio_sample_rate = 44100;
-  config.scheduler.audio_block_samples = 512;
   return config;
 }
 
@@ -305,6 +305,7 @@ TEST_CASE("LivePipeline drains encoded audio video and preserves EOF order",
   OutputDirectory directory;
   std::atomic<int> ready{0}, videos{0}, audios{0}, invalid{0};
   std::atomic<int> sequence{0}, ended{0}, stopped{0}, terminal{0};
+  std::thread::id video_worker, audio_worker;
   LivePipeline pipeline(Config());
   const auto output = pipeline.AddPushUrl(directory.File());
   pipeline.SetOnReady([&](const auto& streams, const auto& device) noexcept {
@@ -312,22 +313,28 @@ TEST_CASE("LivePipeline drains encoded audio video and preserves EOF order",
     if (streams.size() != 2 || device.get() != nullptr) ++invalid;
     for (const auto& stream : streams) {
       if (stream.codec_parameters.get()->codec_type == AVMEDIA_TYPE_AUDIO &&
-          stream.codec_parameters.get()->sample_rate != 48000)
+          (stream.codec_parameters.get()->sample_rate != 48000 ||
+           stream.codec_parameters.get()->format != AV_SAMPLE_FMT_S32))
         ++invalid;
     }
     return true;
   });
   pipeline.SetOnVideo([&](const auto& frame) noexcept {
-    ++videos;
+    const int position = videos++;
+    video_worker = std::this_thread::get_id();
     if (frame->format != AV_PIX_FMT_YUV420P || frame->width != 64 ||
-        frame->height != 64)
+        frame->height != 64 || frame->pts != position || frame->duration != 1 ||
+        av_cmp_q(frame->time_base, AVRational{1, 30}) != 0)
       ++invalid;
     return frame.Ref();
   });
   pipeline.SetOnAudio([&](const auto& frame) noexcept {
-    ++audios;
-    if (frame->format != AV_SAMPLE_FMT_FLTP || frame->sample_rate != 44100 ||
-        frame->nb_samples > 512)
+    const int position = audios++;
+    audio_worker = std::this_thread::get_id();
+    if (frame->format != AV_SAMPLE_FMT_S32 || frame->sample_rate != 48000 ||
+        frame->nb_samples != 1600 || frame->pts != position * 1600 ||
+        frame->duration != 1600 ||
+        av_cmp_q(frame->time_base, AVRational{1, 48000}) != 0)
       ++invalid;
     return frame.Ref();
   });
@@ -340,8 +347,24 @@ TEST_CASE("LivePipeline drains encoded audio video and preserves EOF order",
   CHECK(ready == 1);
   const auto info = pipeline.ready_info();
   REQUIRE(info.streams.size() == 2);
+  REQUIRE(info.scheduled_streams.size() == 2);
   REQUIRE(info.encoded_streams.size() == 2);
   CHECK(info.output_urls == std::vector<std::string>{output});
+  for (const auto& stream : info.streams) {
+    const auto* parameters = stream.codec_parameters.get();
+    if (parameters->codec_type == AVMEDIA_TYPE_AUDIO)
+      CHECK(parameters->sample_rate == 48000);
+  }
+  for (const auto& stream : info.scheduled_streams) {
+    const auto* parameters = stream.codec_parameters.get();
+    if (parameters->codec_type == AVMEDIA_TYPE_AUDIO) {
+      CHECK(parameters->sample_rate == 48000);
+      CHECK(parameters->format == AV_SAMPLE_FMT_S32);
+      CHECK(av_cmp_q(stream.time_base, AVRational{1, 48000}) == 0);
+    } else {
+      CHECK(av_cmp_q(stream.time_base, AVRational{1, 30}) == 0);
+    }
+  }
   for (const auto& stream : info.encoded_streams) {
     const auto* parameters = stream.codec_parameters.get();
     if (parameters->codec_type == AVMEDIA_TYPE_VIDEO) {
@@ -350,13 +373,14 @@ TEST_CASE("LivePipeline drains encoded audio video and preserves EOF order",
       CHECK(parameters->height == 64);
     } else {
       CHECK(parameters->codec_id == AV_CODEC_ID_AAC);
-      CHECK(parameters->sample_rate == 44100);
+      CHECK(parameters->sample_rate == 48000);
     }
   }
   REQUIRE(WaitUntil([&] { return terminal != 0; }));
   pipeline.Stop();
   CHECK(pipeline.state() == PipelineState::kEnded);
   CHECK(invalid == 0);
+  CHECK(video_worker == audio_worker);
   CHECK(ended == 1);
   CHECK(stopped == 2);
   CHECK(terminal == 3);
@@ -371,7 +395,7 @@ TEST_CASE("LivePipeline drains encoded audio video and preserves EOF order",
   CHECK(video.height == 64);
   CHECK(audio.frames > 0);
   CHECK(audios > 0);
-  CHECK(audio.sample_rate == 44100);
+  CHECK(audio.sample_rate == 48000);
   CHECK(audio.samples >= 85000);
   CHECK(std::abs(video.first - audio.first) < 0.15);
   CHECK(std::abs(video.end - audio.end) < 0.15);
@@ -400,6 +424,62 @@ TEST_CASE("LivePipeline handles single track files without absent-track waits",
   REQUIRE(media.size() == 1);
   CHECK(media.at(type).frames > 0);
   CHECK(media.at(type).end > 1.8);
+}
+
+TEST_CASE(
+    "LivePipeline encodes fractional channel cadence without sample drift",
+    "[pipeline][live][media][cadence][eof]") {
+  Runtime runtime;
+  OutputDirectory directory;
+  const int numerator = GENERATE(30000, 60000);
+  const AVRational rate{numerator, 1001};
+  auto config = Config();
+  config.scheduler.video_frame_rate = rate;
+  config.encoder.fps = rate;
+  LivePipeline pipeline(config);
+  const auto output = pipeline.AddPushUrl(directory.File());
+  std::atomic<int> videos{0}, audios{0}, invalid{0}, ended{0}, stopped{0};
+  std::int64_t total_samples = 0;
+  pipeline.SetOnVideo([&](const auto& frame) noexcept {
+    const auto tick = videos++;
+    if (frame->pts != tick || frame->duration != 1 ||
+        av_cmp_q(frame->time_base, av_inv_q(rate)) != 0)
+      ++invalid;
+    return frame.Ref();
+  });
+  pipeline.SetOnAudio([&](const auto& frame) noexcept {
+    constexpr int p2997[] = {1602, 1601, 1602, 1601, 1602};
+    constexpr int p5994[] = {801, 800, 801, 801, 801};
+    const auto tick = audios++;
+    const int expected =
+        numerator == 30000 ? p2997[(tick + 1) % 5] : p5994[(tick + 1) % 5];
+    if (frame->pts != total_samples || frame->nb_samples != expected ||
+        frame->duration != expected || frame->sample_rate != 48000 ||
+        av_cmp_q(frame->time_base, AVRational{1, 48000}) != 0)
+      ++invalid;
+    total_samples += frame->nb_samples;
+    return frame.Ref();
+  });
+  pipeline.SetOnEnded([&]() noexcept { ++ended; });
+  pipeline.SetOnStop([&]() noexcept { ++stopped; });
+  StopPipeline stop_on_failure{pipeline};
+  pipeline.Start(Fixture());
+  REQUIRE(WaitUntil([&] { return pipeline.state() == PipelineState::kEnded; }));
+  pipeline.Stop();
+  CHECK(invalid == 0);
+  CHECK(videos == audios);
+  CHECK(ended == 1);
+  CHECK(stopped == 1);
+  const auto media = DecodeRecording(output);
+  const auto& video = media.at(AVMEDIA_TYPE_VIDEO);
+  const auto& audio = media.at(AVMEDIA_TYPE_AUDIO);
+  CHECK(video.frames == videos);
+  // AAC may expose priming/tail padding when decoded, bounded by one packet
+  // at each end. This independently checks that native sample counts were
+  // not rescaled through a second clock or compressed after encoding.
+  CHECK(std::abs(audio.samples - total_samples) <= 2048);
+  CHECK(std::abs(video.first - audio.first) < 0.15);
+  CHECK(std::abs(video.end - audio.end) < 0.15);
 }
 
 TEST_CASE("LivePipeline Start waits for processed output and Stop joins it",
@@ -479,13 +559,16 @@ TEST_CASE("LivePipeline rolls back rejected Processor and codec startup",
   Runtime runtime;
   std::atomic<int> ready{0}, ended{0}, stopped{0};
   bool accepted = true;
+  bool processor_prepared = true;
   auto config = Config();
   SECTION("Processor Start returns false") { accepted = false; }
   SECTION("Encoder cannot open the selected codec") {
     config.encoder.video_encoder_name = "missing-live-test-encoder";
   }
   SECTION("Scheduler Start returns false") {
-    config.scheduler.audio_block_samples = 0;
+    config.scheduler.video_frame_rate = {31, 2};
+    config.encoder.fps = config.scheduler.video_frame_rate;
+    processor_prepared = false;
   }
   LivePipeline pipeline(config);
   pipeline.SetOnReady([&](const auto&, const auto&) noexcept {
@@ -496,9 +579,9 @@ TEST_CASE("LivePipeline rolls back rejected Processor and codec startup",
   pipeline.SetOnStop([&]() noexcept { ++stopped; });
   CHECK_THROWS(pipeline.Start(Fixture()));
   CHECK(pipeline.state() == PipelineState::kFailed);
-  CHECK(ready == 1);
+  CHECK(ready == (processor_prepared ? 1 : 0));
   CHECK(ended == 0);
-  CHECK(stopped == (accepted ? 1 : 0));
+  CHECK(stopped == (processor_prepared && accepted ? 1 : 0));
   CHECK_FALSE(pipeline.status().error_source.empty());
   CHECK_FALSE(pipeline.status().error_message.empty());
   pipeline.Stop();
@@ -679,6 +762,142 @@ TEST_CASE("LivePipeline loop restart retains filters and clears output targets",
   CHECK(stopped == 2);
   CHECK(ended == 0);
   CHECK(pipeline.state() == PipelineState::kStopped);
+}
+
+TEST_CASE("LivePipeline defaults to the first video and audio in source order",
+          "[pipeline][live][tracks][configuration]") {
+  Runtime runtime;
+  mw::streamer::test::MultiTrackFixture source(Fixture(), false, true);
+  auto config = Config();
+  config.input.loop = true;
+  std::atomic<int> selected{0};
+  LivePipeline pipeline(config);
+  const bool reset_callback = GENERATE(false, true);
+  if (reset_callback) {
+    pipeline.SetOnSelectStreams([&](const auto&) {
+      ++selected;
+      return std::vector<int>{3, 2};
+    });
+    pipeline.SetOnSelectStreams({});
+  }
+  pipeline.Start(source.path());
+  CHECK(pipeline.state() == PipelineState::kRunning);
+  const auto info = pipeline.ready_info();
+  REQUIRE(info.streams.size() == 2);
+  CHECK(info.streams[0].stream_index == 0);
+  CHECK(info.streams[1].stream_index == 1);
+  CHECK((info.streams[0].disposition & AV_DISPOSITION_COMMENT) != 0);
+  CHECK((info.streams[1].disposition & AV_DISPOSITION_COMMENT) != 0);
+  CHECK(selected == 0);
+  CHECK_THROWS_AS(pipeline.SetOnSelectStreams({}), std::logic_error);
+  pipeline.Stop();
+  CHECK(pipeline.state() == PipelineState::kStopped);
+}
+
+TEST_CASE("LivePipeline rejects selection before downstream preparation",
+          "[pipeline][live][tracks][configuration][failure]") {
+  Runtime runtime;
+  mw::streamer::test::MultiTrackFixture source(Fixture(), false);
+  std::atomic<int> selected{0}, ready{0}, frames{0};
+  std::vector<int> offered;
+  LivePipeline pipeline(Config());
+  const bool throws = GENERATE(false, true);
+  pipeline.SetOnSelectStreams([&](const auto& streams) -> std::vector<int> {
+    ++selected;
+    for (const auto& stream : streams) offered.push_back(stream.stream_index);
+    if (throws) throw std::invalid_argument("selector rejected tracks");
+    return {0, 123};
+  });
+  pipeline.SetOnReady([&](const auto&, const auto&) noexcept {
+    ++ready;
+    return true;
+  });
+  pipeline.SetOnVideo([&](const auto& frame) noexcept {
+    ++frames;
+    return frame.Ref();
+  });
+  pipeline.SetOnAudio([&](const auto& frame) noexcept {
+    ++frames;
+    return frame.Ref();
+  });
+  if (throws) {
+    try {
+      pipeline.Start(source.path());
+      FAIL("selector exception must propagate through synchronous Start");
+    } catch (const std::invalid_argument& error) {
+      CHECK(std::string(error.what()) == "selector rejected tracks");
+    }
+  } else {
+    CHECK_THROWS_AS(pipeline.Start(source.path()), ffmpeg::FfmpegException);
+  }
+  CHECK(selected == 1);
+  CHECK(offered == std::vector<int>{0, 1, 2});
+  CHECK(ready == 0);
+  CHECK(frames == 0);
+  CHECK(pipeline.state() == PipelineState::kFailed);
+  CHECK(pipeline.status().error_source == "input");
+  pipeline.Stop();
+  CHECK(pipeline.state() == PipelineState::kFailed);
+}
+
+TEST_CASE(
+    "LivePipeline uses its selector before consuming the chosen audio track",
+    "[pipeline][live][tracks][eof][control]") {
+  Runtime runtime;
+  mw::streamer::test::MultiTrackFixture source(Fixture());
+  auto config = Config();
+  const bool stop_actively = GENERATE(false, true);
+  config.input.loop = stop_actively;
+  std::atomic<int> selections{0};
+  std::atomic<bool> all_tracks_offered{true}, selection_finished{false};
+  std::atomic<bool> selection_before_consumption{true};
+  LivePipeline pipeline(config);
+  pipeline.SetOnSelectStreams([&](const auto& streams) {
+    if (streams.size() != 3 || streams[0].stream_index != 0 ||
+        streams[1].stream_index != 1 || streams[2].stream_index != 2) {
+      all_tracks_offered = false;
+    }
+    ++selections;
+    selection_finished = true;
+    return std::vector<int>{0, 2};
+  });
+  std::atomic<int> videos{0}, audios{0}, ended{0}, stopped{0};
+  pipeline.SetOnVideo([&](const auto& frame) noexcept {
+    if (!selection_finished) selection_before_consumption = false;
+    ++videos;
+    return frame.Ref();
+  });
+  pipeline.SetOnAudio([&](const auto& frame) noexcept {
+    if (!selection_finished) selection_before_consumption = false;
+    ++audios;
+    return frame.Ref();
+  });
+  pipeline.SetOnEnded([&]() noexcept { ++ended; });
+  pipeline.SetOnStop([&]() noexcept { ++stopped; });
+  StopPipeline stop_on_failure{pipeline};
+  OutputDirectory directory;
+  pipeline.AddPushUrl(directory.File());
+  pipeline.Start(source.path());
+  if (stop_actively)
+    REQUIRE(WaitUntil([&] { return videos > 0 && audios > 0; }));
+  if (!stop_actively)
+    REQUIRE(
+        WaitUntil([&] { return pipeline.state() == PipelineState::kEnded; }));
+  pipeline.Stop();
+  CHECK(pipeline.state() ==
+        (stop_actively ? PipelineState::kStopped : PipelineState::kEnded));
+  CHECK(videos > 0);
+  CHECK(audios > 0);
+  CHECK(ended == (stop_actively ? 0 : 1));
+  CHECK(stopped == 1);
+  const auto info = pipeline.ready_info();
+  REQUIRE(info.streams.size() == 2);
+  CHECK(info.streams[0].stream_index == 0);
+  CHECK(info.streams[1].stream_index == 2);
+  CHECK((info.streams[1].disposition & AV_DISPOSITION_COMMENT) != 0);
+  CHECK(selections >= 1);
+  CHECK(all_tracks_offered);
+  CHECK(selection_before_consumption);
 }
 
 }  // namespace

@@ -1,6 +1,7 @@
 #ifndef MW_STREAMER_FFMPEG_DECODER_H_
 #define MW_STREAMER_FFMPEG_DECODER_H_
 
+#include <cstdint>
 #include <string_view>
 
 #include "mw/export.h"
@@ -16,7 +17,7 @@ namespace mw::streamer::ffmpeg {
 enum class DecodeResult { kFrame, kNeedInput, kEnd };
 
 // Synchronous decoder for one track. Serialize all calls on the owning worker.
-// Input owns packet queues, timestamp synthesis and playback scheduling.
+// Input owns packet queues. Media timestamps remain in the source time base.
 class MW_STREAMER_API Decoder {
  public:
   virtual ~Decoder();
@@ -32,6 +33,11 @@ class MW_STREAMER_API Decoder {
   // Replaces frame, including unreferencing it when no output is available.
   // Output timestamps use the input stream time_base.
   DecodeResult ReceiveFrame(Frame& frame);
+  // Estimate the source EOF boundary without modifying frame metadata. Unknown
+  // PTS or an unavailable duration leaves the boundary unknown. A negative
+  // parser_repeat_pict means no demuxer parser duration hint is available.
+  std::int64_t FrameEndPts(const Frame& frame,
+                           int parser_repeat_pict = -1) const noexcept;
   // Signals EOF. On false, receive output and retry. Then receive until kEnd.
   bool Drain();
   // Discards buffered data and permits new input after EOF or a seek. Frames

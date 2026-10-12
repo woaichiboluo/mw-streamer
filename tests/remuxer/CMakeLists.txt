@@ -30,7 +30,7 @@ add_executable(mw_async_remuxer_recording_tests async_remuxer_recording_test.cc)
 target_link_libraries(mw_async_remuxer_recording_tests PRIVATE
     Catch2::Catch2WithMain mw::streamer FFmpeg::avformat)
 add_test(NAME mw_async_remuxer_recording_tests COMMAND mw_async_remuxer_recording_tests)
-set_tests_properties(mw_async_remuxer_recording_tests PROPERTIES TIMEOUT 60)
+set_tests_properties(mw_async_remuxer_recording_tests PROPERTIES TIMEOUT 180)
 
 add_executable(mw_async_remuxer_network_tests async_remuxer_network_test.cc)
 target_link_libraries(mw_async_remuxer_network_tests PRIVATE
@@ -96,6 +96,10 @@ foreach(kind async sync)
     set_tests_properties(${hls_test_target} PROPERTIES
         TIMEOUT 60 LABELS "${kind}_remuxer;hls")
 endforeach()
+
+# Three eight-second encoding fixtures and five realtime SyncRemuxer replays
+# require at least 64 seconds before HTTP checks and teardown.
+set_tests_properties(mw_sync_remuxer_hls_tests PROPERTIES TIMEOUT 90)
 
 # Use only the public library API, including the real DLL in shared builds.
 add_executable(mw_secure_publish_tests secure_publish_test.cc)

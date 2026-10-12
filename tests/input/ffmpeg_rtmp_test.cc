@@ -218,10 +218,11 @@ TEST_CASE("FFmpeg RTMP input advertises Enhanced RTMP HEVC support",
   ConnectServer server;
   mw::streamer::FfmpegInputConfig config;
   config.auto_reconnect = false;
+  config.options["rtmp_enhanced_codecs"] = "hvc1";
   config.open_timeout = 10s;
   std::string codec = "hvc1";
-  SECTION("HEVC is advertised by default") {}
-  SECTION("caller options override default codecs") {
+  SECTION("caller explicitly advertises HEVC") {}
+  SECTION("caller explicitly selects another enhanced codec") {
     codec = "av01";
     config.options["rtmp_enhanced_codecs"] = codec;
   }
@@ -284,11 +285,10 @@ TEST_CASE("FFmpeg RTMP input decodes legacy HEVC CodecID 12",
   input.SetOnFrame([&](int index, const auto& frame) {
     std::lock_guard<std::mutex> lock(mutex);
     if (index == video_index) {
-      valid_video &=
-          frame->width == 64 && frame->height == 64 &&
-          frame->data[0] != nullptr &&
-          av_cmp_q(frame->time_base, AVRational{1, 1000000000}) == 0 &&
-          frame->pkt_dts == AV_NOPTS_VALUE;
+      valid_video &= frame->width == 64 && frame->height == 64 &&
+                     frame->data[0] != nullptr &&
+                     av_cmp_q(frame->time_base, video_time_base) == 0 &&
+                     frame->pts == frame->best_effort_timestamp;
       video_pts.push_back(frame->pts);
     } else if (index == audio_index) {
       valid_audio &= frame->sample_rate == 48000 && frame->nb_samples > 0 &&
@@ -326,8 +326,8 @@ TEST_CASE("FFmpeg RTMP input decodes legacy HEVC CodecID 12",
   CHECK(audio_frames >= 94);
   REQUIRE(video_time_base.num > 0);
   for (size_t i = 1; i < video_pts.size(); ++i) {
-    const auto elapsed =
-        static_cast<double>(video_pts[i] - video_pts[i - 1]) / 1000000000.0;
+    const auto elapsed = static_cast<double>(video_pts[i] - video_pts[i - 1]) *
+                         av_q2d(video_time_base);
     CHECK(elapsed == Catch::Approx(0.1));
   }
   std::lock_guard<std::mutex> lock(server.state()->mutex);

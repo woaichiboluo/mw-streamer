@@ -23,6 +23,8 @@
 #include <utility>
 #include <vector>
 
+#include "multitrack_fixture.h"
+
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
@@ -761,4 +763,114 @@ TEST_CASE("RemuxPipeline各网络协议初次失败重连且Stop结束同步Star
   CHECK(pipeline.state() == PipelineState::kStopped);
   CHECK(notifications.ReadyCount() == 0);
   CHECK(notifications.Count(PipelineState::kFailed) == 0);
+}
+
+TEST_CASE("RemuxPipeline defaults to the first video and audio in source order",
+          "[pipeline][remux][tracks][configuration]") {
+  Runtime runtime;
+  mw::streamer::test::MultiTrackFixture source(Fixture(), false, true);
+  auto config = RemuxPipelineConfig{};
+  config.input.loop = true;
+  std::atomic<int> selected{0};
+  RemuxPipeline pipeline(config);
+  const bool reset_callback = GENERATE(false, true);
+  if (reset_callback) {
+    pipeline.SetOnSelectStreams([&](const auto&) {
+      ++selected;
+      return std::vector<int>{3, 2};
+    });
+    pipeline.SetOnSelectStreams({});
+  }
+  pipeline.Start(source.path());
+  CHECK(pipeline.state() == PipelineState::kRunning);
+  const auto info = pipeline.ready_info();
+  REQUIRE(info.streams.size() == 2);
+  CHECK(info.streams[0].stream_index == 0);
+  CHECK(info.streams[1].stream_index == 1);
+  CHECK((info.streams[0].disposition & AV_DISPOSITION_COMMENT) != 0);
+  CHECK((info.streams[1].disposition & AV_DISPOSITION_COMMENT) != 0);
+  CHECK(selected == 0);
+  CHECK_THROWS_AS(pipeline.SetOnSelectStreams({}), std::logic_error);
+  pipeline.Stop();
+  CHECK(pipeline.state() == PipelineState::kStopped);
+}
+
+TEST_CASE("RemuxPipeline rejects selection before downstream preparation",
+          "[pipeline][remux][tracks][configuration][failure]") {
+  Runtime runtime;
+  mw::streamer::test::MultiTrackFixture source(Fixture(), false);
+  std::atomic<int> selected{0}, ready{0};
+  std::vector<int> offered;
+  OutputDirectory directory;
+  RemuxPipeline pipeline(RemuxPipelineConfig{});
+  const auto planned_recording = pipeline.AddPushUrl(directory.File());
+  const bool throws = GENERATE(false, true);
+  pipeline.SetOnSelectStreams([&](const auto& streams) -> std::vector<int> {
+    ++selected;
+    for (const auto& stream : streams) offered.push_back(stream.stream_index);
+    if (throws) throw std::invalid_argument("selector rejected tracks");
+    return {0, 123};
+  });
+  pipeline.SetOnReady([&](const auto&) { ++ready; });
+  if (throws) {
+    try {
+      pipeline.Start(source.path());
+      FAIL("selector exception must propagate through synchronous Start");
+    } catch (const std::invalid_argument& error) {
+      CHECK(std::string(error.what()) == "selector rejected tracks");
+    }
+  } else {
+    CHECK_THROWS_AS(pipeline.Start(source.path()), ffmpeg::FfmpegException);
+  }
+  CHECK(selected == 1);
+  CHECK(offered == std::vector<int>{0, 1, 2});
+  CHECK(ready == 0);
+  CHECK_FALSE(std::filesystem::exists(planned_recording));
+  CHECK(pipeline.state() == PipelineState::kFailed);
+  CHECK(pipeline.status().error_source == "input");
+  pipeline.Stop();
+  CHECK(pipeline.state() == PipelineState::kFailed);
+}
+
+TEST_CASE(
+    "RemuxPipeline uses its selector before consuming the chosen audio track",
+    "[pipeline][remux][tracks][eof][control]") {
+  Runtime runtime;
+  mw::streamer::test::MultiTrackFixture source(Fixture());
+  auto config = RemuxPipelineConfig{};
+  const bool stop_actively = GENERATE(false, true);
+  config.input.loop = stop_actively;
+  std::atomic<int> selections{0};
+  std::atomic<bool> all_tracks_offered{true}, selection_finished{false};
+  std::atomic<bool> selection_before_consumption{true};
+  RemuxPipeline pipeline(config);
+  pipeline.SetOnSelectStreams([&](const auto& streams) {
+    if (streams.size() != 3 || streams[0].stream_index != 0 ||
+        streams[1].stream_index != 1 || streams[2].stream_index != 2) {
+      all_tracks_offered = false;
+    }
+    ++selections;
+    selection_finished = true;
+    return std::vector<int>{0, 2};
+  });
+  pipeline.SetOnReady([&](const auto&) {
+    if (!selection_finished) selection_before_consumption = false;
+  });
+  OutputDirectory directory;
+  pipeline.AddPushUrl(directory.File());
+  pipeline.Start(source.path());
+  if (!stop_actively)
+    REQUIRE(
+        WaitUntil([&] { return pipeline.state() == PipelineState::kEnded; }));
+  pipeline.Stop();
+  CHECK(pipeline.state() ==
+        (stop_actively ? PipelineState::kStopped : PipelineState::kEnded));
+  const auto info = pipeline.ready_info();
+  REQUIRE(info.streams.size() == 2);
+  CHECK(info.streams[0].stream_index == 0);
+  CHECK(info.streams[1].stream_index == 2);
+  CHECK((info.streams[1].disposition & AV_DISPOSITION_COMMENT) != 0);
+  CHECK(selections >= 1);
+  CHECK(all_tracks_offered);
+  CHECK(selection_before_consumption);
 }

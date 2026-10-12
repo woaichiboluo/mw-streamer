@@ -22,14 +22,15 @@ struct MW_STREAMER_API LivePipelineConfig {
   SchedulerConfig scheduler;
   // fps must equal scheduler.video_frame_rate. Video size/format describe the
   // processed frames, with Encoder's existing inheritance defaults. Audio is
-  // FLTP at scheduler.audio_sample_rate, retaining the input channel layout.
+  // S32 at the channel's fixed 48 kHz; Encoder converts to its native format.
   EncoderConfig encoder;
 };
 
 struct LivePipelineReadyInfo {
-  // Original input descriptions and Encoder's actual encoded descriptions.
-  // Both snapshots remain queryable after stopping.
+  // Source, negotiated Scheduler and actual Encoder descriptions.
+  // All snapshots remain queryable after stopping.
   std::vector<ffmpeg::StreamInfo> streams;
+  std::vector<ffmpeg::StreamInfo> scheduled_streams;
   std::vector<ffmpeg::StreamInfo> encoded_streams;
   std::vector<std::string> output_urls;
   std::string rtsp_url;
@@ -39,14 +40,16 @@ struct LivePipelineReadyInfo {
 // Input(kLive) -> Scheduler -> Processor -> Encoder -> AsyncRemuxer.
 // Requires Init before Start and destruction before Shutdown. Configure
 // callbacks before Start. Processor callbacks obey its noexcept contract and
-// consume their own exceptions. Audio/video processing runs concurrently on
-// Scheduler workers; OnReady runs on Input, End/Stop on the cleanup worker.
-// OnReady receives original input descriptions; audio frame properties follow
-// Scheduler's configuration. Filters preserve audio layout and sample timing.
-// Callbacks may query snapshots, but must not call lifecycle/configuration
-// methods or destroy the pipeline. State observer exceptions are logged.
+// consume their own exceptions. Audio/video processing runs serially on one
+// channel worker, and the resulting picture/audio are submitted as one
+// MediaFrame to the realtime Encoder consumer; OnReady runs after native filter
+// negotiation, End/Stop on the cleanup worker. OnReady receives actual
+// scheduled frame descriptions. Callbacks may query snapshots, but must not
+// call lifecycle/configuration methods or destroy the pipeline. State observer
+// exceptions are logged.
 class MW_STREAMER_API LivePipeline final {
  public:
+  using OnSelectStreams = FfmpegInput::OnSelectStreams;
   using OnReady = Processor::OnReady;
   using OnVideo = Processor::OnVideo;
   using OnAudio = Processor::OnAudio;
@@ -65,6 +68,9 @@ class MW_STREAMER_API LivePipeline final {
   LivePipeline(LivePipeline&&) = delete;
   LivePipeline& operator=(LivePipeline&&) = delete;
 
+  // Before Start, choose source indices from all audio/video descriptions.
+  // An empty callback restores Input's first-video/first-audio default.
+  void SetOnSelectStreams(OnSelectStreams callback);
   void SetOnReady(OnReady callback);
   void SetOnVideo(OnVideo callback);
   void SetOnAudio(OnAudio callback);

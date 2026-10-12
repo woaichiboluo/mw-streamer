@@ -1,340 +1,103 @@
-#include <fmt/format.h>
-
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
-#include <exception>
 #include <memory>
 #include <stdexcept>
-#include <utility>
-
-extern "C" {
-#include <libavformat/avformat.h>
-}
+#include <thread>
 
 #include "encoder_test_support.h"
-#include "mw/streamer/init/init.h"
-#include "mw/streamer/input/ffmpeg_input.h"
-#include "mw/streamer/scheduler/scheduler.h"
 
 namespace {
 
 using namespace encoder_test;
 using mw::streamer::Encoder;
 
-struct ClosePlaybackInput {
-  void operator()(AVFormatContext* input) const {
-    avformat_close_input(&input);
+const ffmpeg::StreamInfo& Stream(const Capture& capture, AVMediaType type) {
+  for (const auto& stream : capture.streams) {
+    if (stream.codec_parameters.get()->codec_type == type) return stream;
   }
-};
+  throw std::logic_error("缺少编码测试轨道");
+}
 
-struct ShutdownPlaybackRuntime {
-  void operator()(mw::streamer::MwStreamerContext* context) const {
-    mw::streamer::Shutdown(context);
-  }
-};
-
-std::vector<ffmpeg::Frame> PlaybackReferenceAudio(const std::string& path) {
-  AVFormatContext* raw = nullptr;
-  ffmpeg::FfmpegException::throwIfError(
-      avformat_open_input(&raw, path.c_str(), nullptr, nullptr),
-      "打开倍速测试参考文件");
-  std::unique_ptr<AVFormatContext, ClosePlaybackInput> input(raw);
-  ffmpeg::FfmpegException::throwIfError(
-      avformat_find_stream_info(input.get(), nullptr), "读取倍速测试参考轨道");
-  const int index =
-      av_find_best_stream(input.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
-  ffmpeg::FfmpegException::throwIfError(index, "查找倍速测试参考音频");
-  const auto* source = input->streams[index];
-  ffmpeg::StreamInfo stream{index, ffmpeg::CodecParameters(*source->codecpar),
-                            source->time_base};
+std::vector<ffmpeg::Packet> Packets(const Capture& capture,
+                                    const ffmpeg::StreamInfo& stream) {
   std::vector<ffmpeg::Packet> packets;
-  for (;;) {
-    ffmpeg::Packet packet;
-    const int result = av_read_frame(input.get(), packet.get());
-    if (result == AVERROR_EOF) break;
-    ffmpeg::FfmpegException::throwIfError(result, "读取倍速测试参考包");
-    if (packet->stream_index == index) packets.push_back(std::move(packet));
+  for (const auto& packet : capture.packets) {
+    if (packet->stream_index == stream.stream_index)
+      packets.push_back(packet.Ref());
   }
-  ffmpeg::AudioDecoder decoder(stream);
-  return Decode(decoder, packets, index);
+  return packets;
 }
 
-double PlaybackToneFrequency(const std::vector<ffmpeg::Frame>& frames) {
-  std::vector<float> samples;
-  for (const auto& frame : frames) {
-    REQUIRE(frame->format == AV_SAMPLE_FMT_FLTP);
-    const auto* begin = reinterpret_cast<const float*>(frame->extended_data[0]);
-    samples.insert(samples.end(), begin, begin + frame->nb_samples);
-  }
-  REQUIRE(samples.size() > 100);
-  // Ignore AAC priming and the padded tail when measuring the sine fixture.
-  const auto begin = samples.size() / 10;
-  const auto end = samples.size() - begin;
-  int crossings = 0;
-  for (auto index = begin + 1; index < end; ++index) {
-    if (samples[index - 1] <= 0 && samples[index] > 0) ++crossings;
-  }
-  return static_cast<double>(crossings) * frames.front()->sample_rate /
-         static_cast<double>(end - begin);
-}
-
-TEST_CASE("Input倍速经Scheduler和Encoder保持固定规格及变速变调内容",
-          "[encoder][input][scheduler][playback-speed]") {
-  mw::streamer::InitConfig runtime_config;
-  runtime_config.log.console_enabled = 0;
-  runtime_config.event_poller_threads = 1;
-  runtime_config.work_threads = 1;
-  std::unique_ptr<mw::streamer::MwStreamerContext, ShutdownPlaybackRuntime>
-      runtime(mw::streamer::Init(runtime_config));
-  const std::string path =
-      std::string(MW_STREAMER_ENCODER_TEST_DATA_DIR) + "/h264_aac.mp4";
-  const double original_frequency =
-      PlaybackToneFrequency(PlaybackReferenceAudio(path));
-  REQUIRE(original_frequency > 0);
-  for (const double speed : {0.5, 2.0, 4.0, 8.0}) {
-    INFO(fmt::format("playback_speed={}", speed));
-    Capture capture;
-    ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
-    Encoder encoder;
-    capture.Bind(encoder);
-    constexpr AVRational kOutputFrameRate{30, 1};
-    const double output_frame_period = av_q2d(av_inv_q(kOutputFrameRate));
-    mw::streamer::SchedulerConfig scheduler_config;
-    scheduler_config.video_frame_rate = kOutputFrameRate;
-    mw::streamer::Scheduler scheduler(scheduler_config);
-    mw::streamer::FfmpegInputConfig input_config;
-    input_config.auto_reconnect = false;
-    input_config.playback_speed = speed;
-    mw::streamer::FfmpegInput input(cpu, input_config);
-    const auto run = [&](auto&& action) noexcept {
-      try {
-        action();
-      } catch (const std::exception& error) {
-        std::lock_guard lock(capture.mutex);
-        ++capture.errors;
-        capture.callback_error = error.what();
-        capture.wake.notify_all();
-      }
-    };
-    bool input_ended = false;
-    bool valid_output_audio = true;
-    bool accepted_frames = true;
-    double source_frame_period = 0;
-    AVRational source_video_time_base{0, 1};
-    std::vector<std::pair<std::int64_t, std::int64_t>> selected_video_times;
-    scheduler.SetOnVideo([&](const auto& frame) noexcept {
-      run([&] {
-        const auto media_time = av_rescale_q(
-            frame->best_effort_timestamp, source_video_time_base, kNanoseconds);
-        if (selected_video_times.empty() ||
-            selected_video_times.back().first != media_time) {
-          selected_video_times.emplace_back(media_time, frame->pts);
-        }
-        accepted_frames &= encoder.SubmitVideo(frame);
-      });
-    });
-    scheduler.SetOnAudio([&](const auto& frame) noexcept {
-      valid_output_audio &=
-          frame->sample_rate == 48000 && frame->format == AV_SAMPLE_FMT_FLTP;
-      run([&] {
-        if (!encoder.SubmitAudio(frame)) {
-          throw std::runtime_error("编码器拒绝倍速音频");
-        }
-      });
-    });
-    scheduler.SetOnEnded([&]() noexcept { encoder.Drain(); });
-    input.SetOnReady([&](const auto& streams) noexcept {
-      run([&] {
-        auto output_streams = streams;
-        for (auto& stream : output_streams) {
-          auto* parameters = stream.codec_parameters.get();
-          if (parameters->codec_type == AVMEDIA_TYPE_AUDIO) {
-            parameters->sample_rate = 48000;
-            parameters->format = AV_SAMPLE_FMT_FLTP;
-          } else if (parameters->codec_type == AVMEDIA_TYPE_VIDEO) {
-            if (parameters->framerate.num <= 0 ||
-                parameters->framerate.den <= 0) {
-              throw std::runtime_error("倍速测试视频缺少原始帧率");
-            }
-            source_frame_period = av_q2d(av_inv_q(parameters->framerate));
-            source_video_time_base = stream.time_base;
-          }
-        }
-        auto config = Config();
-        config.fps = kOutputFrameRate;
-        encoder.Start(config, output_streams, cpu);
-        if (!scheduler.Start(streams)) {
-          throw std::runtime_error("Scheduler倍速会话启动失败");
-        }
-      });
-    });
-    input.SetOnFrame([&](int, const auto& frame) noexcept {
-      run([&] {
-        const bool accepted = frame->width > 0 ? scheduler.SubmitVideo(frame)
-                                               : scheduler.SubmitAudio(frame);
-        if (!accepted) throw std::runtime_error("Scheduler拒绝倍速输入");
-      });
-    });
-    input.SetOnStateChanged([&](mw::streamer::InputState state, int,
-                                std::string_view message) noexcept {
-      run([&] {
-        if (state == mw::streamer::InputState::kFailed) {
-          throw std::runtime_error(std::string(message));
-        }
-        if (state == mw::streamer::InputState::kEnded) {
-          input_ended = true;
-          scheduler.Drain();
-        }
-      });
-    });
-    const auto started = std::chrono::steady_clock::now();
-    input.Start(path);
-    const bool ended = capture.Wait();
-    input.Stop();
-    scheduler.Stop();
-    encoder.Stop();
-    INFO(capture.callback_error);
-    REQUIRE(ended);
-    REQUIRE(capture.errors == 0);
-    CHECK(capture.ended == 1);
-    CHECK(input_ended);
-    CHECK(accepted_frames);
-    CHECK(valid_output_audio);
-    const double expected_duration = 2.0 / speed;
-    const double elapsed = std::chrono::duration<double>(
-                               std::chrono::steady_clock::now() - started)
-                               .count();
-    CHECK(elapsed >= expected_duration - output_frame_period);
-    CHECK(elapsed <= expected_duration + 1.5);
-    double video_end = 0;
-    double audio_end = 0;
-    for (const auto& stream : capture.streams) {
-      const auto* parameters = stream.codec_parameters.get();
-      if (parameters->codec_type == AVMEDIA_TYPE_VIDEO) {
-        CHECK(av_cmp_q(parameters->framerate, kOutputFrameRate) == 0);
-        ffmpeg::VideoDecoder decoder(stream);
-        const auto frames =
-            Decode(decoder, capture.packets, stream.stream_index);
-        REQUIRE_FALSE(frames.empty());
-        for (std::size_t index = 0; index < frames.size(); ++index) {
-          CHECK(av_rescale_q(frames[index]->pts, stream.time_base,
-                             av_inv_q(kOutputFrameRate)) ==
-                static_cast<std::int64_t>(index));
-        }
-        video_end = static_cast<double>(frames.size()) * output_frame_period;
-      } else {
-        CHECK(parameters->sample_rate == 48000);
-        ffmpeg::AudioDecoder decoder(stream);
-        const auto frames =
-            Decode(decoder, capture.packets, stream.stream_index);
-        REQUIRE_FALSE(frames.empty());
-        const double frequency = PlaybackToneFrequency(frames);
-        CHECK(std::abs(frequency / (original_frequency * speed) - 1) < 0.1);
-        for (const auto& frame : frames) {
-          audio_end = std::max(
-              audio_end,
-              static_cast<double>(frame->pts) * av_q2d(stream.time_base) +
-                  static_cast<double>(frame->nb_samples) / 48000);
-        }
-      }
-    }
-    INFO(fmt::format(
-        "expected={} video_end={} audio_end={} source_frame_period={}",
-        expected_duration, video_end, audio_end, source_frame_period));
-    REQUIRE(source_frame_period > 0);
-    // An empty video queue freezes Scheduler's media clock. Sparse paced input
-    // can therefore add one source frame period while the initial queue forms.
-    const double max_duration = expected_duration +
-                                source_frame_period / speed +
-                                2 * output_frame_period;
-    CHECK(video_end >= expected_duration - output_frame_period);
-    CHECK(video_end <= max_duration);
-    CHECK(audio_end >= expected_duration - output_frame_period);
-    CHECK(audio_end <= max_duration);
-    CHECK(std::abs(video_end - audio_end) < 0.1);
-    REQUIRE(selected_video_times.size() > 2);
-    // Exclude the first picture's queue startup delay, then verify the selected
-    // content progresses at the requested speed rather than only counting
-    // frames.
-    const auto& first = selected_video_times[1];
-    const auto& last = selected_video_times.back();
-    const double source_span =
-        static_cast<double>(last.first - first.first) / 1e9;
-    const double output_span =
-        static_cast<double>(last.second - first.second) / 1e9;
-    INFO(
-        fmt::format("source_span={} output_span={}", source_span, output_span));
-    CHECK(std::abs(output_span - source_span / speed) <=
-          2 * output_frame_period);
-  }
-}
-
-TEST_CASE("满视频缓存重复最后画面并保留八个连续编码时刻",
-          "[encoder][video][timing]") {
+TEST_CASE("实时 frame 缓存满时丢弃整份音视频且计数保留时间缺口",
+          "[encoder][audio][video][timing][backpressure]") {
   Gate gate;
   Capture capture;
   Encoder encoder;
   capture.Bind(encoder, &gate);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
-  encoder.Start(Config(), {VideoStream()}, cpu);
+  encoder.Start(Config(), {VideoStream(), AudioStream()}, cpu);
   ReleaseGate release{gate};
-  auto first = VideoFrame(0);
-  REQUIRE(encoder.SubmitVideo(first));
+  const auto first = Frame(VideoFrame(0), AudioFrame(1024));
+  REQUIRE(encoder.SubmitFrame(first));
   REQUIRE(gate.Wait());
-  for (int picture = 1; picture < 8; ++picture) {
-    REQUIRE(encoder.SubmitVideo(VideoFrame(picture)));
+  // A current frame is processing and precisely one complete frame fits in
+  // the realtime queue. Later submissions are valid, nonfatal overloads.
+  for (int index = 1; index <= 5; ++index) {
+    REQUIRE(encoder.SubmitFrame(Frame(
+        VideoFrame(index), AudioFrame(1024, kAudioStart + index * 1024))));
   }
-  encoder.Drain();
-  CHECK_FALSE(encoder.SubmitVideo(VideoFrame(8)));
   gate.Release();
+  REQUIRE(capture.WaitPackets(3));
+  REQUIRE(encoder.SubmitFrame(
+      Frame(VideoFrame(6), AudioFrame(1024, kAudioStart + 6 * 1024))));
+  encoder.Drain();
+  CHECK_FALSE(encoder.SubmitFrame(
+      Frame(VideoFrame(7), AudioFrame(1024, kAudioStart + 7 * 1024))));
   REQUIRE(capture.Wait());
   encoder.Stop();
   REQUIRE(capture.errors == 0);
-  REQUIRE(capture.packets.size() == 8);
-  REQUIRE(capture.streams.size() == 1);
-  const auto& stream = capture.streams.front();
-  for (std::size_t index = 0; index < capture.packets.size(); ++index) {
-    const auto& packet = capture.packets[index];
-    CHECK(packet->stream_index == stream.stream_index);
-    CHECK(av_cmp_q(packet->time_base, stream.time_base) == 0);
-    CHECK(av_rescale_q(packet->pts, packet->time_base, kNanoseconds) ==
-          static_cast<std::int64_t>(index) * kFrameInterval);
-    CHECK(capture.dts_ns[index] ==
-          kStart + static_cast<std::int64_t>(index) * kFrameInterval);
+  CHECK(capture.ended == 1);
+  const auto& video_stream = Stream(capture, AVMEDIA_TYPE_VIDEO);
+  const auto& audio_stream = Stream(capture, AVMEDIA_TYPE_AUDIO);
+  const auto video_packets = Packets(capture, video_stream);
+  const auto audio_packets = Packets(capture, audio_stream);
+  REQUIRE(video_packets.size() == 3);
+  constexpr std::int64_t kVideoPts[] = {0, 1, 6};
+  for (std::size_t index = 0; index < video_packets.size(); ++index) {
+    const auto& packet = video_packets[index];
+    CHECK(av_cmp_q(packet->time_base, video_stream.time_base) == 0);
+    CHECK(av_rescale_q(packet->pts, packet->time_base, kVideoTimeBase) ==
+          kVideoPts[index]);
+    CHECK(packet->dts == packet->pts);
   }
-  CHECK(first->pts == kStart);
-  CHECK(first->duration == kFrameInterval);
-  ffmpeg::VideoDecoder decoder(stream);
-  const auto frames = Decode(decoder, capture.packets, stream.stream_index);
-  REQUIRE(frames.size() == 8);
-  constexpr int kPictures[] = {0, 1, 2, 3, 4, 5, 5, 5};
+  REQUIRE(audio_packets.size() == 4);
+  constexpr std::int64_t kAudioPts[] = {-1024, 0, 1024, 6144};
+  for (std::size_t index = 0; index < audio_packets.size(); ++index) {
+    CHECK(av_cmp_q(audio_packets[index]->time_base, kAudioTimeBase) == 0);
+    CHECK(audio_packets[index]->pts == kAudioPts[index]);
+    CHECK(audio_packets[index]->dts == kAudioPts[index]);
+  }
+  ffmpeg::VideoDecoder decoder(video_stream);
+  const auto frames = Decode(decoder, video_packets, video_stream.stream_index);
+  REQUIRE(frames.size() == 3);
   for (std::size_t index = 0; index < frames.size(); ++index) {
-    REQUIRE(frames[index]->format == AV_PIX_FMT_YUV420P);
-    for (int plane = 0; plane < 3; ++plane) {
-      const int size = plane == 0 ? 64 : 32;
-      const int expected = plane == 0 ? 20 + 20 * kPictures[index] : 128;
-      int max_error = 0;
-      for (int row = 0; row < size; ++row) {
-        for (int column = 0; column < size; ++column) {
-          const int value =
-              frames[index]
-                  ->data[plane][row * frames[index]->linesize[plane] + column];
-          max_error = std::max(max_error, std::abs(value - expected));
-        }
-      }
-      CHECK(max_error <= 2);
-    }
+    const int expected = 20 + 20 * static_cast<int>(kVideoPts[index]);
+    CHECK(std::abs(frames[index]->data[0][0] - expected) <= 2);
   }
+  CHECK(first.video.value()->pts == kVideoStart);
+  CHECK(first.audio.value()->pts == kAudioStart);
+  CHECK(first.audio.value()->nb_samples == 1024);
 }
 
-TEST_CASE("纯音频按样本累计PTS并保留AAC编码延迟", "[encoder][audio][timing]") {
+TEST_CASE("纯音频使用样本计数并保留 AAC 负 DTS 编码延迟",
+          "[encoder][audio][timing]") {
   Capture capture;
   Encoder encoder;
   capture.Bind(encoder);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   encoder.Start(Config(), {AudioStream()}, cpu);
   const auto input = AudioFrame(3072);
-  REQUIRE(encoder.SubmitAudio(input));
+  REQUIRE(encoder.SubmitFrame(Audio(input)));
   encoder.Drain();
   REQUIRE(capture.Wait());
   encoder.Stop();
@@ -343,89 +106,110 @@ TEST_CASE("纯音频按样本累计PTS并保留AAC编码延迟", "[encoder][audi
   const auto& stream = capture.streams.front();
   CHECK(stream.codec_parameters.get()->codec_id == AV_CODEC_ID_AAC);
   CHECK(stream.codec_parameters.get()->sample_rate == 48000);
-  CHECK(stream.codec_parameters.get()->format == AV_SAMPLE_FMT_FLTP);
-  CHECK(stream.codec_parameters.get()->ch_layout.nb_channels == 2);
-  CHECK(av_cmp_q(stream.time_base, {1, 48000}) == 0);
+  CHECK(av_cmp_q(stream.time_base, kAudioTimeBase) == 0);
   REQUIRE(capture.packets.size() == 4);
   for (std::size_t index = 0; index < capture.packets.size(); ++index) {
     const auto& packet = capture.packets[index];
     CHECK(packet->stream_index == stream.stream_index);
     CHECK(packet->pts == (static_cast<std::int64_t>(index) - 1) * 1024);
     CHECK(packet->dts == packet->pts);
-    CHECK(capture.dts_ns[index] ==
-          kStart + av_rescale_q(packet->dts, stream.time_base, kNanoseconds));
+    CHECK(av_cmp_q(packet->time_base, kAudioTimeBase) == 0);
   }
-  CHECK(input->pts == kStart);
+  CHECK(input->pts == kAudioStart);
+  CHECK(input->duration == 3072);
   CHECK(input->nb_samples == 3072);
 }
 
-TEST_CASE("音频等待视频起点并裁剪提前二十毫秒的样本",
+TEST_CASE("音频编码帧跨越过载缺口时保留原生滤镜 FIFO 时间戳",
+          "[encoder][audio][video][timing][backpressure][filter]") {
+  Gate gate;
+  Capture capture;
+  Encoder encoder;
+  capture.Bind(encoder, &gate);
+  ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
+  encoder.Start(Config(), {VideoStream(), AudioStream()}, cpu);
+  ReleaseGate release{gate};
+  REQUIRE(encoder.SubmitFrame(Frame(VideoFrame(0), AudioFrame(800))));
+  REQUIRE(gate.Wait());
+  for (int index = 1; index <= 5; ++index) {
+    REQUIRE(encoder.SubmitFrame(
+        Frame(VideoFrame(index), AudioFrame(800, kAudioStart + index * 800))));
+  }
+  gate.Release();
+  REQUIRE(capture.WaitPackets(2));
+  REQUIRE(encoder.SubmitFrame(
+      Frame(VideoFrame(6), AudioFrame(800, kAudioStart + 4800))));
+  encoder.Drain();
+  REQUIRE(capture.Wait());
+  encoder.Stop();
+  REQUIRE(capture.errors == 0);
+  const auto& audio_stream = Stream(capture, AVMEDIA_TYPE_AUDIO);
+  const auto packets = Packets(capture, audio_stream);
+  REQUIRE(packets.size() == 4);
+  // The native buffersink emits 1024-sample blocks. The second block starts
+  // in the buffered 576 samples at PTS 1024 and consumes 448 samples from the
+  // later frame at PTS 4800. The short tail therefore begins at PTS 5248;
+  // neither a custom FIFO clock nor inserted silence should compress it.
+  constexpr std::int64_t kPts[] = {-1024, 0, 1024, 5248};
+  for (std::size_t index = 0; index < packets.size(); ++index) {
+    CHECK(packets[index]->pts == kPts[index]);
+    CHECK(packets[index]->dts == kPts[index]);
+  }
+  CHECK(packets.back()->duration == 352);
+  CHECK(Packets(capture, Stream(capture, AVMEDIA_TYPE_VIDEO)).size() == 3);
+}
+
+TEST_CASE("channel frame 不按输入音视频起点裁掉音频前缀",
           "[encoder][audio][video][timing]") {
   Capture capture;
   Encoder encoder;
   capture.Bind(encoder);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   encoder.Start(Config(), {VideoStream(), AudioStream()}, cpu);
-  auto audio = AudioFrame(3008, kStart - kFrameInterval, 960);
-  REQUIRE(encoder.SubmitAudio(audio));
-  REQUIRE(encoder.SubmitVideo(VideoFrame(0)));
+  auto audio = AudioFrame(3008, kAudioStart - 960, 960);
+  const auto video = VideoFrame(0);
+  REQUIRE(encoder.SubmitFrame(Frame(video, audio)));
   encoder.Drain();
   REQUIRE(capture.Wait());
   encoder.Stop();
   REQUIRE(capture.errors == 0);
-  REQUIRE(capture.streams.size() == 2);
-  const ffmpeg::StreamInfo* audio_stream = nullptr;
-  const ffmpeg::StreamInfo* video_stream = nullptr;
-  for (const auto& stream : capture.streams) {
-    if (stream.codec_parameters.get()->codec_type == AVMEDIA_TYPE_AUDIO) {
-      audio_stream = &stream;
-    } else {
-      video_stream = &stream;
-    }
+  const auto& audio_stream = Stream(capture, AVMEDIA_TYPE_AUDIO);
+  const auto& video_stream = Stream(capture, AVMEDIA_TYPE_VIDEO);
+  const auto audio_packets = Packets(capture, audio_stream);
+  const auto video_packets = Packets(capture, video_stream);
+  REQUIRE(video_packets.size() == 1);
+  CHECK(video_packets.front()->pts == 0);
+  REQUIRE(audio_packets.size() == 4);
+  std::int64_t encoded_samples = 0;
+  for (std::size_t index = 0; index < audio_packets.size(); ++index) {
+    CHECK(audio_packets[index]->pts ==
+          (static_cast<std::int64_t>(index) - 1) * 1024);
+    encoded_samples += audio_packets[index]->duration;
   }
-  REQUIRE(audio_stream != nullptr);
-  REQUIRE(video_stream != nullptr);
-  int audio_packets = 0;
-  int video_packets = 0;
-  for (std::size_t index = 0; index < capture.packets.size(); ++index) {
-    const auto& packet = capture.packets[index];
-    if (packet->stream_index == audio_stream->stream_index) {
-      CHECK(packet->pts == (audio_packets - 1) * 1024);
-      CHECK(capture.dts_ns[index] ==
-            kStart +
-                av_rescale_q(packet->dts, packet->time_base, kNanoseconds));
-      ++audio_packets;
-    } else {
-      CHECK(packet->stream_index == video_stream->stream_index);
-      CHECK(packet->pts == 0);
-      CHECK(capture.dts_ns[index] == kStart);
-      ++video_packets;
-    }
-  }
-  CHECK(audio_packets == 3);
-  CHECK(video_packets == 1);
-  ffmpeg::AudioDecoder decoder(*audio_stream);
-  const auto frames =
-      Decode(decoder, capture.packets, audio_stream->stream_index);
-  bool checked_samples = false;
+  CHECK(encoded_samples -
+            audio_stream.codec_parameters.get()->initial_padding ==
+        3008);
+  ffmpeg::AudioDecoder decoder(audio_stream);
+  const auto frames = Decode(decoder, audio_packets, audio_stream.stream_index);
+  bool checked_prefix = false;
   for (const auto& frame : frames) {
     if (frame->pts != 0) continue;
     REQUIRE(frame->format == AV_SAMPLE_FMT_FLTP);
     const auto* samples =
         reinterpret_cast<const float*>(frame->extended_data[0]);
     double mean = 0;
-    for (int index = 256; index < frame->nb_samples; ++index)
-      mean += static_cast<double>(samples[index]);
-    mean /= frame->nb_samples - 256;
-    CHECK(std::abs(mean - 0.1) < 0.05);
-    checked_samples = true;
+    for (int index = 256; index < 768; ++index) mean += samples[index];
+    mean /= 512;
+    CHECK(std::abs(mean - 0.75) < 0.1);
+    checked_prefix = true;
   }
-  CHECK(checked_samples);
-  CHECK(audio->pts == kStart - kFrameInterval);
+  CHECK(checked_prefix);
+  CHECK(audio->pts == kAudioStart - 960);
   CHECK(audio->nb_samples == 3008);
+  CHECK(video->pts == kVideoStart);
 }
 
-TEST_CASE("零时间戳可以作为音视频会话的有效同步起点",
+TEST_CASE("channel frame 的消费计数不依赖源帧媒体时钟",
           "[encoder][audio][video][timing]") {
   Capture capture;
   Encoder encoder;
@@ -433,39 +217,34 @@ TEST_CASE("零时间戳可以作为音视频会话的有效同步起点",
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   encoder.Start(Config(), {VideoStream(), AudioStream()}, cpu);
   auto video = VideoFrame(0);
-  video->pts = 0;
-  REQUIRE(encoder.SubmitVideo(video));
-  REQUIRE(encoder.SubmitAudio(AudioFrame(2048, 0)));
+  auto audio = AudioFrame(2048);
+  for (auto* frame : {video.get(), audio.get()}) {
+    frame->pts = AV_NOPTS_VALUE;
+    frame->pkt_dts = AV_NOPTS_VALUE;
+    frame->best_effort_timestamp = AV_NOPTS_VALUE;
+    frame->time_base = {0, 1};
+  }
+  REQUIRE(encoder.SubmitFrame(Frame(video, audio)));
   encoder.Drain();
   REQUIRE(capture.Wait());
   encoder.Stop();
-  CHECK(capture.ended == 1);
-  CHECK(capture.errors == 0);
-  int video_packets = 0;
-  int audio_packets = 0;
-  const int video_index = VideoStream().stream_index;
-  const int audio_index = AudioStream().stream_index;
-  for (std::size_t index = 0; index < capture.packets.size(); ++index) {
-    const auto& packet = capture.packets[index];
-    if (packet->stream_index == video_index) {
-      CHECK(packet->pts == 0);
-      CHECK(capture.dts_ns[index] == 0);
-      ++video_packets;
-    } else {
-      CHECK(packet->stream_index == audio_index);
-      CHECK(packet->pts == (audio_packets - 1) * 1024);
-      CHECK(capture.dts_ns[index] ==
-            av_rescale_q(packet->dts, packet->time_base, kNanoseconds));
-      ++audio_packets;
-    }
-  }
-  CHECK(video_packets == 1);
-  CHECK(audio_packets == 3);
+  REQUIRE(capture.errors == 0);
+  const auto videos = Packets(capture, Stream(capture, AVMEDIA_TYPE_VIDEO));
+  const auto audios = Packets(capture, Stream(capture, AVMEDIA_TYPE_AUDIO));
+  REQUIRE(videos.size() == 1);
+  CHECK(videos.front()->pts == 0);
+  REQUIRE(audios.size() == 3);
+  CHECK(audios.front()->pts == -1024);
+  CHECK(audios.back()->pts == 1024);
+  CHECK(video->pts == AV_NOPTS_VALUE);
+  CHECK(audio->pts == AV_NOPTS_VALUE);
+  CHECK(video->time_base.num == 0);
+  CHECK(audio->time_base.num == 0);
 }
 
-TEST_CASE("B帧延迟编码排空并保持原生DTS与同步域映射",
-          "[encoder][video][timing]") {
-  constexpr int kFrames = 40;
+TEST_CASE("Stop 排空 B 帧保留原生负 DTS 与展示顺序",
+          "[encoder][video][timing][stop]") {
+  constexpr int kFrames = 12;
   Capture capture;
   Encoder encoder;
   capture.Bind(encoder);
@@ -477,36 +256,123 @@ TEST_CASE("B帧延迟编码排空并保持原生DTS与同步域映射",
   config.video_options["x264-params"] =
       "b-adapt=0:rc-lookahead=5:sync-lookahead=0";
   encoder.Start(config, {VideoStream()}, cpu);
+  // Feed small pictures at the real channel cadence so this codec-delay test
+  // does not intentionally exercise the separate realtime overload policy.
+  auto deadline = std::chrono::steady_clock::now();
   for (int index = 0; index < kFrames; ++index) {
-    REQUIRE(encoder.SubmitVideo(VideoFrame(index)));
+    std::this_thread::sleep_until(deadline);
+    REQUIRE(encoder.SubmitFrame(Video(VideoFrame(index))));
+    deadline += std::chrono::milliseconds(20);
   }
-  encoder.Drain();
-  REQUIRE(capture.Wait());
   encoder.Stop();
+  CHECK(capture.ended == 1);
   REQUIRE(capture.errors == 0);
   REQUIRE(capture.packets.size() == kFrames);
   REQUIRE(capture.streams.size() == 1);
-  const auto first_dts = capture.packets.front()->dts;
-  CHECK(first_dts < 0);
-  CHECK(capture.dts_ns.front() == kStart);
+  CHECK(capture.packets.front()->dts < 0);
   std::vector<std::int64_t> presentation_times;
   for (std::size_t index = 0; index < capture.packets.size(); ++index) {
     const auto& packet = capture.packets[index];
     if (index > 0) CHECK(packet->dts > capture.packets[index - 1]->dts);
-    CHECK(capture.dts_ns[index] ==
-          kStart + av_rescale_q(packet->dts - first_dts, packet->time_base,
-                                kNanoseconds));
-    presentation_times.push_back(
-        av_rescale_q(packet->pts, packet->time_base, {1, 50}));
+    CHECK(av_cmp_q(packet->time_base, kVideoTimeBase) == 0);
+    presentation_times.push_back(packet->pts);
   }
   std::sort(presentation_times.begin(), presentation_times.end());
-  for (std::size_t index = 0; index < presentation_times.size(); ++index) {
-    CHECK(presentation_times[index] == static_cast<std::int64_t>(index));
+  for (int index = 0; index < kFrames; ++index) {
+    CHECK(presentation_times[index] == index);
   }
   const auto& stream = capture.streams.front();
   ffmpeg::VideoDecoder decoder(stream);
-  const auto frames = Decode(decoder, capture.packets, stream.stream_index);
-  CHECK(frames.size() == kFrames);
+  CHECK(Decode(decoder, capture.packets, stream.stream_index).size() ==
+        kFrames);
+}
+
+TEST_CASE("Stop 和析构排空 AAC 滤镜短尾及编码器延迟",
+          "[encoder][audio][timing][lifecycle][stop]") {
+  Capture capture;
+  ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
+  auto encoder = std::make_unique<Encoder>();
+  capture.Bind(*encoder);
+  encoder->Start(Config(), {AudioStream()}, cpu);
+  constexpr int kSamples = 3008;
+  const auto input = AudioFrame(kSamples, kAudioStart, 960);
+  REQUIRE(encoder->SubmitFrame(Audio(input)));
+  SECTION("直接 Stop，无需先 Drain") {
+    encoder->Stop();
+    encoder->Stop();
+    encoder->Drain();
+    CHECK_FALSE(encoder->SubmitFrame(Audio(AudioFrame(1024))));
+  }
+  SECTION("析构前回调及其捕获对象保持存活") { encoder.reset(); }
+  REQUIRE(capture.errors == 0);
+  CHECK(capture.ended == 1);
+  CHECK(capture.callback_error.empty());
+  const auto& stream = Stream(capture, AVMEDIA_TYPE_AUDIO);
+  REQUIRE(capture.packets.size() == 4);
+  CHECK(stream.codec_parameters.get()->initial_padding == 1024);
+  CHECK(capture.packets.front()->pts == -1024);
+  CHECK(capture.packets.back()->pts == 2048);
+  CHECK(capture.packets.back()->duration == kSamples - 2048);
+  std::int64_t encoded_samples = 0;
+  for (const auto& packet : capture.packets) {
+    CHECK(av_cmp_q(packet->time_base, kAudioTimeBase) == 0);
+    encoded_samples += packet->duration;
+  }
+  CHECK(encoded_samples - stream.codec_parameters.get()->initial_padding ==
+        kSamples);
+  ffmpeg::AudioDecoder decoder(stream);
+  const auto decoded = Decode(decoder, capture.packets, stream.stream_index);
+  std::int64_t decoded_samples = 0;
+  bool checked_prefix = false;
+  bool checked_tail = false;
+  for (const auto& frame : decoded) {
+    decoded_samples += frame->nb_samples;
+    REQUIRE(frame->format == AV_SAMPLE_FMT_FLTP);
+    if (frame->pts != 0 && frame->pts != 2048) continue;
+    REQUIRE(frame->nb_samples >= 768);
+    const auto* samples =
+        reinterpret_cast<const float*>(frame->extended_data[0]);
+    double mean = 0;
+    for (int index = 256; index < 768; ++index) mean += samples[index];
+    mean /= 512;
+    if (frame->pts == 0) {
+      CHECK(std::abs(mean - 0.75) < 0.1);
+      checked_prefix = true;
+    } else {
+      CHECK(std::abs(mean - 0.1) < 0.1);
+      checked_tail = true;
+    }
+  }
+  // Codec parameters carry the AAC priming delay into the native decoder.
+  // It skips 1024 priming samples, but the 960-sample final packet still
+  // decodes to a full 1024-sample block with 64 tail-padding samples.
+  CHECK(decoded_samples == 3072);
+  REQUIRE(decoded.size() == 3);
+  CHECK(decoded.front()->pts == 0);
+  CHECK(decoded.back()->pts == 2048);
+  std::size_t skip_size = 0;
+  CHECK(av_packet_get_side_data(capture.packets.front().get(),
+                                AV_PKT_DATA_SKIP_SAMPLES,
+                                &skip_size) == nullptr);
+  CHECK(skip_size == 0);
+  // Removing only the copied stream's priming metadata exposes that block;
+  // the packet payload and native durations remain identical.
+  auto without_padding = stream;
+  without_padding.codec_parameters.get()->initial_padding = 0;
+  ffmpeg::AudioDecoder uncompensated(without_padding);
+  const auto untrimmed =
+      Decode(uncompensated, capture.packets, stream.stream_index);
+  std::int64_t untrimmed_samples = 0;
+  for (const auto& frame : untrimmed) untrimmed_samples += frame->nb_samples;
+  CHECK(untrimmed_samples == 4096);
+  REQUIRE(untrimmed.size() == 4);
+  CHECK(untrimmed.front()->pts == -1024);
+  CHECK(stream.codec_parameters.get()->initial_padding == 1024);
+  CHECK(checked_prefix);
+  CHECK(checked_tail);
+  CHECK(input->pts == kAudioStart);
+  CHECK(input->nb_samples == kSamples);
+  CHECK(input->duration == kSamples);
 }
 
 }  // namespace

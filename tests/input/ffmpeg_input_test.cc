@@ -42,8 +42,6 @@ using mw::streamer::InputMode;
 using mw::streamer::InputState;
 namespace ffmpeg = mw::streamer::ffmpeg;
 
-constexpr AVRational kNanoseconds{1, 1000000000};
-
 std::string SamplePath(std::string_view name = "h264_aac.mp4") {
   return std::string(MW_STREAMER_INPUT_TEST_DATA_DIR) + "/" + std::string(name);
 }
@@ -68,7 +66,7 @@ class TemporaryMediaFile final {
   }
   void Restore() {
     std::filesystem::copy_file(
-        SamplePath("seek_tail_h264.mp4"), path_,
+        SamplePath("h264_video.mp4"), path_,
         std::filesystem::copy_options::overwrite_existing);
   }
 
@@ -329,13 +327,14 @@ struct FrameObservation {
   int64_t pts;
   size_t generation;
   std::thread::id thread;
-  int64_t timestamp_ns;
-  int64_t duration_ns;
+  int64_t published_pts;
+  int64_t duration;
 };
 
 struct Observation {
   std::vector<InputState> states;
   std::vector<ffmpeg::StreamInfo> streams;
+  std::vector<std::vector<ffmpeg::StreamInfo>> stream_history;
   std::vector<FrameObservation> frames;
   std::vector<std::thread::id> media_threads;
   std::vector<Clock::time_point> ready_times;
@@ -349,7 +348,14 @@ struct Observation {
 
 class Observer final {
  public:
-  void TrackLoops() { track_loops_ = true; }
+  void RecordPacketGeneration(std::uint64_t generation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (packet_generation_ && *packet_generation_ != generation) {
+      ++generation_;
+      value_.media_threads.push_back(std::this_thread::get_id());
+    }
+    packet_generation_ = generation;
+  }
   void SetFrameHook(std::function<void(const ffmpeg::Frame&)> hook) {
     frame_hook_ = std::move(hook);
   }
@@ -357,13 +363,20 @@ class Observer final {
     ready_hook_ = std::move(hook);
   }
   void Attach(FfmpegInput& input) {
+    input.SetOnPacket([this](std::uint64_t generation, const auto&) {
+      RecordPacketGeneration(generation);
+    });
     input.SetOnReady([this](const std::vector<ffmpeg::StreamInfo>& streams) {
       {
         std::lock_guard<std::mutex> lock(mutex_);
         ++value_.callbacks;
         ++value_.ready;
+        ++generation_;
+        packet_generation_.reset();
+        value_.media_threads.push_back(std::this_thread::get_id());
         value_.ready_times.push_back(Clock::now());
         value_.streams = streams;
+        value_.stream_history.push_back(streams);
         for (const auto& stream : streams) {
           value_.valid &= stream.codec_parameters.get() &&
                           stream.stream_index >= 0 &&
@@ -381,20 +394,11 @@ class Observer final {
             value_.streams.begin(), value_.streams.end(),
             [index](const auto& info) { return info.stream_index == index; });
         if (stream == value_.streams.end() || !frame.get() || !frame->data[0] ||
-            !frame->buf[0] || frame->pts == AV_NOPTS_VALUE ||
-            av_cmp_q(frame->time_base, kNanoseconds) != 0 ||
-            frame->pkt_dts != AV_NOPTS_VALUE) {
+            !frame->buf[0] || frame->pts != frame->best_effort_timestamp ||
+            av_cmp_q(frame->time_base, stream->time_base) != 0) {
           value_.valid = false;
         } else {
           const auto type = stream->codec_parameters.get()->codec_type;
-          const auto offset =
-              frame->pts - av_rescale_q(frame->best_effort_timestamp,
-                                        stream->time_base, kNanoseconds);
-          if (track_loops_ && loop_offset_ && *loop_offset_ != offset) {
-            ++generation_;
-            value_.media_threads.push_back(std::this_thread::get_id());
-          }
-          loop_offset_ = offset;
           value_.frames.push_back(
               {index,
                static_cast<double>(frame->best_effort_timestamp) *
@@ -417,11 +421,6 @@ class Observer final {
           {
             std::lock_guard<std::mutex> lock(mutex_);
             ++value_.callbacks;
-            if (state == InputState::kConnected) {
-              ++generation_;
-              loop_offset_.reset();
-              value_.media_threads.push_back(std::this_thread::get_id());
-            }
             value_.states.push_back(state);
             value_.state_threads.push_back(std::this_thread::get_id());
             value_.error = error;
@@ -466,9 +465,8 @@ class Observer final {
   std::vector<uint8_t> retained_bytes_;
   std::function<void(const ffmpeg::Frame&)> frame_hook_;
   std::function<void()> ready_hook_;
-  bool track_loops_ = false;
   size_t generation_ = 0;
-  std::optional<int64_t> loop_offset_;
+  std::optional<std::uint64_t> packet_generation_;
 };
 
 // Pauses delivery after recording a video frame. Destruction releases the
@@ -524,27 +522,14 @@ size_t StateCount(const Observation& value, InputState state) {
       std::count(value.states.begin(), value.states.end(), state));
 }
 
-int64_t MediaPtsNs(const Observation& value, const FrameObservation& frame) {
-  const auto stream = std::find_if(
-      value.streams.begin(), value.streams.end(), [&](const auto& information) {
-        return information.stream_index == frame.stream_index;
-      });
-  REQUIRE(stream != value.streams.end());
-  return av_rescale_q(frame.pts, stream->time_base, kNanoseconds);
-}
-
-void CheckTimestampMapping(const Observation& value, size_t generation) {
-  const auto first = std::find_if(value.frames.begin(), value.frames.end(),
-                                  [generation](const auto& frame) {
-                                    return frame.generation == generation;
-                                  });
-  REQUIRE(first != value.frames.end());
-  const auto offset = first->timestamp_ns - MediaPtsNs(value, *first);
+void CheckSourceTimestamps(const Observation& value, size_t generation) {
+  bool found = false;
   for (const auto& frame : value.frames) {
     if (frame.generation != generation) continue;
-    CHECK(frame.timestamp_ns - MediaPtsNs(value, frame) == offset);
-    CHECK(frame.duration_ns > 1000000);
+    found = true;
+    CHECK(frame.published_pts == frame.pts);
   }
+  REQUIRE(found);
 }
 
 FfmpegInputConfig RetryConfig(int retries = -1,
@@ -552,6 +537,9 @@ FfmpegInputConfig RetryConfig(int retries = -1,
   FfmpegInputConfig config;
   config.retry_interval = interval;
   config.max_retries = retries;
+  // Disable native HTTP reconnect for deterministic module retry injection.
+  config.options["reconnect"] = "0";
+  config.options["reconnect_streamed"] = "0";
   return config;
 }
 
@@ -585,22 +573,18 @@ ReferenceFrames DecodeReference(
                                     raw->streams[index]->codecpar),
       "configure reference");
   context.get()->pkt_timebase = raw->streams[index]->time_base;
+  context.get()->thread_count = 0;
   ffmpeg::FfmpegException::throwIfError(
       avcodec_open2(context.get(), codec, nullptr), "open reference decoder");
   ReferenceFrames result;
   result.time_base = raw->streams[index]->time_base;
   result.has_b_frames = context.get()->has_b_frames;
   if (seek) {
-    int seek_index =
-        av_find_best_stream(raw, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    if (seek_index < 0) seek_index = index;
-    const int64_t start =
-        raw->start_time == AV_NOPTS_VALUE ? 0 : raw->start_time;
     const int64_t timestamp =
-        av_rescale_q(start + seek->count() * 1000, AVRational{1, AV_TIME_BASE},
-                     raw->streams[seek_index]->time_base);
+        (raw->start_time == AV_NOPTS_VALUE ? 0 : raw->start_time) +
+        seek->count() * 1000;
     ffmpeg::FfmpegException::throwIfError(
-        av_seek_frame(raw, seek_index, timestamp, AVSEEK_FLAG_BACKWARD),
+        avformat_seek_file(raw, -1, INT64_MIN, timestamp, timestamp, 0),
         "seek reference");
     avcodec_flush_buffers(context.get());
   }
@@ -648,7 +632,7 @@ ReferenceFrames DecodeReference(
 
 }  // namespace
 
-TEST_CASE("FFmpeg input schedules both tracks and drains B frames at EOF") {
+TEST_CASE("FFmpeg input decodes both tracks and drains B frames at EOF") {
   const auto reference = DecodeReference(SamplePath("h265_aac.mp4"));
   REQUIRE(reference.has_b_frames > 0);
   REQUIRE(reference.drained_frames > 0);
@@ -679,17 +663,7 @@ TEST_CASE("FFmpeg input schedules both tracks and drains B frames at EOF") {
   for (size_t i = 0; i < video.size(); ++i) {
     CHECK(video[i].pts == reference.pts[i]);
   }
-  CheckTimestampMapping(value, 1);
-  const auto video_elapsed = std::chrono::duration<double>(
-                                 video.back().received - video.front().received)
-                                 .count();
-  CHECK(video_elapsed >= 1.5);
-  const auto& first = value.frames.front();
-  for (const auto& frame : value.frames) {
-    const double wall =
-        std::chrono::duration<double>(frame.received - first.received).count();
-    CHECK(std::abs(wall - (frame.media_time - first.media_time)) < 0.4);
-  }
+  CheckSourceTimestamps(value, 1);
   CHECK(StateCount(value, InputState::kWaitingRetry) == 0);
   input.Stop();
   CHECK(observer.RetainedFrameIsValid());
@@ -742,14 +716,13 @@ TEST_CASE("FFmpeg input seeks locally without rebasing media PTS or waiting") {
         value.frames.rend(),
         [](const auto& frame) { return frame.type == AVMEDIA_TYPE_VIDEO; });
     REQUIRE(previous != value.frames.rend());
-    CHECK(delivered.front().timestamp_ns - previous->timestamp_ns ==
-          MediaPtsNs(value, delivered.front()) - MediaPtsNs(value, *previous));
+    CHECK(delivered.front().published_pts == video.pts.front());
     if (position == 2500ms) {
-      CHECK(delivered.front().timestamp_ns < previous->timestamp_ns);
+      CHECK(delivered.front().published_pts < previous->published_pts);
     }
     CHECK(delivered.front().received - requested < 400ms);
     CHECK(delivered.front().thread == value.media_threads.front());
-    CHECK(value.ready == 1);
+    CHECK(value.ready == phase + 1);
     CHECK(StateCount(value, InputState::kConnecting) == 1);
     CHECK(StateCount(value, InputState::kConnected) == 1);
     CHECK(StateCount(value, InputState::kWaitingRetry) == 0);
@@ -766,19 +739,13 @@ TEST_CASE("FFmpeg input seeks locally without rebasing media PTS or waiting") {
   REQUIRE(observer.WaitState(InputState::kEnded));
   const auto value = observer.snapshot();
   CHECK(value.valid);
-  CheckTimestampMapping(value, 1);
   std::vector<int64_t> video_pts;
   std::vector<int64_t> audio_pts;
-  const auto& first = value.frames[final_begin];
   for (size_t i = final_begin; i < value.frames.size(); ++i) {
     const auto& frame = value.frames[i];
     (frame.type == AVMEDIA_TYPE_VIDEO ? video_pts : audio_pts)
         .push_back(frame.pts);
     CHECK(frame.thread == value.media_threads.front());
-    CHECK(
-        std::abs(std::chrono::duration<double>(frame.received - first.received)
-                     .count() -
-                 (frame.media_time - first.media_time)) < 0.4);
   }
   CHECK(video_pts == final_video.pts);
   CHECK(audio_pts == final_audio.pts);
@@ -791,8 +758,8 @@ TEST_CASE("FFmpeg input seeks locally without rebasing media PTS or waiting") {
   CHECK(observer.HasNoNewCallbacks());
 }
 
-TEST_CASE("FFmpeg inputs use preparation anchors on a shared epoch",
-          "[input][timing][startup]") {
+TEST_CASE("FFmpeg Ready initialization does not rewrite source timestamps",
+          "[input][native][startup]") {
   Observer first_observer;
   Observer delayed_observer;
   FfmpegInput first_input;
@@ -801,32 +768,29 @@ TEST_CASE("FFmpeg inputs use preparation anchors on a shared epoch",
   delayed_observer.SetReadyHook([] { std::this_thread::sleep_for(200ms); });
   delayed_observer.Attach(delayed_input);
   first_input.Start(SamplePath("h265_aac.mp4"));
-  REQUIRE(first_observer.Wait(
-      [](const auto& value) { return !value.frames.empty(); }));
+  REQUIRE(first_observer.WaitState(InputState::kEnded));
   first_input.Stop();
   delayed_input.Start(SamplePath("h265_aac.mp4"));
-  REQUIRE(delayed_observer.Wait(
-      [](const auto& value) { return !value.frames.empty(); }));
+  REQUIRE(delayed_observer.WaitState(InputState::kEnded));
   delayed_input.Stop();
   const auto first = first_observer.snapshot();
   const auto delayed = delayed_observer.snapshot();
   REQUIRE(first.valid);
   REQUIRE(delayed.valid);
-  REQUIRE(first.ready_times.size() == 1);
   REQUIRE(delayed.ready_times.size() == 1);
-  CheckTimestampMapping(first, 1);
-  CheckTimestampMapping(delayed, 1);
-  CHECK(first.frames.front().media_time == delayed.frames.front().media_time);
+  REQUIRE_FALSE(delayed.frames.empty());
   CHECK(delayed.frames.front().received - delayed.ready_times.front() >= 200ms);
-  const auto timestamp_gap =
-      delayed.frames.front().timestamp_ns - first.frames.front().timestamp_ns;
-  const auto delivery_gap =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          delayed.frames.front().received - first.frames.front().received)
-          .count();
-  // Both runs use the same epoch and media origin. Ready initialization must
-  // advance the first output timestamp along with its actual delivery time.
-  CHECK(std::abs(delivery_gap - timestamp_gap) < 100000000);
+  for (const auto type : {AVMEDIA_TYPE_VIDEO, AVMEDIA_TYPE_AUDIO}) {
+    std::vector<int64_t> first_pts;
+    std::vector<int64_t> delayed_pts;
+    for (const auto& frame : first.frames) {
+      if (frame.type == type) first_pts.push_back(frame.published_pts);
+    }
+    for (const auto& frame : delayed.frames) {
+      if (frame.type == type) delayed_pts.push_back(frame.published_pts);
+    }
+    CHECK(first_pts == delayed_pts);
+  }
 }
 
 TEST_CASE("FFmpeg input Seek validates local active input and clears on Stop") {
@@ -855,7 +819,12 @@ TEST_CASE("FFmpeg input Seek validates local active input and clears on Stop") {
   const auto stopped = observer.snapshot();
   input.Start(SamplePath("seek_h264_aac.mp4"));
   REQUIRE(observer.Wait([&](const auto& value) {
-    return value.frames.size() > stopped.frames.size();
+    return std::any_of(
+        value.frames.begin() +
+            static_cast<std::vector<FrameObservation>::difference_type>(
+                stopped.frames.size()),
+        value.frames.end(),
+        [](const auto& frame) { return frame.type == AVMEDIA_TYPE_VIDEO; });
   }));
   input.Stop();
   const auto restarted = observer.snapshot();
@@ -870,43 +839,36 @@ TEST_CASE("FFmpeg input Seek validates local active input and clears on Stop") {
   CHECK(observer.HasNoNewCallbacks());
 }
 
-TEST_CASE("FFmpeg local Seek interrupts the EOF loop duration wait") {
+TEST_CASE(
+    "FFmpeg local Seek discards prefetched frames while callback is paused") {
   const auto reference = DecodeReference(SamplePath("seek_tail_h264.mp4"));
   REQUIRE(reference.pts.size() == 1);
   REQUIRE(reference.end_time == 2);
   Observer observer;
-  FfmpegInputConfig config;
-  config.loop = true;
-  FfmpegInput input(config);
+  FfmpegInput input;
+  CallbackPause pause;
+  pause.Arm(0);
+  observer.SetFrameHook(pause.hook());
   observer.Attach(input);
-  std::vector<std::uint64_t> generations;
-  input.SetOnPacket([&](std::uint64_t generation, const auto&) {
-    generations.push_back(generation);
-  });
   input.Start(SamplePath("seek_tail_h264.mp4"));
-  REQUIRE(observer.Wait(
-      [](const auto& value) { return value.frames.size() == 1; }));
-  // The only frame has a two-second duration. With its callback returned and
-  // no more data to decode, the media worker is waiting at the loop boundary.
-  REQUIRE(observer.HasNoNewCallbacks(20ms));
-  const auto requested = Clock::now();
+  REQUIRE(pause.Wait(1));
   input.Seek(0ms);
-  REQUIRE(observer.Wait(
-      [](const auto& value) { return value.frames.size() >= 2; }, 1s));
+  pause.Arm(0);
+  pause.Release();
+  REQUIRE(pause.Wait(2));
+  pause.Release();
+  REQUIRE(observer.WaitState(InputState::kEnded));
   input.Stop();
   const auto value = observer.snapshot();
   CHECK(value.valid);
   REQUIRE(value.frames.size() == 2);
-  CHECK(generations == std::vector<std::uint64_t>{0, 1});
   CHECK(value.frames[1].pts == reference.pts.front());
-  CHECK(value.frames[1].timestamp_ns == value.frames[0].timestamp_ns);
-  CHECK(value.frames[1].duration_ns == 2000000000LL);
-  CHECK(value.frames[1].received - requested < 400ms);
+  CHECK(value.frames[1].published_pts == value.frames[0].published_pts);
+  CHECK(value.frames[1].duration == value.frames[0].duration);
   CHECK(value.frames[1].thread == value.frames[0].thread);
-  CHECK(value.ready == 1);
+  CHECK(value.ready == 2);
   CHECK(StateCount(value, InputState::kConnecting) == 1);
   CHECK(StateCount(value, InputState::kConnected) == 1);
-  CHECK(StateCount(value, InputState::kEnded) == 0);
   CHECK(StateCount(value, InputState::kFailed) == 0);
   CHECK(observer.HasNoNewCallbacks());
 }
@@ -929,25 +891,39 @@ TEST_CASE("FFmpeg input loops complete local audio video and B frames") {
   config.loop = true;
   config.max_retries = 0;
   FfmpegInput input(config);
-  observer.TrackLoops();
+  CallbackPause pause;
+  const auto gate = pause.hook();
+  observer.SetFrameHook([&](const auto& frame) {
+    if (observer.snapshot().frames.back().generation >= 3) {
+      pause.Arm(frame->best_effort_timestamp);
+    }
+    gate(frame);
+  });
   observer.SetReadyHook([] { std::this_thread::sleep_for(60ms); });
   observer.Attach(input);
   std::vector<std::uint64_t> generations;
   input.SetOnPacket([&](std::uint64_t generation, const auto&) {
+    observer.RecordPacketGeneration(generation);
     generations.push_back(generation);
   });
   input.Start(SamplePath("h265_aac.mp4"));
   REQUIRE(observer.Wait([](const auto& value) {
-    return value.ready == 1 && !value.frames.empty() &&
+    return value.ready == 3 && !value.frames.empty() &&
            value.frames.back().generation == 3;
   }));
+  REQUIRE(pause.Wait(1));
+  std::thread release([&] {
+    std::this_thread::sleep_for(10ms);
+    pause.Release();
+  });
   input.Stop();
+  release.join();
   const auto value = observer.snapshot();
   generations.erase(std::unique(generations.begin(), generations.end()),
                     generations.end());
   CHECK(generations == std::vector<std::uint64_t>{0, 1, 2});
   CHECK(value.valid);
-  CHECK(value.ready == 1);
+  CHECK(value.ready == 3);
   CHECK(StateCount(value, InputState::kConnecting) == 1);
   CHECK(StateCount(value, InputState::kConnected) == 1);
   CHECK(StateCount(value, InputState::kWaitingRetry) == 0);
@@ -959,45 +935,20 @@ TEST_CASE("FFmpeg input loops complete local audio video and B frames") {
                     [&](const auto& thread) {
                       return thread == value.media_threads.front();
                     }));
-  std::vector<Clock::time_point> beginnings;
-  std::vector<int64_t> first_timestamps;
   for (size_t generation = 1; generation <= 3; ++generation) {
     CAPTURE(generation);
-    std::vector<FrameObservation> frames;
     std::vector<int64_t> video_pts;
     std::vector<int64_t> audio_pts;
     for (const auto& frame : value.frames) {
       CHECK(frame.thread == value.media_threads.front());
       if (frame.generation != generation) continue;
-      frames.push_back(frame);
       (frame.type == AVMEDIA_TYPE_VIDEO ? video_pts : audio_pts)
           .push_back(frame.pts);
     }
-    REQUIRE_FALSE(frames.empty());
-    beginnings.push_back(frames.front().received);
-    first_timestamps.push_back(frames.front().timestamp_ns);
-    CheckTimestampMapping(value, generation);
+    CheckSourceTimestamps(value, generation);
     if (generation == 3) continue;
     CHECK(video_pts == video.pts);
     CHECK(audio_pts == audio.pts);
-    for (const auto& frame : frames) {
-      const double elapsed = std::chrono::duration<double>(
-                                 frame.received - frames.front().received)
-                                 .count();
-      CHECK(std::abs(elapsed - (frame.media_time - frames.front().media_time)) <
-            0.4);
-    }
-  }
-  for (size_t i = 1; i < beginnings.size(); ++i) {
-    const double elapsed =
-        std::chrono::duration<double>(beginnings[i] - beginnings[i - 1])
-            .count();
-    CHECK(elapsed >= duration - 0.02);
-    CHECK(elapsed < duration + 0.8);
-    const auto absolute_end_ns = static_cast<int64_t>(
-        std::llround(std::max(video.end_time, audio.end_time) * 1000000000));
-    CHECK(std::abs(first_timestamps[i] - first_timestamps[i - 1] -
-                   absolute_end_ns) <= 2);
   }
   CHECK(input.state() == InputState::kStopped);
   CHECK(observer.RetainedFrameIsValid());
@@ -1033,9 +984,7 @@ TEST_CASE("FFmpeg input delivers a leading track without waiting for its PTS") {
                                     audio.front().received)
           .count();
   CHECK(std::abs(first_frame_gap) < 0.4);
-  CHECK(video.front().timestamp_ns - audio.front().timestamp_ns ==
-        MediaPtsNs(value, video.front()) - MediaPtsNs(value, audio.front()));
-  CheckTimestampMapping(value, 1);
+  CheckSourceTimestamps(value, 1);
   for (size_t i = 0; i < video.size(); ++i) {
     CHECK(video[i].pts == reference_video.pts[i] + 5000);
   }
@@ -1047,7 +996,7 @@ TEST_CASE("FFmpeg input delivers a leading track without waiting for its PTS") {
 }
 
 TEST_CASE(
-    "FFmpeg input keeps audio moving while waiting for a video keyframe") {
+    "FFmpeg input delivers decodable nonkey video without a keyframe gate") {
   const auto reference = DecodeReference(SamplePath("mpeg2_nonkey_aac.ts"));
   REQUIRE(reference.pts.size() == 79);
   REQUIRE(reference.key_frames == 0);
@@ -1061,16 +1010,20 @@ TEST_CASE(
   input.Start(server.url());
   REQUIRE(observer.Wait(
       [](const auto& value) {
-        return value.ready == 1 && value.frames.size() >= 4;
+        return value.ready == 1 &&
+               std::any_of(value.frames.begin(), value.frames.end(),
+                           [](const auto& frame) {
+                             return frame.type == AVMEDIA_TYPE_VIDEO;
+                           });
       },
       2s));
   const auto value = observer.snapshot();
   CHECK(value.valid);
   REQUIRE(value.streams.size() == 2);
   CHECK(input.state() == InputState::kConnected);
-  CHECK(std::all_of(
+  CHECK(std::any_of(
       value.frames.begin(), value.frames.end(),
-      [](const auto& frame) { return frame.type == AVMEDIA_TYPE_AUDIO; }));
+      [](const auto& frame) { return frame.type == AVMEDIA_TYPE_VIDEO; }));
   CHECK(StateCount(value, InputState::kWaitingRetry) == 0);
   CHECK(StateCount(value, InputState::kFailed) == 0);
   CHECK(server.requests() == 1);
@@ -1081,20 +1034,22 @@ TEST_CASE(
   CHECK(observer.HasNoNewCallbacks());
 }
 
-TEST_CASE("FFmpeg input stops scheduled delivery and restarts") {
+TEST_CASE("FFmpeg input stops decoded delivery and restarts") {
   Observer observer;
   FfmpegInput input(FfmpegInputConfig{});
   observer.Attach(input);
   input.Start(SamplePath());
   CHECK_THROWS_AS(input.Start(SamplePath()), std::logic_error);
-  REQUIRE(observer.Wait(
-      [](const auto& value) { return value.frames.size() >= 4; }));
+  REQUIRE(observer.Wait([](const auto& value) {
+    return std::any_of(
+        value.frames.begin(), value.frames.end(),
+        [](const auto& frame) { return frame.type == AVMEDIA_TYPE_VIDEO; });
+  }));
   const auto start = Clock::now();
   input.Stop();
   CHECK(Clock::now() - start < 1s);
   CHECK(input.state() == InputState::kStopped);
   const auto stopped = observer.snapshot();
-  CHECK(stopped.frames.size() < 100);
   CHECK(StateCount(stopped, InputState::kStopped) == 1);
   CHECK(observer.RetainedFrameIsValid());
   CHECK(observer.HasNoNewCallbacks());
@@ -1119,13 +1074,12 @@ TEST_CASE("FFmpeg input preserves HTTP options across loop and retries",
   HttpServer server(ServerState::Response::kMedia);
   Observer observer;
   auto config = RetryConfig(1);
-  config.options = {{"user_agent", "mw-streamer-options-test"},
-                    {"referer", "https://example.com/media/"},
-                    {"headers", "X-Mw-Input: retained\r\n"}};
+  config.options.insert({{"user_agent", "mw-streamer-options-test"},
+                         {"referer", "https://example.com/media/"},
+                         {"headers", "X-Mw-Input: retained\r\n"}});
   SECTION("initial open") {}
   SECTION("failed loop reopen and reconnect") {
     config.loop = true;
-    observer.TrackLoops();
     server.SetResponseSequence({
         {ServerState::Response::kMedia, "h264_aac.flv"},
         {ServerState::Response::kFailure, "h264_aac.flv"},
@@ -1146,7 +1100,7 @@ TEST_CASE("FFmpeg input preserves HTTP options across loop and retries",
   input.Stop();
   const auto value = observer.snapshot();
   CHECK(value.valid);
-  CHECK(value.ready == 1);
+  CHECK(value.ready == (config.loop ? 2 : 1));
   CHECK_FALSE(value.frames.empty());
   CHECK(StateCount(value, InputState::kFailed) == 0);
   CHECK(StateCount(value, InputState::kWaitingRetry) == (config.loop ? 1 : 0));
@@ -1160,6 +1114,30 @@ TEST_CASE("FFmpeg input preserves HTTP options across loop and retries",
           std::string::npos);
     CHECK(request.find("X-Mw-Input: retained\r\n") != std::string::npos);
   }
+}
+
+TEST_CASE(
+    "FFmpeg input defaults to source Referer and persistent HTTP connection",
+    "[input][ffmpeg][options][native]") {
+  HttpServer server(ServerState::Response::kMedia);
+  Observer observer;
+  FfmpegInputConfig config;
+  config.mode = InputMode::kRemux;
+  FfmpegInput input(config);
+  observer.Attach(input);
+  input.Start(server.url());
+  REQUIRE(observer.WaitState(InputState::kEnded));
+  input.Stop();
+  const auto value = observer.snapshot();
+  CHECK(value.ready == 1);
+  CHECK(StateCount(value, InputState::kFailed) == 0);
+  const auto requests = server.request_headers();
+  REQUIRE(requests.size() == 1);
+  INFO(requests.front());
+  CHECK(requests.front().find("Referer: " + server.url() + "\r\n") !=
+        std::string::npos);
+  CHECK(requests.front().find("Connection: keep-alive\r\n") !=
+        std::string::npos);
 }
 
 TEST_CASE("FFmpeg input reports first failure and respects retry limits") {
@@ -1235,12 +1213,13 @@ TEST_CASE("FFmpeg input reopens after two read errors and resets budget") {
   observer.Attach(input);
   std::vector<std::uint64_t> generations;
   input.SetOnPacket([&](std::uint64_t generation, const auto&) {
+    observer.RecordPacketGeneration(generation);
     generations.push_back(generation);
   });
   input.Start(server.url());
   REQUIRE(observer.Wait(
       [](const auto& value) {
-        return value.ready == 1 &&
+        return value.ready == 3 &&
                StateCount(value, InputState::kConnected) == 3 &&
                !value.frames.empty() && value.frames.back().generation == 3;
       },
@@ -1293,7 +1272,7 @@ TEST_CASE(
   const auto stopped = observer.snapshot();
   INFO(stopped.message);
   REQUIRE(disconnected_twice);
-  REQUIRE(stopped.ready == 1);
+  REQUIRE(stopped.ready == 2);
   REQUIRE(StateCount(stopped, InputState::kWaitingRetry) == 2);
   REQUIRE(StateCount(stopped, InputState::kFailed) == 0);
   CHECK(StateCount(stopped, InputState::kEnded) == 0);
@@ -1338,21 +1317,15 @@ TEST_CASE(
     REQUIRE(audio_pts.size() <= audio.pts.size());
     CHECK(std::equal(video_pts.begin(), video_pts.end(), video.pts.begin()));
     CHECK(std::equal(audio_pts.begin(), audio_pts.end(), audio.pts.begin()));
-    CheckTimestampMapping(stopped, generation);
+    CheckSourceTimestamps(stopped, generation);
   }
 
   const auto reconnect_first =
       std::find_if(stopped.frames.begin(), stopped.frames.end(),
                    [](const auto& frame) { return frame.generation == 2; });
   REQUIRE(reconnect_first != stopped.frames.end());
-  const auto reconnect_gap =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          reconnect_first->received - stopped.frames.front().received)
-          .count();
-  const auto reconnect_timestamp_gap =
-      reconnect_first->timestamp_ns - stopped.frames.front().timestamp_ns;
-  CHECK(reconnect_timestamp_gap >= 1000000000);
-  CHECK(std::abs(reconnect_timestamp_gap - reconnect_gap) < 100000000);
+  CHECK(reconnect_first->received - stopped.frames.front().received >= 1s);
+  CHECK(reconnect_first->published_pts == stopped.frames.front().published_pts);
 
   // Observe longer than the retry delay: Stop must cancel the pending reopen,
   // with neither late delivery nor another HTTP request after it returns.
@@ -1378,8 +1351,8 @@ TEST_CASE(
   INFO(resumed.message);
   REQUIRE(restarted);
   REQUIRE(StateCount(resumed, InputState::kFailed) == 0);
-  REQUIRE(resumed.ready == 2);
-  CheckTimestampMapping(resumed, 3);
+  REQUIRE(resumed.ready == 3);
+  CheckSourceTimestamps(resumed, 3);
   CHECK(threads_for_state(resumed, InputState::kConnecting) ==
         resumed.media_threads);
   CHECK(threads_for_state(resumed, InputState::kConnected) ==
@@ -1401,12 +1374,11 @@ TEST_CASE("FFmpeg network EOF ends or loops without error reconnect") {
   SECTION("loop disabled") {}
   SECTION("loop enabled") { config.loop = true; }
   FfmpegInput input(config);
-  if (config.loop) observer.TrackLoops();
   observer.Attach(input);
   input.Start(server.url());
   if (config.loop) {
     REQUIRE(observer.Wait([](const auto& value) {
-      return value.ready == 1 && !value.frames.empty() &&
+      return value.ready >= 2 && !value.frames.empty() &&
              value.frames.back().generation == 2;
     }));
   } else {
@@ -1415,7 +1387,7 @@ TEST_CASE("FFmpeg network EOF ends or loops without error reconnect") {
   input.Stop();
   const auto value = observer.snapshot();
   CHECK(value.valid);
-  CHECK(value.ready == 1);
+  CHECK(value.ready == (config.loop ? 2 : 1));
   CHECK(StateCount(value, InputState::kConnecting) == 1);
   CHECK(StateCount(value, InputState::kConnected) == 1);
   CHECK(StateCount(value, InputState::kEnded) == (config.loop ? 0 : 1));
@@ -1438,31 +1410,56 @@ TEST_CASE("FFmpeg input missing file does not retry") {
 }
 
 TEST_CASE("FFmpeg local loop reopening recovers through the retry policy") {
+  const auto reference = DecodeReference(SamplePath("h264_video.mp4"));
+  REQUIRE(reference.pts.size() > 2);
   TemporaryMediaFile file;
   Observer observer;
   auto config = RetryConfig(2, 100ms);
   config.loop = true;
   FfmpegInput input(config);
+  CallbackPause pause;
+  const auto gate = pause.hook();
+  bool cleared = false;
+  observer.SetFrameHook([&](const auto& frame) {
+    if (!cleared) {
+      file.Clear();
+      cleared = true;
+    } else if (observer.snapshot().frames.back().generation >= 2) {
+      pause.Arm(frame->best_effort_timestamp);
+      gate(frame);
+    }
+  });
   observer.Attach(input);
   input.Start(file.path());
   REQUIRE(
       observer.Wait([](const auto& value) { return !value.frames.empty(); }));
-  // The prepared two-second frame remains valid, while reopening now fails.
-  file.Clear();
+  // The callback removed the source before fullspeed EOF reopening.
   REQUIRE(observer.WaitState(InputState::kWaitingRetry));
   const auto waiting = observer.snapshot();
   CHECK(waiting.ready == 1);
-  CHECK(waiting.frames.size() == 1);
+  CHECK(waiting.frames.size() == reference.pts.size());
   file.Restore();
-  REQUIRE(observer.Wait([](const auto& value) {
-    return value.frames.size() >= 2 ||
+  REQUIRE(observer.Wait([&](const auto& value) {
+    return value.frames.size() > reference.pts.size() ||
            StateCount(value, InputState::kFailed) != 0;
   }));
+  REQUIRE(pause.Wait(1));
+  std::thread release([&] {
+    std::this_thread::sleep_for(10ms);
+    pause.Release();
+  });
   input.Stop();
+  release.join();
   const auto value = observer.snapshot();
   CHECK(value.valid);
-  CHECK(value.ready == 1);
-  CHECK(value.frames.size() == 2);
+  CHECK(value.ready == 2);
+  REQUIRE(value.frames.size() == reference.pts.size() + 1);
+  for (std::size_t index = 0; index < reference.pts.size(); ++index) {
+    CHECK(value.frames[index].pts == reference.pts[index]);
+    CHECK(value.frames[index].generation == 1);
+  }
+  CHECK(value.frames.back().pts == reference.pts.front());
+  CHECK(value.frames.back().generation == 2);
   CHECK(StateCount(value, InputState::kWaitingRetry) == 1);
   CHECK(StateCount(value, InputState::kConnecting) == 2);
   CHECK(StateCount(value, InputState::kConnected) == 2);
@@ -1471,7 +1468,8 @@ TEST_CASE("FFmpeg local loop reopening recovers through the retry policy") {
 }
 
 TEST_CASE(
-    "FFmpeg network loop retries failed reopening without another Ready") {
+    "FFmpeg network loop retries failed reopening and announces reopened "
+    "tracks") {
   HttpServer server(ServerState::Response::kMedia);
   server.SetResponseSequence({
       {ServerState::Response::kMedia, "h264_aac.flv"},
@@ -1491,7 +1489,7 @@ TEST_CASE(
   input.Stop();
   const auto value = observer.snapshot();
   CHECK(value.valid);
-  CHECK(value.ready == 1);
+  CHECK(value.ready == 2);
   CHECK(StateCount(value, InputState::kWaitingRetry) == 1);
   CHECK(StateCount(value, InputState::kConnecting) == 2);
   CHECK(StateCount(value, InputState::kConnected) == 2);
@@ -1513,7 +1511,7 @@ TEST_CASE("FFmpeg empty EOF loop stops at the configured retry budget") {
   const auto failed = observer.snapshot();
   input.Stop();
   const auto value = observer.snapshot();
-  CHECK(value.ready == 1);
+  CHECK(value.ready == 2);
   CHECK(value.frames.empty());
   CHECK(failed.error == AVERROR_EOF);
   CHECK(failed.message.find("未解码出音视频帧") != std::string::npos);
@@ -1524,8 +1522,7 @@ TEST_CASE("FFmpeg empty EOF loop stops at the configured retry budget") {
   CHECK(server.HasNoNewRequests(100ms));
 }
 
-TEST_CASE(
-    "FFmpeg loop configuration changes fail before delivering new media") {
+TEST_CASE("FFmpeg loop reopening rebuilds changed source tracks and decoders") {
   std::string first = "h264_video.mp4";
   std::string changed;
   SECTION("selected track count") { changed = "h264_aac.mp4"; }
@@ -1543,62 +1540,104 @@ TEST_CASE(
   auto config = RetryConfig();
   config.loop = true;
   FfmpegInput input(config);
+  CallbackPause pause;
+  const auto gate = pause.hook();
+  observer.SetFrameHook([&](const auto& frame) {
+    if (observer.snapshot().frames.back().generation >= 3) {
+      pause.Arm(frame->best_effort_timestamp);
+    }
+    gate(frame);
+  });
   observer.Attach(input);
   input.Start(server.url());
-  REQUIRE(observer.WaitState(InputState::kFailed));
+  REQUIRE(pause.Wait(1, 8s));
+  std::thread release([&] {
+    std::this_thread::sleep_for(10ms);
+    pause.Release();
+  });
   input.Stop();
+  release.join();
   const auto value = observer.snapshot();
   CHECK(value.valid);
-  CHECK(value.ready == 1);
+  CHECK(value.ready == 3);
+  REQUIRE(value.stream_history.size() == 3);
   CHECK(StateCount(value, InputState::kConnecting) == 1);
   CHECK(StateCount(value, InputState::kConnected) == 1);
   CHECK(StateCount(value, InputState::kWaitingRetry) == 0);
-  CHECK(server.requests() == 2);
-  CHECK(value.frames.size() == DecodeReference(SamplePath(first)).pts.size());
+  CHECK(StateCount(value, InputState::kFailed) == 0);
+  CHECK(server.requests() == 3);
+  const auto& original = value.stream_history[0];
+  const auto& reopened = value.stream_history[1];
+  if (changed == "h264_aac.mp4") {
+    CHECK(original.size() == 1);
+    CHECK(reopened.size() == 2);
+  } else if (first == "h264_video.mp4") {
+    CHECK(original.front().codec_parameters.get()->codec_id ==
+          AV_CODEC_ID_H264);
+    CHECK(reopened.front().codec_parameters.get()->codec_id ==
+          AV_CODEC_ID_HEVC);
+  } else {
+    CHECK(original.front().codec_parameters.get()->width !=
+          reopened.front().codec_parameters.get()->width);
+  }
+  for (std::size_t segment = 0; segment < 2; ++segment) {
+    const auto path = SamplePath(segment == 0 ? first : changed);
+    for (const auto& stream : value.stream_history[segment]) {
+      const auto type = stream.codec_parameters.get()->codec_type;
+      const auto reference = DecodeReference(path, type);
+      std::vector<int64_t> pts;
+      for (const auto& frame : value.frames) {
+        if (frame.generation == segment + 1 && frame.type == type) {
+          pts.push_back(frame.pts);
+        }
+      }
+      CHECK(pts == reference.pts);
+    }
+  }
   CHECK(observer.HasNoNewCallbacks());
   CHECK(server.HasNoNewRequests(100ms));
 }
 
-TEST_CASE("FFmpeg read retry rejects changed tracks before delivering frames") {
+TEST_CASE("FFmpeg read retry announces changed tracks before new frames") {
   HttpServer server(ServerState::Response::kTruncatedMedia);
   server.SetResponseSequence({
       {ServerState::Response::kTruncatedMedia, "h264_aac.flv"},
       {ServerState::Response::kMedia, "h265_aac.mp4"},
   });
-  const auto video = DecodeReference(SamplePath("h264_aac.flv"));
-  const auto audio =
-      DecodeReference(SamplePath("h264_aac.flv"), AVMEDIA_TYPE_AUDIO);
   Observer observer;
   FfmpegInput input(RetryConfig());
   observer.Attach(input);
   input.Start(server.url());
-  REQUIRE(observer.WaitState(InputState::kFailed));
+  REQUIRE(observer.WaitState(InputState::kEnded));
   input.Stop();
   const auto value = observer.snapshot();
   CHECK(value.valid);
-  CHECK(value.ready == 1);
+  CHECK(value.ready == 2);
+  REQUIRE(value.stream_history.size() == 2);
+  CHECK(value.stream_history[0].front().codec_parameters.get()->codec_id ==
+        AV_CODEC_ID_H264);
+  CHECK(value.stream_history[1].front().codec_parameters.get()->codec_id ==
+        AV_CODEC_ID_HEVC);
   CHECK(StateCount(value, InputState::kWaitingRetry) == 1);
   CHECK(StateCount(value, InputState::kConnecting) == 2);
-  CHECK(StateCount(value, InputState::kConnected) == 1);
+  CHECK(StateCount(value, InputState::kConnected) == 2);
+  CHECK(StateCount(value, InputState::kFailed) == 0);
   CHECK(server.requests() == 2);
-  const auto retry = std::find(value.states.begin(), value.states.end(),
-                               InputState::kWaitingRetry);
-  REQUIRE(retry != value.states.end());
-  CHECK(std::find(retry, value.states.end(), InputState::kConnected) ==
-        value.states.end());
-  std::vector<int64_t> video_pts;
-  std::vector<int64_t> audio_pts;
-  for (const auto& frame : value.frames) {
-    CHECK(frame.generation == 1);
-    (frame.type == AVMEDIA_TYPE_VIDEO ? video_pts : audio_pts)
-        .push_back(frame.pts);
+  for (const auto type : {AVMEDIA_TYPE_VIDEO, AVMEDIA_TYPE_AUDIO}) {
+    const auto original = DecodeReference(SamplePath("h264_aac.flv"), type);
+    const auto changed = DecodeReference(SamplePath("h265_aac.mp4"), type);
+    std::vector<int64_t> original_pts;
+    std::vector<int64_t> changed_pts;
+    for (const auto& frame : value.frames) {
+      if (frame.type != type) continue;
+      (frame.generation == 1 ? original_pts : changed_pts).push_back(frame.pts);
+    }
+    REQUIRE_FALSE(original_pts.empty());
+    REQUIRE(original_pts.size() <= original.pts.size());
+    CHECK(std::equal(original_pts.begin(), original_pts.end(),
+                     original.pts.begin()));
+    CHECK(changed_pts == changed.pts);
   }
-  REQUIRE_FALSE(video_pts.empty());
-  REQUIRE_FALSE(audio_pts.empty());
-  REQUIRE(video_pts.size() <= video.pts.size());
-  REQUIRE(audio_pts.size() <= audio.pts.size());
-  CHECK(std::equal(video_pts.begin(), video_pts.end(), video.pts.begin()));
-  CHECK(std::equal(audio_pts.begin(), audio_pts.end(), audio.pts.begin()));
   CHECK(observer.HasNoNewCallbacks());
   CHECK(server.HasNoNewRequests(100ms));
 }
@@ -1620,67 +1659,60 @@ TEST_CASE("FFmpeg input fails explicitly when Packet byte cap is exceeded") {
   input.Stop();
 }
 
-TEST_CASE("FFmpeg packet-only input reconnects and checks the stream contract",
+TEST_CASE("FFmpeg packet-only input reopens original or changed tracks",
           "[packet]") {
-  AVFormatContext* reference = nullptr;
-  REQUIRE(avformat_open_input(&reference, SamplePath("h264_aac.flv").c_str(),
-                              nullptr, nullptr) == 0);
-  REQUIRE(avformat_find_stream_info(reference, nullptr) >= 0);
-  std::size_t expected_packets = 0;
-  ffmpeg::Packet packet;
-  while (av_read_frame(reference, packet.get()) >= 0) {
-    if (packet->size > 0) ++expected_packets;
-    packet.Unref();
-  }
-  avformat_close_input(&reference);
-  const auto first_cycle_packets = expected_packets;
-
+  const auto count_packets = [](const std::string& name) {
+    AVFormatContext* reference = nullptr;
+    REQUIRE(avformat_open_input(&reference, SamplePath(name).c_str(), nullptr,
+                                nullptr) == 0);
+    REQUIRE(avformat_find_stream_info(reference, nullptr) >= 0);
+    std::size_t count = 0;
+    ffmpeg::Packet packet;
+    while (av_read_frame(reference, packet.get()) >= 0) {
+      if (packet->size > 0) ++count;
+      packet.Unref();
+    }
+    avformat_close_input(&reference);
+    return count;
+  };
+  const auto first_cycle_packets = count_packets("h264_aac.flv");
+  std::string second = "h264_aac.flv";
+  SECTION("same source after read failure") {}
+  SECTION("changed tracks after read failure") { second = "h265_aac.mp4"; }
+  const auto second_cycle_packets = count_packets(second);
   HttpServer server(ServerState::Response::kMedia);
+  server.SetResponseSequence({
+      {ServerState::Response::kTruncatedMedia, "h264_aac.flv"},
+      {ServerState::Response::kMedia, second},
+  });
   auto config = RetryConfig(1);
   config.mode = InputMode::kRemux;
-  InputState terminal = InputState::kEnded;
-  std::size_t expected_retries = 1;
-  SECTION("read failure resumes packets without another Ready") {
-    server.SetResponseSequence({
-        {ServerState::Response::kTruncatedMedia, "h264_aac.flv"},
-        {ServerState::Response::kMedia, "h264_aac.flv"},
-    });
-    expected_packets *= 2;
-  }
-  SECTION("changed loop tracks fail before delivering changed packets") {
-    config.loop = true;
-    server.SetResponseSequence({
-        {ServerState::Response::kMedia, "h264_aac.flv"},
-        {ServerState::Response::kMedia, "h265_aac.mp4"},
-    });
-    terminal = InputState::kFailed;
-    expected_retries = 0;
-  }
   Observer observer;
   std::atomic<std::size_t> packets{0};
   std::vector<std::uint64_t> generations;
   FfmpegInput input(config);
   observer.Attach(input);
   input.SetOnPacket([&](std::uint64_t generation, const auto&) {
+    observer.RecordPacketGeneration(generation);
     generations.push_back(generation);
     ++packets;
   });
   input.Start(server.url());
-  REQUIRE(observer.WaitState(terminal));
+  REQUIRE(observer.WaitState(InputState::kEnded));
   input.Stop();
   const auto value = observer.snapshot();
-  CHECK(value.ready == 1);
+  CHECK(value.ready == 2);
+  REQUIRE(value.stream_history.size() == 2);
+  CHECK(value.stream_history[1].front().codec_parameters.get()->codec_id ==
+        (second == "h264_aac.flv" ? AV_CODEC_ID_H264 : AV_CODEC_ID_HEVC));
   CHECK(value.frames.empty());
-  CHECK(packets.load() == expected_packets);
-  std::vector<std::uint64_t> expected_generations(expected_packets, 0);
-  if (expected_retries) {
-    std::fill(expected_generations.begin() +
-                  static_cast<std::vector<std::uint64_t>::difference_type>(
-                      first_cycle_packets),
-              expected_generations.end(), 1);
-  }
+  CHECK(packets.load() == first_cycle_packets + second_cycle_packets);
+  std::vector<std::uint64_t> expected_generations(first_cycle_packets, 0);
+  expected_generations.insert(expected_generations.end(), second_cycle_packets,
+                              1);
   CHECK(generations == expected_generations);
-  CHECK(StateCount(value, InputState::kWaitingRetry) == expected_retries);
+  CHECK(StateCount(value, InputState::kWaitingRetry) == 1);
+  CHECK(StateCount(value, InputState::kFailed) == 0);
   CHECK(server.requests() == 2);
   CHECK(observer.HasNoNewCallbacks());
   const auto stopped_packets = packets.load();
@@ -1694,7 +1726,6 @@ TEST_CASE("FFmpeg input validates configuration and URLs") {
   SECTION("retry interval") { config.retry_interval = 0ms; }
   SECTION("open timeout") { config.open_timeout = 0ms; }
   SECTION("read timeout") { config.read_timeout = 0ms; }
-  SECTION("packet bytes") { config.max_packet_buffer_bytes = 0; }
   CHECK_THROWS_AS(FfmpegInput(config), std::invalid_argument);
   FfmpegInput input;
   CHECK_THROWS_AS(input.Start(""), std::invalid_argument);
@@ -1713,12 +1744,26 @@ TEST_CASE("FFmpeg input times out stalled reads after a successful open") {
   observer.Attach(input);
   input.Start(server.url());
   REQUIRE(observer.WaitState(InputState::kConnected));
-  REQUIRE(observer.WaitState(InputState::kFailed));
+  // The source supplies eight seconds before stalling. Asynchronous read
+  // failure drains accepted packets and decoder frames before reporting it.
+  REQUIRE(observer.Wait(
+      [](const auto& value) {
+        return StateCount(value, InputState::kFailed) != 0;
+      },
+      12s));
   const auto value = observer.snapshot();
   CHECK(value.valid);
   CHECK(value.ready == 1);
   CHECK(value.frames.size() > 100);
-  CHECK(value.error < 0);
+  const auto video = DecodeReference(SamplePath("h264_aac.flv"));
+  const auto audio =
+      DecodeReference(SamplePath("h264_aac.flv"), AVMEDIA_TYPE_AUDIO);
+  const auto video_count = static_cast<std::size_t>(std::count_if(
+      value.frames.begin(), value.frames.end(),
+      [](const auto& frame) { return frame.type == AVMEDIA_TYPE_VIDEO; }));
+  CHECK(video_count == 4 * video.pts.size());
+  CHECK(value.frames.size() - video_count == 4 * audio.pts.size());
+  CHECK(value.error == AVERROR(ETIMEDOUT));
   CHECK(value.message.find("av_read_frame") != std::string::npos);
   CHECK(StateCount(value, InputState::kWaitingRetry) == 0);
   input.Stop();
@@ -1769,9 +1814,8 @@ TEST_CASE("CUDA Input Seek keeps GPU frames and the external device",
                  av_q2d(stream->time_base),
              Clock::now(), type, frame->best_effort_timestamp, observed.ready,
              std::this_thread::get_id(), frame->pts, frame->duration});
-        observed.valid &= frame->pts != AV_NOPTS_VALUE &&
-                          av_cmp_q(frame->time_base, kNanoseconds) == 0 &&
-                          frame->pkt_dts == AV_NOPTS_VALUE;
+        observed.valid &= frame->pts == frame->best_effort_timestamp &&
+                          av_cmp_q(frame->time_base, stream->time_base) == 0;
         if (type == AVMEDIA_TYPE_VIDEO) {
           observed.valid &=
               frame->format == AV_PIX_FMT_CUDA && frame->hw_frames_ctx;
@@ -1813,8 +1857,8 @@ TEST_CASE("CUDA Input Seek keeps GPU frames and the external device",
   std::lock_guard<std::mutex> lock(mutex);
   INFO(observed.message);
   CHECK(observed.valid);
-  CheckTimestampMapping(observed, 1);
-  CHECK(observed.ready == 1);
+  CheckSourceTimestamps(observed, 1);
+  CHECK(observed.ready == 3);
   CHECK(StateCount(observed, InputState::kConnecting) == 1);
   CHECK(StateCount(observed, InputState::kConnected) == 1);
   CHECK(StateCount(observed, InputState::kFailed) == 0);
@@ -1823,8 +1867,9 @@ TEST_CASE("CUDA Input Seek keeps GPU frames and the external device",
     CHECK(frame.thread == observed.media_threads.front());
   }
   for (const auto& frame : retained) {
-    CHECK(av_cmp_q(frame->time_base, kNanoseconds) == 0);
-    CHECK(frame->pkt_dts == AV_NOPTS_VALUE);
+    CHECK(frame->time_base.num > 0);
+    CHECK(frame->time_base.den > 0);
+    CHECK(frame->pts == frame->best_effort_timestamp);
     ffmpeg::Frame downloaded;
     CHECK(av_hwframe_transfer_data(downloaded.get(), frame.get(), 0) == 0);
     CHECK(downloaded->width == frame->width);
@@ -1864,7 +1909,6 @@ TEST_CASE("CUDA Input shares its device across read retries and EOF loops",
   std::size_t ready = 0;
   std::size_t retries = 0;
   std::size_t connects = 0;
-  std::optional<int64_t> loop_offset;
   std::vector<std::thread::id> media_threads;
   std::vector<ffmpeg::StreamInfo> streams;
   std::vector<ffmpeg::Frame> retained;
@@ -1877,6 +1921,10 @@ TEST_CASE("CUDA Input shares its device across read retries and EOF loops",
     ++ready;
     streams = information;
   });
+  input.SetOnPacket([&](std::uint64_t packet_generation, const auto&) {
+    std::lock_guard<std::mutex> lock(mutex);
+    generation = static_cast<std::size_t>(packet_generation) + 1;
+  });
   input.SetOnFrame([&](int index, const auto& frame) {
     std::lock_guard<std::mutex> lock(mutex);
     ++callbacks;
@@ -1887,14 +1935,8 @@ TEST_CASE("CUDA Input shares its device across read retries and EOF loops",
     if (stream == streams.end()) {
       valid = false;
     } else {
-      const auto offset =
-          frame->pts - av_rescale_q(frame->best_effort_timestamp,
-                                    stream->time_base, kNanoseconds);
-      if (loop && loop_offset && *loop_offset != offset) {
-        ++generation;
-        media_threads.push_back(std::this_thread::get_id());
-      }
-      loop_offset = offset;
+      valid &= frame->pts == frame->best_effort_timestamp &&
+               av_cmp_q(frame->time_base, stream->time_base) == 0;
       if (stream->codec_parameters.get()->codec_type == AVMEDIA_TYPE_VIDEO) {
         valid &= frame->format == AV_PIX_FMT_CUDA && frame->hw_frames_ctx;
         if (frame->hw_frames_ctx) {
@@ -1918,8 +1960,6 @@ TEST_CASE("CUDA Input shares its device across read retries and EOF loops",
     ++callbacks;
     if (state == InputState::kConnected) {
       ++connects;
-      ++generation;
-      loop_offset.reset();
       media_threads.push_back(std::this_thread::get_id());
     }
     retries += state == InputState::kWaitingRetry;
@@ -1942,7 +1982,7 @@ TEST_CASE("CUDA Input shares its device across read retries and EOF loops",
   REQUIRE(completed);
   REQUIRE_FALSE(failed);
   CHECK(valid);
-  CHECK(ready == 1);
+  CHECK(ready >= 2);
   REQUIRE(retained.size() >= 2);
   if (loop) {
     CHECK(connects == 1);

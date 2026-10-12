@@ -10,6 +10,10 @@
 #include <string>
 #include <thread>
 
+extern "C" {
+#include <libavutil/mathematics.h>
+}
+
 #include "mw/streamer/init/init.h"
 #include "mw/streamer/pipeline/batch_pipeline.h"
 
@@ -25,14 +29,23 @@ struct Track {
   std::atomic<int> sample_rate{0};
 
   void Consume(const mw::streamer::ffmpeg::Frame& frame) noexcept {
-    if (frames.fetch_add(1) == 0) first.store(frame->pts);
-    end.store(frame->pts + frame->duration);
+    frames.fetch_add(1);
+    if (frame->pts != AV_NOPTS_VALUE && frame->time_base.num > 0 &&
+        frame->time_base.den > 0) {
+      constexpr AVRational kNanoseconds{1, 1000000000};
+      const auto pts = av_rescale_q(frame->pts, frame->time_base, kNanoseconds);
+      auto unset = kUnset;
+      first.compare_exchange_strong(unset, pts);
+      end.store(pts +
+                av_rescale_q(frame->duration, frame->time_base, kNanoseconds));
+    }
     if (frame->sample_rate > 0) sample_rate.store(frame->sample_rate);
   }
 
   double MediaSeconds() const noexcept {
-    return frames.load() ? static_cast<double>(end.load() - first.load()) / 1e9
-                         : 0.0;
+    return first.load() != kUnset && end.load() != kUnset
+               ? static_cast<double>(end.load() - first.load()) / 1e9
+               : 0.0;
   }
 };
 
@@ -78,7 +91,7 @@ int main(int argc, char** argv) {
     }
     const bool cuda = backend == "cuda";
     mw::streamer::BatchPipelineConfig config;
-    if (argc > 3) config.input.playback_speed = std::stod(argv[3]);
+    if (argc > 3) config.playback_speed = std::stod(argv[3]);
     if (argc > 4 && argv[4][0]) config.input.options["user_agent"] = argv[4];
     config.input.auto_reconnect = false;
     mw::streamer::InitConfig init_config;
@@ -171,8 +184,7 @@ int main(int argc, char** argv) {
         audio.MediaSeconds(),
         static_cast<double>(video.frames.load()) / processed,
         video.MediaSeconds() / processed, audio.sample_rate.load(),
-        config.input.playback_speed, backend, ready_cuda.load(),
-        cuda_frames.load());
+        config.playback_speed, backend, ready_cuda.load(), cuda_frames.load());
     if (cuda && (!ready_cuda.load() || video.frames.load() == 0 ||
                  cuda_frames.load() != video.frames.load())) {
       fmt::print(stderr, "CUDA decoding was not used for every video frame\n");

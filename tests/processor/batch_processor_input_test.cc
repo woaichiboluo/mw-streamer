@@ -33,7 +33,6 @@ using mw::streamer::FfmpegInputConfig;
 using mw::streamer::InputMode;
 using mw::streamer::InputState;
 namespace ffmpeg = mw::streamer::ffmpeg;
-constexpr AVRational kNanoseconds{1, 1000000000};
 
 struct ReferenceTrack {
   AVRational time_base;
@@ -111,7 +110,6 @@ TEST_CASE(
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   FfmpegInputConfig config;
   config.mode = InputMode::kBatch;
-  config.playback_speed = 8.0;
   std::mutex mutex;
   std::condition_variable changed;
   bool ended = false, failed = false, accepted = false;
@@ -214,12 +212,10 @@ TEST_CASE(
       const auto& expected = track.frames[position];
       REQUIRE(expected->best_effort_timestamp != AV_NOPTS_VALUE);
       CHECK(actual->best_effort_timestamp == expected->best_effort_timestamp);
-      CHECK(actual->pts == av_rescale_q(expected->best_effort_timestamp,
-                                        track.time_base, kNanoseconds));
-      CHECK(av_cmp_q(actual->time_base, kNanoseconds) == 0);
-      CHECK(actual->pkt_dts == AV_NOPTS_VALUE);
-      CHECK(actual->duration ==
-            av_rescale_q(expected->duration, track.time_base, kNanoseconds));
+      CHECK(actual->pts == expected->best_effort_timestamp);
+      CHECK(av_cmp_q(actual->time_base, track.time_base) == 0);
+      CHECK(actual->pkt_dts == expected->pkt_dts);
+      CHECK(actual->duration == expected->duration);
       CHECK(actual->width == expected->width);
       CHECK(actual->height == expected->height);
       REQUIRE(actual->format == expected->format);

@@ -226,6 +226,42 @@ class Fixture final {
   int index_ = -1;
 };
 
+TEST_CASE("原生编码线程配置在打开前生效且默认保留 codec 缓存",
+          "[ffmpeg][encoder][threads]") {
+  const auto* codec = avcodec_find_encoder_by_name("mjpeg");
+  REQUIRE(codec != nullptr);
+  REQUIRE(codec->capabilities & AV_CODEC_CAP_FRAME_THREADS);
+  REQUIRE(codec->capabilities & AV_CODEC_CAP_SLICE_THREADS);
+  auto config = VideoConfig();
+  config.encoder_name = "mjpeg";
+  config.pixel_format = AV_PIX_FMT_YUVJ420P;
+  config.time_base = {1, 30};
+  config.max_b_frames = 0;
+  bool slice = false;
+  SECTION("默认线程策略保留多帧缓存") {}
+  SECTION("Slice 线程首帧立即输出") {
+    config.thread_type = FF_THREAD_SLICE;
+    slice = true;
+  }
+  Options options;
+  options.Set("threads", "4");
+  options.Set("strict", "-1");
+  ffmpeg::VideoEncoder encoder(config, options.get());
+  auto frame = VideoFrame(0);
+  frame->format = config.pixel_format;
+  REQUIRE(encoder.SendFrame(frame));
+  ffmpeg::Packet packet;
+  const auto result = encoder.ReceivePacket(packet);
+  CHECK(result == (slice ? ffmpeg::EncodeResult::kPacket
+                         : ffmpeg::EncodeResult::kNeedInput));
+  std::vector<ffmpeg::Packet> packets;
+  if (result == ffmpeg::EncodeResult::kPacket) packets.push_back(packet.Ref());
+  Finish(encoder, packets);
+  REQUIRE(packets.size() == 1);
+  CHECK(packets.front()->pts ==
+        av_rescale_q(frame->pts, frame->time_base, config.time_base));
+}
+
 TEST_CASE("视频编码背压重送与B帧排空保留图像和非零时间线",
           "[ffmpeg][encoder][video]") {
   constexpr int kFrames = 40;

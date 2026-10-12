@@ -1,160 +1,72 @@
 #ifndef MW_STREAMER_SCHEDULER_SCHEDULER_H_
 #define MW_STREAMER_SCHEDULER_SCHEDULER_H_
 
-#include <atomic>
-#include <chrono>
-#include <condition_variable>
-#include <cstdint>
-#include <deque>
 #include <functional>
-#include <mutex>
-#include <optional>
+#include <memory>
 #include <string_view>
-#include <thread>
-#include <vector>
 
 #include "mw/export.h"
-#include "mw/streamer/ffmpeg/frame.h"
-#include "mw/streamer/ffmpeg/stream_info.h"
-#include "mw/streamer/performance/performance.h"
-#include "mw/streamer/scheduler/scheduler_timing.h"
-
-struct SwrContext;
+#include "mw/streamer/input/input_frame_source.h"
+#include "mw/streamer/media_frame.h"
 
 namespace mw::streamer {
 
 struct MW_STREAMER_API SchedulerConfig {
   AVRational video_frame_rate{30, 1};
-  int audio_sample_rate = 48000;
-  int audio_block_samples = 1024;
 };
 
-// One input is scheduled onto independent video and audio output threads.
-// Set callbacks before Start; handle callback exceptions within the callback.
-// Callbacks within a track are serial, and the two tracks may run concurrently.
-// Serialize Start/Stop externally. Submit and Drain run serially on the input
-// thread. Stop the upstream Input before stopping or destroying Scheduler.
+// Pulls native decoded media through FFmpeg bwdif/fps and asynchronous audio
+// resampling, then delivers one MediaFrame per channel tick. Its picture and
+// corresponding audio samples are consumed together. Frame callbacks are serial
+// on the channel worker. Configure callbacks before Start; serialize Start/Stop
+// and never join from callbacks.
 class MW_STREAMER_API Scheduler final {
  public:
-  // The reference is callback-scoped; retain with Frame::Ref() if needed.
-  // Video retains its input buffers, including CUDA surfaces. Audio uses FLTP
-  // at the configured rate and preserves the input channel layout.
-  using OnFrame = std::function<void(const ffmpeg::Frame&)>;
+  using OnReady = std::function<void(const std::vector<ffmpeg::StreamInfo>&)>;
+  // Video retains CPU/CUDA buffers. Audio is packed S32 at 48000 Hz and
+  // source channel layout. Output time is video ticks/cumulative audio samples.
+  // Source audio EOF retains its last block while video continues.
+  // Temporary producer underflow repeats the picture with silence.
+  // Initial/loop resets with fewer than four queued frames peek the first
+  // picture with silence without consuming it.
+  using OnFrame = std::function<void(const MediaFrame&)>;
   using OnEnded = std::function<void()>;
-  // Once per session for an unrecoverable processing error. Runs on the input
-  // caller or an output worker, outside internal locks. Both workers are
-  // requested to stop and further input is rejected. The external pipeline
-  // must stop Input and call Stop; never call Stop from this callback.
   using OnError = std::function<void(int, std::string_view)>;
 
-  explicit Scheduler(SchedulerConfig config = {}) noexcept;
+  explicit Scheduler(SchedulerConfig config = {});
   ~Scheduler();
   Scheduler(const Scheduler&) = delete;
   Scheduler& operator=(const Scheduler&) = delete;
   Scheduler(Scheduler&&) = delete;
   Scheduler& operator=(Scheduler&&) = delete;
 
-  void SetOnVideo(OnFrame callback) noexcept;
-  void SetOnAudio(OnFrame callback) noexcept;
+  // Once on the filter producer after graph negotiation, before frame delivery.
+  // CUDA stream descriptions contain the surface's software pixel layout.
+  void SetOnReady(OnReady callback) noexcept;
+  // One callback contains both tracks for the tick. Performance callback time
+  // for each present track measures this shared boundary, not exclusive work.
+  void SetOnFrame(OnFrame callback) noexcept;
   void SetOnEnded(OnEnded callback) noexcept;
+  // Fatal source/filter/callback errors request workers to stop. The external
+  // pipeline calls Stop; OnError runs outside locks and must not call Stop.
   void SetOnError(OnError callback) noexcept;
 
-  // Starts a fresh session. A track absent from streams has no worker.
-  // false means configuration is invalid, already started, or startup failed.
-  // Stop must precede starting another session; callbacks are retained.
-  bool Start(const std::vector<ffmpeg::StreamInfo>& streams) noexcept;
-  // false also covers normal cache overflow and inactive/draining sessions;
-  // only OnError signals an unrecoverable processing failure.
-  bool SubmitVideo(const ffmpeg::Frame& frame) noexcept;
-  bool SubmitAudio(const ffmpeg::Frame& frame) noexcept;
-  // Finishes the current input, drains SWR and short PCM tails, then invokes
-  // OnEnded once after both tracks and their frame callbacks finish.
+  // Input has already selected the required tracks. The source must contain
+  // at most one video and one audio track, and at least one of those types.
+  bool Start(const DecodedInputSource& source) noexcept;
+  // Reopening queues another segment. Old filters and bundles drain first.
+  // source.flush instead discards pending old segments and frames for a seek;
+  // channel time stays continuous. Rejected after Drain/Stop.
+  bool QueueSource(const DecodedInputSource& source) noexcept;
+  // No more segments. Drain native filters/bundles and call OnEnded once.
   void Drain() noexcept;
-  // Cancels and joins workers, waits for in-flight input and OnEnded/OnError
-  // calls, then clears buffers. No callbacks run afterward until the next
-  // Start. The external pipeline calls Stop, never a Scheduler callback.
+  // Wake workers without joining; request before stopping upstream Input.
+  void RequestStop() noexcept;
   void Stop() noexcept;
 
  private:
-  using Clock = std::chrono::steady_clock;
-
-  struct AudioFrame {
-    ffmpeg::Frame frame;
-    std::int64_t start_sample;
-    int offset = 0;
-    int samples = 0;
-  };
-
-  bool TickVideo(Clock::time_point now);
-  bool TickAudio(Clock::time_point start, Clock::time_point end);
-  void RunVideo() noexcept;
-  void RunAudio() noexcept;
-  void WorkerStarted() noexcept;
-  void FinishTrack(bool video) noexcept;
-  void NotifyEnded() noexcept;
-  void Fail(int error, std::string_view message, bool video) noexcept;
-  void RequestStop() noexcept;
-  void Join() noexcept;
-  void Wake() noexcept;
-  bool WaitUntil(Clock::time_point deadline, bool precise = false) noexcept;
-  void DeliverVideo(const ffmpeg::Frame& frame, bool repeated) noexcept;
-  void DeliverAudio(const ffmpeg::Frame& frame, std::size_t index) noexcept;
-  std::int64_t OutputTime(Clock::time_point now) const noexcept;
-  ffmpeg::Frame ResampleAudio(const ffmpeg::Frame& frame);
-  bool QueueAudio(ffmpeg::Frame frame, bool append_tail = false);
-  void PopAudio(std::int64_t samples, bool discarded = false) noexcept;
-  void ResetAudio(std::int64_t timestamp) noexcept;
-  bool DiscardStoppedAudio() noexcept;
-  void FlushResampler();
-  void Clear() noexcept;
-  void RecordTick(bool video, Clock::time_point started,
-                  Clock::time_point deadline,
-                  std::int64_t interval_ns) noexcept;
-
-  SchedulerConfig config_;
-  OnFrame on_video_;
-  OnFrame on_audio_;
-  OnEnded on_ended_;
-  OnError on_error_;
-  std::mutex mutex_;
-  std::condition_variable idle_;
-  bool initialized_ = false;
-  bool stopping_ = false;
-  bool failed_ = false;
-  bool draining_ = false;
-  bool video_done_ = true;
-  bool audio_done_ = true;
-  bool ended_notified_ = false;
-  int audio_calls_ = 0;
-  int callback_calls_ = 0;
-  std::atomic<bool> stop_requested_{true};
-  std::mutex wait_mutex_;
-  std::condition_variable wake_;
-  std::thread video_thread_;
-  std::thread audio_thread_;
-  int started_workers_ = 0;
-  std::deque<ffmpeg::Frame> video_frames_;
-  std::optional<ffmpeg::Frame> video_output_;
-  bool video_timing_set_ = false;
-  Clock::time_point video_system_;
-  std::uint64_t video_media_ = 0;
-  Clock::time_point video_end_system_;
-  std::deque<AudioFrame> audio_frames_;
-  std::optional<ffmpeg::Frame> audio_output_template_;
-  internal::SourceAudioTiming audio_timing_;
-  internal::AudioOutputTiming audio_output_timing_;
-  std::int64_t audio_timestamp_ = 0;
-  std::int64_t audio_sample_cursor_ = 0;
-  std::int64_t audio_queued_samples_ = 0;
-  std::int64_t audio_last_size_ = 0;
-  bool audio_pending_stop_ = false;
-  ::SwrContext* resampler_ = nullptr;
-  AVSampleFormat resampler_format_ = AV_SAMPLE_FMT_NONE;
-  int resampler_rate_ = 0;
-  AVChannelLayout resampler_layout_{};
-  std::int64_t resampler_next_pts_ = 0;
-  std::int64_t resample_offset_ = 0;
-  internal::SchedulerPerformance performance_;
+  class Impl;
+  std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace mw::streamer

@@ -1,7 +1,4 @@
-add_executable(mw_scheduler_tests scheduler_test.cc scheduler_test_main.cc
-    scheduler_video_test.cc scheduler_audio_test.cc
-    scheduler_audio_buffer_test.cc scheduler_integration_test.cc
-    scheduler_timing_test.cc scheduler_error_test.cc)
+add_executable(mw_scheduler_tests scheduler_source_test.cc scheduler_test_main.cc)
 target_compile_definitions(mw_scheduler_tests PRIVATE
     MW_STREAMER_SCHEDULER_TEST_DATA_DIR="${MW_STREAMER_TEST_DATA_DIR}")
 target_link_libraries(mw_scheduler_tests PRIVATE

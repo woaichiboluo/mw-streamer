@@ -45,14 +45,15 @@ class LivePipeline::Impl final {
         input_(video_device_, InputConfig(config_)),
         scheduler_(config_.scheduler) {
     input_.SetOnReady([this](const auto& streams) { Prepare(streams); });
-    input_.SetOnFrame([this](int, const auto& frame) { SubmitInput(frame); });
+    input_.SetOnDecodedReady(
+        [this](const auto& source) { QueueSource(source); });
     input_.SetOnStateChanged([this](auto state, int code, auto message) {
       InputChanged(state, code, message);
     });
-    scheduler_.SetOnVideo(
-        [this](const auto& frame) noexcept { Process(frame, true); });
-    scheduler_.SetOnAudio(
-        [this](const auto& frame) noexcept { Process(frame, false); });
+    scheduler_.SetOnFrame(
+        [this](const MediaFrame& frame) noexcept { Process(frame); });
+    scheduler_.SetOnReady(
+        [this](const auto& streams) { PrepareEncoding(streams); });
     scheduler_.SetOnEnded([this]() noexcept {
       std::lock_guard<std::mutex> lock(mutex_);
       scheduler_ended_ = true;
@@ -63,9 +64,8 @@ class LivePipeline::Impl final {
     });
     encoder_.SetOnReady(
         [this](const auto& streams) noexcept { PrepareOutput(streams); });
-    encoder_.SetOnPacket([this](const auto& packet, auto dts) noexcept {
-      SubmitEncoded(packet, dts);
-    });
+    encoder_.SetOnPacket(
+        [this](const auto& packet) noexcept { SubmitEncoded(packet); });
     encoder_.SetOnEnded([this]() noexcept {
       std::lock_guard<std::mutex> lock(mutex_);
       encoder_ended_ = true;
@@ -86,6 +86,24 @@ class LivePipeline::Impl final {
   }
 
   ~Impl() { Stop(); }
+
+  void SetOnSelectStreams(OnSelectStreams callback) {
+    std::lock_guard<std::mutex> control(control_);
+    RequireConfigurable();
+    if (!callback) {
+      input_.SetOnSelectStreams({});
+      return;
+    }
+    input_.SetOnSelectStreams(
+        [this, callback = std::move(callback)](const auto& streams) {
+          try {
+            return callback(streams);
+          } catch (...) {
+            Exception("input", std::current_exception());
+            throw;
+          }
+        });
+  }
 
   void SetOnReady(OnReady callback) {
     std::lock_guard<std::mutex> control(control_);
@@ -161,6 +179,7 @@ class LivePipeline::Impl final {
         status_.state = previous;
         ready_info_ = {};
         ready_ = configured_ = finish_requested_ = false;
+        scheduler_started_ = false;
         input_available_ = false;
         scheduler_ended_ = encoder_ended_ = encoder_started_ = false;
         finish_state_ = PipelineState::kStopped;
@@ -308,32 +327,29 @@ class LivePipeline::Impl final {
   }
 
   void Prepare(const std::vector<ffmpeg::StreamInfo>& streams) noexcept {
-    std::string_view stage = "processor";
     try {
       if (Finishing()) return;
       {
         std::lock_guard<std::mutex> lock(mutex_);
         ready_info_.streams = streams;
       }
+    } catch (...) {
+      Exception("input", std::current_exception());
+    }
+  }
+  void PrepareEncoding(const std::vector<ffmpeg::StreamInfo>& streams) {
+    std::string_view stage = "processor";
+    try {
+      if (Finishing()) return;
       if (!processor_.Start(streams, video_device_))
         throw std::runtime_error("Processor 启动被 OnReady 拒绝");
       if (Finishing()) return;
-      auto encoding_streams = streams;
-      for (auto& stream : encoding_streams) {
-        auto* parameters = stream.codec_parameters.get();
-        if (parameters->codec_type == AVMEDIA_TYPE_AUDIO) {
-          parameters->format = AV_SAMPLE_FMT_FLTP;
-          parameters->sample_rate = config_.scheduler.audio_sample_rate;
-        }
-      }
       stage = "encoder";
-      encoder_.Start(config_.encoder, encoding_streams, video_device_);
+      encoder_.Start(config_.encoder, streams, video_device_);
       encoder_started_ = true;
       if (Finishing()) return;
-      stage = "scheduler";
-      if (!scheduler_.Start(streams))
-        throw std::runtime_error("Scheduler 启动失败");
       std::lock_guard<std::mutex> lock(mutex_);
+      ready_info_.scheduled_streams = streams;
       configured_ = true;
     } catch (...) {
       Exception(stage, std::current_exception());
@@ -353,39 +369,46 @@ class LivePipeline::Impl final {
       Exception("remuxer", std::current_exception());
     }
   }
-  void SubmitInput(const ffmpeg::Frame& frame) {
+  void QueueSource(const DecodedInputSource& source) {
     if (Finishing()) return;
-    // Cache rejection is a recoverable drop. Scheduler reports fatal errors
-    // independently through OnError.
-    if (frame->nb_samples > 0)
-      scheduler_.SubmitAudio(frame);
-    else
-      scheduler_.SubmitVideo(frame);
+    bool started;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      started = scheduler_started_;
+    }
+    const bool accepted =
+        started ? scheduler_.QueueSource(source) : scheduler_.Start(source);
+    if (!accepted) {
+      Fail("scheduler", AVERROR_EXTERNAL, "Scheduler 拒绝输入源");
+      return;
+    }
     bool ready;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      scheduler_started_ = true;
       input_available_ = true;
       ready = ready_;
     }
     if (ready && state() == PipelineState::kReconnecting)
       ChangeState(PipelineState::kRunning, true);
   }
-  void Process(const ffmpeg::Frame& frame, bool video) noexcept {
+  void Process(const MediaFrame& frame) noexcept {
     if (Failed()) return;
     try {
-      const bool accepted =
-          video ? encoder_.SubmitVideo(processor_.ProcessVideo(frame))
-                : encoder_.SubmitAudio(processor_.ProcessAudio(frame));
+      MediaFrame processed;
+      if (frame.video) processed.video = processor_.ProcessVideo(*frame.video);
+      if (frame.audio) processed.audio = processor_.ProcessAudio(*frame.audio);
+      const bool accepted = encoder_.SubmitFrame(processed);
       if (!accepted && !Failed())
         throw std::runtime_error("Encoder 拒绝处理后的帧");
     } catch (...) {
       Exception("encoder", std::current_exception());
     }
   }
-  void SubmitEncoded(const ffmpeg::Packet& packet, std::int64_t dts) noexcept {
+  void SubmitEncoded(const ffmpeg::Packet& packet) noexcept {
     if (Failed()) return;
     try {
-      if (!remuxer_.SubmitPacket(packet, dts))
+      if (!remuxer_.SubmitPacket(packet))
         throw std::runtime_error("AsyncRemuxer 拒绝编码包");
       // Repeated frames/silence during reconnection must not clear that state.
       // Only this session's first packet completes synchronous startup.
@@ -429,6 +452,12 @@ class LivePipeline::Impl final {
     }
     try {
       ChangeState(PipelineState::kStopping);
+      bool ending;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ending = finish_state_ == PipelineState::kEnded;
+      }
+      if (!ending) scheduler_.RequestStop();
       input_.Stop();  // Also joins initial preparation.
       bool eof;
       {
@@ -452,12 +481,14 @@ class LivePipeline::Impl final {
           return encoder_ended_ || finish_state_ == PipelineState::kFailed;
         });
       }
+      if (Failed()) encoder_.RequestCancel();
       encoder_.Stop();
       StopOutput();
       processor_.Stop();
     } catch (...) {
       Exception("pipeline", std::current_exception());
       scheduler_.Stop();
+      encoder_.RequestCancel();
       encoder_.Stop();
       StopOutput();
       processor_.Stop();
@@ -487,6 +518,7 @@ class LivePipeline::Impl final {
   PipelineStatus status_;
   LivePipelineReadyInfo ready_info_;
   bool configured_ = false;
+  bool scheduler_started_ = false;
   bool ready_ = false;
   bool input_available_ = false;
   bool finish_requested_ = false;
@@ -505,6 +537,9 @@ LivePipeline::LivePipeline(const ffmpeg::HwDeviceContext& video_device,
                            LivePipelineConfig config)
     : impl_(std::make_unique<Impl>(video_device, std::move(config))) {}
 LivePipeline::~LivePipeline() = default;
+void LivePipeline::SetOnSelectStreams(OnSelectStreams callback) {
+  impl_->SetOnSelectStreams(std::move(callback));
+}
 void LivePipeline::SetOnReady(OnReady callback) {
   impl_->SetOnReady(std::move(callback));
 }
