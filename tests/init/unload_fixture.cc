@@ -3,7 +3,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
-#include <cstring>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -22,14 +21,13 @@ extern "C" MW_EXPORT int RunLifecycle(const char* sample_path,
     config.event_poller_threads = 2;
     config.work_threads = 1;
     config.enable_cpu_affinity = false;
-    config.log.console_enabled = 0;
-    config.log.async_enabled = 1;
-    config.log.async_queue_size = 64;
-    config.log.rotating_file_enabled = 1;
-    config.log.rotating_file_path = log_path;
-    config.log.rotating_file_path_size = std::strlen(log_path);
-    config.log.rotating_file_max_size = 1024 * 1024;
-    config.log.rotating_file_max_files = 2;
+    config.log.console.enabled = false;
+    config.log.async.enabled = true;
+    config.log.async.queue_size = 64;
+    config.log.rotating_file.enabled = true;
+    config.log.rotating_file.path = log_path;
+    config.log.rotating_file.max_size = 1024 * 1024;
+    config.log.rotating_file.max_files = 2;
     const std::unique_ptr<mw::streamer::MwStreamerContext,
                           decltype(&mw::streamer::Shutdown)>
         context(mw::streamer::Init(config), &mw::streamer::Shutdown);

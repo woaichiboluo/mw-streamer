@@ -35,7 +35,7 @@ mw::streamer::InitConfig Config(const std::string& certificate = {},
   config.event_poller_threads = 2;
   config.work_threads = 1;
   config.enable_cpu_affinity = false;
-  config.log.console_enabled = 0;
+  config.log.console.enabled = false;
   config.tls.certificate_file = certificate;
   config.tls.certificate_password = password;
   return config;

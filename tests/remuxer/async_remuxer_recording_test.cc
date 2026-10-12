@@ -41,7 +41,7 @@ mw::streamer::InitConfig RuntimeConfig() {
   config.event_poller_threads = 2;
   config.work_threads = 1;
   config.enable_cpu_affinity = false;
-  config.log.console_enabled = 0;
+  config.log.console.enabled = false;
   return config;
 }
 

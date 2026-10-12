@@ -1,8 +1,15 @@
+#include <fmt/format.h>
+
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
-#include <string_view>
+#include <system_error>
 
 #include "mw/log.h"
 
@@ -13,9 +20,12 @@
 #include <unistd.h>
 #endif
 
-extern "C" void WriteCLogProbe(void);
-
 namespace {
+
+using mw::log::LogConfig;
+using mw::log::Logging;
+using mw::log::LogLevel;
+using mw::log::OverflowPolicy;
 
 int FileDescriptor(std::FILE* file) {
 #ifdef _WIN32
@@ -121,12 +131,11 @@ class StdoutCapture {
   int saved_descriptor_ = -1;
 };
 
-MwLogConfig ConsoleConfig(std::string_view modules) {
-  MwLogConfig config;
-  mw_log_default_config(&config);
-  config.modules = modules.data();
-  config.modules_size = modules.size();
-  config.console_color = 0;
+LogConfig ConsoleConfig() {
+  LogConfig config;
+  config.modules = {{"configured.module", LogLevel::kDebug},
+                    {"muted.module", LogLevel::kOff}};
+  config.console.color = false;
   return config;
 }
 
@@ -147,99 +156,240 @@ TEST_CASE(
   MW_LOG_WARNING("unconfigured.module", "default-warning-probe");
   MW_LOG_ERROR("unconfigured.module", "default-error-probe");
   MW_LOG_DEBUG("unconfigured.module", "default-debug-hidden");
-  mw_log_write(kMwLogLevelOff, nullptr, 0, nullptr, 0, "c-off-hidden", 12);
   mw::log::Write("unconfigured.module", mw::log::LogLevel::kOff, "off_probe.cc",
                  12, "default-off-hidden");
   mw::log::Write("direct.module", mw::log::LogLevel::kInfo,
                  "/path/direct_probe.cc", 123, "direct-write-probe");
-  WriteCLogProbe();
 
   {
-    auto config = ConsoleConfig("configured.module:debug;muted.module:off");
+    auto config = ConsoleConfig();
+    config.modules["业务支付:a;b"] = LogLevel::kDebug;
     mw::log::Logging logging(config);
     MW_LOG_DEBUG("configured.module", "configured-debug-probe");
     MW_LOG_INFO("unconfigured.module", "configured-info-hidden");
     MW_LOG_ERROR("muted.module", "configured-off-hidden");
+    MW_LOG_DEBUG("业务支付:a;b", "custom-module-probe-{}", 42);
   }
   MW_LOG_INFO("unconfigured.module", "after-shutdown-probe");
 
   {
-    auto config = ConsoleConfig("configured.module:debug");
-    config.console_enabled = 0;
-    config.rotating_file_enabled = 0;
+    auto config = ConsoleConfig();
+    config.console.enabled = false;
+    config.rotating_file.enabled = false;
     mw::log::Logging logging(config);
     MW_LOG_ERROR("configured.module", "disabled-sinks-hidden");
-    WriteCLogProbe();
   }
 
   bool cpp_initialization_failed = false;
   try {
-    auto config = ConsoleConfig("default");
-    config.rotating_file_enabled = 1;
+    auto config = ConsoleConfig();
+    config.rotating_file.enabled = true;
     mw::log::Logging logging(config);
   } catch (const std::invalid_argument&) {
     cpp_initialization_failed = true;
   }
   MW_LOG_ERROR("unconfigured.module", "after-cpp-failure-probe");
 
-  auto invalid_config = ConsoleConfig("default");
-  invalid_config.modules = nullptr;
-  invalid_config.modules_size = 1;
-  const auto failed_result = mw_log_initialize(&invalid_config);
-  mw_log_write(kMwLogLevelError, "c.module", 8, "c_direct_probe.c", 456,
-               "after-c-failure-probe", 21);
-
-  const auto c_config = ConsoleConfig("c.module:debug");
-  const auto initialized_result = mw_log_initialize(&c_config);
-  WriteCLogProbe();
-  mw_log_shutdown();
-  const bool c_default_info = mw_log_should_log(kMwLogLevelInfo, "c.module", 8);
-  const bool c_default_debug =
-      mw_log_should_log(kMwLogLevelDebug, "c.module", 8);
-  const bool c_default_off = mw_log_should_log(kMwLogLevelOff, "c.module", 8);
-  mw_log_write(kMwLogLevelInfo, nullptr, 0, nullptr, 0,
-               "c-after-shutdown-probe", 22);
+  {
+    auto config = ConsoleConfig();
+    mw::log::Logging logging(config);
+    MW_LOG_DEBUG("configured.module", "after-failure-configured-probe");
+  }
   const auto output = capture.Finish();
 
   CHECK(default_info);
   CHECK_FALSE(default_debug);
   CHECK_FALSE(default_off);
-  CHECK(c_default_info);
-  CHECK_FALSE(c_default_debug);
-  CHECK_FALSE(c_default_off);
   CHECK(cpp_initialization_failed);
-  CHECK(failed_result == kMwLogInvalidArgument);
-  CHECK(initialized_result == kMwLogSuccess);
 
   CHECK(output.find("[unconfigured.module] default-info-42") !=
         std::string::npos);
   for (const auto* marker :
-       {"default-warning-probe", "default-error-probe", "c-info-probe",
-        "c-error-probe", "configured-debug-probe", "after-shutdown-probe",
-        "after-cpp-failure-probe", "after-c-failure-probe", "c-debug-probe"}) {
+       {"default-warning-probe", "default-error-probe",
+        "configured-debug-probe", "after-shutdown-probe",
+        "after-cpp-failure-probe", "after-failure-configured-probe"}) {
     CHECK(output.find(marker) != std::string::npos);
   }
   for (const auto* marker :
-       {"default-debug-hidden", "default-off-hidden", "c-off-hidden",
-        "configured-info-hidden", "configured-off-hidden",
-        "disabled-sinks-hidden"}) {
+       {"default-debug-hidden", "default-off-hidden", "configured-info-hidden",
+        "configured-off-hidden", "disabled-sinks-hidden"}) {
     CHECK(output.find(marker) == std::string::npos);
-  }
-  for (const auto* marker :
-       {"c-info-probe", "c-error-probe", "c-debug-probe"}) {
-    std::size_t count = 0;
-    std::size_t position = 0;
-    while ((position = output.find(marker, position)) != std::string::npos) {
-      ++count;
-      ++position;
-    }
-    CHECK(count == (std::string_view(marker) == "c-debug-probe" ? 1U : 2U));
   }
   CHECK(
       output.find("[direct.module] direct-write-probe [direct_probe.cc:123]") !=
       std::string::npos);
   CHECK(output.find("[logging_test.cc:") != std::string::npos);
-  CHECK(output.find("[logging_c_probe.c:") != std::string::npos);
-  CHECK(output.find("[c_direct_probe.c:456]") != std::string::npos);
-  CHECK(output.find("[default] c-after-shutdown-probe") != std::string::npos);
+  CHECK(output.find("[业务支付:a;b] custom-module-probe-42") !=
+        std::string::npos);
+}
+
+TEST_CASE("module levels preserve defaults and support complete replacement") {
+  LogConfig config;
+  config.console.enabled = false;
+  {
+    Logging logging(config);
+    CHECK(mw::log::ShouldLog("streamer", LogLevel::kInfo));
+    CHECK_FALSE(mw::log::ShouldLog("streamer", LogLevel::kDebug));
+    for (const auto* module :
+         {"perf.input", "perf.decoder.video", "perf.decoder.audio",
+          "perf.scheduler", "perf.encoder.video", "perf.encoder.audio",
+          "perf.remux"}) {
+      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kTrace));
+      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kDebug));
+      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kInfo));
+      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kWarning));
+      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kError));
+      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kCritical));
+    }
+    CHECK(mw::log::ShouldLog("default", LogLevel::kInfo));
+    CHECK(mw::log::ShouldLog("", LogLevel::kInfo));
+    for (const auto* module : {"processor", "unknown.module"}) {
+      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kTrace));
+      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kDebug));
+      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kInfo));
+      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kWarning));
+      CHECK(mw::log::ShouldLog(module, LogLevel::kError));
+      CHECK(mw::log::ShouldLog(module, LogLevel::kCritical));
+    }
+  }
+  config.modules["perf.input"] = LogLevel::kInfo;
+  {
+    Logging logging(config);
+    CHECK(mw::log::ShouldLog("perf.input", LogLevel::kInfo));
+    CHECK_FALSE(mw::log::ShouldLog("perf.input", LogLevel::kDebug));
+    CHECK_FALSE(mw::log::ShouldLog("perf.remux", LogLevel::kCritical));
+  }
+  config.modules.clear();
+  {
+    Logging logging(config);
+    CHECK_FALSE(mw::log::ShouldLog("streamer", LogLevel::kInfo));
+    CHECK_FALSE(mw::log::ShouldLog("perf.input", LogLevel::kInfo));
+    CHECK(mw::log::ShouldLog("perf.input", LogLevel::kError));
+    CHECK(mw::log::ShouldLog("default", LogLevel::kInfo));
+  }
+  config.modules = {{"default", LogLevel::kOff}};
+  Logging logging(config);
+  CHECK_FALSE(mw::log::ShouldLog("default", LogLevel::kCritical));
+  CHECK_FALSE(mw::log::ShouldLog("", LogLevel::kCritical));
+}
+
+TEST_CASE("module names are owned and matched exactly without delimiters") {
+  LogConfig config;
+  config.console.enabled = false;
+  std::string module = "业务支付:a;b";
+  std::string path = "owned.log";
+  config.modules = {{module, LogLevel::kDebug},
+                    {"custom.parent", LogLevel::kTrace},
+                    {"custom.info", LogLevel::kInfo}};
+  config.rotating_file.path = path;
+  module.assign("changed");
+  path.clear();
+  CHECK(config.rotating_file.path == "owned.log");
+
+  Logging logging(config);
+  config.modules.clear();
+  CHECK(mw::log::ShouldLog("业务支付:a;b", LogLevel::kDebug));
+  CHECK_FALSE(mw::log::ShouldLog("业务支付:a;b", LogLevel::kTrace));
+  CHECK(mw::log::ShouldLog("custom.parent", LogLevel::kTrace));
+  CHECK_FALSE(mw::log::ShouldLog("custom.parent.child", LogLevel::kDebug));
+  CHECK_FALSE(mw::log::ShouldLog("业务支付", LogLevel::kDebug));
+  CHECK_FALSE(mw::log::ShouldLog("changed", LogLevel::kDebug));
+  CHECK(mw::log::ShouldLog("custom.info", LogLevel::kInfo));
+  CHECK_FALSE(mw::log::ShouldLog("custom.info", LogLevel::kDebug));
+}
+
+TEST_CASE(
+    "module configuration supports additions updates and removal by name") {
+  LogConfig config;
+  config.console.enabled = false;
+  config.modules["custom.module"] = LogLevel::kTrace;
+  config.modules["custom.module"] = LogLevel::kDebug;
+  config.modules["perf.input"] = LogLevel::kTrace;
+  {
+    Logging logging(config);
+    CHECK(mw::log::ShouldLog("streamer", LogLevel::kInfo));
+    CHECK(mw::log::ShouldLog("custom.module", LogLevel::kDebug));
+    CHECK_FALSE(mw::log::ShouldLog("custom.module", LogLevel::kTrace));
+    CHECK(mw::log::ShouldLog("perf.input", LogLevel::kTrace));
+    config.modules["custom.module"] = LogLevel::kOff;
+    config.modules.erase("perf.input");
+    CHECK(mw::log::ShouldLog("custom.module", LogLevel::kDebug));
+    CHECK(mw::log::ShouldLog("perf.input", LogLevel::kTrace));
+  }
+  {
+    Logging logging(config);
+    CHECK(mw::log::ShouldLog("streamer", LogLevel::kInfo));
+    CHECK_FALSE(mw::log::ShouldLog("custom.module", LogLevel::kCritical));
+    CHECK_FALSE(mw::log::ShouldLog("perf.input", LogLevel::kInfo));
+    config.modules.erase("custom.module");
+    CHECK_FALSE(mw::log::ShouldLog("custom.module", LogLevel::kCritical));
+  }
+  Logging logging(config);
+  CHECK(mw::log::ShouldLog("streamer", LogLevel::kInfo));
+  CHECK(mw::log::ShouldLog("custom.module", LogLevel::kError));
+  CHECK_FALSE(mw::log::ShouldLog("custom.module", LogLevel::kDebug));
+}
+
+TEST_CASE("invalid log configuration fails before publishing a logger") {
+  LogConfig config;
+  config.console.enabled = false;
+  SECTION("empty module name") { config.modules[""] = LogLevel::kInfo; }
+  SECTION("invalid module level") {
+    config.modules["custom"] = static_cast<LogLevel>(255);
+  }
+  SECTION("invalid overflow policy") {
+    config.async.overflow = static_cast<OverflowPolicy>(255);
+  }
+  CHECK_THROWS_AS(Logging{config}, std::invalid_argument);
+  LogConfig valid_config;
+  valid_config.console.enabled = false;
+  CHECK_NOTHROW(Logging{valid_config});
+}
+
+TEST_CASE("async file logging drains pending messages on destruction") {
+  struct TemporaryDirectory {
+    TemporaryDirectory()
+        : path(std::filesystem::temp_directory_path() /
+               fmt::format("mw-log-async-{}", std::chrono::steady_clock::now()
+                                                  .time_since_epoch()
+                                                  .count())) {
+      if (!std::filesystem::create_directory(path)) {
+        throw std::runtime_error("cannot create temporary log directory");
+      }
+    }
+    ~TemporaryDirectory() {
+      std::error_code error;
+      std::filesystem::remove_all(path, error);
+    }
+    std::filesystem::path path;
+  } temporary;
+
+  const auto log_path = temporary.path / "async.log";
+  constexpr int kMessageCount = 128;
+  {
+    LogConfig config;
+    config.console.enabled = false;
+    config.rotating_file.enabled = true;
+    config.rotating_file.path = log_path.string();
+    config.async.enabled = true;
+    config.async.queue_size = 4;
+    config.async.overflow = OverflowPolicy::kBlock;
+    config.modules = {{"async.module", LogLevel::kDebug},
+                      {"muted.module", LogLevel::kOff}};
+    Logging logging(config);
+    for (int message = 0; message < kMessageCount; ++message) {
+      MW_LOG_DEBUG("async.module", "async-message-{}|", message);
+      MW_LOG_ERROR("muted.module", "muted-message-{}|", message);
+    }
+  }
+  std::ifstream file(log_path);
+  REQUIRE(file.is_open());
+  const std::string output{std::istreambuf_iterator<char>(file),
+                           std::istreambuf_iterator<char>()};
+  CHECK(std::count(output.begin(), output.end(), '\n') == kMessageCount);
+  for (int message = 0; message < kMessageCount; ++message) {
+    CHECK(output.find(fmt::format("[async.module] async-message-{}|",
+                                  message)) != std::string::npos);
+  }
+  CHECK(output.find("muted-message-") == std::string::npos);
 }

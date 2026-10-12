@@ -25,7 +25,7 @@ struct TlsConfig {
 struct MW_STREAMER_API InitConfig {
   InitConfig();
 
-  MwLogConfig log;
+  mw::log::LogConfig log;
   // Zero selects the hardware concurrency reported by ZLM.
   std::size_t event_poller_threads = 0;
   std::size_t work_threads = 0;

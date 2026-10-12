@@ -38,7 +38,7 @@ InitConfig TestConfig() {
   config.event_poller_threads = 2;
   config.work_threads = 1;
   config.enable_cpu_affinity = false;
-  config.log.console_enabled = 0;
+  config.log.console.enabled = false;
   return config;
 }
 
@@ -116,7 +116,7 @@ TEST_CASE("streamer configures only an attached console for UTF-8") {
 TEST_CASE("streamer ignores SIGPIPE across shutdown and reinitialization") {
   const pid_t child = fork();
   if (child == 0) {
-    struct sigaction action{};
+    struct sigaction action {};
     action.sa_handler = SIG_DFL;
     sigemptyset(&action.sa_mask);
     sigset_t signals;
@@ -165,8 +165,8 @@ TEST_CASE("streamer ignores SIGPIPE across shutdown and reinitialization") {
 
 TEST_CASE("streamer initializes and shuts down with async logging") {
   auto config = TestConfig();
-  config.log.async_enabled = 1;
-  config.log.async_queue_size = 64;
+  config.log.async.enabled = true;
+  config.log.async.queue_size = 64;
   ContextOwner context(Init(config), &Shutdown);
   REQUIRE(context.get() != nullptr);
   {
@@ -180,8 +180,7 @@ TEST_CASE("streamer initializes and shuts down with async logging") {
 TEST_CASE(
     "failed streamer initialization permits a later valid initialization") {
   auto config = TestConfig();
-  config.log.modules = nullptr;
-  config.log.modules_size = 1;
+  config.log.modules = {{"", mw::log::LogLevel::kInfo}};
   REQUIRE_THROWS_AS(Init(config), std::invalid_argument);
   ContextOwner context(Init(TestConfig()), &Shutdown);
   CHECK_NOTHROW(FfmpegInput());

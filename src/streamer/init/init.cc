@@ -34,7 +34,7 @@ class MwStreamerContext final {
   std::optional<internal::ScopedTimerResolution> timer_resolution;
 };
 
-InitConfig::InitConfig() { mw_log_default_config(&log); }
+InitConfig::InitConfig() = default;
 
 MwStreamerContext* Init(const InitConfig& config) {
   internal::EnableUtf8Console();

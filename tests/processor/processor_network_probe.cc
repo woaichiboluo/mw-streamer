@@ -6,7 +6,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <deque>
 #include <exception>
 #include <fstream>
@@ -446,23 +445,23 @@ int main(int argc, char* argv[]) {
     config.event_poller_threads = 2;
     config.work_threads = 1;
     config.enable_cpu_affinity = false;
-    config.log.console_enabled = 0;
+    config.log.console.enabled = false;
     const std::string runtime_log =
         argc > 4 ? std::string(argv[4]) + ".log" : "";
     if (!runtime_log.empty()) {
       const bool trace_enabled = mw::streamer::internal::HasEnvironmentVariable(
           "MW_STREAMER_PROBE_TRACE");
-      config.log.modules = trace_enabled
-                               ? "streamer:trace;perf.input:trace;"
-                                 "perf.decoder.video:trace;"
-                                 "perf.decoder.audio:trace;perf.scheduler:trace"
-                               : "streamer:debug;perf.input:info;"
-                                 "perf.decoder.video:info;"
-                                 "perf.decoder.audio:info;perf.scheduler:info";
-      config.log.modules_size = std::strlen(config.log.modules);
-      config.log.rotating_file_enabled = 1;
-      config.log.rotating_file_path = runtime_log.c_str();
-      config.log.rotating_file_path_size = runtime_log.size();
+      const auto performance_level =
+          trace_enabled ? mw::log::LogLevel::kTrace : mw::log::LogLevel::kInfo;
+      config.log.modules = {
+          {"streamer", trace_enabled ? mw::log::LogLevel::kTrace
+                                     : mw::log::LogLevel::kDebug},
+          {"perf.input", performance_level},
+          {"perf.decoder.video", performance_level},
+          {"perf.decoder.audio", performance_level},
+          {"perf.scheduler", performance_level}};
+      config.log.rotating_file.enabled = true;
+      config.log.rotating_file.path = runtime_log;
     }
     const std::unique_ptr<mw::streamer::MwStreamerContext,
                           decltype(&mw::streamer::Shutdown)>

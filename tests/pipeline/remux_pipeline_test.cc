@@ -74,15 +74,12 @@ class Runtime final {
     config.event_poller_threads = 1;
     config.work_threads = 1;
     config.enable_cpu_affinity = false;
-    config.log.console_enabled = 0;
+    config.log.console.enabled = false;
     if (!log_file.empty()) {
-      static constexpr char kModules[] = "streamer:warn";
-      config.log.modules = kModules;
-      config.log.modules_size = sizeof(kModules) - 1;
-      config.log.async_enabled = 0;
-      config.log.rotating_file_enabled = 1;
-      config.log.rotating_file_path = log_file.data();
-      config.log.rotating_file_path_size = log_file.size();
+      config.log.modules = {{"streamer", mw::log::LogLevel::kWarning}};
+      config.log.async.enabled = false;
+      config.log.rotating_file.enabled = true;
+      config.log.rotating_file.path = log_file;
     }
     context_ = mw::streamer::Init(config);
   }
@@ -715,8 +712,8 @@ TEST_CASE("RemuxPipeline单个网络输出失败不终止整个会话",
     // without stopping the still-running pipeline to flush the logger.
     const std::string probe(4096, '.');
     REQUIRE(WaitUntil([&] {
-      mw_log_write(kMwLogLevelWarning, "streamer", 8, __FILE__, __LINE__,
-                   probe.data(), probe.size());
+      mw::log::Write("streamer", mw::log::LogLevel::kWarning, __FILE__,
+                     __LINE__, probe);
       std::ifstream file(log_file);
       const std::string text((std::istreambuf_iterator<char>(file)), {});
       return text.find("RemuxPipeline 输出错误: target=" + unavailable) !=

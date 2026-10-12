@@ -1,82 +1,18 @@
 #ifndef MW_LOG_H_
 #define MW_LOG_H_
 
-#include <stddef.h>
-#include <stdint.h>
-
-#include "mw/export.h"
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-typedef enum MwLogLevel {
-  kMwLogLevelTrace,
-  kMwLogLevelDebug,
-  kMwLogLevelInfo,
-  kMwLogLevelWarning,
-  kMwLogLevelError,
-  kMwLogLevelCritical,
-  kMwLogLevelOff,
-} MwLogLevel;
-
-typedef enum MwLogOverflowPolicy {
-  kMwLogOverflowBlock,
-  kMwLogOverflowOverrunOldest,
-} MwLogOverflowPolicy;
-
-typedef enum MwLogResult {
-  kMwLogSuccess,
-  kMwLogInvalidArgument,
-  kMwLogAlreadyInitialized,
-  kMwLogInternalError,
-} MwLogResult;
-
-typedef struct MwLogConfig {
-  // Semicolon-separated module names with optional levels, for example
-  // "streamer;perf.input:info;perf.decoder.video:off". A bare name uses info.
-  // The default config enables the streamer performance summaries. Explicit
-  // entries override the built-in info level for "default" and error level for
-  // every other module.
-  const char* modules;
-  size_t modules_size;
-  int console_enabled;
-  int console_color;
-  int rotating_file_enabled;
-  const char* rotating_file_path;
-  size_t rotating_file_path_size;
-  size_t rotating_file_max_size;
-  size_t rotating_file_max_files;
-  int async_enabled;
-  size_t async_queue_size;
-  MwLogOverflowPolicy async_overflow;
-} MwLogConfig;
-
-MW_LOG_API void mw_log_default_config(MwLogConfig* config);
-MW_LOG_API MwLogResult mw_log_initialize(const MwLogConfig* config);
-MW_LOG_API void mw_log_shutdown(void);
-
-// Calls before initialization and after shutdown use spdlog's default logger
-// and level. Explicit configuration takes precedence, including disabled sinks.
-MW_LOG_API int mw_log_should_log(MwLogLevel level, const char* module,
-                                 size_t module_size);
-MW_LOG_API void mw_log_write(MwLogLevel level, const char* module,
-                             size_t module_size, const char* file,
-                             uint32_t line, const char* message,
-                             size_t message_size);
-
-#ifdef __cplusplus
-}
-
 #include <fmt/format.h>
 #include <fmt/ostream.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
+
+#include "mw/export.h"
 
 namespace mw::log {
 
@@ -90,8 +26,56 @@ enum class LogLevel : std::uint8_t {
   kOff,
 };
 
+enum class OverflowPolicy : std::uint8_t {
+  kBlock,
+  kOverrunOldest,
+};
+
+struct ConsoleConfig {
+  bool enabled = true;
+  bool color = true;
+};
+
+struct RotatingFileConfig {
+  bool enabled = false;
+  std::string path;
+  // Size in bytes. Size and retained file count must be positive when enabled.
+  std::size_t max_size = 10 * 1024 * 1024;
+  std::size_t max_files = 5;
+};
+
+struct AsyncConfig {
+  bool enabled = false;
+  // Number of pending messages; must be positive for an active async logger.
+  std::size_t queue_size = 8192;
+  OverflowPolicy overflow = OverflowPolicy::kOverrunOldest;
+};
+
+struct LogConfig {
+  // Arbitrary nonempty names are matched exactly; dots have no hierarchy.
+  // Assign or erase individual keys to change their levels. Replacing this map
+  // replaces all explicit levels. Unlisted modules use error, except "default",
+  // which uses info. Logging copies the map; edits affect the next instance.
+  std::map<std::string, LogLevel> modules = {
+      {"streamer", LogLevel::kInfo},
+      {"perf.input", LogLevel::kOff},
+      {"perf.decoder.video", LogLevel::kOff},
+      {"perf.decoder.audio", LogLevel::kOff},
+      {"perf.scheduler", LogLevel::kOff},
+      {"perf.encoder.video", LogLevel::kOff},
+      {"perf.encoder.audio", LogLevel::kOff},
+      {"perf.remux", LogLevel::kOff},
+      {"default", LogLevel::kInfo}};
+  ConsoleConfig console;
+  RotatingFileConfig rotating_file;
+  AsyncConfig async;
+};
+
 class LoggingImpl;
 
+// Logging calls are thread-safe while the active Logging object is alive.
+// Before initialization and after shutdown, calls use spdlog's default logger
+// and level. Explicit configuration takes precedence, including disabled sinks.
 MW_LOG_API bool ShouldLog(std::string_view module, LogLevel level) noexcept;
 MW_LOG_API void Write(std::string_view module, LogLevel level, const char* file,
                       std::uint32_t line, std::string_view message) noexcept;
@@ -110,7 +94,12 @@ void WriteFormatted(std::string_view module, LogLevel level, const char* file,
 
 class MW_LOG_API Logging {
  public:
-  explicit Logging(const MwLogConfig& config);
+  // Owns a process-wide logger and copies the configuration. Only one instance
+  // may be active. Invalid configuration throws std::invalid_argument; an
+  // already active instance throws std::logic_error. Sink failures propagate.
+  explicit Logging(const LogConfig& config = {});
+  // Stop concurrent logging before destruction. Flushes and joins the owned
+  // asynchronous worker before releasing its sinks.
   ~Logging();
 
   Logging(const Logging&) = delete;
@@ -151,44 +140,5 @@ class MW_LOG_API Logging {
 #define MW_LOG_WARNING_DEFAULT(...) MW_LOG_WARNING("default", __VA_ARGS__)
 #define MW_LOG_ERROR_DEFAULT(...) MW_LOG_ERROR("default", __VA_ARGS__)
 #define MW_LOG_CRITICAL_DEFAULT(...) MW_LOG_CRITICAL("default", __VA_ARGS__)
-
-#else
-
-#include <string.h>
-
-#define MW_LOG_C_WRITE(level, module, message)                           \
-  do {                                                                   \
-    const char* const mw_log_module_ = (module);                         \
-    const size_t mw_log_module_size_ =                                   \
-        mw_log_module_ ? strlen(mw_log_module_) : 0;                     \
-    if (mw_log_should_log(level, mw_log_module_, mw_log_module_size_)) { \
-      const char* const mw_log_message_ = (message);                     \
-      mw_log_write(level, mw_log_module_, mw_log_module_size_, __FILE__, \
-                   (uint32_t)__LINE__, mw_log_message_,                  \
-                   mw_log_message_ ? strlen(mw_log_message_) : 0);       \
-    }                                                                    \
-  } while (0)
-
-#define MW_LOG_TRACE(module, message) \
-  MW_LOG_C_WRITE(kMwLogLevelTrace, module, message)
-#define MW_LOG_DEBUG(module, message) \
-  MW_LOG_C_WRITE(kMwLogLevelDebug, module, message)
-#define MW_LOG_INFO(module, message) \
-  MW_LOG_C_WRITE(kMwLogLevelInfo, module, message)
-#define MW_LOG_WARNING(module, message) \
-  MW_LOG_C_WRITE(kMwLogLevelWarning, module, message)
-#define MW_LOG_ERROR(module, message) \
-  MW_LOG_C_WRITE(kMwLogLevelError, module, message)
-#define MW_LOG_CRITICAL(module, message) \
-  MW_LOG_C_WRITE(kMwLogLevelCritical, module, message)
-
-#define MW_LOG_TRACE_DEFAULT(message) MW_LOG_TRACE("default", message)
-#define MW_LOG_DEBUG_DEFAULT(message) MW_LOG_DEBUG("default", message)
-#define MW_LOG_INFO_DEFAULT(message) MW_LOG_INFO("default", message)
-#define MW_LOG_WARNING_DEFAULT(message) MW_LOG_WARNING("default", message)
-#define MW_LOG_ERROR_DEFAULT(message) MW_LOG_ERROR("default", message)
-#define MW_LOG_CRITICAL_DEFAULT(message) MW_LOG_CRITICAL("default", message)
-
-#endif  // __cplusplus
 
 #endif  // MW_LOG_H_

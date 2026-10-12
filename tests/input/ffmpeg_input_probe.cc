@@ -282,7 +282,7 @@ int main(int argc, char* argv[]) {
     config.event_poller_threads = 1;
     config.work_threads = 1;
     config.enable_cpu_affinity = false;
-    config.log.console_enabled = 0;
+    config.log.console.enabled = false;
     const std::unique_ptr<mw::streamer::MwStreamerContext,
                           decltype(&mw::streamer::Shutdown)>
         context(mw::streamer::Init(config), &mw::streamer::Shutdown);

@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "../encoder/encoder_test_support.h"
+#include "mw/log.h"
 #include "mw/streamer/init/init.h"
 #include "mw/streamer/remuxer/async_remuxer.h"
 
@@ -26,11 +27,12 @@ namespace {
 
 namespace ffmpeg = mw::streamer::ffmpeg;
 namespace fs = std::filesystem;
+using mw::log::LogLevel;
 constexpr AVRational kMilliseconds{1, 1000};
 
 class LoggedRuntime final {
  public:
-  explicit LoggedRuntime(const std::string& level)
+  explicit LoggedRuntime(LogLevel level)
       : root_(fs::temp_directory_path()),
         directory_(
             root_ /
@@ -38,21 +40,20 @@ class LoggedRuntime final {
              std::to_string(
                  std::chrono::steady_clock::now().time_since_epoch().count()))),
         path_((directory_ / "performance.log").string()),
-        modules_("perf.remux:" + level +
-                 ";perf.encoder.video:off;perf.encoder.audio:off;streamer:off"),
         runtime_(nullptr, &mw::streamer::Shutdown) {
     fs::create_directories(directory_);
     mw::streamer::InitConfig config;
     config.event_poller_threads = 2;
     config.work_threads = 1;
     config.enable_cpu_affinity = false;
-    config.log.console_enabled = 0;
-    config.log.async_enabled = 0;
-    config.log.rotating_file_enabled = 1;
-    config.log.rotating_file_path = path_.c_str();
-    config.log.rotating_file_path_size = path_.size();
-    config.log.modules = modules_.c_str();
-    config.log.modules_size = modules_.size();
+    config.log.console.enabled = false;
+    config.log.async.enabled = false;
+    config.log.rotating_file.enabled = true;
+    config.log.rotating_file.path = path_;
+    config.log.modules = {{"perf.remux", level},
+                          {"perf.encoder.video", LogLevel::kOff},
+                          {"perf.encoder.audio", LogLevel::kOff},
+                          {"streamer", LogLevel::kOff}};
     runtime_.reset(mw::streamer::Init(config));
   }
   ~LoggedRuntime() {
@@ -74,7 +75,6 @@ class LoggedRuntime final {
   fs::path root_;
   fs::path directory_;
   std::string path_;
-  std::string modules_;
   std::unique_ptr<mw::streamer::MwStreamerContext,
                   decltype(&mw::streamer::Shutdown)>
       runtime_;
@@ -311,7 +311,8 @@ void CheckHandoffs(const std::string& text,
 
 TEST_CASE("公开AsyncRemuxer性能info trace off实际排空统计且日志不改变媒体包",
           "[performance][remuxer][async]") {
-  const std::string level = GENERATE("info", "trace", "off");
+  const auto level =
+      GENERATE(LogLevel::kInfo, LogLevel::kTrace, LogLevel::kOff);
   LoggedRuntime logging(level);
   encoder_test::Capture capture;
   EncodeFixture(capture);
@@ -332,7 +333,7 @@ TEST_CASE("公开AsyncRemuxer性能info trace off实际排空统计且日志不�
       const auto index = order[position];
       REQUIRE(remuxer.SubmitPacket(capture.packets[index]));
       totals.Add(capture.packets[index]);
-      if (level == "info" && position == 0) {
+      if (level == LogLevel::kInfo && position == 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2050));
       }
     }
@@ -345,7 +346,7 @@ TEST_CASE("公开AsyncRemuxer性能info trace off实际排空统计且日志不�
   CHECK(errors.load() == 0);
   CheckUnchanged(capture, snapshots);
   const auto text = logging.ReadAfterShutdown();
-  if (level == "off") {
+  if (level == LogLevel::kOff) {
     CHECK(Lines(text).empty());
     return;
   }
@@ -354,7 +355,7 @@ TEST_CASE("公开AsyncRemuxer性能info trace off实际排空统计且日志不�
   CheckInfo(summaries.front());
   CHECK(Integer(summaries.front(), "errors") == 0);
   CHECK(Integer(summaries.front(), "pending_packets") == 0);
-  if (level == "info") {
+  if (level == LogLevel::kInfo) {
     REQUIRE_FALSE(Lines(text, "info", "report=interval").empty());
     CHECK(Lines(text, "trace").empty());
   } else {
@@ -368,7 +369,7 @@ TEST_CASE("公开AsyncRemuxer性能info trace off实际排空统计且日志不�
 
 TEST_CASE("AsyncRemuxer性能复用会话累计清零且重复Stop不产生多份摘要",
           "[performance][remuxer][async][lifecycle]") {
-  LoggedRuntime logging("trace");
+  LoggedRuntime logging(LogLevel::kTrace);
   encoder_test::Capture capture;
   EncodeFixture(capture);
   std::vector<Totals> totals(2);
@@ -407,7 +408,7 @@ TEST_CASE("AsyncRemuxer性能复用会话累计清零且重复Stop不产生多�
 
 TEST_CASE("AsyncRemuxer性能记录EOF缺轨保留全部包和非法包拒绝",
           "[performance][remuxer][async][accounting]") {
-  LoggedRuntime logging("trace");
+  LoggedRuntime logging(LogLevel::kTrace);
   encoder_test::Capture capture;
   EncodeFixture(capture);
   Totals accepted;
@@ -472,7 +473,7 @@ TEST_CASE("AsyncRemuxer性能记录EOF缺轨保留全部包和非法包拒绝",
 
 TEST_CASE("AsyncRemuxer转换失败将已取出的在途编码包计入中止而不冒充交付",
           "[performance][remuxer][async][failure]") {
-  LoggedRuntime logging("trace");
+  LoggedRuntime logging(LogLevel::kTrace);
   encoder_test::Capture capture;
   EncodeFixture(capture);
   const auto snapshots = Snapshot(capture);

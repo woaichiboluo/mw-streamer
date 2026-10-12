@@ -8,7 +8,6 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -52,19 +51,17 @@ class Runtime final {
     config.event_poller_threads = poller_threads;
     config.work_threads = 1;
     config.enable_cpu_affinity = false;
-    config.log.console_enabled = 0;
+    config.log.console.enabled = false;
     if (certificate) {
       config.tls.certificate_file = certificate->combined_file();
       if (trust_certificate)
         config.tls.trusted_certificate_file = certificate->trusted_file();
     }
     if (debug) {
-      config.log.modules = "zlm:trace;streamer:debug";
-      config.log.modules_size = std::strlen(config.log.modules);
-      config.log.rotating_file_enabled = 1;
-      config.log.rotating_file_path = "async-remuxer-network-debug.log";
-      config.log.rotating_file_path_size =
-          std::strlen(config.log.rotating_file_path);
+      config.log.modules = {{"zlm", mw::log::LogLevel::kTrace},
+                            {"streamer", mw::log::LogLevel::kDebug}};
+      config.log.rotating_file.enabled = true;
+      config.log.rotating_file.path = "async-remuxer-network-debug.log";
     }
     context_ = mw::streamer::Init(config);
   }

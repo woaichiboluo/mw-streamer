@@ -242,7 +242,7 @@ TEST_CASE("软硬解码交叉编码机械上传下载并保留共享CUDA设备�
                "gpu_to_h264", "gpu_to_hevc");
   CAPTURE(scenario);
   mw::streamer::InitConfig runtime_config;
-  runtime_config.log.console_enabled = 0;
+  runtime_config.log.console.enabled = false;
   runtime_config.event_poller_threads = 1;
   runtime_config.work_threads = 1;
   std::unique_ptr<mw::streamer::MwStreamerContext, ShutdownRuntime> runtime(
@@ -361,7 +361,7 @@ TEST_CASE("外层CUDA编码支持CBR和带峰值上限的VBR", "[.][encoder][cud
                              mw::streamer::RateControl::kVbr);
   CAPTURE(name, mode);
   mw::streamer::InitConfig runtime_config;
-  runtime_config.log.console_enabled = 0;
+  runtime_config.log.console.enabled = false;
   runtime_config.event_poller_threads = 1;
   runtime_config.work_threads = 1;
   std::unique_ptr<mw::streamer::MwStreamerContext, ShutdownRuntime> runtime(

@@ -22,29 +22,32 @@
 
 namespace {
 using namespace std::chrono_literals;
+using mw::log::LogLevel;
 using mw::streamer::internal::PerformanceReport;
 using mw::streamer::internal::PerformanceWindow;
 
-TEST_CASE("性能日志默认可见且各模块独立控制", "[performance][logging]") {
-  MwLogConfig config;
-  mw_log_default_config(&config);
-  config.console_enabled = 0;
+TEST_CASE("性能日志默认关闭且各模块可独立开启", "[performance][logging]") {
+  mw::log::LogConfig config;
+  config.console.enabled = false;
   {
     mw::log::Logging logging(config);
     for (const auto* module :
          {"perf.input", "perf.decoder.video", "perf.decoder.audio",
           "perf.scheduler", "perf.encoder.video", "perf.encoder.audio",
           "perf.remux"}) {
-      CHECK(mw::log::ShouldLog(module, mw::log::LogLevel::kInfo));
+      CHECK_FALSE(mw::log::ShouldLog(module, mw::log::LogLevel::kInfo));
       CHECK_FALSE(mw::log::ShouldLog(module, mw::log::LogLevel::kDebug));
+      CHECK_FALSE(mw::log::ShouldLog(module, mw::log::LogLevel::kError));
+      CHECK_FALSE(mw::log::ShouldLog(module, mw::log::LogLevel::kCritical));
     }
   }
-  const std::string modules =
-      "perf.input:off;perf.decoder.video:info;perf.decoder.audio:off;"
-      "perf.scheduler:info;perf.encoder.video:off;perf.encoder.audio:info;"
-      "perf.remux:off";
-  config.modules = modules.c_str();
-  config.modules_size = modules.size();
+  config.modules = {{"perf.input", LogLevel::kOff},
+                    {"perf.decoder.video", LogLevel::kInfo},
+                    {"perf.decoder.audio", LogLevel::kOff},
+                    {"perf.scheduler", LogLevel::kInfo},
+                    {"perf.encoder.video", LogLevel::kOff},
+                    {"perf.encoder.audio", LogLevel::kInfo},
+                    {"perf.remux", LogLevel::kOff}};
   mw::log::Logging logging(config);
   CHECK_FALSE(mw::log::ShouldLog("perf.input", mw::log::LogLevel::kInfo));
   CHECK(mw::log::ShouldLog("perf.decoder.video", mw::log::LogLevel::kInfo));
@@ -145,16 +148,12 @@ TEST_CASE("编码实时整帧过载与取消分别统计且丢弃样本不计入
            std::chrono::steady_clock::now().time_since_epoch().count()) +
        ".log");
   const auto log_name = log_path.string();
-  MwLogConfig config;
-  mw_log_default_config(&config);
-  config.console_enabled = 0;
-  config.rotating_file_enabled = 1;
-  config.rotating_file_path = log_name.c_str();
-  config.rotating_file_path_size = log_name.size();
-  const std::string modules =
-      "perf.encoder.video:trace;perf.encoder.audio:trace";
-  config.modules = modules.c_str();
-  config.modules_size = modules.size();
+  mw::log::LogConfig config;
+  config.console.enabled = false;
+  config.rotating_file.enabled = true;
+  config.rotating_file.path = log_name;
+  config.modules = {{"perf.encoder.video", LogLevel::kTrace},
+                    {"perf.encoder.audio", LogLevel::kTrace}};
   {
     mw::log::Logging logging(config);
     mw::streamer::internal::EncoderPerformance performance;
@@ -196,15 +195,11 @@ TEST_CASE("Input 读取统计区分暂时无数据、EOF、主动停止和真实
            std::chrono::steady_clock::now().time_since_epoch().count()) +
        ".log");
   const auto log_name = log_path.string();
-  MwLogConfig config;
-  mw_log_default_config(&config);
-  config.console_enabled = 0;
-  config.rotating_file_enabled = 1;
-  config.rotating_file_path = log_name.c_str();
-  config.rotating_file_path_size = log_name.size();
-  const std::string modules = "perf.input:trace";
-  config.modules = modules.c_str();
-  config.modules_size = modules.size();
+  mw::log::LogConfig config;
+  config.console.enabled = false;
+  config.rotating_file.enabled = true;
+  config.rotating_file.path = log_name;
+  config.modules = {{"perf.input", LogLevel::kTrace}};
   {
     mw::log::Logging logging(config);
     mw::streamer::internal::InputPerformance performance;
@@ -268,8 +263,9 @@ TEST_CASE("Input 读取统计区分暂时无数据、EOF、主动停止和真实
 
 TEST_CASE("实际Input解码调度日志匹配数据且模块可以独立关闭",
           "[performance][input]") {
-  const std::string level = GENERATE("info", "trace", "off");
-  const bool enabled = level != "off";
+  const auto level =
+      GENERATE(LogLevel::kInfo, LogLevel::kTrace, LogLevel::kOff);
+  const bool enabled = level != LogLevel::kOff;
   const auto log_path =
       std::filesystem::temp_directory_path() /
       ("mw-perf-" +
@@ -281,15 +277,13 @@ TEST_CASE("实际Input解码调度日志匹配数据且模块可以独立关闭"
   config.event_poller_threads = 2;
   config.work_threads = 1;
   config.enable_cpu_affinity = false;
-  config.log.console_enabled = 0;
-  config.log.rotating_file_enabled = 1;
-  config.log.rotating_file_path = log_name.c_str();
-  config.log.rotating_file_path_size = log_name.size();
-  const std::string modules =
-      "perf.input:" + level + ";perf.decoder.video:" + level +
-      ";perf.decoder.audio:" + level + ";perf.scheduler:" + level;
-  config.log.modules = modules.c_str();
-  config.log.modules_size = modules.size();
+  config.log.console.enabled = false;
+  config.log.rotating_file.enabled = true;
+  config.log.rotating_file.path = log_name;
+  config.log.modules = {{"perf.input", level},
+                        {"perf.decoder.video", level},
+                        {"perf.decoder.audio", level},
+                        {"perf.scheduler", level}};
   std::unique_ptr<mw::streamer::MwStreamerContext,
                   decltype(&mw::streamer::Shutdown)>
       runtime(mw::streamer::Init(config), &mw::streamer::Shutdown);
@@ -389,7 +383,7 @@ TEST_CASE("实际Input解码调度日志匹配数据且模块可以独立关闭"
     }
     CHECK(overview.find("report=summary") != std::string::npos);
     CHECK(text.find("nan") == std::string::npos);
-    if (level == "trace") {
+    if (level == LogLevel::kTrace) {
       CHECK(text.find("[trace]") != std::string::npos);
       CHECK(Field(text, "perf.input", "total_packets") == packets.load());
       CHECK(Field(text, "perf.input", "total_payload_bytes") == bytes.load());

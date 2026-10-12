@@ -40,7 +40,7 @@ class Runtime final {
     mw::streamer::InitConfig config;
     config.event_poller_threads = config.work_threads = 1;
     config.enable_cpu_affinity = false;
-    config.log.console_enabled = 0;
+    config.log.console.enabled = false;
     context_ = mw::streamer::Init(config);
   }
   ~Runtime() { mw::streamer::Shutdown(context_); }
