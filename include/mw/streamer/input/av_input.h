@@ -20,7 +20,7 @@
 namespace mw::streamer {
 
 struct AvInputConfig {
-  // Maximum queued packets, shared by all streams. Must be positive.
+  // Maximum queued packets, shared by selected streams. Must be positive.
   // FFmpeg's own probing and protocol buffers are outside this limit.
   std::size_t packet_capacity = 256;
   std::chrono::milliseconds open_timeout{60000};
@@ -52,6 +52,10 @@ struct AvInputStatus {
 struct AvInputInfo {
   // Deep copies of all source streams, including non-audio/video streams.
   std::vector<ffmpeg::StreamInfo> streams;
+  // First video/audio stream in source order, regardless of disposition.
+  // Original stream indices are preserved; -1 means the type is absent.
+  int video_stream_index = -1;
+  int audio_stream_index = -1;
   std::int64_t start_time_us = AV_NOPTS_VALUE;
   std::int64_t duration_us = AV_NOPTS_VALUE;
   std::map<std::string, std::string> metadata;
@@ -68,7 +72,8 @@ struct AvInputReadResult {
 // One demux connection and one reader worker with a bounded packet queue.
 // Open/Close/configuration must be serialized externally. Exactly one packet
 // consumer may run concurrently with the reader and Close. Snapshots and
-// RequestCancel are thread-safe. No decoding, track selection or retry policy.
+// RequestCancel are thread-safe. Delivers only the first video and first audio
+// stream. No decoding or retry policy.
 // Open must not overlap packet reads; finish the old consumer before reopening.
 class MW_STREAMER_API AvInput final {
  public:

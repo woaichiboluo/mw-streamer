@@ -22,6 +22,9 @@ struct MW_STREAMER_API StreamInfo {
   // filter construction. Encoder-generated descriptions keep these empty.
   int disposition = 0;
   std::map<std::string, std::string> metadata{};
+  // Demuxer-derived video hints, independent of the original codec parameters.
+  AVRational frame_rate{0, 1};
+  AVRational sample_aspect_ratio{0, 1};
 
   // Compare track identity, time base and audio/video format properties.
   // Other codec metadata and extradata are ignored.

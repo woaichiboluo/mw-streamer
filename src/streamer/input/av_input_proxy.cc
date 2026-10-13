@@ -85,7 +85,9 @@ class AvInputProxy::Impl final {
         std::unique_lock<std::mutex> lock(mutex_);
         if (wait) {
           changed_.wait(lock, [this] {
-            return stopping_ || available_ || Terminal(status_.state);
+            return stopping_ || available_ || Terminal(status_.state) ||
+                   (!config_.loop && terminal_ &&
+                    terminal_->state == AvInputState::kEnded);
           });
         }
         generation = status_.generation;
@@ -94,7 +96,9 @@ class AvInputProxy::Impl final {
             status_.state == AvInputProxyState::kFailed) {
           return {AvInputReadStatus::kNull, {}, generation, description};
         }
-        if (status_.state == AvInputProxyState::kEnded) {
+        if (status_.state == AvInputProxyState::kEnded ||
+            (!config_.loop && terminal_ &&
+             terminal_->state == AvInputState::kEnded)) {
           return {AvInputReadStatus::kEof, {}, generation, description};
         }
         if (!available_) {
@@ -107,7 +111,17 @@ class AvInputProxy::Impl final {
         return {result.status, std::move(result.packet), generation,
                 description};
       }
-      if (result.status == AvInputReadStatus::kEof && !config_.loop) {
+      if (result.status == AvInputReadStatus::kEof) {
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          // Only the consumer acknowledges EOF. Keep this generation's result
+          // intact even if the control worker immediately replaces the input.
+          if (!stopping_ && input_ == input && !terminal_) {
+            terminal_ = AvInputStatus{AvInputState::kEnded, {}};
+            if (config_.loop) available_ = false;
+          }
+        }
+        changed_.notify_all();
         return {result.status, {}, generation, description};
       }
       if (!wait) {
@@ -156,8 +170,8 @@ class AvInputProxy::Impl final {
       // Open resets its cancellation flag before notifying Opening. Reapply a
       // concurrent stop here so stopping before Open cannot lose cancellation.
       if (stopping_ && status.state == AvInputState::kOpening) cancel = input_;
+      // Ended is acknowledged by Read, so reconnection cannot hide source EOF.
       if (!terminal_ && (status.state == AvInputState::kFailed ||
-                         status.state == AvInputState::kEnded ||
                          status.state == AvInputState::kCancelled)) {
         terminal_ = status;
       }

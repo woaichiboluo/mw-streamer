@@ -27,8 +27,8 @@ enum class AvInputProxyState {
   kConnecting,
   kConnected,
   kWaitingRetry,
-  // No more source data. Consumers may still be delivering returned packets;
-  // drain downstream only after the consumer finishes, not from this event.
+  // The consumer has read EOF from a non-looping source. Previously returned
+  // packets may still be in use; this event does not acknowledge delivery.
   kEnded,
   kFailed,
 };
@@ -78,11 +78,14 @@ class MW_STREAMER_API AvInputProxy final {
   // through status notifications; invalid calls/thread creation may throw.
   // Call Stop and finish old reads before another Start.
   void Start(std::string_view url);
-  // Waits through connection attempts and loop transitions. Reports EOF only
-  // for a completed non-looping source; final failure/Stop return kNull.
+  // Reports EOF for each completed generation, with its generation/info.
+  // Reading EOF triggers reopening when loop is enabled; until then the ended
+  // input remains current. Each looping generation reports EOF exactly once.
+  // Waits through connection attempts; final failure/Stop return kNull.
   // Source errors belong to status notifications, not the read result.
   AvInputProxyReadResult ReadPacket();
-  // Returns kNull immediately during opening/retries or producer underflow.
+  // Same EOF semantics as ReadPacket. Returns kNull immediately during
+  // opening/retries, loop transitions or producer underflow.
   AvInputProxyReadResult TryReadPacket();
   void RequestStop() noexcept;
   // Interrupts opening, reading and retry waits, joins the control worker and

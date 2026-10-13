@@ -5,7 +5,7 @@ target_compile_definitions(mw_av_input_tests PRIVATE
     MW_AV_INPUT_TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests/data"
 )
 target_link_libraries(mw_av_input_tests PRIVATE
-    mw::av_input Catch2::Catch2WithMain FFmpeg::avformat fmt::fmt
+    mw::streamer Catch2::Catch2WithMain FFmpeg::avformat fmt::fmt
 )
 add_test(NAME mw_av_input_tests COMMAND mw_av_input_tests)
 set_tests_properties(mw_av_input_tests PROPERTIES TIMEOUT 60)

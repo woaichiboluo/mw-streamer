@@ -93,13 +93,26 @@ class AvInput::Impl final {
       info.duration_us = format_->duration;
       info.metadata = ffmpeg::AvDictionary::ToMap(format_->metadata);
       for (unsigned int index = 0; index < format_->nb_streams; ++index) {
-        const auto* stream = format_->streams[index];
+        auto* stream = format_->streams[index];
         ffmpeg::StreamInfo description{
             stream->index, ffmpeg::CodecParameters(*stream->codecpar),
             stream->time_base};
+        if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+          description.frame_rate =
+              av_guess_frame_rate(format_, stream, nullptr);
+          description.sample_aspect_ratio =
+              av_guess_sample_aspect_ratio(format_, stream, nullptr);
+        }
         description.disposition = stream->disposition;
         description.metadata = ffmpeg::AvDictionary::ToMap(stream->metadata);
         info.streams.push_back(std::move(description));
+        if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
+            info.video_stream_index < 0) {
+          info.video_stream_index = stream->index;
+        } else if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO &&
+                   info.audio_stream_index < 0) {
+          info.audio_stream_index = stream->index;
+        }
       }
       {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -262,6 +275,10 @@ class AvInput::Impl final {
           continue;
         }
         deadline_ns_.store(0);
+        if (packet->stream_index != info_.video_stream_index &&
+            packet->stream_index != info_.audio_stream_index) {
+          continue;
+        }
         {
           std::lock_guard<std::mutex> lock(mutex_);
           if (cancelled_.load()) break;

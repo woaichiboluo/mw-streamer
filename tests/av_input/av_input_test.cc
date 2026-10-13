@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <future>
 #include <iterator>
@@ -112,6 +113,122 @@ bool WaitFor(Predicate predicate) {
     std::this_thread::sleep_for(1ms);
   }
   return true;
+}
+
+class TrackFixture final {
+ public:
+  TrackFixture()
+      : path_((std::filesystem::temp_directory_path() /
+               fmt::format(
+                   "mw-av-input-tracks-{}.mp4",
+                   std::chrono::steady_clock::now().time_since_epoch().count()))
+                  .string()) {}
+
+  ~TrackFixture() {
+    std::error_code error;
+    std::filesystem::remove(path_, error);
+  }
+
+  void Write(const std::vector<AVMediaType>& types) {
+    auto source = OpenNative(SamplePath());
+    AVFormatContext* raw_output = nullptr;
+    REQUIRE(avformat_alloc_output_context2(&raw_output, nullptr, "mp4",
+                                           path_.c_str()) >= 0);
+    const auto release = [](AVFormatContext* output) {
+      avio_closep(&output->pb);
+      avformat_free_context(output);
+    };
+    std::unique_ptr<AVFormatContext, decltype(release)> output(raw_output,
+                                                               release);
+    std::vector<int> source_indices;
+    for (const auto type : types) {
+      const int index =
+          av_find_best_stream(source.get(), type, -1, -1, nullptr, 0);
+      REQUIRE(index >= 0);
+      source_indices.push_back(index);
+      auto* stream = avformat_new_stream(output.get(), nullptr);
+      REQUIRE(stream != nullptr);
+      REQUIRE(avcodec_parameters_copy(stream->codecpar,
+                                      source->streams[index]->codecpar) >= 0);
+      stream->codecpar->codec_tag = 0;
+      stream->time_base = source->streams[index]->time_base;
+      // Prefer later tracks to prove selection does not use default flags.
+      stream->disposition =
+          source_indices.size() > 2 ? AV_DISPOSITION_DEFAULT : 0;
+    }
+    REQUIRE(avio_open(&output->pb, path_.c_str(), AVIO_FLAG_WRITE) >= 0);
+    REQUIRE(avformat_write_header(output.get(), nullptr) >= 0);
+    ffmpeg::Packet packet;
+    while (av_read_frame(source.get(), packet.get()) >= 0) {
+      for (std::size_t index = 0; index < source_indices.size(); ++index) {
+        if (source_indices[index] != packet->stream_index) continue;
+        auto copy = packet.Ref();
+        av_packet_rescale_ts(copy.get(),
+                             source->streams[packet->stream_index]->time_base,
+                             output->streams[index]->time_base);
+        copy->stream_index = static_cast<int>(index);
+        copy->pos = -1;
+        REQUIRE(av_interleaved_write_frame(output.get(), copy.get()) >= 0);
+      }
+      packet.Unref();
+    }
+    REQUIRE(av_write_trailer(output.get()) >= 0);
+  }
+
+  const std::string& path() const { return path_; }
+
+ private:
+  std::string path_;
+};
+
+TEST_CASE("AvInput selects the first video and audio tracks in source order",
+          "[av-input][tracks]") {
+  std::vector<AVMediaType> types{AVMEDIA_TYPE_AUDIO, AVMEDIA_TYPE_VIDEO,
+                                 AVMEDIA_TYPE_AUDIO, AVMEDIA_TYPE_VIDEO};
+  int expected_audio = 0;
+  int expected_video = 1;
+  SECTION("multiple tracks with later defaults") {}
+  SECTION("video only") {
+    types = {AVMEDIA_TYPE_VIDEO};
+    expected_audio = -1;
+    expected_video = 0;
+  }
+  SECTION("audio only") {
+    types = {AVMEDIA_TYPE_AUDIO};
+    expected_audio = 0;
+    expected_video = -1;
+  }
+  TrackFixture fixture;
+  fixture.Write(types);
+  auto native = OpenNative(fixture.path());
+  AvInputConfig config;
+  config.packet_capacity = 1;
+  AvInput input(config);
+  input.Open(fixture.path());
+  const auto info = input.info();
+  REQUIRE(info.streams.size() == types.size());
+  CHECK(info.video_stream_index == expected_video);
+  CHECK(info.audio_stream_index == expected_audio);
+  for (std::size_t index = 0; index < info.streams.size(); ++index) {
+    CHECK(info.streams[index].stream_index == static_cast<int>(index));
+    CHECK(info.streams[index].codec_parameters.get()->codec_type ==
+          types[index]);
+  }
+  std::size_t count = 0;
+  ffmpeg::Packet packet;
+  while (av_read_frame(native.get(), packet.get()) >= 0) {
+    if (packet->stream_index == expected_video ||
+        packet->stream_index == expected_audio) {
+      auto result = input.ReadPacket();
+      REQUIRE(result.status == AvInputReadStatus::kPacket);
+      REQUIRE(result.packet.has_value());
+      CheckPacket(*result.packet->get(), *packet.get());
+      ++count;
+    }
+    packet.Unref();
+  }
+  REQUIRE(count > 0);
+  CHECK(input.ReadPacket().status == AvInputReadStatus::kEof);
 }
 
 TEST_CASE("AvInput preserves native packet content, timing and track order",

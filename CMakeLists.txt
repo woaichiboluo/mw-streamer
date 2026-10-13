@@ -4,7 +4,7 @@ cmake_policy(SET CMP0091 NEW)
 
 project(mw_streamer VERSION 0.1.0 LANGUAGES C CXX)
 
-option(BUILD_SHARED "Build logging and input as shared libraries" OFF)
+option(BUILD_SHARED "Build mw::log and mw::streamer as shared libraries" OFF)
 option(BUILD_TESTS "Build tests for refactored modules" ${PROJECT_IS_TOP_LEVEL})
 set(BUILD_SHARED_LIBS OFF)
 
@@ -25,7 +25,7 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
 include(cmake/Dependencies.cmake)
 
-find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVFORMAT AVUTIL)
+find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVFORMAT AVUTIL AVFILTER)
 find_package(Threads REQUIRED)
 
 # Add options after dependencies so only first-party C++ targets inherit them.
@@ -61,4 +61,7 @@ add_subdirectory(src)
 if(BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests/av_input)
+    add_subdirectory(tests/decoder)
+    add_subdirectory(tests/frame_source)
+    add_subdirectory(tests/media_input)
 endif()

@@ -1,0 +1,406 @@
+#include "mw/streamer/decoder/av_decoder.h"
+
+#include <condition_variable>
+#include <deque>
+#include <limits>
+#include <mutex>
+#include <new>
+#include <stdexcept>
+#include <thread>
+#include <utility>
+
+#include "mw/log.h"
+#include "mw/streamer/ffmpeg/codec_context.h"
+#include "mw/streamer/ffmpeg/error.h"
+
+namespace mw::streamer {
+namespace {
+
+const AVCodec* FindDecoder(const ffmpeg::StreamInfo& stream,
+                           const AvDecoderConfig& config,
+                           const ffmpeg::HwDeviceContext* device) {
+  stream.Validate();
+  if (config.decoder_name.find('\0') != std::string::npos) {
+    throw std::invalid_argument("AvDecoder 解码器名称不能包含空字符");
+  }
+  const auto* parameters = stream.codec_parameters.get();
+  const auto id = parameters->codec_id;
+  const AVCodec* codec = nullptr;
+  if (!config.decoder_name.empty()) {
+    codec = avcodec_find_decoder_by_name(config.decoder_name.c_str());
+  } else {
+    // Prefer libvpx for software WebM alpha. With a GPU device, select the
+    // native decoder's hardware path.
+    const bool hardware =
+        device && device->get() && parameters->codec_type == AVMEDIA_TYPE_VIDEO;
+    if (!hardware && id == AV_CODEC_ID_VP9) {
+      codec = avcodec_find_decoder_by_name("libvpx-vp9");
+    } else if (!hardware && id == AV_CODEC_ID_VP8) {
+      codec = avcodec_find_decoder_by_name("libvpx");
+    }
+    if (!codec) codec = avcodec_find_decoder(id);
+  }
+  if (!codec) {
+    throw ffmpeg::FfmpegException(AVERROR_DECODER_NOT_FOUND,
+                                  "avcodec_find_decoder");
+  }
+  if (codec->id != id || codec->type != parameters->codec_type) {
+    throw std::invalid_argument("AvDecoder 指定解码器与轨道编码不匹配");
+  }
+  return codec;
+}
+
+AVPixelFormat HardwareFormat(AVCodecContext*,
+                             const AVPixelFormat* formats) noexcept {
+  for (const auto* format = formats; *format != AV_PIX_FMT_NONE; ++format) {
+    if (*format == AV_PIX_FMT_CUDA) return *format;
+  }
+  return AV_PIX_FMT_NONE;
+}
+
+AVPixelFormat AlphaFormat(AVPixelFormat format) {
+  switch (format) {
+    case AV_PIX_FMT_YUV420P:
+      return AV_PIX_FMT_YUVA420P;
+    case AV_PIX_FMT_YUV422P:
+      return AV_PIX_FMT_YUVA422P;
+    case AV_PIX_FMT_YUV444P:
+      return AV_PIX_FMT_YUVA444P;
+    default:
+      return format;
+  }
+}
+
+}  // namespace
+
+class AvDecoder::Impl final {
+ public:
+  Impl(const ffmpeg::StreamInfo& stream, AvDecoderConfig config,
+       OnFailed on_failed, const ffmpeg::HwDeviceContext* device = nullptr)
+      : stream_(stream),
+        config_(std::move(config)),
+        on_failed_(std::move(on_failed)),
+        context_(FindDecoder(stream, config_, device)) {
+    if (config_.packet_watermark == 0 || config_.frame_capacity == 0 ||
+        config_.thread_count < 0) {
+      throw std::invalid_argument("AvDecoder 缓存水位必须为正，线程数不能为负");
+    }
+    auto* context = context_.get();
+    ffmpeg::FfmpegException::throwIfError(
+        avcodec_parameters_to_context(context, stream_.codec_parameters.get()),
+        "avcodec_parameters_to_context");
+    context->pkt_timebase = stream_.time_base;
+    context->thread_count = config_.thread_count;
+    if (context->codec_type == AVMEDIA_TYPE_VIDEO) {
+      if (stream_.frame_rate.num > 0 && stream_.frame_rate.den > 0) {
+        context->framerate = stream_.frame_rate;
+      }
+      if (stream_.sample_aspect_ratio.num > 0 &&
+          stream_.sample_aspect_ratio.den > 0) {
+        context->sample_aspect_ratio = stream_.sample_aspect_ratio;
+      }
+      const auto alpha = stream_.metadata.find("alpha_mode");
+      if (alpha != stream_.metadata.end() && !alpha->second.empty() &&
+          alpha->second.front() == '1') {
+        context->pix_fmt = AlphaFormat(context->pix_fmt);
+      }
+    }
+    if (device && device->get() && context->codec_type == AVMEDIA_TYPE_VIDEO) {
+      ConfigureDevice(*device);
+    }
+    if ((context->codec->capabilities & AV_CODEC_CAP_HARDWARE) &&
+        !context->hw_device_ctx) {
+      throw std::invalid_argument("AvDecoder 硬件解码器需要外部设备上下文");
+    }
+    ffmpeg::FfmpegException::throwIfError(
+        avcodec_open2(context, context->codec, nullptr), "avcodec_open2");
+    worker_ = std::thread(&Impl::Run, this);
+  }
+
+  ~Impl() { Stop(); }
+
+  bool PushPacket(ffmpeg::Packet packet, std::uint64_t generation) {
+    if (!packet.get() || !packet->data || packet->size <= 0 ||
+        packet->stream_index != stream_.stream_index) {
+      throw std::invalid_argument("AvDecoder Packet 为空或不属于当前轨道");
+    }
+    return Push(std::move(packet), generation);
+  }
+
+  bool PushEof(std::uint64_t generation) { return Push({}, generation); }
+
+  AvDecoderReadResult TryReadFrame() {
+    AvDecoderReadResult result;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!frames_.empty() && !stopping_) {
+        result = std::move(frames_.front());
+        frames_.pop_front();
+      } else {
+        result.stream_index = stream_.stream_index;
+        result.time_base = stream_.time_base;
+      }
+    }
+    changed_.notify_all();
+    return result;
+  }
+
+  bool wants_packet() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !stopping_ && !error_ && packets_.size() < config_.packet_watermark;
+  }
+
+  std::size_t buffered_packets() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return packets_.size();
+  }
+
+  std::size_t buffered_frames() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return frames_.size();
+  }
+
+  std::exception_ptr error() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return error_;
+  }
+
+  const ffmpeg::StreamInfo& stream_info() const { return stream_; }
+
+  void RequestStop() noexcept {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopping_ = true;
+    }
+    changed_.notify_all();
+  }
+
+  void Stop() noexcept {
+    RequestStop();
+    if (worker_.joinable()) worker_.join();
+    std::lock_guard<std::mutex> lock(mutex_);
+    packets_.clear();
+    frames_.clear();
+  }
+
+ private:
+  void ConfigureDevice(const ffmpeg::HwDeviceContext& device) {
+    const auto* native =
+        reinterpret_cast<const AVHWDeviceContext*>(device.get()->data);
+    if (native->type != AV_HWDEVICE_TYPE_CUDA) {
+      throw std::invalid_argument("AvDecoder 硬解只支持 CUDA 设备");
+    }
+    auto* context = context_.get();
+    for (int index = 0;; ++index) {
+      const auto* supported = avcodec_get_hw_config(context->codec, index);
+      if (!supported) {
+        throw std::invalid_argument("AvDecoder 指定解码器不支持 CUDA 设备");
+      }
+      if (supported->device_type == AV_HWDEVICE_TYPE_CUDA &&
+          supported->pix_fmt == AV_PIX_FMT_CUDA &&
+          (supported->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
+        break;
+      }
+    }
+    context->hw_device_ctx = av_buffer_ref(device.get());
+    if (!context->hw_device_ctx) throw std::bad_alloc();
+    context->get_format = HardwareFormat;
+    context->thread_count =
+        config_.thread_count == 0 ? 2 : config_.thread_count;
+  }
+
+  struct Input {
+    std::optional<ffmpeg::Packet> packet;
+    std::uint64_t generation;
+  };
+
+  bool Push(std::optional<ffmpeg::Packet> packet, std::uint64_t generation) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (stopping_ || error_) return false;
+      if (submitted_generation_ &&
+          (generation < *submitted_generation_ ||
+           (generation == *submitted_generation_ && submitted_eof_))) {
+        throw std::logic_error("AvDecoder 不接受旧代或已提交 EOF 的同代输入");
+      }
+      const bool eof = !packet;
+      packets_.push_back({std::move(packet), generation});
+      submitted_generation_ = generation;
+      submitted_eof_ = eof;
+    }
+    changed_.notify_all();
+    return true;
+  }
+
+  std::int64_t FrameEndPts(const ffmpeg::Frame& frame) const {
+    if (frame->pts == AV_NOPTS_VALUE) return AV_NOPTS_VALUE;
+    auto duration = frame->duration;
+    const auto* context = context_.get();
+    if (duration <= 0) {
+      if (context->codec_type == AVMEDIA_TYPE_VIDEO &&
+          context->framerate.num > 0 && context->framerate.den > 0) {
+        // No AVStream/parser is borrowed from the demux connection. Its nominal
+        // rate provides the estimate when decoded duration is unavailable.
+        duration =
+            av_rescale_q(1, av_inv_q(context->framerate), stream_.time_base);
+      } else if (context->codec_type == AVMEDIA_TYPE_AUDIO &&
+                 context->sample_rate > 0) {
+        duration =
+            av_rescale_q(frame->nb_samples, AVRational{1, context->sample_rate},
+                         stream_.time_base);
+      }
+    }
+    if (duration <= 0 ||
+        frame->pts > std::numeric_limits<std::int64_t>::max() - duration) {
+      return AV_NOPTS_VALUE;
+    }
+    return frame->pts + duration;
+  }
+
+  bool Emit(AvDecoderReadResult result) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    changed_.wait(lock, [this] {
+      return stopping_ || frames_.size() < config_.frame_capacity;
+    });
+    if (stopping_) return false;
+    frames_.push_back(std::move(result));
+    return true;
+  }
+
+  void Run() noexcept {
+    try {
+      std::optional<std::uint64_t> generation;
+      bool drained = false;
+      std::int64_t next_pts = AV_NOPTS_VALUE;
+      for (;;) {
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          if (stopping_) return;
+        }
+        // Receive buffered frames first. Only EAGAIN requests another packet.
+        if (generation && !drained) {
+          ffmpeg::Frame frame;
+          const int received =
+              avcodec_receive_frame(context_.get(), frame.get());
+          if (received == AVERROR_EOF) {
+            if (!Emit({AvDecoderReadStatus::kEof,
+                       {},
+                       *generation,
+                       stream_.stream_index,
+                       stream_.time_base,
+                       next_pts})) {
+              return;
+            }
+            drained = true;
+            continue;
+          }
+          if (received != AVERROR(EAGAIN)) {
+            ffmpeg::FfmpegException::throwIfError(received,
+                                                  "avcodec_receive_frame");
+            if (context_.get()->hw_device_ctx &&
+                (frame->format != AV_PIX_FMT_CUDA || !frame->hw_frames_ctx)) {
+              throw ffmpeg::FfmpegException(AVERROR_INVALIDDATA,
+                                            "AvDecoder 硬解未交付硬件帧");
+            }
+            frame->pts = frame->best_effort_timestamp;
+            frame->time_base = stream_.time_base;
+            next_pts = FrameEndPts(frame);
+            if (!Emit({AvDecoderReadStatus::kFrame, std::move(frame),
+                       *generation, stream_.stream_index, stream_.time_base,
+                       AV_NOPTS_VALUE})) {
+              return;
+            }
+            continue;
+          }
+        }
+        Input input;
+        {
+          std::unique_lock<std::mutex> lock(mutex_);
+          changed_.wait(lock,
+                        [this] { return stopping_ || !packets_.empty(); });
+          if (stopping_) return;
+          input = std::move(packets_.front());
+          packets_.pop_front();
+        }
+        if (!generation || *generation != input.generation) {
+          if (generation) context_.FlushBuffers();
+          generation = input.generation;
+          drained = false;
+          next_pts = AV_NOPTS_VALUE;
+        }
+        // EOF is ordered behind all submitted packets. After a drain the codec
+        // waits for a new generation, instead of closing its worker/context.
+        ffmpeg::FfmpegException::throwIfError(
+            avcodec_send_packet(context_.get(),
+                                input.packet ? input.packet->get() : nullptr),
+            "avcodec_send_packet");
+      }
+    } catch (...) {
+      const auto failure = std::current_exception();
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        error_ = failure;
+        packets_.clear();
+      }
+      MW_LOG_ERROR("streamer", "AvDecoder 轨道 {} 解码失败",
+                   stream_.stream_index);
+      if (on_failed_) {
+        try {
+          on_failed_(failure);
+        } catch (const std::exception& observer_error) {
+          MW_LOG_ERROR("streamer", "AvDecoder 错误通知异常: {}",
+                       observer_error.what());
+        } catch (...) {
+          MW_LOG_ERROR("streamer", "AvDecoder 错误通知发生未知异常");
+        }
+      }
+    }
+  }
+
+  const ffmpeg::StreamInfo stream_;
+  const AvDecoderConfig config_;
+  const OnFailed on_failed_;
+  ffmpeg::CodecContext context_;
+  mutable std::mutex mutex_;
+  std::condition_variable changed_;
+  bool stopping_ = false;
+  std::optional<std::uint64_t> submitted_generation_;
+  bool submitted_eof_ = false;
+  std::exception_ptr error_;
+  std::deque<Input> packets_;
+  std::deque<AvDecoderReadResult> frames_;
+  std::thread worker_;
+};
+
+AvDecoder::AvDecoder(const ffmpeg::StreamInfo& stream, AvDecoderConfig config,
+                     OnFailed on_failed)
+    : impl_(std::make_unique<Impl>(stream, std::move(config),
+                                   std::move(on_failed))) {}
+AvDecoder::AvDecoder(const ffmpeg::StreamInfo& stream,
+                     const ffmpeg::HwDeviceContext& device,
+                     AvDecoderConfig config, OnFailed on_failed)
+    : impl_(std::make_unique<Impl>(stream, std::move(config),
+                                   std::move(on_failed), &device)) {}
+AvDecoder::~AvDecoder() = default;
+bool AvDecoder::PushPacket(ffmpeg::Packet packet, std::uint64_t generation) {
+  return impl_->PushPacket(std::move(packet), generation);
+}
+bool AvDecoder::PushEof(std::uint64_t generation) {
+  return impl_->PushEof(generation);
+}
+AvDecoderReadResult AvDecoder::TryReadFrame() { return impl_->TryReadFrame(); }
+bool AvDecoder::wants_packet() const { return impl_->wants_packet(); }
+std::size_t AvDecoder::buffered_packets() const {
+  return impl_->buffered_packets();
+}
+std::size_t AvDecoder::buffered_frames() const {
+  return impl_->buffered_frames();
+}
+std::exception_ptr AvDecoder::error() const { return impl_->error(); }
+const ffmpeg::StreamInfo& AvDecoder::stream_info() const {
+  return impl_->stream_info();
+}
+void AvDecoder::RequestStop() noexcept { impl_->RequestStop(); }
+void AvDecoder::Stop() noexcept { impl_->Stop(); }
+
+}  // namespace mw::streamer
