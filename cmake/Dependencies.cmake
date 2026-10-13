@@ -41,39 +41,15 @@ if(NOT TARGET spdlog::spdlog)
     FetchContent_MakeAvailable(spdlog)
 endif()
 
-# Retain the pinned dependency for the future media implementation.
-FetchContent_Declare(
-    tomlplusplus
-    GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
-    GIT_TAG 30172438cee64926dc41fdd9c11fb3ba5b2ba9de # v3.4.0
-    GIT_PROGRESS TRUE
-)
-
-FetchContent_Declare(
-    Catch2
-    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-    GIT_TAG v3.8.1
-    GIT_PROGRESS TRUE
-)
-
 if(BUILD_TESTS AND NOT TARGET Catch2::Catch2WithMain)
     set(CATCH_INSTALL_DOCS OFF CACHE BOOL "Install Catch2 documentation" FORCE)
     set(CATCH_INSTALL_EXTRAS OFF CACHE BOOL "Install Catch2 extras" FORCE)
     set(CATCH_DEVELOPMENT_BUILD OFF CACHE BOOL "Build Catch2 self-tests" FORCE)
-    FetchContent_MakeAvailable(Catch2)
-endif()
-
-if(BUILD_EXAMPLES AND NOT TARGET CLI11::CLI11)
-    set(CLI11_BUILD_DOCS OFF CACHE BOOL "Build CLI11 documentation" FORCE)
-    set(CLI11_BUILD_TESTS OFF CACHE BOOL "Build CLI11 tests" FORCE)
-    set(CLI11_BUILD_EXAMPLES OFF CACHE BOOL "Build CLI11 examples" FORCE)
-    set(CLI11_INSTALL OFF CACHE BOOL "Install CLI11 headers" FORCE)
-
     FetchContent_Declare(
-        cli11
-        GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
-        GIT_TAG cbd58a3696887b34c70949aef21a71735a0c2ad5 # v2.7.2
+        Catch2
+        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+        GIT_TAG v3.8.1
         GIT_PROGRESS TRUE
     )
-    FetchContent_MakeAvailable(cli11)
+    FetchContent_MakeAvailable(Catch2)
 endif()

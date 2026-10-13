@@ -1,2 +1,2 @@
 add_subdirectory(log)
-add_subdirectory(streamer)
+add_subdirectory(input)
