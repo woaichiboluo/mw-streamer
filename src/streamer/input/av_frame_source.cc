@@ -229,6 +229,17 @@ class AvFrameSource::Impl final {
             "复制 AvFrameSource 输出声道布局");
       config_.audio_channel_layout = audio_parameters_.get()->ch_layout;
     }
+    MW_LOG_INFO("streamer", "AvFrameSource[{}] 已创建: video={}, audio={}",
+                static_cast<const void*>(this), video != nullptr,
+                audio != nullptr);
+    MW_LOG_DEBUG("streamer",
+                 "AvFrameSource[{}] 输出配置: fps={}/{}, sample_rate={}, "
+                 "sample_format={}, channels={}, capacity={}, start_us={}",
+                 static_cast<const void*>(this), config_.fps.num,
+                 config_.fps.den, config_.audio_sample_rate,
+                 static_cast<int>(config_.audio_sample_format),
+                 config_.audio_channel_layout.nb_channels, capacity_,
+                 initial_start_us_);
   }
 
   ~Impl() { Stop(); }
@@ -236,6 +247,8 @@ class AvFrameSource::Impl final {
 
   AvFrameSourceReadResult TryReadFrame() {
     AvFrameSourceReadResult result;
+    bool released_prebuffer = false;
+    std::size_t remaining = 0;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (stopping_ || frames_.empty()) return result;
@@ -263,10 +276,33 @@ class AvFrameSource::Impl final {
       result = std::move(frames_.front());
       frames_.pop_front();
       read_generation_ = result.generation;
+      released_prebuffer =
+          prebuffering_ && result.status == AvFrameSourceReadStatus::kFrame;
       prebuffering_ = result.status == AvFrameSourceReadStatus::kEof;
       if (result.status == AvFrameSourceReadStatus::kFrame) --buffered_frames_;
+      remaining = buffered_frames_;
     }
     changed_.notify_all();
+    if (released_prebuffer) {
+      MW_LOG_DEBUG("streamer",
+                   "AvFrameSource[{}] 预缓冲完成: generation={}, remaining={}",
+                   static_cast<const void*>(this), result.generation,
+                   remaining);
+    }
+    if (result.status == AvFrameSourceReadStatus::kEof) {
+      MW_LOG_DEBUG("streamer",
+                   "AvFrameSource[{}] 消费 EOF，进入预缓冲: generation={}, "
+                   "frame_index={}, end_us={}",
+                   static_cast<const void*>(this), result.generation,
+                   result.frame_index, result.pts_us);
+    } else {
+      MW_LOG_TRACE("streamer",
+                   "AvFrameSource[{}] 消费帧: generation={}, frame_index={}, "
+                   "pts_us={}, duration_us={}, remaining={}",
+                   static_cast<const void*>(this), result.generation,
+                   result.frame_index, result.pts_us, result.duration_us,
+                   remaining);
+    }
     return result;
   }
 
@@ -280,18 +316,32 @@ class AvFrameSource::Impl final {
     return error_;
   }
   void RequestStop() noexcept {
+    bool requested = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      requested = !stopping_;
       stopping_ = true;
     }
     changed_.notify_all();
+    if (requested)
+      MW_LOG_INFO("streamer", "AvFrameSource[{}] 请求停止",
+                  static_cast<const void*>(this));
   }
   void Stop() noexcept {
     RequestStop();
-    if (worker_.joinable()) worker_.join();
-    std::lock_guard<std::mutex> lock(mutex_);
-    frames_.clear();
-    buffered_frames_ = 0;
+    const bool joined = worker_.joinable();
+    if (joined) worker_.join();
+    std::size_t discarded = 0;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      discarded = buffered_frames_;
+      frames_.clear();
+      buffered_frames_ = 0;
+    }
+    if (joined) {
+      MW_LOG_INFO("streamer", "AvFrameSource[{}] 已停止: discarded_frames={}",
+                  static_cast<const void*>(this), discarded);
+    }
   }
 
  private:
@@ -347,6 +397,11 @@ class AvFrameSource::Impl final {
 
   void ResetGeneration(std::uint64_t generation) {
     const bool initial = !generation_;
+    MW_LOG_DEBUG("streamer",
+                 "AvFrameSource[{}] 切换代次: previous={}, generation={}, "
+                 "initial={}, drained={}",
+                 static_cast<const void*>(this), generation_.value_or(0),
+                 generation, initial, generation_finished_);
     // Keep audio cadence phase across a normally drained generation, even
     // though its frame number resets. A discontinuity starts fresh.
     if (initial || !generation_finished_) cadence_index_ = 0;
@@ -367,8 +422,15 @@ class AvFrameSource::Impl final {
       track->last.reset();
       track->input_eof = !track->decoder;
       track->output_eof = !track->decoder;
-      if (track->pending && track->pending->generation < generation)
+      if (track->pending && track->pending->generation < generation) {
+        MW_LOG_WARNING("streamer",
+                       "AvFrameSource[{}] 切换代次丢弃旧缓存: stream={}, "
+                       "cached_generation={}, generation={}",
+                       static_cast<const void*>(this),
+                       track->stream->stream_index, track->pending->generation,
+                       generation);
         track->pending.reset();
+      }
     }
   }
 
@@ -390,6 +452,9 @@ class AvFrameSource::Impl final {
       if (start_us_ == AV_NOPTS_VALUE || pts_us < start_us_) start_us_ = pts_us;
     }
     origin_ready_ = true;
+    MW_LOG_DEBUG("streamer",
+                 "AvFrameSource[{}] 确定共同起点: generation={}, start_us={}",
+                 static_cast<const void*>(this), *generation_, start_us_);
     return true;
   }
 
@@ -397,6 +462,11 @@ class AvFrameSource::Impl final {
     if (!track.pending || track.pending->generation > *generation_)
       return false;
     if (track.pending->generation < *generation_) {
+      MW_LOG_WARNING("streamer",
+                     "AvFrameSource[{}] 丢弃旧缓存: stream={}, "
+                     "cached_generation={}, generation={}",
+                     static_cast<const void*>(this), track.stream->stream_index,
+                     track.pending->generation, *generation_);
       track.pending.reset();
       return true;
     }
@@ -406,10 +476,29 @@ class AvFrameSource::Impl final {
       if (track.filter) track.filter->PushEof(input.end_pts);
       track.input_eof = true;
       if (!track.filter) track.output_eof = true;
+      MW_LOG_DEBUG("streamer",
+                   "AvFrameSource[{}] 滤镜输入 EOF: stream={}, generation={}, "
+                   "end_pts={}",
+                   static_cast<const void*>(this), track.stream->stream_index,
+                   input.generation, input.end_pts);
     } else {
       if (!track.filter) {
         track.filter = std::make_unique<TrackFilter>(*track.stream, config_,
                                                      *input.frame, start_us_);
+        if (mw::log::ShouldLog("streamer", mw::log::LogLevel::kDebug)) {
+          const auto output_time_base = track.filter->time_base();
+          MW_LOG_DEBUG(
+              "streamer",
+              "AvFrameSource[{}] 滤镜已建立: stream={}, type={}, "
+              "generation={}, input_time_base={}/{}, "
+              "output_time_base={}/{}, input_format={}, start_us={}",
+              static_cast<const void*>(this), track.stream->stream_index,
+              static_cast<int>(
+                  track.stream->codec_parameters.get()->codec_type),
+              input.generation, track.stream->time_base.num,
+              track.stream->time_base.den, output_time_base.num,
+              output_time_base.den, input.frame->get()->format, start_us_);
+        }
       }
       track.filter->PushFrame(*input.frame);
     }
@@ -423,6 +512,10 @@ class AvFrameSource::Impl final {
     if (result == AVERROR(EAGAIN)) return false;
     if (result == AVERROR_EOF) {
       track.output_eof = true;
+      MW_LOG_DEBUG("streamer",
+                   "AvFrameSource[{}] 滤镜输出 EOF: stream={}, generation={}",
+                   static_cast<const void*>(this), track.stream->stream_index,
+                   *generation_);
     } else {
       Check(result, "读取 AvFrameSource 滤镜输出");
       track.output = std::move(frame);
@@ -452,13 +545,53 @@ class AvFrameSource::Impl final {
   }
 
   bool Emit(AvFrameSourceReadResult result) {
+    const bool trace =
+        mw::log::ShouldLog("streamer", mw::log::LogLevel::kTrace);
     std::unique_lock<std::mutex> lock(mutex_);
+    const bool backpressure = trace && frames_.size() >= capacity_;
+    std::chrono::steady_clock::time_point wait_start;
+    if (backpressure) wait_start = std::chrono::steady_clock::now();
     changed_.wait(lock,
                   [this] { return stopping_ || frames_.size() < capacity_; });
-    if (stopping_) return false;
+    std::int64_t waited_us = 0;
+    if (backpressure) {
+      waited_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                      std::chrono::steady_clock::now() - wait_start)
+                      .count();
+    }
+    const bool stopped = stopping_;
     const bool frame = result.status == AvFrameSourceReadStatus::kFrame;
-    frames_.push_back(std::move(result));
-    if (frame) ++buffered_frames_;
+    const auto generation = result.generation;
+    const auto frame_index = result.frame_index;
+    const auto pts_us = result.pts_us;
+    const auto duration_us = result.duration_us;
+    if (!stopped) {
+      frames_.push_back(std::move(result));
+      if (frame) ++buffered_frames_;
+    }
+    const auto buffered = buffered_frames_;
+    lock.unlock();
+    if (backpressure) {
+      MW_LOG_TRACE("streamer",
+                   "AvFrameSource[{}] 背压等待结束: generation={}, "
+                   "frame_index={}, waited_us={}, stopped={}",
+                   static_cast<const void*>(this), generation, frame_index,
+                   waited_us, stopped);
+    }
+    if (stopped) return false;
+    if (frame) {
+      MW_LOG_TRACE("streamer",
+                   "AvFrameSource[{}] 帧入队: generation={}, frame_index={}, "
+                   "pts_us={}, duration_us={}, buffered={}",
+                   static_cast<const void*>(this), generation, frame_index,
+                   pts_us, duration_us, buffered);
+    } else {
+      MW_LOG_DEBUG("streamer",
+                   "AvFrameSource[{}] EOF 入队: generation={}, frame_index={}, "
+                   "end_us={}, buffered={}",
+                   static_cast<const void*>(this), generation, frame_index,
+                   pts_us, buffered);
+    }
     return true;
   }
 
@@ -512,6 +645,8 @@ class AvFrameSource::Impl final {
 
   void Run() noexcept {
     try {
+      MW_LOG_INFO("streamer", "AvFrameSource[{}] 工作线程启动",
+                  static_cast<const void*>(this));
       while (!Stopping()) {
         bool progress = Fetch(video_);
         progress |= Fetch(audio_);
@@ -533,6 +668,11 @@ class AvFrameSource::Impl final {
             }
           }
           if (discontinuity) {
+            MW_LOG_WARNING(
+                "streamer",
+                "AvFrameSource[{}] 代次不连续，重建滤镜: previous={}, "
+                "generation={}",
+                static_cast<const void*>(this), *generation_, *discontinuity);
             ResetGeneration(*discontinuity);
             progress = true;
           }
@@ -540,6 +680,12 @@ class AvFrameSource::Impl final {
           // up.
           for (auto* track : {&video_, &audio_}) {
             if (track->pending && track->pending->generation < *generation_) {
+              MW_LOG_WARNING("streamer",
+                             "AvFrameSource[{}] 丢弃旧解码缓存: stream={}, "
+                             "cached_generation={}, generation={}",
+                             static_cast<const void*>(this),
+                             track->stream->stream_index,
+                             track->pending->generation, *generation_);
               track->pending.reset();
               progress = true;
             }
@@ -578,15 +724,33 @@ class AvFrameSource::Impl final {
         error_ = failure;
       }
       changed_.notify_all();
-      MW_LOG_ERROR("streamer", "AvFrameSource 处理失败");
+      if (mw::log::ShouldLog("streamer", mw::log::LogLevel::kError)) {
+        try {
+          std::rethrow_exception(failure);
+        } catch (const std::exception& processing_error) {
+          MW_LOG_ERROR(
+              "streamer",
+              "AvFrameSource[{}] 处理失败: generation={}, frame_index={}, "
+              "error={}",
+              static_cast<const void*>(this), generation_.value_or(0),
+              frame_index_, processing_error.what());
+        } catch (...) {
+          MW_LOG_ERROR("streamer",
+                       "AvFrameSource[{}] 处理发生未知异常: generation={}, "
+                       "frame_index={}",
+                       static_cast<const void*>(this), generation_.value_or(0),
+                       frame_index_);
+        }
+      }
       if (on_failed_) {
         try {
           on_failed_(failure);
         } catch (const std::exception& observer_error) {
-          MW_LOG_ERROR("streamer", "AvFrameSource 错误通知异常: {}",
-                       observer_error.what());
+          MW_LOG_ERROR("streamer", "AvFrameSource[{}] 错误通知异常: {}",
+                       static_cast<const void*>(this), observer_error.what());
         } catch (...) {
-          MW_LOG_ERROR("streamer", "AvFrameSource 错误通知发生未知异常");
+          MW_LOG_ERROR("streamer", "AvFrameSource[{}] 错误通知发生未知异常",
+                       static_cast<const void*>(this));
         }
       }
     }

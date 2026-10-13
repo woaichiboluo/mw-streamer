@@ -393,24 +393,36 @@ TEST_CASE("AvInput opening failures preserve their error and require Close",
   input.SetOnStateChanged([&](const auto& status) {
     if (status.state == AvInputState::kFailed) observed_error = status.error;
   });
-  std::exception_ptr opening_error;
+  int opening_error_code = 0;
+  std::string opening_error_message;
   try {
     input.Open(path);
     FAIL("Expected opening failure");
-  } catch (const ffmpeg::FfmpegException&) {
-    opening_error = std::current_exception();
+  } catch (const ffmpeg::FfmpegException& error) {
+    opening_error_code = error.error_code();
+    opening_error_message = error.what();
   }
   const auto status = input.status();
   CHECK(status.state == AvInputState::kFailed);
-  CHECK(status.error == opening_error);
-  CHECK(observed_error == opening_error);
-  CHECK(ExceptionCode(observed_error) < 0);
+  REQUIRE(opening_error_code < 0);
+  REQUIRE_FALSE(opening_error_message.empty());
+  // Recapturing an exception may copy it, so compare its contents, not
+  // identity.
+  for (const auto& exception : {status.error, observed_error}) {
+    REQUIRE(exception != nullptr);
+    try {
+      std::rethrow_exception(exception);
+    } catch (const ffmpeg::FfmpegException& error) {
+      CHECK(error.error_code() == opening_error_code);
+      CHECK(std::string(error.what()) == opening_error_message);
+    }
+  }
   const auto result = input.ReadPacket();
   CHECK(result.status == AvInputReadStatus::kNull);
   CHECK_FALSE(result.packet.has_value());
   CHECK_THROWS_AS(input.Open(SamplePath()), std::logic_error);
   input.Close();
-  CHECK(ExceptionCode(observed_error) == ExceptionCode(opening_error));
+  CHECK(ExceptionCode(observed_error) == opening_error_code);
 }
 
 TEST_CASE("AvInput state observers can query snapshots and throw safely",

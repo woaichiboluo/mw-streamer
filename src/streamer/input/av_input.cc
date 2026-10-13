@@ -24,6 +24,24 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+const char* StateName(AvInputState state) {
+  switch (state) {
+    case AvInputState::kClosed:
+      return "closed";
+    case AvInputState::kOpening:
+      return "opening";
+    case AvInputState::kOpened:
+      return "opened";
+    case AvInputState::kEnded:
+      return "ended";
+    case AvInputState::kFailed:
+      return "failed";
+    case AvInputState::kCancelled:
+      return "cancelled";
+  }
+  return "unknown";
+}
+
 std::int64_t NowNs() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              Clock::now().time_since_epoch())
@@ -59,6 +77,12 @@ class AvInput::Impl final {
       throw std::logic_error("重新打开 AvInput 前需要 Close");
     }
     cancelled_.store(false);
+    MW_LOG_DEBUG("streamer",
+                 "AvInput[{}] 打开配置: 包容量={} 打开超时={}ms 读取超时={}ms "
+                 "格式={} 选项数={}",
+                 static_cast<const void*>(this), config_.packet_capacity,
+                 config_.open_timeout.count(), config_.read_timeout.count(),
+                 config_.input_format_name, config_.options.size());
     {
       std::lock_guard<std::mutex> lock(mutex_);
       info_ = {};
@@ -82,8 +106,11 @@ class AvInput::Impl final {
       CheckIo(avformat_open_input(&format_, address.c_str(), input_format,
                                   options.address()),
               "avformat_open_input");
-      for (const auto& [key, value] : options.ToMap()) {
-        MW_LOG_WARNING("streamer", "AvInput 未使用输入选项: {}", key);
+      if (log::ShouldLog("streamer", log::LogLevel::kWarning)) {
+        for (const auto& [key, value] : options.ToMap()) {
+          MW_LOG_WARNING("streamer", "AvInput[{}] 未使用输入选项: {}",
+                         static_cast<const void*>(this), key);
+        }
       }
       CheckIo(avformat_find_stream_info(format_, nullptr),
               "avformat_find_stream_info");
@@ -114,6 +141,12 @@ class AvInput::Impl final {
           info.audio_stream_index = stream->index;
         }
       }
+      MW_LOG_DEBUG(
+          "streamer",
+          "AvInput[{}] 轨道: 总数={} 视频={} 音频={} 起点={}us 时长={}us",
+          static_cast<const void*>(this), info.streams.size(),
+          info.video_stream_index, info.audio_stream_index, info.start_time_us,
+          info.duration_us);
       {
         std::lock_guard<std::mutex> lock(mutex_);
         info_ = std::move(info);
@@ -142,8 +175,13 @@ class AvInput::Impl final {
     if (!packets_.empty()) {
       auto packet = std::move(packets_.front());
       packets_.pop_front();
+      const auto buffered = packets_.size();
       lock.unlock();
       changed_.notify_all();
+      MW_LOG_TRACE("streamer",
+                   "AvInput[{}] 消费包: 流={} PTS={} DTS={} 字节={} 剩余={}",
+                   static_cast<const void*>(this), packet->stream_index,
+                   packet->pts, packet->dts, packet->size, buffered);
       return {AvInputReadStatus::kPacket, std::move(packet)};
     }
     if (status_.state == AvInputState::kEnded) {
@@ -153,11 +191,16 @@ class AvInput::Impl final {
   }
 
   void RequestCancel() noexcept {
+    bool requested;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      cancelled_.store(true);
+      requested = !cancelled_.exchange(true);
     }
     changed_.notify_all();
+    if (requested) {
+      MW_LOG_DEBUG("streamer", "AvInput[{}] 请求取消",
+                   static_cast<const void*>(this));
+    }
   }
 
   void Close() noexcept {
@@ -215,18 +258,47 @@ class AvInput::Impl final {
 
   void Publish(AvInputState state, std::exception_ptr error = {}) {
     AvInputStatus snapshot{state, std::move(error)};
+    AvInputState previous;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      previous = status_.state;
       status_ = snapshot;
     }
     changed_.notify_all();
+    if (state == AvInputState::kOpening || state == AvInputState::kOpened ||
+        state == AvInputState::kClosed) {
+      MW_LOG_INFO("streamer", "AvInput[{}] 状态: {} -> {}",
+                  static_cast<const void*>(this), StateName(previous),
+                  StateName(state));
+    } else {
+      MW_LOG_DEBUG("streamer", "AvInput[{}] 状态: {} -> {}",
+                   static_cast<const void*>(this), StateName(previous),
+                   StateName(state));
+    }
+    if (snapshot.error && log::ShouldLog("streamer", log::LogLevel::kError)) {
+      try {
+        std::rethrow_exception(snapshot.error);
+      } catch (const ffmpeg::FfmpegException& failure) {
+        MW_LOG_ERROR("streamer", "AvInput[{}] 输入失败: 错误码={} {}",
+                     static_cast<const void*>(this), failure.error_code(),
+                     failure.what());
+      } catch (const std::exception& failure) {
+        MW_LOG_ERROR("streamer", "AvInput[{}] 输入失败: {}",
+                     static_cast<const void*>(this), failure.what());
+      } catch (...) {
+        MW_LOG_ERROR("streamer", "AvInput[{}] 输入失败: 未知异常",
+                     static_cast<const void*>(this));
+      }
+    }
     if (!on_state_changed_) return;
     try {
       on_state_changed_(snapshot);
     } catch (const std::exception& failure) {
-      MW_LOG_ERROR("streamer", "AvInput 状态通知异常: {}", failure.what());
+      MW_LOG_ERROR("streamer", "AvInput[{}] 状态通知异常: {}",
+                   static_cast<const void*>(this), failure.what());
     } catch (...) {
-      MW_LOG_ERROR("streamer", "AvInput 状态通知发生未知异常");
+      MW_LOG_ERROR("streamer", "AvInput[{}] 状态通知发生未知异常",
+                   static_cast<const void*>(this));
     }
   }
 
@@ -243,8 +315,18 @@ class AvInput::Impl final {
   void Run() noexcept {
     try {
       for (;;) {
+        const bool trace = log::ShouldLog("streamer", log::LogLevel::kTrace);
         {
           std::unique_lock<std::mutex> lock(mutex_);
+          if (trace && !cancelled_.load() &&
+              packets_.size() >= config_.packet_capacity) {
+            const auto buffered = packets_.size();
+            lock.unlock();
+            MW_LOG_TRACE("streamer", "AvInput[{}] 包队列已满: {}/{}",
+                         static_cast<const void*>(this), buffered,
+                         config_.packet_capacity);
+            lock.lock();
+          }
           changed_.wait(lock, [this] {
             return cancelled_.load() ||
                    packets_.size() < config_.packet_capacity;
@@ -259,6 +341,8 @@ class AvInput::Impl final {
                 "av_read_frame");
         if (code == AVERROR_EOF) {
           deadline_ns_.store(0);
+          MW_LOG_DEBUG("streamer", "AvInput[{}] 源 EOF，等待包队列排空",
+                       static_cast<const void*>(this));
           {
             std::unique_lock<std::mutex> lock(mutex_);
             changed_.wait(
@@ -279,12 +363,23 @@ class AvInput::Impl final {
             packet->stream_index != info_.audio_stream_index) {
           continue;
         }
+        const int stream_index = packet->stream_index;
+        const auto pts = packet->pts;
+        const auto dts = packet->dts;
+        const int bytes = packet->size;
+        std::size_t buffered;
         {
           std::lock_guard<std::mutex> lock(mutex_);
           if (cancelled_.load()) break;
           packets_.push_back(std::move(packet));
+          buffered = packets_.size();
         }
         changed_.notify_all();
+        MW_LOG_TRACE(
+            "streamer",
+            "AvInput[{}] 投递包: 流={} PTS={} DTS={} 字节={} 缓存={}/{}",
+            static_cast<const void*>(this), stream_index, pts, dts, bytes,
+            buffered, config_.packet_capacity);
       }
     } catch (...) {
       FinishFailure(std::current_exception());

@@ -337,10 +337,19 @@ TEST_CASE("AvInputProxy delivers EOF even when the next open fails",
   TemporarySource file;
   file.Restore();
   const auto source = ReadNativeSource();
+  bool removed = false;
+  std::error_code removal_error;
   AvInputProxyConfig config;
   config.loop = true;
   config.input.packet_capacity = 1;
   AvInputProxy proxy(config);
+  proxy.SetOnStateChanged([&](const auto& status) {
+    if (status.state == AvInputProxyState::kConnecting &&
+        status.generation == 1) {
+      // The previous input is closed, and the next input has not opened yet.
+      removed = std::filesystem::remove(file.path(), removal_error);
+    }
+  });
   proxy.Start(file.path());
   std::shared_ptr<const mw::streamer::AvInputInfo> info;
   std::uint64_t generation = 0;
@@ -352,7 +361,6 @@ TEST_CASE("AvInputProxy delivers EOF even when the next open fails",
     generation = result.generation;
     info = result.info;
   }
-  REQUIRE(std::filesystem::remove(file.path()));
   mw::streamer::AvInputProxyReadResult eof;
   REQUIRE(WaitFor([&] {
     eof = proxy.TryReadPacket();
@@ -365,9 +373,13 @@ TEST_CASE("AvInputProxy delivers EOF even when the next open fails",
   REQUIRE(WaitFor([&] {
     return proxy.status().state == AvInputProxyState::kWaitingRetry;
   }));
-  CHECK(proxy.status().generation == generation + 1);
+  const auto retry_status = proxy.status();
+  CHECK(retry_status.generation == generation + 1);
+  CHECK(ExceptionCode(retry_status.error) == AVERROR(ENOENT));
   CHECK(proxy.TryReadPacket().status == AvInputReadStatus::kNull);
   proxy.Stop();
+  REQUIRE_FALSE(removal_error);
+  REQUIRE(removed);
   CHECK(proxy.TryReadPacket().status == AvInputReadStatus::kNull);
 }
 

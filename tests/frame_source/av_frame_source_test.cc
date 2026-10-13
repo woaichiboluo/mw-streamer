@@ -911,12 +911,22 @@ TEST_CASE(
   CHECK(notifications.load() == 1);
   CHECK(source.TryReadFrame().status == AvFrameSourceReadStatus::kNull);
   CHECK(observed == source.error());
-  CHECK(observed == decoder.error());
+  const auto decoder_error = decoder.error();
+  REQUIRE(decoder_error != nullptr);
+  std::string decoder_error_message;
+  try {
+    std::rethrow_exception(decoder_error);
+  } catch (const ffmpeg::FfmpegException& error) {
+    CHECK(error.error_code() == AVERROR_INVALIDDATA);
+    decoder_error_message = error.what();
+  }
+  REQUIRE_FALSE(decoder_error_message.empty());
   REQUIRE(observed != nullptr);
   try {
     std::rethrow_exception(observed);
   } catch (const ffmpeg::FfmpegException& error) {
     CHECK(error.error_code() == AVERROR_INVALIDDATA);
+    CHECK(std::string(error.what()) == decoder_error_message);
   }
 }
 

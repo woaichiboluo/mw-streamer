@@ -37,6 +37,26 @@ void Acknowledge(std::optional<std::uint64_t>& position,
   if (!position || *position < generation) position = generation;
 }
 
+const char* StateName(AvMediaInputState state) {
+  switch (state) {
+    case AvMediaInputState::kStopped:
+      return "stopped";
+    case AvMediaInputState::kConnecting:
+      return "connecting";
+    case AvMediaInputState::kRunning:
+      return "running";
+    case AvMediaInputState::kWaitingRetry:
+      return "waiting_retry";
+    case AvMediaInputState::kDraining:
+      return "draining";
+    case AvMediaInputState::kEnded:
+      return "ended";
+    case AvMediaInputState::kFailed:
+      return "failed";
+  }
+  return "unknown";
+}
+
 }  // namespace
 
 class AvMediaInput::Impl final {
@@ -74,6 +94,15 @@ class AvMediaInput::Impl final {
       }
       changed_.notify_all();
     });
+    MW_LOG_DEBUG("streamer",
+                 "AvMediaInput [{}] 配置: mode={} loop={} video_threads={} "
+                 "audio_threads={} fps={}/{} audio_rate={} shared_device={}",
+                 static_cast<const void*>(this),
+                 config_.mode == AvMediaInputMode::kBatch ? "batch" : "live",
+                 config_.proxy.loop, config_.video_decoder.thread_count,
+                 config_.audio_decoder.thread_count, config_.output.fps.num,
+                 config_.output.fps.den, config_.output.audio_sample_rate,
+                 device_.has_value());
   }
 
   ~Impl() { Stop(); }
@@ -106,13 +135,33 @@ class AvMediaInput::Impl final {
       live_eof_.reset();
       final_generation_.reset();
     }
+    MW_LOG_INFO("streamer", "AvMediaInput [{}] 启动: mode={} loop={}",
+                static_cast<const void*>(this),
+                config_.mode == AvMediaInputMode::kBatch ? "batch" : "live",
+                config_.proxy.loop);
     try {
       worker_ = std::thread(&Impl::Run, this);
     } catch (...) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      failure_ = std::current_exception();
-      status_.state = AvMediaInputState::kFailed;
-      status_.error = failure_;
+      const auto failure = std::current_exception();
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        failure_ = failure;
+        status_.state = AvMediaInputState::kFailed;
+        status_.error = failure_;
+      }
+      if (mw::log::ShouldLog("streamer", mw::log::LogLevel::kCritical)) {
+        try {
+          std::rethrow_exception(failure);
+        } catch (const std::exception& error) {
+          MW_LOG_CRITICAL("streamer",
+                          "AvMediaInput [{}] 无法创建调度工作线程: {}",
+                          static_cast<const void*>(this), error.what());
+        } catch (...) {
+          MW_LOG_CRITICAL("streamer",
+                          "AvMediaInput [{}] 创建调度工作线程发生未知异常",
+                          static_cast<const void*>(this));
+        }
+      }
       throw;
     }
   }
@@ -132,6 +181,18 @@ class AvMediaInput::Impl final {
         Acknowledge(video ? video_eof_ : audio_eof_, result.generation);
       }
       changed_.notify_all();
+      MW_LOG_DEBUG("streamer",
+                   "AvMediaInput [{}] Batch 消费 EOF: stream={} generation={}",
+                   static_cast<const void*>(this), result.stream_index,
+                   result.generation);
+    } else if (result.status == AvDecoderReadStatus::kFrame &&
+               mw::log::ShouldLog("streamer", mw::log::LogLevel::kTrace)) {
+      MW_LOG_TRACE("streamer",
+                   "AvMediaInput [{}] Batch 消费帧: stream={} generation={} "
+                   "pts={} time_base={}/{}",
+                   static_cast<const void*>(this), result.stream_index,
+                   result.generation, result.frame->get()->pts,
+                   result.time_base.num, result.time_base.den);
     }
     return result;
   }
@@ -149,6 +210,19 @@ class AvMediaInput::Impl final {
         Acknowledge(live_eof_, result.generation);
       }
       changed_.notify_all();
+      MW_LOG_DEBUG("streamer",
+                   "AvMediaInput [{}] Live 消费 EOF: generation={} frame={} "
+                   "end_pts_us={}",
+                   static_cast<const void*>(this), result.generation,
+                   result.frame_index, result.pts_us);
+    } else if (result.status == AvFrameSourceReadStatus::kFrame &&
+               mw::log::ShouldLog("streamer", mw::log::LogLevel::kTrace)) {
+      MW_LOG_TRACE("streamer",
+                   "AvMediaInput [{}] Live 消费帧: generation={} frame={} "
+                   "pts_us={} duration_us={} video={} audio={}",
+                   static_cast<const void*>(this), result.generation,
+                   result.frame_index, result.pts_us, result.duration_us,
+                   result.video.has_value(), result.audio.has_value());
     }
     return result;
   }
@@ -165,14 +239,20 @@ class AvMediaInput::Impl final {
 
   void RequestStop() noexcept {
     std::shared_ptr<Session> session;
+    bool requested = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      requested = !stopping_;
       stopping_ = true;
       session = session_;
     }
     changed_.notify_all();
     proxy_.RequestStop();
     if (session) session->RequestStop();
+    if (requested) {
+      MW_LOG_DEBUG("streamer", "AvMediaInput [{}] 请求停止",
+                   static_cast<const void*>(this));
+    }
   }
   void Stop() noexcept {
     RequestStop();
@@ -263,14 +343,48 @@ class AvMediaInput::Impl final {
       status_ = next;
       snapshot = status_;
     }
+    if (state == AvMediaInputState::kFailed &&
+        mw::log::ShouldLog("streamer", mw::log::LogLevel::kError)) {
+      try {
+        if (snapshot.error) std::rethrow_exception(snapshot.error);
+      } catch (const ffmpeg::FfmpegException& error) {
+        MW_LOG_ERROR(
+            "streamer",
+            "AvMediaInput [{}] 终止失败: generation={} code={} error={}",
+            static_cast<const void*>(this), snapshot.generation,
+            error.error_code(), error.what());
+      } catch (const std::exception& error) {
+        MW_LOG_ERROR(
+            "streamer", "AvMediaInput [{}] 终止失败: generation={} error={}",
+            static_cast<const void*>(this), snapshot.generation, error.what());
+      } catch (...) {
+        MW_LOG_ERROR("streamer",
+                     "AvMediaInput [{}] 未知终止异常: generation={}",
+                     static_cast<const void*>(this), snapshot.generation);
+      }
+    } else if (state == AvMediaInputState::kRunning ||
+               state == AvMediaInputState::kEnded ||
+               state == AvMediaInputState::kStopped) {
+      MW_LOG_INFO("streamer", "AvMediaInput [{}] 状态={}: generation={}",
+                  static_cast<const void*>(this), StateName(state),
+                  snapshot.generation);
+    } else {
+      MW_LOG_DEBUG("streamer",
+                   "AvMediaInput [{}] 状态={}: generation={} retries={} "
+                   "retry_delay_s={}",
+                   static_cast<const void*>(this), StateName(state),
+                   snapshot.generation, snapshot.retry_count,
+                   snapshot.retry_delay.count());
+    }
     if (!on_state_changed_) return;
     try {
       on_state_changed_(snapshot);
     } catch (const std::exception& observer_error) {
-      MW_LOG_ERROR("streamer", "AvMediaInput 状态通知异常: {}",
-                   observer_error.what());
+      MW_LOG_ERROR("streamer", "AvMediaInput [{}] 状态通知异常: {}",
+                   static_cast<const void*>(this), observer_error.what());
     } catch (...) {
-      MW_LOG_ERROR("streamer", "AvMediaInput 状态通知发生未知异常");
+      MW_LOG_ERROR("streamer", "AvMediaInput [{}] 状态通知发生未知异常",
+                   static_cast<const void*>(this));
     }
   }
 
@@ -325,6 +439,12 @@ class AvMediaInput::Impl final {
       session_ = created;
     }
     session = std::move(created);
+    MW_LOG_DEBUG("streamer",
+                 "AvMediaInput [{}] 媒体处理链已建立: video_stream={} "
+                 "audio_stream={} live_source={} start_us={}",
+                 static_cast<const void*>(this), info->video_stream_index,
+                 info->audio_stream_index, session->source != nullptr,
+                 info->start_time_us);
   }
 
   bool ProcessEvents(std::shared_ptr<Session>& session) {
@@ -375,6 +495,10 @@ class AvMediaInput::Impl final {
     Initialize(result.info, session);
     if (Stopping()) return false;
     if (result.status == AvInputReadStatus::kEof) {
+      MW_LOG_DEBUG("streamer",
+                   "AvMediaInput [{}] 分发源 EOF: generation={} loop={}",
+                   static_cast<const void*>(this), result.generation,
+                   config_.proxy.loop);
       for (auto* decoder : {session->video.get(), session->audio.get()}) {
         if (decoder && !decoder->PushEof(result.generation)) {
           if (Stopping()) return false;
@@ -388,6 +512,15 @@ class AvMediaInput::Impl final {
         Publish(AvMediaInputState::kDraining);
       }
     } else {
+      if (mw::log::ShouldLog("streamer", mw::log::LogLevel::kTrace)) {
+        MW_LOG_TRACE("streamer",
+                     "AvMediaInput [{}] 分发包: stream={} generation={} "
+                     "pts={} dts={} size={}",
+                     static_cast<const void*>(this),
+                     result.packet->get()->stream_index, result.generation,
+                     result.packet->get()->pts, result.packet->get()->dts,
+                     result.packet->get()->size);
+      }
       auto* decoder = result.packet->get()->stream_index ==
                               session->description->video_stream_index
                           ? session->video.get()
@@ -424,6 +557,8 @@ class AvMediaInput::Impl final {
       proxy_events_.clear();
     }
     session.reset();
+    MW_LOG_DEBUG("streamer", "AvMediaInput [{}] 媒体处理链已释放",
+                 static_cast<const void*>(this));
   }
 
   void Run() noexcept {

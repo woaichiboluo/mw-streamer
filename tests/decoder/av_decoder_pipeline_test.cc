@@ -24,17 +24,22 @@ TEST_CASE("Proxy selected packets feed separate decoders across looping EOF",
   input_config.loop = true;
   input_config.input.packet_capacity = 1;
   mw::streamer::AvInputProxy proxy(input_config);
+  const auto started = std::chrono::steady_clock::now();
+  const auto overall_deadline = started + 30s;
+  auto progress_deadline = started + 3s;
   proxy.Start(fmt::format("{}/h264_aac.mp4", MW_AV_DECODER_TEST_DATA_DIR));
-  const auto deadline = std::chrono::steady_clock::now() + 3s;
   mw::streamer::AvInputProxyReadResult input;
   do {
     input = proxy.TryReadPacket();
-    REQUIRE(std::chrono::steady_clock::now() < deadline);
+    const auto now = std::chrono::steady_clock::now();
+    REQUIRE(now < overall_deadline);
+    REQUIRE(now < progress_deadline);
     if (input.status == AvInputReadStatus::kNull) {
       std::this_thread::sleep_for(1ms);
     }
   } while (input.status == AvInputReadStatus::kNull);
   REQUIRE(input.status == AvInputReadStatus::kPacket);
+  progress_deadline = std::chrono::steady_clock::now() + 3s;
   REQUIRE(input.info != nullptr);
   const auto info = input.info;
   REQUIRE(info->video_stream_index >= 0);
@@ -84,7 +89,9 @@ TEST_CASE("Proxy selected packets feed separate decoders across looping EOF",
     return progress;
   };
   for (;;) {
-    REQUIRE(std::chrono::steady_clock::now() < deadline);
+    const auto now = std::chrono::steady_clock::now();
+    REQUIRE(now < overall_deadline);
+    REQUIRE(now < progress_deadline);
     bool progress = consume(*video, 0, info->video_stream_index);
     progress |= consume(*audio, 1, info->audio_stream_index);
     if (ended[0][1] && ended[1][1]) break;
@@ -108,9 +115,17 @@ TEST_CASE("Proxy selected packets feed separate decoders across looping EOF",
         progress = true;
       }
       input = {};
-      if (!source_ended) input = proxy.TryReadPacket();
+      if (!source_ended) {
+        input = proxy.TryReadPacket();
+        progress |= input.status != AvInputReadStatus::kNull;
+      }
     }
-    if (!progress) std::this_thread::sleep_for(1ms);
+    // Only packets, frames and EOF reset the stall deadline, not empty polls.
+    if (progress) {
+      progress_deadline = std::chrono::steady_clock::now() + 3s;
+    } else {
+      std::this_thread::sleep_for(1ms);
+    }
   }
   proxy.Stop();
   video->Stop();
