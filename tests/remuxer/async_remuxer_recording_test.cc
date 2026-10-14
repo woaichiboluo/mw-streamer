@@ -76,7 +76,7 @@ bool MarkerFrame(int index) {
 }
 
 void EncodeMarkers(encoder_test::Capture& capture, int b_frames = 2) {
-  mw::streamer::Encoder encoder;
+  mw::streamer::AvEncoder encoder;
   capture.Bind(encoder);
   auto config = encoder_test::Config();
   config.fps = {30000, 1001};
@@ -512,7 +512,7 @@ TEST_CASE("公开AsyncRemuxer控制调用校验与空会话结束只通知一次
   }
   SECTION("空会话支持DrainStop并拒绝无效输出扩展名") {
     encoder_test::Capture capture;
-    mw::streamer::Encoder encoder;
+    mw::streamer::AvEncoder encoder;
     capture.Bind(encoder);
     ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
     encoder.Start(encoder_test::Config(), {encoder_test::VideoStream()}, cpu);

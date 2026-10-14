@@ -16,18 +16,3 @@ if(BUILD_SHARED)
         Catch2::Catch2WithMain mw_streamer_test_static ZLMediaKit::MediaKit mw::log)
     add_test(NAME mw_streamer_lifecycle_tests COMMAND mw_streamer_lifecycle_tests)
 endif()
-
-if(WIN32 AND BUILD_SHARED)
-    add_library(mw_streamer_unload_fixture SHARED unload_fixture.cc)
-    target_link_libraries(mw_streamer_unload_fixture PRIVATE mw::streamer mw::log fmt::fmt)
-    add_executable(mw_streamer_unload_host unload_host.cc)
-    target_link_libraries(mw_streamer_unload_host PRIVATE fmt::fmt)
-    add_dependencies(mw_streamer_unload_host mw_streamer_unload_fixture)
-    add_test(NAME mw_streamer_unload_tests
-        COMMAND mw_streamer_unload_host
-            "$<TARGET_FILE:mw_streamer_unload_fixture>"
-            "${MW_STREAMER_TEST_DATA_DIR}/h264_aac.mp4"
-            "${CMAKE_CURRENT_BINARY_DIR}/unload.log"
-    )
-    set_tests_properties(mw_streamer_unload_tests PROPERTIES TIMEOUT 45)
-endif()

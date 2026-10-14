@@ -44,9 +44,6 @@ endif()
 add_test(NAME mw_async_remuxer_network_tests COMMAND mw_async_remuxer_network_tests)
 set_tests_properties(mw_async_remuxer_network_tests PROPERTIES TIMEOUT 60)
 
-add_executable(mw_async_remuxer_publish_probe async_remuxer_publish_probe.cc)
-target_link_libraries(mw_async_remuxer_publish_probe PRIVATE mw::streamer fmt::fmt)
-
 add_executable(mw_sync_remuxer_tests sync_remuxer_test.cc)
 target_compile_definitions(mw_sync_remuxer_tests PRIVATE
     MW_STREAMER_SYNC_REMUXER_TEST_DATA_DIR="${MW_STREAMER_TEST_DATA_DIR}")
@@ -103,8 +100,6 @@ set_tests_properties(mw_sync_remuxer_hls_tests PROPERTIES TIMEOUT 90)
 
 # Use only the public library API, including the real DLL in shared builds.
 add_executable(mw_secure_publish_tests secure_publish_test.cc)
-target_compile_definitions(mw_secure_publish_tests PRIVATE
-    MW_STREAMER_TLS_TEST_DATA_DIR="${MW_STREAMER_TEST_DATA_DIR}")
 target_link_libraries(mw_secure_publish_tests PRIVATE
     Catch2::Catch2WithMain mw::streamer FFmpeg::avformat
     OpenSSL::SSL OpenSSL::Crypto)

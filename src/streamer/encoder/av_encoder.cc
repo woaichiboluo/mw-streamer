@@ -1,0 +1,721 @@
+#include "mw/streamer/encoder/av_encoder.h"
+
+#include <algorithm>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <iterator>
+#include <limits>
+#include <mutex>
+#include <new>
+#include <optional>
+#include <stdexcept>
+#include <string_view>
+#include <utility>
+
+extern "C" {
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
+#include <libavutil/mathematics.h>
+#include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
+#include <libavutil/samplefmt.h>
+}
+
+#include <tbb/parallel_invoke.h>
+
+#include "mw/log.h"
+#include "mw/streamer/ffmpeg/av_dictionary.h"
+#include "mw/streamer/ffmpeg/codec_context.h"
+#include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/ffmpeg/filter_graph.h"
+#include "mw/streamer/platform/thread.h"
+
+namespace mw::streamer {
+namespace {
+
+constexpr std::size_t kFrameCapacity = 1;
+constexpr int kVideoIndex = 0;
+constexpr int kAudioIndex = 1;
+
+bool ReservedOption(std::string_view key) {
+  constexpr std::string_view reserved[] = {
+      "b",           "bit_rate",     "g",
+      "gop_size",    "bf",           "max_b_frames",
+      "maxrate",     "rc_max_rate",  "minrate",
+      "rc_min_rate", "bufsize",      "rc_buffer_size",
+      "rc",          "cbr",          "framerate",
+      "r",           "time_base",    "video_size",
+      "s",           "width",        "height",
+      "pix_fmt",     "pixel_format", "sample_fmt",
+      "sample_rate", "ar",           "channel_layout",
+      "ac"};
+  return std::find(std::begin(reserved), std::end(reserved), key) !=
+         std::end(reserved);
+}
+
+void CopyOptions(const std::map<std::string, std::string>& source,
+                 ffmpeg::AvDictionary& target) {
+  for (const auto& [key, value] : source) {
+    if (ReservedOption(key)) {
+      throw std::invalid_argument("扩展选项不能覆盖正式编码字段: " + key);
+    }
+    target.Set(key.c_str(), value);
+  }
+}
+
+bool IsNvenc(std::string_view name) {
+  return name.size() >= 6 && name.substr(name.size() - 6) == "_nvenc";
+}
+
+void ConfigureRateControl(const AvEncoderConfig& config,
+                          ffmpeg::AvDictionary& options) {
+  const auto& name = config.video_encoder_name;
+  const bool cbr = config.rate_control == RateControl::kCbr;
+  if (config.rate_control != RateControl::kCbr &&
+      config.rate_control != RateControl::kVbr) {
+    throw std::invalid_argument("未知码率控制模式");
+  }
+  if (config.video_bit_rate <= 0 || config.max_bit_rate < 0 ||
+      (config.max_bit_rate > 0 &&
+       (config.max_bit_rate < config.video_bit_rate ||
+        (cbr && config.max_bit_rate != config.video_bit_rate)))) {
+    throw std::invalid_argument("视频目标码率与峰值码率不兼容");
+  }
+  const auto maximum = cbr ? config.video_bit_rate : config.max_bit_rate;
+  options.Set("b", std::to_string(config.video_bit_rate));
+  options.Set("maxrate", std::to_string(maximum));
+  if (cbr) options.Set("minrate", std::to_string(config.video_bit_rate));
+  if (maximum > 0) {
+    if (maximum > std::numeric_limits<int>::max() / 2) {
+      throw std::invalid_argument("两秒码率缓冲超过 FFmpeg 支持范围");
+    }
+    options.Set("bufsize", std::to_string(maximum * 2));
+  }
+  if (IsNvenc(name)) {
+    options.Set("rc", cbr ? "cbr" : "vbr");
+  } else if (cbr && name == "libx264") {
+    options.Set("nal-hrd", "cbr");
+  } else if (cbr && name == "libx265") {
+    std::string parameters;
+    const auto supplied = config.video_options.find("x265-params");
+    if (supplied != config.video_options.end() && !supplied->second.empty()) {
+      parameters = supplied->second + ":";
+    }
+    options.Set("x265-params", parameters + "strict-cbr=1:hrd=1");
+  }
+}
+
+void ValidatePixelFormat(const AVCodecContext& context,
+                         AVPixelFormat pixel_format,
+                         bool hardware_layout = false) {
+  const void* configurations = nullptr;
+  int count = 0;
+  ffmpeg::FfmpegException::throwIfError(
+      avcodec_get_supported_config(&context, nullptr,
+                                   AV_CODEC_CONFIG_PIX_FORMAT, 0,
+                                   &configurations, &count),
+      "查询编码器像素格式");
+  if (!configurations) return;
+  const auto* formats = static_cast<const AVPixelFormat*>(configurations);
+  bool accepts_software = false;
+  for (int index = 0; index < count; ++index) {
+    if (formats[index] == pixel_format) return;
+    const auto* description = av_pix_fmt_desc_get(formats[index]);
+    accepts_software |=
+        description && !(description->flags & AV_PIX_FMT_FLAG_HWACCEL);
+  }
+  // Hardware-only encoders expose surface formats here; their software
+  // layouts are validated by the device and hardware frame pool instead.
+  if (hardware_layout && !accepts_software) return;
+  throw std::invalid_argument("当前编码器不支持指定像素格式");
+}
+
+void ConfigureHardware(AVCodecContext& context,
+                       const ffmpeg::HwDeviceContext& device,
+                       AVPixelFormat sw_format) {
+  auto* codec_context = &context;
+  codec_context->pix_fmt = sw_format;
+  codec_context->sw_pix_fmt = sw_format;
+  const auto* codec = codec_context->codec;
+  // A software encoder keeps CPU storage even when a shared GPU exists.
+  if (!(codec->capabilities & AV_CODEC_CAP_HARDWARE) &&
+      !avcodec_get_hw_config(codec, 0)) {
+    ValidatePixelFormat(*codec_context, sw_format);
+    return;
+  }
+  if (!device.get()) {
+    throw std::invalid_argument("硬件编码器需要外部硬件设备上下文");
+  }
+  const auto* native =
+      reinterpret_cast<const AVHWDeviceContext*>(device.get()->data);
+  const AVCodecHWConfig* hardware = nullptr;
+  for (int index = 0;; ++index) {
+    const auto* supported = avcodec_get_hw_config(codec, index);
+    if (!supported) break;
+    const auto* description = av_pix_fmt_desc_get(supported->pix_fmt);
+    if (supported->device_type == native->type && description &&
+        (description->flags & AV_PIX_FMT_FLAG_HWACCEL) &&
+        (supported->methods & AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX)) {
+      hardware = supported;
+      break;
+    }
+  }
+  if (!hardware) {
+    throw std::invalid_argument("指定编码器不支持共享设备的硬件帧编码");
+  }
+  ValidatePixelFormat(*codec_context, sw_format, true);
+  ValidatePixelFormat(*codec_context, hardware->pix_fmt);
+  codec_context->hw_device_ctx = av_buffer_ref(device.get());
+  if (!codec_context->hw_device_ctx) throw std::bad_alloc();
+  const auto free_constraints = [](AVHWFramesConstraints* value) {
+    av_hwframe_constraints_free(&value);
+  };
+  const std::unique_ptr<AVHWFramesConstraints, decltype(free_constraints)>
+      constraints(av_hwdevice_get_hwframe_constraints(
+                      codec_context->hw_device_ctx, nullptr),
+                  free_constraints);
+  if (constraints && constraints->valid_sw_formats) {
+    bool supported = false;
+    for (const auto* format = constraints->valid_sw_formats;
+         *format != AV_PIX_FMT_NONE; ++format) {
+      supported |= *format == sw_format;
+    }
+    if (!supported) {
+      throw std::invalid_argument("共享编码设备不支持指定像素布局");
+    }
+  }
+  codec_context->pix_fmt = hardware->pix_fmt;
+  codec_context->sw_pix_fmt = sw_format;
+  codec_context->hw_frames_ctx =
+      av_hwframe_ctx_alloc(codec_context->hw_device_ctx);
+  if (!codec_context->hw_frames_ctx) throw std::bad_alloc();
+  auto* frames =
+      reinterpret_cast<AVHWFramesContext*>(codec_context->hw_frames_ctx->data);
+  frames->format = hardware->pix_fmt;
+  frames->sw_format = sw_format;
+  frames->width = context.width;
+  frames->height = context.height;
+  ffmpeg::FfmpegException::throwIfError(
+      av_hwframe_ctx_init(codec_context->hw_frames_ctx),
+      "初始化硬件编码帧描述");
+}
+
+ffmpeg::Frame PrepareVideoFrame(const AVCodecContext& context,
+                                const ffmpeg::Frame& source) {
+  const auto* codec = &context;
+  const auto* frame = source.get();
+  if (!frame || !frame->data[0] || frame->width != codec->width ||
+      frame->height != codec->height) {
+    throw std::invalid_argument("视频搬运帧数据或尺寸不匹配");
+  }
+  const auto* target = codec->hw_frames_ctx
+                           ? reinterpret_cast<const AVHWFramesContext*>(
+                                 codec->hw_frames_ctx->data)
+                           : nullptr;
+  const auto* origin = frame->hw_frames_ctx
+                           ? reinterpret_cast<const AVHWFramesContext*>(
+                                 frame->hw_frames_ctx->data)
+                           : nullptr;
+  const auto layout = target ? target->sw_format : codec->pix_fmt;
+  if ((origin ? origin->sw_format : frame->format) != layout ||
+      (origin && frame->format != origin->format)) {
+    throw std::invalid_argument("视频搬运像素布局不匹配");
+  }
+  if (!target && !origin) return source.Ref();
+  if (target && origin) {
+    if (origin->format != target->format || !origin->device_ref ||
+        origin->device_ref->data != codec->hw_device_ctx->data) {
+      throw std::invalid_argument("GPU 视频帧不属于共享编码设备");
+    }
+    return source.Ref();
+  }
+  ffmpeg::Frame result;
+  if (target) {
+    ffmpeg::FfmpegException::throwIfError(
+        av_hwframe_get_buffer(codec->hw_frames_ctx, result.get(), 0),
+        "分配上传 GPU 帧");
+  } else {
+    result->format = layout;
+  }
+  ffmpeg::FfmpegException::throwIfError(
+      av_hwframe_transfer_data(result.get(), frame, 0), "搬运 CPU/GPU 视频帧");
+  result.CopyPropertiesFrom(source);
+  return result;
+}
+
+const AVCodec* FindEncoder(const std::string& name, AVMediaType type) {
+  const auto* codec = avcodec_find_encoder_by_name(name.c_str());
+  if (!codec)
+    throw ffmpeg::FfmpegException(AVERROR_ENCODER_NOT_FOUND,
+                                  "查找编码器 " + name);
+  if (codec->type != type)
+    throw std::invalid_argument("编码器类型与输出轨道不匹配");
+  return codec;
+}
+
+void OpenCodec(AVCodecContext& context, ffmpeg::AvDictionary& options) {
+  // Preserve independent parameter sets for downstream track initialization.
+  context.flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+  if (context.codec->capabilities & AV_CODEC_CAP_SLICE_THREADS)
+    context.thread_type = FF_THREAD_SLICE;
+  if (IsNvenc(context.codec->name) && !options.Get("preset"))
+    options.Set("preset", "p2");
+  ffmpeg::FfmpegException::throwIfError(
+      avcodec_open2(&context, context.codec, options.address()),
+      "avcodec_open2");
+  if (const auto* unused =
+          av_dict_get(options.get(), "", nullptr, AV_DICT_IGNORE_SUFFIX))
+    throw std::invalid_argument(std::string("未识别的编码器选项: ") +
+                                unused->key);
+}
+
+std::unique_ptr<ffmpeg::CodecContext> OpenVideo(
+    const AvEncoderConfig& config, const ffmpeg::HwDeviceContext& device) {
+  const auto* pixel = av_pix_fmt_desc_get(config.video_pixel_format);
+  if (config.width <= 0 || config.height <= 0 || !pixel ||
+      (pixel->flags & AV_PIX_FMT_FLAG_HWACCEL) || config.gop_size < 0 ||
+      config.max_b_frames < 0)
+    throw std::invalid_argument("视频编码格式或 GOP 配置无效");
+  auto owned = std::make_unique<ffmpeg::CodecContext>(
+      FindEncoder(config.video_encoder_name, AVMEDIA_TYPE_VIDEO));
+  auto* context = owned->get();
+  context->width = config.width;
+  context->height = config.height;
+  context->framerate = config.fps;
+  context->time_base = av_inv_q(config.fps);
+  context->sample_aspect_ratio = {1, 1};
+  context->bit_rate = config.video_bit_rate;
+  context->gop_size = config.gop_size;
+  context->max_b_frames = config.max_b_frames;
+  context->flags |= AV_CODEC_FLAG_FRAME_DURATION;
+  ConfigureHardware(*context, device, config.video_pixel_format);
+  ffmpeg::AvDictionary options;
+  CopyOptions(config.video_options, options);
+  ConfigureRateControl(config, options);
+  OpenCodec(*context, options);
+  return owned;
+}
+
+std::unique_ptr<ffmpeg::CodecContext> OpenAudio(const AvEncoderConfig& config) {
+  if (config.audio_sample_rate <= 0 || config.audio_bit_rate < 0 ||
+      av_get_bytes_per_sample(config.audio_sample_format) <= 0 ||
+      !av_channel_layout_check(&config.audio_channel_layout))
+    throw std::invalid_argument("音频编码配置无效");
+  auto owned = std::make_unique<ffmpeg::CodecContext>(
+      FindEncoder(config.audio_encoder_name, AVMEDIA_TYPE_AUDIO));
+  auto* context = owned->get();
+  context->sample_fmt = config.audio_sample_format;
+  const void* supported = nullptr;
+  int count = 0;
+  ffmpeg::FfmpegException::throwIfError(
+      avcodec_get_supported_config(context, nullptr,
+                                   AV_CODEC_CONFIG_SAMPLE_FORMAT, 0, &supported,
+                                   &count),
+      "查询音频编码格式");
+  if (supported && count > 0) {
+    const auto* formats = static_cast<const AVSampleFormat*>(supported);
+    if (std::find(formats, formats + count, context->sample_fmt) ==
+        formats + count)
+      context->sample_fmt = formats[0];
+  }
+  context->sample_rate = config.audio_sample_rate;
+  context->time_base = {1, config.audio_sample_rate};
+  context->bit_rate = config.audio_bit_rate;
+  ffmpeg::FfmpegException::throwIfError(
+      av_channel_layout_copy(&context->ch_layout, &config.audio_channel_layout),
+      "复制编码声道布局");
+  ffmpeg::AvDictionary options;
+  CopyOptions(config.audio_options, options);
+  OpenCodec(*context, options);
+  return owned;
+}
+
+class AudioFilter final {
+ public:
+  AudioFilter(AVSampleFormat input, AVSampleFormat output, int rate,
+              const AVChannelLayout& layout, int frame_size) {
+    source_ = avfilter_graph_alloc_filter(
+        graph_.get(), avfilter_get_by_name("abuffer"), "in");
+    sink_ = avfilter_graph_alloc_filter(
+        graph_.get(), avfilter_get_by_name("abuffersink"), "out");
+    if (!source_ || !sink_) throw std::bad_alloc();
+    auto* parameters = av_buffersrc_parameters_alloc();
+    if (!parameters) throw std::bad_alloc();
+    const std::unique_ptr<AVBufferSrcParameters,
+                          void (*)(AVBufferSrcParameters*)>
+        guard(parameters, [](AVBufferSrcParameters* value) {
+          av_channel_layout_uninit(&value->ch_layout);
+          av_free(value);
+        });
+    parameters->format = input;
+    parameters->sample_rate = rate;
+    parameters->time_base = {1, rate};
+    Check(av_channel_layout_copy(&parameters->ch_layout, &layout),
+          "设置编码音频源布局");
+    Check(av_buffersrc_parameters_set(source_, parameters),
+          "设置编码音频源参数");
+    Check(avfilter_init_str(source_, nullptr), "初始化编码音频源");
+    const AVSampleFormat formats[]{output};
+    const int rates[]{rate};
+    Check(av_opt_set_array(sink_, "sample_formats",
+                           AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE, 0, 1,
+                           AV_OPT_TYPE_SAMPLE_FMT, formats),
+          "设置编码音频输出格式");
+    Check(av_opt_set_array(sink_, "samplerates",
+                           AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE, 0, 1,
+                           AV_OPT_TYPE_INT, rates),
+          "设置编码音频输出采样率");
+    Check(avfilter_init_str(sink_, nullptr), "初始化编码音频输出");
+    Check(avfilter_link(source_, 0, sink_, 0), "连接编码音频滤镜");
+    Check(avfilter_graph_config(graph_.get(), nullptr), "配置编码音频滤镜");
+    if (frame_size > 0) {
+      av_buffersink_set_frame_size(sink_,
+                                   static_cast<unsigned int>(frame_size));
+    }
+  }
+
+  void Submit(const ffmpeg::Frame& frame) {
+    Check(av_buffersrc_write_frame(source_, frame.get()), "提交编码音频源帧");
+  }
+  void End() {
+    Check(av_buffersrc_close(source_, AV_NOPTS_VALUE, 0), "结束编码音频源");
+  }
+  bool Receive(ffmpeg::Frame& frame) {
+    const int result = av_buffersink_get_frame(sink_, frame.get());
+    if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) return false;
+    Check(result, "获取编码音频滤镜帧");
+    frame->time_base = av_buffersink_get_time_base(sink_);
+    return true;
+  }
+
+ private:
+  static void Check(int result, const char* operation) {
+    ffmpeg::FfmpegException::throwIfError(result, operation);
+  }
+  ffmpeg::FilterGraph graph_;
+  AVFilterContext* source_ = nullptr;
+  AVFilterContext* sink_ = nullptr;
+};
+
+}  // namespace
+
+class AvEncoder::Impl final {
+ public:
+  explicit Impl(const ffmpeg::HwDeviceContext& device)
+      : device_(device.Ref()) {}
+  ~Impl() { Stop(); }
+
+  void SetOnPacket(OnPacket callback) {
+    CheckConfigurable();
+    on_packet_ = std::move(callback);
+  }
+  void SetOnError(OnError callback) {
+    CheckConfigurable();
+    on_error_ = std::move(callback);
+  }
+
+  bool Start(const AvEncoderConfig& config) noexcept {
+    if (worker_.joinable()) {
+      MW_LOG_ERROR("streamer", "AvEncoder 启动失败: 重新启动前需要 Stop");
+      return false;
+    }
+    try {
+      {
+        std::lock_guard lock(mutex_);
+        streams_.clear();
+        error_ = {};
+      }
+      auto session = std::make_unique<Session>(config);
+      std::vector<ffmpeg::StreamInfo> streams;
+      const bool video = config.video_pixel_format != AV_PIX_FMT_NONE;
+      const bool audio = config.audio_sample_format != AV_SAMPLE_FMT_NONE;
+      if ((!video && !audio) || config.fps.num <= 0 || config.fps.den <= 0) {
+        throw std::invalid_argument("AvEncoder 需要至少一条轨道和有效帧率");
+      }
+      if (video) {
+        session->video = OpenVideo(config, device_);
+        streams.push_back(ffmpeg::StreamInfo::FromCodecContext(
+            *session->video->get(), kVideoIndex));
+      }
+      if (audio) {
+        session->audio = OpenAudio(config);
+        const auto* context = session->audio->get();
+        streams.push_back(
+            ffmpeg::StreamInfo::FromCodecContext(*context, kAudioIndex));
+        ffmpeg::FfmpegException::throwIfError(
+            av_channel_layout_copy(&session->audio_format->ch_layout,
+                                   &config.audio_channel_layout),
+            "复制编码输入音频布局");
+        session->config.audio_channel_layout = session->audio_format->ch_layout;
+        session->filter = std::make_unique<AudioFilter>(
+            config.audio_sample_format, context->sample_fmt,
+            context->sample_rate, context->ch_layout,
+            context->codec->capabilities & AV_CODEC_CAP_VARIABLE_FRAME_SIZE
+                ? 0
+                : context->frame_size);
+      } else {
+        session->config.audio_channel_layout = {};
+      }
+      {
+        std::lock_guard lock(mutex_);
+        streams_ = std::move(streams);
+        session_ = std::move(session);
+        video_pts_ = audio_pts_ = 0;
+        accepting_ = true;
+      }
+      if (!worker_.Start([this] { Run(); })) {
+        std::lock_guard lock(mutex_);
+        accepting_ = false;
+        session_.reset();
+        streams_.clear();
+        throw std::runtime_error("启动 AvEncoder 帧线程失败");
+      }
+      MW_LOG_INFO("streamer", "AvEncoder 已启动: video={} audio={}", video,
+                  audio);
+      return true;
+    } catch (...) {
+      const auto failure = std::current_exception();
+      Stop();
+      {
+        std::lock_guard lock(mutex_);
+        accepting_ = false;
+        session_.reset();
+        streams_.clear();
+        error_ = failure;
+      }
+      try {
+        std::rethrow_exception(failure);
+      } catch (const std::exception& error) {
+        MW_LOG_ERROR("streamer", "AvEncoder 启动失败: {}", error.what());
+      } catch (...) {
+        MW_LOG_ERROR("streamer", "AvEncoder 启动失败: 未知异常");
+      }
+      return false;
+    }
+  }
+
+  std::vector<ffmpeg::StreamInfo> streams() const {
+    std::lock_guard lock(mutex_);
+    return streams_;
+  }
+  std::exception_ptr error() const {
+    std::lock_guard lock(mutex_);
+    return error_;
+  }
+
+  bool SubmitFrame(const MediaFrame& frame) {
+    std::lock_guard lock(mutex_);
+    if (!accepting_) return false;
+    const auto& config = session_->config;
+    if (static_cast<bool>(session_->video) != frame.video.has_value() ||
+        static_cast<bool>(session_->audio) != frame.audio.has_value())
+      throw std::invalid_argument("编码输入与配置的音视频轨道不匹配");
+    if (frame.video && (!frame.video->get() || !(*frame.video)->data[0]))
+      throw std::invalid_argument("编码视频内容为空");
+    const int samples =
+        frame.audio && frame.audio->get() ? (*frame.audio)->nb_samples : 0;
+    if (frame.audio &&
+        (!frame.audio->get() || !(*frame.audio)->data[0] || samples <= 0 ||
+         (*frame.audio)->format != config.audio_sample_format ||
+         (*frame.audio)->sample_rate != config.audio_sample_rate ||
+         av_channel_layout_compare(&(*frame.audio)->ch_layout,
+                                   &config.audio_channel_layout) != 0))
+      throw std::invalid_argument("编码音频内容或格式不匹配");
+    if ((frame.video &&
+         video_pts_ == std::numeric_limits<std::int64_t>::max()) ||
+        audio_pts_ > std::numeric_limits<std::int64_t>::max() - samples)
+      throw std::overflow_error("编码输入时间计数溢出");
+    MediaFrame retained = frame;
+    if (retained.video) {
+      (*retained.video)->pts = video_pts_++;
+      (*retained.video)->time_base = av_inv_q(config.fps);
+      (*retained.video)->duration = 1;
+    }
+    if (retained.audio) {
+      (*retained.audio)->pts = audio_pts_;
+      (*retained.audio)->time_base = {1, config.audio_sample_rate};
+      (*retained.audio)->duration = samples;
+      audio_pts_ += samples;
+    }
+    if (frames_.size() == kFrameCapacity) {
+      MW_LOG_TRACE("streamer", "AvEncoder 实时帧队列满，丢弃新帧");
+    } else {
+      frames_.push_back(std::move(retained));
+      wake_.notify_one();
+    }
+    return true;
+  }
+
+  void Stop() noexcept {
+    if (!worker_.joinable()) return;
+    {
+      std::unique_lock lock(mutex_);
+      accepting_ = false;
+      wake_.wait(lock,
+                 [this] { return error_ || frames_.size() < kFrameCapacity; });
+      if (!error_) frames_.push_back(std::nullopt);
+    }
+    wake_.notify_one();
+    worker_.Join();
+    std::lock_guard lock(mutex_);
+    frames_.clear();
+    session_.reset();
+  }
+
+ private:
+  struct Session {
+    explicit Session(AvEncoderConfig value) : config(std::move(value)) {}
+    AvEncoderConfig config;
+    ffmpeg::Frame audio_format;
+    std::unique_ptr<ffmpeg::CodecContext> video;
+    std::unique_ptr<ffmpeg::CodecContext> audio;
+    std::unique_ptr<AudioFilter> filter;
+  };
+
+  void CheckConfigurable() const {
+    if (worker_.joinable())
+      throw std::logic_error("配置或重新启动 AvEncoder 前需要 Stop");
+  }
+  int Receive(AVCodecContext& context, int index) {
+    for (;;) {
+      ffmpeg::Packet packet;
+      const int result = avcodec_receive_packet(&context, packet.get());
+      if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) return result;
+      ffmpeg::FfmpegException::throwIfError(result, "avcodec_receive_packet");
+      packet->stream_index = index;
+      packet->time_base = context.time_base;
+      if (on_packet_) on_packet_(packet);
+    }
+  }
+  void Encode(AVCodecContext& context, const ffmpeg::Frame& frame, int index) {
+    auto submitted = frame.Ref();
+    submitted->pts =
+        av_rescale_q(frame->pts, frame->time_base, context.time_base);
+    submitted->duration =
+        av_rescale_q(frame->duration, frame->time_base, context.time_base);
+    submitted->time_base = context.time_base;
+    if (submitted->pts == AV_NOPTS_VALUE || submitted->duration < 0)
+      throw std::invalid_argument("编码时间戳换算溢出");
+    if (context.codec_type == AVMEDIA_TYPE_VIDEO) {
+      submitted->pict_type = AV_PICTURE_TYPE_NONE;
+      submitted->pkt_dts = AV_NOPTS_VALUE;
+    }
+    for (;;) {
+      const int result = avcodec_send_frame(&context, submitted.get());
+      if (result != AVERROR(EAGAIN)) {
+        ffmpeg::FfmpegException::throwIfError(result, "avcodec_send_frame");
+        break;
+      }
+      Receive(context, index);
+    }
+    Receive(context, index);
+  }
+  void DrainCodec(AVCodecContext& context, int index) {
+    for (;;) {
+      const int result = avcodec_send_frame(&context, nullptr);
+      if (result != AVERROR(EAGAIN)) {
+        if (result != AVERROR_EOF)
+          ffmpeg::FfmpegException::throwIfError(result,
+                                                "avcodec_send_frame EOF");
+        break;
+      }
+      Receive(context, index);
+    }
+    if (Receive(context, index) != AVERROR_EOF)
+      throw std::runtime_error("编码器排空未到达 EOF");
+  }
+  void Video(const std::optional<MediaFrame>& frame) {
+    if (!session_->video) return;
+    if (frame) {
+      const auto prepared =
+          PrepareVideoFrame(*session_->video->get(), *frame->video);
+      Encode(*session_->video->get(), prepared, kVideoIndex);
+    } else {
+      DrainCodec(*session_->video->get(), kVideoIndex);
+    }
+  }
+  void Audio(const std::optional<MediaFrame>& frame) {
+    if (!session_->audio) return;
+    if (frame)
+      session_->filter->Submit(*frame->audio);
+    else
+      session_->filter->End();
+    for (;;) {
+      ffmpeg::Frame filtered;
+      if (!session_->filter->Receive(filtered)) break;
+      Encode(*session_->audio->get(), filtered, kAudioIndex);
+    }
+    if (!frame) DrainCodec(*session_->audio->get(), kAudioIndex);
+  }
+  void Run() noexcept {
+    try {
+      for (;;) {
+        std::optional<MediaFrame> frame;
+        {
+          std::unique_lock lock(mutex_);
+          wake_.wait(lock, [this] { return !frames_.empty(); });
+          frame = std::move(frames_.front());
+          frames_.pop_front();
+        }
+        wake_.notify_all();
+        tbb::parallel_invoke([&] { Video(frame); }, [&] { Audio(frame); });
+        if (!frame) break;
+      }
+    } catch (...) {
+      const auto failure = std::current_exception();
+      {
+        std::lock_guard lock(mutex_);
+        error_ = failure;
+        accepting_ = false;
+        frames_.clear();
+      }
+      wake_.notify_all();
+      if (on_error_) {
+        try {
+          on_error_(failure);
+        } catch (...) {
+          MW_LOG_ERROR("streamer", "AvEncoder OnError 回调抛出异常");
+        }
+      }
+    }
+  }
+
+  ffmpeg::HwDeviceContext device_;
+  internal::Thread worker_;
+  OnPacket on_packet_;
+  OnError on_error_;
+  mutable std::mutex mutex_;
+  std::condition_variable wake_;
+  bool accepting_ = false;
+  std::exception_ptr error_;
+  std::unique_ptr<Session> session_;
+  std::vector<ffmpeg::StreamInfo> streams_;
+  std::deque<std::optional<MediaFrame>> frames_;
+  std::int64_t video_pts_ = 0;
+  std::int64_t audio_pts_ = 0;
+};
+
+AvEncoder::AvEncoder(const ffmpeg::HwDeviceContext& device)
+    : impl_(std::make_unique<Impl>(device)) {}
+AvEncoder::~AvEncoder() = default;
+void AvEncoder::SetOnPacket(OnPacket callback) {
+  impl_->SetOnPacket(std::move(callback));
+}
+void AvEncoder::SetOnError(OnError callback) {
+  impl_->SetOnError(std::move(callback));
+}
+bool AvEncoder::Start(const AvEncoderConfig& config) noexcept {
+  return impl_->Start(config);
+}
+std::vector<ffmpeg::StreamInfo> AvEncoder::streams() const {
+  return impl_->streams();
+}
+bool AvEncoder::SubmitFrame(const MediaFrame& frame) {
+  return impl_->SubmitFrame(frame);
+}
+std::exception_ptr AvEncoder::error() const { return impl_->error(); }
+void AvEncoder::Stop() noexcept { impl_->Stop(); }
+
+}  // namespace mw::streamer

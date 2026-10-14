@@ -10,6 +10,7 @@
 #include <vector>
 
 extern "C" {
+#include <libavutil/mathematics.h>
 #include <libavutil/mem.h>
 }
 
@@ -17,6 +18,7 @@ extern "C" {
 #include "ext-codec/AAC.h"
 #include "ext-codec/H264.h"
 #include "ext-codec/H265.h"
+#include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/init/init.h"
 #include "mw/streamer/remuxer/packet_converter.h"
 
@@ -47,7 +49,7 @@ class Options final {
     ffmpeg::FfmpegException::throwIfError(av_dict_set(&value_, name, value, 0),
                                           "设置包转换测试编码选项");
   }
-  AVDictionary* get() const { return value_; }
+  AVDictionary** address() { return &value_; }
 
  private:
   AVDictionary* value_ = nullptr;
@@ -58,61 +60,119 @@ struct Encoded {
   std::vector<ffmpeg::Packet> packets;
 };
 
-void Encode(ffmpeg::Encoder& encoder, const ffmpeg::Frame& frame,
+const AVCodec* FindEncoder(const char* name) {
+  const auto* codec = avcodec_find_encoder_by_name(name);
+  if (!codec) {
+    throw ffmpeg::FfmpegException(AVERROR_ENCODER_NOT_FOUND,
+                                  "查找包转换测试编码器");
+  }
+  return codec;
+}
+
+ffmpeg::CodecContext OpenVideo(const char* name, int width, int height,
+                               Options& options) {
+  ffmpeg::CodecContext encoder(FindEncoder(name));
+  auto* context = encoder.get();
+  context->width = width;
+  context->height = height;
+  context->pix_fmt = AV_PIX_FMT_YUV420P;
+  context->framerate = {50, 1};
+  context->time_base = {1, 50};
+  context->gop_size = 60;
+  context->max_b_frames = 0;
+  context->sample_aspect_ratio = {1, 1};
+  context->flags |= AV_CODEC_FLAG_GLOBAL_HEADER | AV_CODEC_FLAG_FRAME_DURATION;
+  ffmpeg::FfmpegException::throwIfError(
+      avcodec_open2(context, context->codec, options.address()),
+      "打开包转换测试视频编码器");
+  return encoder;
+}
+
+void Encode(AVCodecContext& encoder, const ffmpeg::Frame& frame,
             Encoded& output, int index) {
   const auto receive = [&] {
-    ffmpeg::Packet packet;
-    while (encoder.ReceivePacket(packet) == ffmpeg::EncodeResult::kPacket) {
+    for (;;) {
+      ffmpeg::Packet packet;
+      const int result = avcodec_receive_packet(&encoder, packet.get());
+      if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) return result;
+      ffmpeg::FfmpegException::throwIfError(result, "接收包转换测试编码包");
       packet->stream_index = index;
-      output.packets.push_back(packet.Ref());
+      packet->time_base = encoder.time_base;
+      output.packets.push_back(std::move(packet));
     }
   };
-  while (!encoder.SendFrame(frame)) receive();
+  auto submitted = frame.Ref();
+  submitted->pts =
+      av_rescale_q(frame->pts, frame->time_base, encoder.time_base);
+  submitted->duration =
+      av_rescale_q(frame->duration, frame->time_base, encoder.time_base);
+  submitted->time_base = encoder.time_base;
+  if (encoder.codec_type == AVMEDIA_TYPE_VIDEO) {
+    submitted->pict_type = AV_PICTURE_TYPE_NONE;
+    submitted->pkt_dts = AV_NOPTS_VALUE;
+  }
+  for (;;) {
+    const int result = avcodec_send_frame(&encoder, submitted.get());
+    if (result != AVERROR(EAGAIN)) {
+      ffmpeg::FfmpegException::throwIfError(result, "提交包转换测试编码帧");
+      break;
+    }
+    receive();
+  }
   receive();
-  while (!encoder.Drain()) receive();
-  receive();
-  output.stream = encoder.stream_info(index);
+  for (;;) {
+    const int result = avcodec_send_frame(&encoder, nullptr);
+    if (result != AVERROR(EAGAIN)) {
+      if (result != AVERROR_EOF) {
+        ffmpeg::FfmpegException::throwIfError(result, "排空包转换测试编码器");
+      }
+      break;
+    }
+    receive();
+  }
+  REQUIRE(receive() == AVERROR_EOF);
+  output.stream = ffmpeg::StreamInfo::FromCodecContext(encoder, index);
   REQUIRE_FALSE(output.packets.empty());
 }
 
 Encoded Video(const char* name) {
-  ffmpeg::VideoEncoderConfig config;
-  config.encoder_name = name;
-  config.width = 64;
-  config.height = 64;
-  config.frame_rate = {50, 1};
-  config.time_base = {1, 50};
   Options options;
   options.Set("preset", "ultrafast");
-  if (config.encoder_name == "libx264") {
+  if (std::string(name) == "libx264") {
     options.Set("tune", "zerolatency");
     options.Set("threads", "1");
   } else {
     options.Set("x265-params", "pools=none:frame-threads=1:log-level=error");
   }
-  ffmpeg::VideoEncoder encoder(config, options.get());
+  auto encoder = OpenVideo(name, 64, 64, options);
   Encoded output;
-  Encode(encoder, encoder_test::VideoFrame(0), output, 4);
+  Encode(*encoder.get(), encoder_test::VideoFrame(0), output, 4);
   return output;
 }
 
 Encoded Audio() {
-  ffmpeg::AudioEncoder encoder(ffmpeg::AudioEncoderConfig{});
+  ffmpeg::CodecContext encoder(FindEncoder("aac"));
+  auto* context = encoder.get();
+  context->sample_fmt = AV_SAMPLE_FMT_FLTP;
+  context->sample_rate = 48000;
+  context->time_base = {1, 48000};
+  context->ch_layout = AV_CHANNEL_LAYOUT_STEREO;
+  context->bit_rate = 128000;
+  context->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+  ffmpeg::FfmpegException::throwIfError(
+      avcodec_open2(context, context->codec, nullptr),
+      "打开包转换测试音频编码器");
   Encoded output;
-  Encode(encoder, encoder_test::AudioFrame(1024), output, 7);
+  Encode(*context, encoder_test::AudioFrame(1024), output, 7);
   return output;
 }
 
 Encoded MultiSliceVideo(const char* name) {
-  ffmpeg::VideoEncoderConfig config;
-  config.encoder_name = name;
-  config.width = 128;
-  config.height = 384;
-  config.frame_rate = {50, 1};
-  config.time_base = {1, 50};
+  constexpr int kWidth = 128;
+  constexpr int kHeight = 384;
   Options options;
   options.Set("preset", "ultrafast");
-  if (config.encoder_name == "libx264") {
+  if (std::string(name) == "libx264") {
     options.Set("tune", "zerolatency");
     options.Set("threads", "1");
     options.Set("x264-params", "slices=6:aud=1:repeat-headers=1");
@@ -121,10 +181,10 @@ Encoded MultiSliceVideo(const char* name) {
                 "pools=1:frame-threads=1:log-level=error:ctu=64:slices=6:"
                 "aud=1:repeat-headers=1");
   }
-  ffmpeg::VideoEncoder encoder(config, options.get());
+  auto encoder = OpenVideo(name, kWidth, kHeight, options);
   ffmpeg::Frame frame;
-  frame->width = config.width;
-  frame->height = config.height;
+  frame->width = kWidth;
+  frame->height = kHeight;
   frame->format = AV_PIX_FMT_YUV420P;
   frame->time_base = encoder_test::kVideoTimeBase;
   frame->pts = encoder_test::kVideoStart;
@@ -133,8 +193,8 @@ Encoded MultiSliceVideo(const char* name) {
                                         "分配多slice视频测试帧");
   for (int plane = 0; plane < 3; ++plane) {
     const int divisor = plane == 0 ? 1 : 2;
-    const int width = config.width / divisor;
-    const int height = config.height / divisor;
+    const int width = kWidth / divisor;
+    const int height = kHeight / divisor;
     for (int row = 0; row < height; ++row) {
       std::memset(frame->data[plane] + row * frame->linesize[plane],
                   plane == 0 ? 32 + row % 128 : 128,
@@ -142,7 +202,7 @@ Encoded MultiSliceVideo(const char* name) {
     }
   }
   Encoded output;
-  Encode(encoder, frame, output, 4);
+  Encode(*encoder.get(), frame, output, 4);
   return output;
 }
 

@@ -81,7 +81,7 @@ class LoggedRuntime final {
 };
 
 void EncodeFixture(encoder_test::Capture& capture) {
-  mw::streamer::Encoder encoder;
+  mw::streamer::AvEncoder encoder;
   capture.Bind(encoder);
   auto config = encoder_test::Config();
   config.max_b_frames = 2;

@@ -9,7 +9,7 @@
 namespace {
 
 using namespace encoder_test;
-using mw::streamer::Encoder;
+using mw::streamer::AvEncoder;
 constexpr int kRate = 48000;
 constexpr int kSamples = 6400;
 constexpr double kPi = 3.14159265358979323846;
@@ -50,10 +50,10 @@ ffmpeg::Frame S32Frame(int offset, int samples) {
   return frame;
 }
 
-TEST_CASE("Encoder 将原始 S32 音频转换成 AAC 原生格式并保留源帧",
+TEST_CASE("AvEncoder 将原始 S32 音频转换成 AAC 原生格式并保留源帧",
           "[encoder][audio][sample-format]") {
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   const auto source = S32Stream();
@@ -109,7 +109,7 @@ TEST_CASE("Encoder 将原始 S32 音频转换成 AAC 原生格式并保留源帧
         kSamples);
   CHECK(av_rescale_q(capture.packets.back()->duration, output.time_base,
                      {1, kRate}) == 256);
-  ffmpeg::AudioDecoder decoder(output);
+  auto decoder = CreateDecoder(output);
   const auto frames = Decode(decoder, capture.packets, output.stream_index);
   REQUIRE_FALSE(frames.empty());
   double sine[2][2]{};
@@ -154,10 +154,10 @@ TEST_CASE("Encoder 将原始 S32 音频转换成 AAC 原生格式并保留源帧
   CHECK(amplitude(1, 0) < 0.04);
 }
 
-TEST_CASE("Encoder 音频格式转换仍拒绝中途改变输入布局",
+TEST_CASE("AvEncoder 音频格式转换仍拒绝中途改变输入布局",
           "[encoder][audio][sample-format][validation]") {
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   encoder.Start(Config(), {S32Stream()}, cpu);

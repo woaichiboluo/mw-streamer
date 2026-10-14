@@ -25,6 +25,7 @@ extern "C" {
 
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/ffmpeg/filter_graph.h"
 #include "mw/streamer/platform/thread.h"
 
 namespace mw::streamer {
@@ -33,10 +34,6 @@ namespace {
 void Check(int code, const char* operation) {
   ffmpeg::FfmpegException::throwIfError(code, operation);
 }
-
-struct GraphDeleter {
-  void operator()(AVFilterGraph* graph) const { avfilter_graph_free(&graph); }
-};
 
 struct ParametersDeleter {
   void operator()(AVBufferSrcParameters* parameters) const {
@@ -66,9 +63,8 @@ class TrackFilter final {
  public:
   TrackFilter(const ffmpeg::StreamInfo& stream, const AvEncoderConfig& config,
               const ffmpeg::Frame& first, std::int64_t start_time_us)
-      : video_(stream.codec_parameters.get()->codec_type == AVMEDIA_TYPE_VIDEO),
-        graph_(avfilter_graph_alloc()) {
-    if (!graph_) throw std::bad_alloc();
+      : video_(stream.codec_parameters.get()->codec_type ==
+               AVMEDIA_TYPE_VIDEO) {
     const auto* source_filter =
         avfilter_get_by_name(video_ ? "buffer" : "abuffer");
     if (!source_filter) {
@@ -188,7 +184,7 @@ class TrackFilter final {
 
  private:
   const bool video_;
-  std::unique_ptr<AVFilterGraph, GraphDeleter> graph_;
+  ffmpeg::FilterGraph graph_;
   AVFilterContext* source_ = nullptr;
   AVFilterContext* sink_ = nullptr;
 };

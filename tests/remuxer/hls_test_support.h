@@ -35,6 +35,7 @@ extern "C" {
 #include "Rtsp/RtspMediaSource.h"
 #include "Util/mini.h"
 #include "Util/util.h"
+#include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/init/init.h"
 #include "mw/streamer/remuxer/async_remuxer.h"
 #include "mw/streamer/remuxer/sync_remuxer.h"
@@ -86,7 +87,7 @@ struct Encoded final {
 
 inline Encoded Encode() {
   encoder_test::Capture capture;
-  mw::streamer::Encoder encoder;
+  mw::streamer::AvEncoder encoder;
   capture.Bind(encoder);
   auto config = encoder_test::Config();
   config.gop_size = 50;
@@ -291,26 +292,42 @@ inline DecodedTimes DecodeSegment(const std::string& bytes) {
   REQUIRE(avformat_open_input(&raw, path_utf8.c_str(), nullptr, nullptr) == 0);
   std::unique_ptr<AVFormatContext, FormatCloser> format(raw);
   REQUIRE(avformat_find_stream_info(raw, nullptr) >= 0);
-  std::vector<std::unique_ptr<ffmpeg::Decoder>> decoders(raw->nb_streams);
+  std::vector<std::unique_ptr<ffmpeg::CodecContext>> decoders(raw->nb_streams);
   std::size_t videos = 0, audios = 0;
   DecodedTimes times;
   for (unsigned index = 0; index < raw->nb_streams; ++index) {
     const auto* stream = raw->streams[index];
-    ffmpeg::StreamInfo info{static_cast<int>(index),
-                            ffmpeg::CodecParameters(*stream->codecpar),
-                            stream->time_base};
-    if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+    const auto type = stream->codecpar->codec_type;
+    if (type == AVMEDIA_TYPE_VIDEO) {
       REQUIRE(stream->codecpar->codec_id == AV_CODEC_ID_H264);
-      decoders[index] = std::make_unique<ffmpeg::VideoDecoder>(info);
-    } else if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+    } else if (type == AVMEDIA_TYPE_AUDIO) {
       REQUIRE(stream->codecpar->codec_id == AV_CODEC_ID_AAC);
-      decoders[index] = std::make_unique<ffmpeg::AudioDecoder>(info);
+    } else {
+      continue;
     }
+    const auto* codec = avcodec_find_decoder(stream->codecpar->codec_id);
+    REQUIRE(codec);
+    auto decoder = std::make_unique<ffmpeg::CodecContext>(codec);
+    REQUIRE(avcodec_parameters_to_context(decoder->get(), stream->codecpar) >=
+            0);
+    decoder->get()->pkt_timebase = stream->time_base;
+    decoder->get()->thread_count = 0;
+    if (type == AVMEDIA_TYPE_VIDEO) {
+      decoder->get()->framerate = stream->codecpar->framerate;
+      decoder->get()->sample_aspect_ratio =
+          stream->codecpar->sample_aspect_ratio;
+    }
+    REQUIRE(avcodec_open2(decoder->get(), codec, nullptr) >= 0);
+    decoders[index] = std::move(decoder);
   }
   const auto receive = [&](std::size_t index) {
     ffmpeg::Frame frame;
-    while (decoders[index]->ReceiveFrame(frame) ==
-           ffmpeg::DecodeResult::kFrame) {
+    while (true) {
+      const auto status =
+          avcodec_receive_frame(decoders[index]->get(), frame.get());
+      if (status == AVERROR(EAGAIN) || status == AVERROR_EOF) break;
+      REQUIRE(status >= 0);
+      frame->time_base = raw->streams[index]->time_base;
       REQUIRE(frame->pts != AV_NOPTS_VALUE);
       const auto pts = av_rescale_q(frame->pts, frame->time_base, {1, 1000000});
       const bool video =
@@ -333,12 +350,22 @@ inline DecodedTimes DecodeSegment(const std::string& bytes) {
     REQUIRE(status >= 0);
     const auto index = static_cast<std::size_t>(packet->stream_index);
     if (!decoders[index]) continue;
-    while (!decoders[index]->SendPacket(packet)) receive(index);
+    int sent;
+    while ((sent = avcodec_send_packet(decoders[index]->get(), packet.get())) ==
+           AVERROR(EAGAIN)) {
+      receive(index);
+    }
+    REQUIRE(sent >= 0);
     receive(index);
   }
   for (std::size_t index = 0; index < decoders.size(); ++index) {
     if (!decoders[index]) continue;
-    while (!decoders[index]->Drain()) receive(index);
+    int sent;
+    while ((sent = avcodec_send_packet(decoders[index]->get(), nullptr)) ==
+           AVERROR(EAGAIN)) {
+      receive(index);
+    }
+    REQUIRE((sent >= 0 || sent == AVERROR_EOF));
     receive(index);
   }
   REQUIRE(videos >= 50);

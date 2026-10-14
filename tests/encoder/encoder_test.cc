@@ -7,7 +7,7 @@
 namespace {
 
 using namespace encoder_test;
-using mw::streamer::Encoder;
+using mw::streamer::AvEncoder;
 
 ffmpeg::Frame Nv12VideoFrame(int index) {
   ffmpeg::Frame frame;
@@ -32,7 +32,7 @@ ffmpeg::Frame Nv12VideoFrame(int index) {
 TEST_CASE("视频像素格式默认沿用轨道且显式配置优先",
           "[encoder][configuration][pixel-format]") {
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   auto config = Config();
@@ -60,7 +60,7 @@ TEST_CASE("视频像素格式默认沿用轨道且显式配置优先",
   CHECK(source.codec_parameters.get()->format == source_format);
   REQUIRE(capture.streams.size() == 1);
   const auto& encoded_stream = capture.streams.front();
-  ffmpeg::VideoDecoder decoder(encoded_stream);
+  auto decoder = CreateDecoder(encoded_stream);
   const auto frames =
       Decode(decoder, capture.packets, encoded_stream.stream_index);
   REQUIRE(frames.size() == 3);
@@ -77,7 +77,7 @@ TEST_CASE("视频像素格式默认沿用轨道且显式配置优先",
 TEST_CASE("无效视频像素格式启动失败后可重新启动",
           "[encoder][configuration][pixel-format]") {
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   auto config = Config();
@@ -98,7 +98,7 @@ TEST_CASE("无效视频像素格式启动失败后可重新启动",
   CHECK(capture.errors == 0);
   REQUIRE(capture.streams.size() == 1);
   const auto& encoded_stream = capture.streams.front();
-  ffmpeg::VideoDecoder decoder(encoded_stream);
+  auto decoder = CreateDecoder(encoded_stream);
   CHECK(Decode(decoder, capture.packets, encoded_stream.stream_index).size() ==
         1);
 }
@@ -106,7 +106,7 @@ TEST_CASE("无效视频像素格式启动失败后可重新启动",
 TEST_CASE("显式视频像素格式不会自动转换不匹配的输入帧",
           "[encoder][configuration][pixel-format]") {
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   auto config = Config();
@@ -124,7 +124,7 @@ TEST_CASE("显式视频像素格式不会自动转换不匹配的输入帧",
 TEST_CASE("编码器启动提供输出轨道并允许停止后重新启动",
           "[encoder][lifecycle]") {
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   for (int session = 0; session < 2; ++session) {
@@ -161,7 +161,7 @@ TEST_CASE("无媒体帧的编码会话只通知一次结束", "[encoder][lifecyc
     for (bool drain_first : {false, true}) {
       INFO("tracks=" << streams.size() << " drain_first=" << drain_first);
       Capture capture;
-      Encoder encoder;
+      AvEncoder encoder;
       capture.Bind(encoder);
       ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
       encoder.Start(Config(), streams, cpu);
@@ -184,14 +184,14 @@ TEST_CASE("初始化失败回滚且扩展选项不能覆盖正式字段",
           "[encoder][configuration]") {
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   for (const auto* key : {"b", "g", "bf", "rc", "maxrate"}) {
-    Encoder encoder;
+    AvEncoder encoder;
     auto config = Config();
     config.video_options[key] = "1";
     CHECK_THROWS(encoder.Start(config, {VideoStream()}, cpu));
     encoder.Stop();
   }
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   auto invalid = Config();
   invalid.video_encoder_name = "mw_encoder_does_not_exist";
@@ -210,7 +210,7 @@ TEST_CASE("初始化失败回滚且扩展选项不能覆盖正式字段",
 
 TEST_CASE("编码错误通知一次且不会当作自然结束", "[encoder][lifecycle]") {
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   encoder.Start(Config(), {VideoStream(), AudioStream()}, cpu);
@@ -228,7 +228,7 @@ TEST_CASE("Stop 等待 Packet 回调并排空已接收的 frame",
           "[encoder][lifecycle][stop][backpressure]") {
   Gate gate;
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder, &gate);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   encoder.Start(Config(), {VideoStream()}, cpu);
@@ -258,7 +258,7 @@ TEST_CASE("Stop 等待 Packet 回调并排空已接收的 frame",
   encoder.Drain();
   CHECK(capture.packets.size() == 2);
   CHECK(capture.ended == 1);
-  ffmpeg::VideoDecoder decoder(capture.streams.front());
+  auto decoder = CreateDecoder(capture.streams.front());
   CHECK(Decode(decoder, capture.packets, capture.streams.front().stream_index)
             .size() == 2);
 }
@@ -267,7 +267,7 @@ TEST_CASE("双轨编码会话拒绝缺失半个 channel frame", "[encoder][lifec
   for (bool only_video : {false, true}) {
     INFO("only_video=" << only_video);
     Capture capture;
-    Encoder encoder;
+    AvEncoder encoder;
     capture.Bind(encoder);
     ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
     encoder.Start(Config(), {VideoStream(), AudioStream()}, cpu);
@@ -293,21 +293,21 @@ TEST_CASE("CBR合法配置可编码且不接受矛盾峰值码率", "[encoder][c
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   for (const auto control :
        {mw::streamer::RateControl::kCbr, mw::streamer::RateControl::kVbr}) {
-    Encoder encoder;
+    AvEncoder encoder;
     auto config = Config();
     config.rate_control = control;
     config.max_bit_rate = config.video_bit_rate - 1;
     CHECK_THROWS(encoder.Start(config, {VideoStream()}, cpu));
   }
   {
-    Encoder encoder;
+    AvEncoder encoder;
     auto config = Config();
     config.rate_control = mw::streamer::RateControl::kCbr;
     config.max_bit_rate = config.video_bit_rate + 1;
     CHECK_THROWS(encoder.Start(config, {VideoStream()}, cpu));
   }
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   auto config = Config();
   config.rate_control = mw::streamer::RateControl::kCbr;
@@ -327,7 +327,7 @@ TEST_CASE("CBR合法配置可编码且不接受矛盾峰值码率", "[encoder][c
 TEST_CASE("拼错的编码器扩展选项在初始化时明确失败",
           "[encoder][configuration]") {
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   auto config = Config();
@@ -344,7 +344,7 @@ TEST_CASE("Stop 排空期间的 Packet 致命错误取消排队 frame",
           "[encoder][lifecycle][stop][error][backpressure]") {
   Gate gate;
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   encoder.SetOnPacket([&](const auto& packet) {
     {
@@ -389,7 +389,7 @@ TEST_CASE("Stop 等待 OnEnded 回调并拒绝结束期间的新 frame",
           "[encoder][lifecycle][stop][callback]") {
   Gate gate;
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   encoder.SetOnEnded([&]() noexcept {
     gate.Enter();
@@ -424,7 +424,7 @@ TEST_CASE("Stop 等待 OnEnded 回调并拒绝结束期间的新 frame",
 TEST_CASE("OnReady 异常执行启动回滚且允许停止后重新启动",
           "[encoder][lifecycle][stop][configuration][callback]") {
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   int ready_attempts = 0;
   encoder.SetOnReady([&](const auto&) {

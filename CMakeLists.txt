@@ -27,6 +27,7 @@ include(cmake/Dependencies.cmake)
 
 find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVFORMAT AVUTIL AVFILTER)
 find_package(Threads REQUIRED)
+find_package(TBB REQUIRED)
 
 # Add options after dependencies so only first-party C++ targets inherit them.
 if(MSVC)
@@ -55,7 +56,6 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${MW_CXX_WARNING_OPTIONS}>")
 endif()
 
-# Keep the previous streaming pipeline excluded during reconstruction.
 add_subdirectory(src)
 
 if(BUILD_TESTS)
@@ -67,4 +67,5 @@ if(BUILD_TESTS)
     add_subdirectory(tests/output)
     add_subdirectory(tests/platform)
     add_subdirectory(tests/scheduler)
+    add_subdirectory(tests/encoder)
 endif()

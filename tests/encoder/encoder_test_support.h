@@ -6,13 +6,16 @@
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "mw/streamer/encoder/encoder.h"
-#include "mw/streamer/ffmpeg/decoder.h"
+#include "mw/streamer/encoder/av_encoder.h"
+#include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/ffmpeg/hw_device_context.h"
 
 namespace encoder_test {
 
@@ -33,8 +36,8 @@ inline mw::streamer::MediaFrame Frame(ffmpeg::Frame video,
   return {std::move(video), std::move(audio)};
 }
 
-inline mw::streamer::EncoderConfig Config() {
-  mw::streamer::EncoderConfig config;
+inline mw::streamer::AvEncoderConfig Config() {
+  mw::streamer::AvEncoderConfig config;
   config.fps = {50, 1};
   config.video_options = {{"preset", "ultrafast"},
                           {"tune", "zerolatency"},
@@ -153,7 +156,7 @@ struct Capture final {
   std::vector<ffmpeg::StreamInfo> streams;
   std::vector<ffmpeg::Packet> packets;
 
-  void Bind(mw::streamer::Encoder& encoder, Gate* first_packet = nullptr) {
+  void Bind(mw::streamer::AvEncoder& encoder, Gate* first_packet = nullptr) {
     encoder.SetOnReady([this](const auto& value) noexcept {
       try {
         std::lock_guard lock(mutex);
@@ -202,25 +205,70 @@ struct Capture final {
   }
 };
 
+inline ffmpeg::CodecContext CreateDecoder(const ffmpeg::StreamInfo& stream,
+                                          AVBufferRef* device = nullptr) {
+  const auto* codec =
+      avcodec_find_decoder(stream.codec_parameters.get()->codec_id);
+  if (!codec) throw std::runtime_error("找不到测试解码器");
+  ffmpeg::CodecContext decoder(codec);
+  auto* context = decoder.get();
+  ffmpeg::FfmpegException::throwIfError(
+      avcodec_parameters_to_context(context, stream.codec_parameters.get()),
+      "配置测试解码器");
+  context->pkt_timebase = stream.time_base;
+  if (device) {
+    context->hw_device_ctx = av_buffer_ref(device);
+    if (!context->hw_device_ctx) throw std::bad_alloc();
+    context->get_format = [](AVCodecContext*, const AVPixelFormat* formats) {
+      for (auto* format = formats; *format != AV_PIX_FMT_NONE; ++format) {
+        if (*format == AV_PIX_FMT_CUDA) return *format;
+      }
+      return AV_PIX_FMT_NONE;
+    };
+  }
+  ffmpeg::FfmpegException::throwIfError(avcodec_open2(context, codec, nullptr),
+                                        "打开测试解码器");
+  return decoder;
+}
+
+inline std::vector<ffmpeg::Frame> ReceiveFrames(ffmpeg::CodecContext& decoder) {
+  std::vector<ffmpeg::Frame> frames;
+  for (;;) {
+    ffmpeg::Frame frame;
+    const int result = avcodec_receive_frame(decoder.get(), frame.get());
+    if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) break;
+    ffmpeg::FfmpegException::throwIfError(result, "接收测试解码帧");
+    frame->time_base = decoder.get()->pkt_timebase;
+    frames.push_back(std::move(frame));
+  }
+  return frames;
+}
+
 inline std::vector<ffmpeg::Frame> Decode(
-    ffmpeg::Decoder& decoder, const std::vector<ffmpeg::Packet>& packets,
+    ffmpeg::CodecContext& decoder, const std::vector<ffmpeg::Packet>& packets,
     int stream_index) {
   std::vector<ffmpeg::Frame> frames;
-  ffmpeg::Frame frame;
   const auto receive = [&] {
-    for (;;) {
-      const auto result = decoder.ReceiveFrame(frame);
-      if (result != ffmpeg::DecodeResult::kFrame) return result;
-      frames.push_back(frame.Ref());
+    for (auto& frame : ReceiveFrames(decoder)) {
+      frames.push_back(std::move(frame));
     }
   };
-  for (const auto& packet : packets) {
-    if (packet->stream_index != stream_index) continue;
-    while (!decoder.SendPacket(packet)) receive();
+  const auto send = [&](const AVPacket* packet) {
+    for (;;) {
+      const int result = avcodec_send_packet(decoder.get(), packet);
+      if (result == AVERROR(EAGAIN)) {
+        receive();
+        continue;
+      }
+      ffmpeg::FfmpegException::throwIfError(result, "提交测试解码包");
+      break;
+    }
     receive();
+  };
+  for (const auto& packet : packets) {
+    if (packet->stream_index == stream_index) send(packet.get());
   }
-  while (!decoder.Drain()) receive();
-  receive();
+  send(nullptr);
   return frames;
 }
 

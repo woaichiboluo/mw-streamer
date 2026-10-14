@@ -29,6 +29,7 @@ set(MW_STREAMER_SOURCES
     streamer/ffmpeg/codec_context.cc
     streamer/ffmpeg/codec_parameters.cc
     streamer/ffmpeg/error.cc
+    streamer/ffmpeg/filter_graph.cc
     streamer/ffmpeg/frame.cc
     streamer/ffmpeg/hw_device_context.cc
     streamer/ffmpeg/packet.cc
@@ -41,6 +42,7 @@ set(MW_STREAMER_SOURCES
     streamer/output/output.cc
     streamer/platform/thread.cc
     streamer/scheduler/scheduler.cc
+    streamer/encoder/av_encoder.cc
 )
 
 if(BUILD_SHARED)
@@ -59,6 +61,6 @@ target_include_directories(mw_streamer PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
 )
 target_link_libraries(mw_streamer
-    PUBLIC mw::log FFmpeg::avformat FFmpeg::avcodec FFmpeg::avutil
-    PRIVATE FFmpeg::avfilter fmt::fmt Threads::Threads
+    PUBLIC mw::log FFmpeg::avformat FFmpeg::avcodec FFmpeg::avutil FFmpeg::avfilter
+    PRIVATE fmt::fmt Threads::Threads TBB::tbb
 )

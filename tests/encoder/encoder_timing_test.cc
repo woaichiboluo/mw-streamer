@@ -9,7 +9,7 @@
 namespace {
 
 using namespace encoder_test;
-using mw::streamer::Encoder;
+using mw::streamer::AvEncoder;
 
 const ffmpeg::StreamInfo& Stream(const Capture& capture, AVMediaType type) {
   for (const auto& stream : capture.streams) {
@@ -32,7 +32,7 @@ TEST_CASE("实时 frame 缓存满时丢弃整份音视频且计数保留时间�
           "[encoder][audio][video][timing][backpressure]") {
   Gate gate;
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder, &gate);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   encoder.Start(Config(), {VideoStream(), AudioStream()}, cpu);
@@ -77,7 +77,7 @@ TEST_CASE("实时 frame 缓存满时丢弃整份音视频且计数保留时间�
     CHECK(audio_packets[index]->pts == kAudioPts[index]);
     CHECK(audio_packets[index]->dts == kAudioPts[index]);
   }
-  ffmpeg::VideoDecoder decoder(video_stream);
+  auto decoder = CreateDecoder(video_stream);
   const auto frames = Decode(decoder, video_packets, video_stream.stream_index);
   REQUIRE(frames.size() == 3);
   for (std::size_t index = 0; index < frames.size(); ++index) {
@@ -92,7 +92,7 @@ TEST_CASE("实时 frame 缓存满时丢弃整份音视频且计数保留时间�
 TEST_CASE("纯音频使用样本计数并保留 AAC 负 DTS 编码延迟",
           "[encoder][audio][timing]") {
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   encoder.Start(Config(), {AudioStream()}, cpu);
@@ -124,7 +124,7 @@ TEST_CASE("音频编码帧跨越过载缺口时保留原生滤镜 FIFO 时间戳
           "[encoder][audio][video][timing][backpressure][filter]") {
   Gate gate;
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder, &gate);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   encoder.Start(Config(), {VideoStream(), AudioStream()}, cpu);
@@ -162,7 +162,7 @@ TEST_CASE("音频编码帧跨越过载缺口时保留原生滤镜 FIFO 时间戳
 TEST_CASE("channel frame 不按输入音视频起点裁掉音频前缀",
           "[encoder][audio][video][timing]") {
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   encoder.Start(Config(), {VideoStream(), AudioStream()}, cpu);
@@ -189,7 +189,7 @@ TEST_CASE("channel frame 不按输入音视频起点裁掉音频前缀",
   CHECK(encoded_samples -
             audio_stream.codec_parameters.get()->initial_padding ==
         3008);
-  ffmpeg::AudioDecoder decoder(audio_stream);
+  auto decoder = CreateDecoder(audio_stream);
   const auto frames = Decode(decoder, audio_packets, audio_stream.stream_index);
   bool checked_prefix = false;
   for (const auto& frame : frames) {
@@ -214,7 +214,7 @@ TEST_CASE("channel frame 不按输入音视频起点裁掉音频前缀",
 TEST_CASE("channel frame 的消费计数不依赖源帧媒体时钟",
           "[encoder][audio][video][timing]") {
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   encoder.Start(Config(), {VideoStream(), AudioStream()}, cpu);
@@ -248,7 +248,7 @@ TEST_CASE("Stop 排空 B 帧保留原生负 DTS 与展示顺序",
           "[encoder][video][timing][stop]") {
   constexpr int kFrames = 12;
   Capture capture;
-  Encoder encoder;
+  AvEncoder encoder;
   capture.Bind(encoder);
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   auto config = Config();
@@ -284,7 +284,7 @@ TEST_CASE("Stop 排空 B 帧保留原生负 DTS 与展示顺序",
     CHECK(presentation_times[static_cast<std::size_t>(index)] == index);
   }
   const auto& stream = capture.streams.front();
-  ffmpeg::VideoDecoder decoder(stream);
+  auto decoder = CreateDecoder(stream);
   CHECK(Decode(decoder, capture.packets, stream.stream_index).size() ==
         kFrames);
 }
@@ -293,7 +293,7 @@ TEST_CASE("Stop 和析构排空 AAC 滤镜短尾及编码器延迟",
           "[encoder][audio][timing][lifecycle][stop]") {
   Capture capture;
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
-  auto encoder = std::make_unique<Encoder>();
+  auto encoder = std::make_unique<AvEncoder>();
   capture.Bind(*encoder);
   encoder->Start(Config(), {AudioStream()}, cpu);
   constexpr int kSamples = 3008;
@@ -322,7 +322,7 @@ TEST_CASE("Stop 和析构排空 AAC 滤镜短尾及编码器延迟",
   }
   CHECK(encoded_samples - stream.codec_parameters.get()->initial_padding ==
         kSamples);
-  ffmpeg::AudioDecoder decoder(stream);
+  auto decoder = CreateDecoder(stream);
   const auto decoded = Decode(decoder, capture.packets, stream.stream_index);
   std::int64_t decoded_samples = 0;
   bool checked_prefix = false;
@@ -363,7 +363,7 @@ TEST_CASE("Stop 和析构排空 AAC 滤镜短尾及编码器延迟",
   // the packet payload and native durations remain identical.
   auto without_padding = stream;
   without_padding.codec_parameters.get()->initial_padding = 0;
-  ffmpeg::AudioDecoder uncompensated(without_padding);
+  auto uncompensated = CreateDecoder(without_padding);
   const auto untrimmed =
       Decode(uncompensated, capture.packets, stream.stream_index);
   std::int64_t untrimmed_samples = 0;

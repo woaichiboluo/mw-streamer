@@ -9,14 +9,14 @@
 #include <string>
 #include <vector>
 
-#include "mw/streamer/encoder/encoder.h"
+#include "mw/streamer/encoder/av_encoder.h"
 
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/mathematics.h>
 }
 
-#include "mw/streamer/ffmpeg/decoder.h"
+#include "encoder_test_support.h"
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/init/init.h"
 
@@ -39,20 +39,6 @@ struct ShutdownRuntime {
   }
 };
 
-std::vector<ffmpeg::Frame> ReceiveFrames(ffmpeg::Decoder& decoder) {
-  std::vector<ffmpeg::Frame> frames;
-  ffmpeg::Frame frame;
-  while (decoder.ReceiveFrame(frame) == ffmpeg::DecodeResult::kFrame) {
-    frames.push_back(frame.Ref());
-  }
-  return frames;
-}
-
-void AppendFrames(std::vector<ffmpeg::Frame>& destination,
-                  std::vector<ffmpeg::Frame> source) {
-  for (auto& frame : source) destination.push_back(std::move(frame));
-}
-
 std::vector<ffmpeg::Frame> ReadFrames(const ffmpeg::HwDeviceContext& device,
                                       ffmpeg::StreamInfo& stream) {
   AVFormatContext* raw_input = nullptr;
@@ -70,21 +56,17 @@ std::vector<ffmpeg::Frame> ReadFrames(const ffmpeg::HwDeviceContext& device,
   const auto* source = input->streams[stream_index];
   stream = {stream_index, ffmpeg::CodecParameters(*source->codecpar),
             source->time_base};
-  ffmpeg::VideoDecoder decoder(stream, device, "hevc");
-  std::vector<ffmpeg::Frame> frames;
+  auto decoder = encoder_test::CreateDecoder(stream, device.get());
+  std::vector<ffmpeg::Packet> packets;
   for (;;) {
     ffmpeg::Packet packet;
     const int result = av_read_frame(input.get(), packet.get());
     if (result == AVERROR_EOF) break;
     ffmpeg::FfmpegException::throwIfError(result, "读取编码迁移测试包");
-    if (packet->stream_index != stream_index) continue;
-    while (!decoder.SendPacket(packet)) {
-      AppendFrames(frames, ReceiveFrames(decoder));
-    }
-    AppendFrames(frames, ReceiveFrames(decoder));
+    if (packet->stream_index == stream_index)
+      packets.push_back(std::move(packet));
   }
-  while (!decoder.Drain()) AppendFrames(frames, ReceiveFrames(decoder));
-  AppendFrames(frames, ReceiveFrames(decoder));
+  auto frames = encoder_test::Decode(decoder, packets, stream_index);
   REQUIRE(frames.size() >= 20);
   frames.resize(20);
   for (std::size_t index = 0; index < frames.size(); ++index) {
@@ -222,17 +204,8 @@ struct Capture {
 std::vector<ffmpeg::Frame> DecodePackets(
     const ffmpeg::StreamInfo& stream,
     const std::vector<ffmpeg::Packet>& packets) {
-  ffmpeg::VideoDecoder decoder(stream);
-  std::vector<ffmpeg::Frame> frames;
-  for (const auto& packet : packets) {
-    while (!decoder.SendPacket(packet)) {
-      AppendFrames(frames, ReceiveFrames(decoder));
-    }
-    AppendFrames(frames, ReceiveFrames(decoder));
-  }
-  while (!decoder.Drain()) AppendFrames(frames, ReceiveFrames(decoder));
-  AppendFrames(frames, ReceiveFrames(decoder));
-  return frames;
+  auto decoder = encoder_test::CreateDecoder(stream);
+  return encoder_test::Decode(decoder, packets, stream.stream_index);
 }
 
 TEST_CASE("软硬解码交叉编码机械上传下载并保留共享CUDA设备和输入帧",
@@ -270,7 +243,7 @@ TEST_CASE("软硬解码交叉编码机械上传下载并保留共享CUDA设备�
 
   stream.time_base = kFrameTimeBase;
   const int source_format = stream.codec_parameters.get()->format;
-  mw::streamer::EncoderConfig config;
+  mw::streamer::AvEncoderConfig config;
   config.video_pixel_format = gpu_input ? AV_PIX_FMT_NV12 : AV_PIX_FMT_NONE;
   config.fps = {10, 1};
   config.video_bit_rate = 2000000;
@@ -287,7 +260,7 @@ TEST_CASE("软硬解码交叉编码机械上传下载并保留共享CUDA设备�
   }
 
   Capture capture;
-  mw::streamer::Encoder encoder;
+  mw::streamer::AvEncoder encoder;
   encoder.SetOnReady([&](const auto& streams) { capture.streams = streams; });
   encoder.SetOnPacket([&](const ffmpeg::Packet& packet) {
     std::lock_guard lock(capture.mutex);
@@ -371,7 +344,7 @@ TEST_CASE("外层CUDA编码支持CBR和带峰值上限的VBR", "[.][encoder][cud
   const auto frames = ReadFrames(device, stream);
   stream.time_base = kFrameTimeBase;
   const int source_format = stream.codec_parameters.get()->format;
-  mw::streamer::EncoderConfig config;
+  mw::streamer::AvEncoderConfig config;
   config.video_pixel_format = AV_PIX_FMT_NV12;
   config.video_encoder_name = name;
   config.fps = {10, 1};
@@ -382,7 +355,7 @@ TEST_CASE("外层CUDA编码支持CBR和带峰值上限的VBR", "[.][encoder][cud
   config.max_b_frames = 0;
   config.video_options = {{"delay", "0"}, {"zerolatency", "1"}};
   Capture capture;
-  mw::streamer::Encoder encoder;
+  mw::streamer::AvEncoder encoder;
   encoder.SetOnReady([&](const auto& streams) { capture.streams = streams; });
   encoder.SetOnPacket([&](const ffmpeg::Packet& packet) {
     std::lock_guard lock(capture.mutex);

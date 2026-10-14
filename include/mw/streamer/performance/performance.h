@@ -14,8 +14,6 @@ extern "C" {
 }
 
 struct AVPacket;
-struct AVFrame;
-struct AVCodecContext;
 
 namespace mw::streamer {
 enum class InputState;
@@ -173,43 +171,6 @@ class InputPerformance final {
   bool trace_enabled_ = false;
   bool active_ = false;
   bool final_ = false;
-};
-
-// Decoder API wall-time and throughput sampling on the decoder's worker.
-class DecoderPerformance final {
- public:
-  using Clock = PerformanceWindow::Clock;
-  using TimePoint = PerformanceWindow::TimePoint;
-
-  explicit DecoderPerformance(int stream_index) noexcept;
-  void Start(const void* instance, const AVCodecContext& context) noexcept;
-  TimePoint Begin() const noexcept;
-  void PacketSent(TimePoint started, const AVPacket* packet,
-                  int result) noexcept;
-  void FrameReceived(TimePoint started, const AVFrame* frame,
-                     int result) noexcept;
-  void Drained(TimePoint started, int result) noexcept;
-  void Flush() noexcept;
-  void Stop() noexcept;
-
- private:
-  void Finish(TimePoint started, bool error = false,
-              bool final = false) noexcept;
-  void CountFrame(const AVFrame& frame) noexcept;
-  void Report(bool final) noexcept;
-
-  PerformanceWindow window_;
-  const void* instance_ = nullptr;
-  int stream_index_;
-  AVRational time_base_{};
-  const char* module_ = nullptr;
-  const char* codec_ = "?";
-  const char* backend_ = "cpu";
-  bool video_ = false;
-  bool enabled_ = false;
-  bool trace_enabled_ = false;
-  bool final_ = false;
-  std::int64_t previous_pts_ = 0;
 };
 
 // Updates run under the owning Encoder's existing mutex. Worker time includes
