@@ -1,4 +1,4 @@
-#include "mw/streamer/remuxer/async_remuxer.h"
+#include "mw/streamer/remuxer/remuxer.h"
 
 #include <algorithm>
 #include <condition_variable>
@@ -10,7 +10,6 @@
 #include <utility>
 
 extern "C" {
-#include <libavutil/error.h>
 #include <libavutil/mathematics.h>
 }
 
@@ -22,22 +21,18 @@ extern "C" {
 #include "mw/streamer/remuxer/remux_output.h"
 
 namespace mw::streamer {
-class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
+class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
  public:
   void SetOnError(OnError callback) {
     std::lock_guard<std::mutex> lock(mutex_);
     on_error_ = std::move(callback);
-  }
-  void SetOnEnded(OnEnded callback) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    on_ended_ = std::move(callback);
   }
 
   void Start(const std::vector<ffmpeg::StreamInfo>& streams) {
     std::lock_guard<std::mutex> control(control_);
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (running_) throw std::logic_error("AsyncRemuxer 已经启动");
+      if (running_) throw std::logic_error("Remuxer 已经启动");
     }
     auto poller =
         poller_ ? poller_ : toolkit::EventPollerPool::Instance().getPoller();
@@ -55,9 +50,8 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
             std::make_unique<internal::MediaTimestampConverter>(streams);
         std::weak_ptr<Impl> weak = shared_from_this();
         auto output = std::make_shared<internal::RemuxOutput>(
-            poller, [weak](std::string_view target, int code,
-                           std::string_view message) {
-              if (auto self = weak.lock()) self->Error(target, code, message);
+            poller, [weak](std::exception_ptr error) {
+              if (auto self = weak.lock()) self->Error(error);
             });
         output->Start(converter->tracks());
         try {
@@ -68,7 +62,7 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
           try {
             output->Close();
           } catch (const std::exception& failure) {
-            MW_LOG_ERROR("streamer", "AsyncRemuxer 启动回滚失败: {}",
+            MW_LOG_ERROR("streamer", "Remuxer 启动回滚失败: {}",
                          failure.what());
           }
           std::rethrow_exception(error);
@@ -83,6 +77,7 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
         handoff_.reset();
         running_ = accepting_ = true;
         draining_ = closing_ = scheduled_ = false;
+        error_reported_ = false;
       });
     } catch (...) {
       const auto error = std::current_exception();
@@ -98,7 +93,7 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
       return false;
     }
     if (poller_->isCurrentThread())
-      throw std::logic_error("AsyncRemuxer 不允许在输出 poller 上提交编码包");
+      throw std::logic_error("Remuxer 不允许在输出 poller 上提交编码包");
     try {
       interleaver_->Validate(packet);
     } catch (...) {
@@ -140,7 +135,7 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
         internal::OutputRegistration::Kind::kHls, app, stream, ip, port, tls));
   }
 
-  RemuxerOutputInfo output_info() const {
+  Remuxer::OutputInfo output_info() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return output_info_;
   }
@@ -180,7 +175,7 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
   bool RequireRegisterable() {
     std::lock_guard<std::mutex> lock(mutex_);
     if ((running_ && !accepting_) || draining_ || closing_)
-      throw std::logic_error("AsyncRemuxer 正在排空");
+      throw std::logic_error("Remuxer 正在排空");
     return running_;
   }
   std::string Register(internal::OutputRegistration::Entry entry) {
@@ -203,20 +198,41 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
   }
   void RequireAccepting() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!accepting_) throw std::logic_error("AsyncRemuxer 未启动或已经排空");
+    if (!accepting_) throw std::logic_error("Remuxer 未启动或已经排空");
   }
-  void Error(std::string_view target, int code, std::string_view message,
-             bool closing_error = false) {
+  void Error(std::exception_ptr error) {
     OnError callback;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!running_ || (closing_ && !closing_error)) return;
+      if (!running_) return;
       performance_.Error();
-      callback = on_error_;
+      if (!error_reported_) {
+        error_reported_ = true;
+        accepting_ = false;
+        draining_ = true;
+        writable_.notify_all();
+        if (!closing_) Schedule();
+        callback = on_error_;
+      }
     }
-    MW_LOG_ERROR("streamer", "AsyncRemuxer error: target={} code={} {}", target,
-                 code, message);
-    if (callback) callback(target, code, message);
+    try {
+      std::rethrow_exception(error);
+    } catch (const std::exception& failure) {
+      MW_LOG_ERROR("streamer", "Remuxer error: {}", failure.what());
+    } catch (...) {
+      MW_LOG_ERROR("streamer", "Remuxer error: unknown exception");
+    }
+    if (callback) {
+      try {
+        callback(error);
+      } catch (const std::exception& failure) {
+        MW_LOG_ERROR("streamer", "Remuxer OnError callback failed: {}",
+                     failure.what());
+      } catch (...) {
+        MW_LOG_ERROR("streamer",
+                     "Remuxer OnError callback failed: unknown exception");
+      }
+    }
   }
 
   // Admission has one packet slot; media interleaving is separate so waiting
@@ -291,13 +307,8 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
                                           : 0),
                             interleaver_->initialized(), draining_);
       }
-    } catch (const std::exception& error) {
-      {
-        std::lock_guard<std::mutex> lock(mutex_);
-        accepting_ = false;
-        writable_.notify_all();
-      }
-      Error({}, AVERROR_EXTERNAL, error.what());
+    } catch (...) {
+      Error(std::current_exception());
       finish = true;
     }
     if (finish) {
@@ -309,8 +320,8 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
       }
       try {
         output_->Flush();
-      } catch (const std::exception& error) {
-        Error({}, AVERROR_EXTERNAL, error.what(), true);
+      } catch (...) {
+        Error(std::current_exception());
       }
       auto self = shared_from_this();
       // Ring dispatches produced by flush run before targets are released.
@@ -321,8 +332,8 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
   void Finish() {
     try {
       output_->Close();
-    } catch (const std::exception& error) {
-      Error({}, AVERROR_EXTERNAL, error.what(), true);
+    } catch (...) {
+      Error(std::current_exception());
     }
     output_.reset();
     converter_.reset();
@@ -331,17 +342,11 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
     // Wait behind the pusher teardown tasks queued on this same poller.
     poller_->async(
         [self] {
-          OnEnded callback;
           {
             std::lock_guard<std::mutex> lock(self->mutex_);
             self->handoff_.reset();
             self->interleaver_.reset();
             self->performance_.Report(0, 0, true, self->draining_, true);
-            callback = self->on_ended_;
-          }
-          if (callback) callback();
-          {
-            std::lock_guard<std::mutex> lock(self->mutex_);
             self->running_ = self->scheduled_ = false;
           }
           self->stopped_.notify_all();
@@ -353,7 +358,7 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
   std::mutex control_;
   mutable std::mutex mutex_;
   internal::OutputRegistration registration_;
-  RemuxerOutputInfo output_info_;
+  Remuxer::OutputInfo output_info_;
   std::condition_variable stopped_;
   std::condition_variable writable_;
   std::optional<internal::PacketInterleaver::Item> handoff_;
@@ -362,8 +367,8 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
   bool draining_ = false;
   bool closing_ = false;
   bool scheduled_ = false;
+  bool error_reported_ = false;
   OnError on_error_;
-  OnEnded on_ended_;
   toolkit::EventPoller::Ptr poller_;
   std::shared_ptr<internal::RemuxOutput> output_;
   std::unique_ptr<internal::PacketInterleaver> interleaver_;
@@ -372,49 +377,51 @@ class AsyncRemuxer::Impl final : public std::enable_shared_from_this<Impl> {
   std::unique_ptr<internal::MediaTimestampConverter> timestamps_;
 };
 
-AsyncRemuxer::AsyncRemuxer() : impl_(std::make_shared<Impl>()) {}
-AsyncRemuxer::~AsyncRemuxer() { Stop(); }
-void AsyncRemuxer::SetOnError(OnError callback) {
+Remuxer::Remuxer() : impl_(std::make_shared<Impl>()) {}
+Remuxer::~Remuxer() { Stop(); }
+void Remuxer::SetOnError(OnError callback) {
   impl_->SetOnError(std::move(callback));
 }
-void AsyncRemuxer::SetOnEnded(OnEnded callback) {
-  impl_->SetOnEnded(std::move(callback));
+bool Remuxer::Start(const std::vector<ffmpeg::StreamInfo>& streams) noexcept {
+  try {
+    impl_->Start(streams);
+    return true;
+  } catch (const std::exception& error) {
+    MW_LOG_ERROR("streamer", "Remuxer 启动失败: {}", error.what());
+  } catch (...) {
+    MW_LOG_ERROR("streamer", "Remuxer 启动失败: 未知异常");
+  }
+  return false;
 }
-void AsyncRemuxer::Start(const std::vector<ffmpeg::StreamInfo>& streams) {
-  impl_->Start(streams);
-}
-bool AsyncRemuxer::SubmitPacket(const ffmpeg::Packet& packet) {
+bool Remuxer::SubmitPacket(const ffmpeg::Packet& packet) {
   return impl_->SubmitPacket(packet);
 }
-std::string AsyncRemuxer::AddPushUrl(const std::string& url) {
+std::string Remuxer::AddPushUrl(const std::string& url) {
   return impl_->AddPushUrl(url);
 }
-void AsyncRemuxer::AddRtspPublish(const std::string& app,
-                                  const std::string& stream,
-                                  const std::string& ip, std::uint16_t port) {
+void Remuxer::AddRtspPublish(const std::string& app, const std::string& stream,
+                             const std::string& ip, std::uint16_t port) {
   AddRtspPublish(app, stream, ip, port, false);
 }
-void AsyncRemuxer::AddRtspPublish(const std::string& app,
-                                  const std::string& stream,
-                                  const std::string& ip, std::uint16_t port,
-                                  bool tls) {
+void Remuxer::AddRtspPublish(const std::string& app, const std::string& stream,
+                             const std::string& ip, std::uint16_t port,
+                             bool tls) {
   impl_->AddRtspPublish(app, stream, ip, port, tls);
 }
-std::string AsyncRemuxer::AddHlsPublish(const std::string& app,
-                                        const std::string& stream,
-                                        const std::string& ip,
-                                        std::uint16_t port) {
+std::string Remuxer::AddHlsPublish(const std::string& app,
+                                   const std::string& stream,
+                                   const std::string& ip, std::uint16_t port) {
   return AddHlsPublish(app, stream, ip, port, false);
 }
-std::string AsyncRemuxer::AddHlsPublish(const std::string& app,
-                                        const std::string& stream,
-                                        const std::string& ip,
-                                        std::uint16_t port, bool tls) {
+std::string Remuxer::AddHlsPublish(const std::string& app,
+                                   const std::string& stream,
+                                   const std::string& ip, std::uint16_t port,
+                                   bool tls) {
   return impl_->AddHlsPublish(app, stream, ip, port, tls);
 }
-void AsyncRemuxer::Drain() noexcept { impl_->Drain(); }
-void AsyncRemuxer::Stop() noexcept { impl_->Stop(); }
-RemuxerOutputInfo AsyncRemuxer::output_info() const {
+void Remuxer::Drain() noexcept { impl_->Drain(); }
+void Remuxer::Stop() noexcept { impl_->Stop(); }
+Remuxer::OutputInfo Remuxer::output_info() const {
   return impl_->output_info();
 }
 

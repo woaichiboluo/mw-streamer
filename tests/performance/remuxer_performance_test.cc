@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -21,7 +22,7 @@
 #include "../encoder/encoder_test_support.h"
 #include "mw/log.h"
 #include "mw/streamer/init/init.h"
-#include "mw/streamer/remuxer/async_remuxer.h"
+#include "mw/streamer/remuxer/remuxer.h"
 
 namespace {
 
@@ -309,7 +310,7 @@ void CheckHandoffs(const std::string& text,
 
 }  // namespace
 
-TEST_CASE("公开AsyncRemuxer性能info trace off实际排空统计且日志不改变媒体包",
+TEST_CASE("公开Remuxer性能info trace off实际排空统计且日志不改变媒体包",
           "[performance][remuxer][async]") {
   const auto level =
       GENERATE(LogLevel::kInfo, LogLevel::kTrace, LogLevel::kOff);
@@ -319,14 +320,11 @@ TEST_CASE("公开AsyncRemuxer性能info trace off实际排空统计且日志不�
   const auto snapshots = Snapshot(capture);
   const auto order = Order(capture);
   Totals totals;
-  std::atomic<int> ended{0};
   std::atomic<int> errors{0};
   {
-    mw::streamer::AsyncRemuxer remuxer;
-    remuxer.SetOnEnded([&]() noexcept { ++ended; });
-    remuxer.SetOnError(
-        [&](std::string_view, int, std::string_view) noexcept { ++errors; });
-    remuxer.Start(capture.streams);
+    mw::streamer::Remuxer remuxer;
+    remuxer.SetOnError([&](std::exception_ptr) noexcept { ++errors; });
+    REQUIRE(remuxer.Start(capture.streams));
     // There are deliberately no targets: a false SDK inputFrame return is
     // demand information, and must not be counted as a lost encoded packet.
     for (std::size_t position = 0; position < order.size(); ++position) {
@@ -342,7 +340,6 @@ TEST_CASE("公开AsyncRemuxer性能info trace off实际排空统计且日志不�
     remuxer.Drain();
     remuxer.Stop();
   }
-  CHECK(ended.load() == 1);
   CHECK(errors.load() == 0);
   CheckUnchanged(capture, snapshots);
   const auto text = logging.ReadAfterShutdown();
@@ -367,21 +364,18 @@ TEST_CASE("公开AsyncRemuxer性能info trace off实际排空统计且日志不�
   }
 }
 
-TEST_CASE("AsyncRemuxer性能复用会话累计清零且重复Stop不产生多份摘要",
+TEST_CASE("Remuxer性能复用会话累计清零且重复Stop不产生多份摘要",
           "[performance][remuxer][async][lifecycle]") {
   LoggedRuntime logging(LogLevel::kTrace);
   encoder_test::Capture capture;
   EncodeFixture(capture);
   std::vector<Totals> totals(2);
-  std::atomic<int> ended{0};
   std::atomic<int> errors{0};
   {
-    mw::streamer::AsyncRemuxer remuxer;
-    remuxer.SetOnEnded([&]() noexcept { ++ended; });
-    remuxer.SetOnError(
-        [&](std::string_view, int, std::string_view) noexcept { ++errors; });
+    mw::streamer::Remuxer remuxer;
+    remuxer.SetOnError([&](std::exception_ptr) noexcept { ++errors; });
     for (std::size_t session = 0; session < totals.size(); ++session) {
-      remuxer.Start(capture.streams);
+      REQUIRE(remuxer.Start(capture.streams));
       for (const auto index : Order(capture)) {
         if (session == 1 && (capture.packets[index]->stream_index !=
                                  encoder_test::VideoStream().stream_index ||
@@ -393,7 +387,6 @@ TEST_CASE("AsyncRemuxer性能复用会话累计清零且重复Stop不产生多�
       remuxer.Drain();
       remuxer.Stop();
       remuxer.Stop();
-      CHECK(ended.load() == static_cast<int>(session + 1));
     }
   }
   CHECK(errors.load() == 0);
@@ -406,7 +399,7 @@ TEST_CASE("AsyncRemuxer性能复用会话累计清零且重复Stop不产生多�
   CHECK(totals[1].packets == 2);
 }
 
-TEST_CASE("AsyncRemuxer性能记录EOF缺轨保留全部包和非法包拒绝",
+TEST_CASE("Remuxer性能记录EOF缺轨保留全部包和非法包拒绝",
           "[performance][remuxer][async][accounting]") {
   LoggedRuntime logging(LogLevel::kTrace);
   encoder_test::Capture capture;
@@ -415,12 +408,10 @@ TEST_CASE("AsyncRemuxer性能记录EOF缺轨保留全部包和非法包拒绝",
   Totals handed_off;
   int expected_errors = 0;
   int expected_rejected = 0;
-  std::atomic<int> ended{0};
   {
-    mw::streamer::AsyncRemuxer remuxer;
-    remuxer.SetOnEnded([&]() noexcept { ++ended; });
-    remuxer.SetOnError([](std::string_view, int, std::string_view) noexcept {});
-    remuxer.Start(capture.streams);
+    mw::streamer::Remuxer remuxer;
+    remuxer.SetOnError([](std::exception_ptr) noexcept {});
+    REQUIRE(remuxer.Start(capture.streams));
     SECTION("EOF仅收到AAC时全部有效包交给SDK") {
       for (const auto index : Order(capture)) {
         if (capture.packets[index]->stream_index !=
@@ -458,7 +449,6 @@ TEST_CASE("AsyncRemuxer性能记录EOF缺轨保留全部包和非法包拒绝",
     remuxer.Stop();
     remuxer.Stop();
   }
-  CHECK(ended.load() == 1);
   REQUIRE(accepted.packets > 0);
   const auto text = logging.ReadAfterShutdown();
   const auto info = Lines(text, "info", "report=summary");
@@ -471,7 +461,7 @@ TEST_CASE("AsyncRemuxer性能记录EOF缺轨保留全部包和非法包拒绝",
                expected_rejected);
 }
 
-TEST_CASE("AsyncRemuxer转换失败将已取出的在途编码包计入中止而不冒充交付",
+TEST_CASE("Remuxer转换失败将已取出的在途编码包计入中止而不冒充交付",
           "[performance][remuxer][async][failure]") {
   LoggedRuntime logging(LogLevel::kTrace);
   encoder_test::Capture capture;
@@ -494,14 +484,15 @@ TEST_CASE("AsyncRemuxer转换失败将已取出的在途编码包计入中止而
   REQUIRE(damaged->size > 0);
   std::fill_n(damaged->data, damaged->size, std::uint8_t{0});
   const auto bytes = static_cast<std::int64_t>(damaged->size);
-  std::atomic<int> ended{0};
   std::atomic<int> errors{0};
+  std::exception_ptr failure;
   {
-    mw::streamer::AsyncRemuxer remuxer;
-    remuxer.SetOnEnded([&]() noexcept { ++ended; });
-    remuxer.SetOnError(
-        [&](std::string_view, int, std::string_view) noexcept { ++errors; });
-    remuxer.Start({*stream});
+    mw::streamer::Remuxer remuxer;
+    remuxer.SetOnError([&](std::exception_ptr error) noexcept {
+      failure = error;
+      ++errors;
+    });
+    REQUIRE(remuxer.Start({*stream}));
     // Metadata passes admission. With one declared video track PopReady
     // removes this key packet before the adapter rejects its zeroed NAL data.
     // Counting only the remaining interleaver queue would lose this abort.
@@ -510,8 +501,9 @@ TEST_CASE("AsyncRemuxer转换失败将已取出的在途编码包计入中止而
     remuxer.Stop();
     remuxer.Stop();
   }
-  CHECK(ended.load() == 1);
   CHECK(errors.load() >= 1);
+  REQUIRE(failure != nullptr);
+  REQUIRE_THROWS_AS(std::rethrow_exception(failure), std::invalid_argument);
   CheckUnchanged(capture, snapshots);
   const auto text = logging.ReadAfterShutdown();
   CHECK(Lines(text, "trace", "event=handoff").empty());

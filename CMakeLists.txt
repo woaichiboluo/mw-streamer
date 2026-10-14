@@ -25,7 +25,7 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
 include(cmake/Dependencies.cmake)
 
-find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVFORMAT AVUTIL AVFILTER)
+find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVFORMAT AVUTIL AVFILTER AVDEVICE)
 find_package(Threads REQUIRED)
 find_package(TBB REQUIRED)
 
@@ -60,6 +60,7 @@ add_subdirectory(src)
 
 if(BUILD_TESTS)
     enable_testing()
+    set(MW_STREAMER_TEST_DATA_DIR "${PROJECT_SOURCE_DIR}/tests/data")
     add_subdirectory(tests/av_input)
     add_subdirectory(tests/decoder)
     add_subdirectory(tests/frame_source)
@@ -68,4 +69,5 @@ if(BUILD_TESTS)
     add_subdirectory(tests/platform)
     add_subdirectory(tests/scheduler)
     add_subdirectory(tests/encoder)
+    add_subdirectory(tests/remuxer)
 endif()

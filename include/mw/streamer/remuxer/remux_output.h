@@ -2,12 +2,11 @@
 #define MW_STREAMER_REMUXER_REMUX_OUTPUT_H_
 
 #include <cstdint>
-#include <functional>
+#include <exception>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -15,7 +14,7 @@
 #include "Network/TcpServer.h"
 #include "Poller/EventPoller.h"
 #include "Pusher/PusherProxy.h"
-#include "mw/streamer/remuxer/output_info.h"
+#include "mw/streamer/remuxer/remuxer.h"
 
 namespace mw::streamer::internal {
 
@@ -41,7 +40,7 @@ class OutputRegistration final {
                               std::uint16_t port, bool tls);
   const Entry* FindPush(const std::string& url) const;
   void Add(Entry entry);
-  RemuxerOutputInfo info() const;
+  Remuxer::OutputInfo info() const;
   const std::vector<Entry>& entries() const { return entries_; }
 
  private:
@@ -50,12 +49,14 @@ class OutputRegistration final {
 
 // One shared output session. Own through shared_ptr and serialize every call on
 // poller; Flush before Close, allowing queued Ring dispatches to run in
-// between. Errors from asynchronous pushers run on that same poller.
+// between. Terminal pusher errors run on that same poller; recoverable network
+// failures are logged while the SDK retries them internally.
 class RemuxOutput final : public mediakit::MediaSourceEvent,
                           public std::enable_shared_from_this<RemuxOutput> {
  public:
-  using ErrorCallback = std::function<void(std::string_view target, int code,
-                                           std::string_view message)>;
+  // Only unrecoverable errors are forwarded. Original exceptions are retained;
+  // terminal SDK error results are wrapped at entry.
+  using ErrorCallback = Remuxer::OnError;
 
   RemuxOutput(toolkit::EventPoller::Ptr poller, ErrorCallback callback);
   void Start(const std::vector<mediakit::Track::Ptr>& tracks);
@@ -86,7 +87,7 @@ class RemuxOutput final : public mediakit::MediaSourceEvent,
   bool close(mediakit::MediaSource&) override;
   void onRegist(mediakit::MediaSource& source, bool registered) override;
   void StartPushers();
-  void Error(std::string_view target, int code, std::string_view message);
+  void Error(std::exception_ptr error);
 
   toolkit::EventPoller::Ptr poller_;
   ErrorCallback on_error_;

@@ -2,9 +2,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -23,7 +23,7 @@ extern "C" {
 
 #include "../encoder/encoder_test_support.h"
 #include "mw/streamer/init/init.h"
-#include "mw/streamer/remuxer/async_remuxer.h"
+#include "mw/streamer/remuxer/remuxer.h"
 
 namespace {
 
@@ -136,33 +136,23 @@ void EncodeMarkers(encoder_test::Capture& capture, int b_frames = 2) {
 
 struct Notifications final {
   std::mutex mutex;
-  std::condition_variable wake;
-  int ended = 0;
   std::vector<std::string> errors;
   bool callback_failed = false;
 
-  void Bind(mw::streamer::AsyncRemuxer& remuxer) {
-    remuxer.SetOnError([this](std::string_view target, int,
-                              std::string_view message) noexcept {
+  void Bind(mw::streamer::Remuxer& remuxer) {
+    remuxer.SetOnError([this](std::exception_ptr error) noexcept {
       try {
-        std::lock_guard<std::mutex> lock(mutex);
-        errors.push_back(std::string(target) + ": " + std::string(message));
+        try {
+          std::rethrow_exception(error);
+        } catch (const std::exception& exception) {
+          std::lock_guard<std::mutex> lock(mutex);
+          errors.emplace_back(exception.what());
+        }
       } catch (...) {
         std::lock_guard<std::mutex> lock(mutex);
         callback_failed = true;
       }
-      wake.notify_all();
     });
-    remuxer.SetOnEnded([this]() noexcept {
-      std::lock_guard<std::mutex> lock(mutex);
-      ++ended;
-      wake.notify_all();
-    });
-  }
-  bool Wait() {
-    std::unique_lock<std::mutex> lock(mutex);
-    return wake.wait_for(lock, std::chrono::seconds(20),
-                         [&] { return ended != 0; });
   }
 };
 
@@ -225,7 +215,7 @@ Decoded DecodeFile(const std::string& path, unsigned int stream_count = 2) {
   AVFormatContext* raw = nullptr;
   ffmpeg::FfmpegException::throwIfError(
       avformat_open_input(&raw, path.c_str(), nullptr, nullptr),
-      "打开AsyncRemuxer录制成品");
+      "打开Remuxer录制成品");
   const std::unique_ptr<AVFormatContext, FormatCloser> input(raw);
   ffmpeg::FfmpegException::throwIfError(
       avformat_find_stream_info(input.get(), nullptr), "探测录制轨道");
@@ -388,7 +378,7 @@ void CheckName(const std::string& path, const std::string& stem,
 
 }  // namespace
 
-TEST_CASE("公开AsyncRemuxer多目标录制保留B帧AAC同步并完成动态录制尾部",
+TEST_CASE("公开Remuxer多目标录制保留B帧AAC同步并完成动态录制尾部",
           "[remuxer][async][recording][integration]") {
   const std::unique_ptr<mw::streamer::MwStreamerContext,
                         decltype(&mw::streamer::Shutdown)>
@@ -397,7 +387,7 @@ TEST_CASE("公开AsyncRemuxer多目标录制保留B帧AAC同步并完成动态�
   encoder_test::Capture capture;
   EncodeMarkers(capture);
   Notifications notifications;
-  mw::streamer::AsyncRemuxer remuxer;
+  mw::streamer::Remuxer remuxer;
   notifications.Bind(remuxer);
   const auto first = remuxer.AddPushUrl(directory.File("single_a.mp4"));
   const auto second = remuxer.AddPushUrl(directory.File("single_b.mp4"));
@@ -407,7 +397,7 @@ TEST_CASE("公开AsyncRemuxer多目标录制保留B帧AAC同步并完成动态�
   REQUIRE(remuxer.output_info().output_urls ==
           std::vector<std::string>{first, second, hls_a, hls_b});
   CHECK_FALSE(fs::exists(fs::u8path(first)));
-  remuxer.Start(capture.streams);
+  REQUIRE(remuxer.Start(capture.streams));
   CheckName(first, "single_a", "mp4");
   CheckName(second, "single_b", "mp4");
   CheckName(hls_a, "playlist_a", "m3u8");
@@ -430,11 +420,9 @@ TEST_CASE("公开AsyncRemuxer多目标录制保留B帧AAC同步并完成动态�
     REQUIRE(remuxer.SubmitPacket(capture.packets[index]));
   }
   remuxer.Drain();
-  REQUIRE(notifications.Wait());
   remuxer.Stop();
   remuxer.Drain();
   remuxer.Stop();
-  CHECK(notifications.ended == 1);
   CHECK_FALSE(notifications.callback_failed);
   const auto error_text = std::accumulate(
       notifications.errors.begin(), notifications.errors.end(), std::string{},
@@ -465,7 +453,7 @@ TEST_CASE("公开AsyncRemuxer多目标录制保留B帧AAC同步并完成动态�
   const auto first_contents = Read(first);
   const auto next = remuxer.AddPushUrl(directory.File("single_a.mp4"));
   CHECK(next != first);
-  remuxer.Start(capture.streams);
+  REQUIRE(remuxer.Start(capture.streams));
   const auto restarted = remuxer.output_info().output_urls;
   REQUIRE(restarted.size() == 1);
   CHECK(restarted.front() == next);
@@ -476,23 +464,22 @@ TEST_CASE("公开AsyncRemuxer多目标录制保留B帧AAC同步并完成动态�
     REQUIRE(remuxer.SubmitPacket(capture.packets[index]));
   }
   remuxer.Stop();
-  CHECK(notifications.ended == 2);
   REQUIRE(notifications.errors.empty());
   CHECK(Read(first) == first_contents);
   CheckFullRecording(restarted.front());
-  remuxer.Start(capture.streams);
+  REQUIRE(remuxer.Start(capture.streams));
   CHECK(remuxer.output_info().output_urls.empty());
   remuxer.Stop();
 }
 
-TEST_CASE("公开AsyncRemuxer控制调用校验与空会话结束只通知一次",
+TEST_CASE("公开Remuxer控制调用校验与空会话重复停止",
           "[remuxer][async][recording][lifecycle]") {
   const std::unique_ptr<mw::streamer::MwStreamerContext,
                         decltype(&mw::streamer::Shutdown)>
       context(mw::streamer::Init(RuntimeConfig()), &mw::streamer::Shutdown);
   OutputDirectory directory;
   Notifications notifications;
-  mw::streamer::AsyncRemuxer remuxer;
+  mw::streamer::Remuxer remuxer;
   notifications.Bind(remuxer);
   SECTION("Start前保存目标且立即拒绝非法参数") {
     CHECK_THROWS_AS(remuxer.AddPushUrl(directory.File("invalid.ts")),
@@ -520,17 +507,15 @@ TEST_CASE("公开AsyncRemuxer控制调用校验与空会话结束只通知一次
     REQUIRE(capture.Wait());
     encoder.Stop();
     REQUIRE(capture.errors == 0);
-    remuxer.Start(capture.streams);
+    REQUIRE(remuxer.Start(capture.streams));
     CHECK_THROWS_AS(remuxer.AddPushUrl(directory.File("invalid.ts")),
                     std::invalid_argument);
     remuxer.Drain();
     CHECK_THROWS_AS(remuxer.AddPushUrl(directory.File("draining.mp4")),
                     std::logic_error);
-    REQUIRE(notifications.Wait());
     remuxer.Stop();
     remuxer.Drain();
     remuxer.Stop();
-    CHECK(notifications.ended == 1);
     CHECK(notifications.errors.empty());
     CHECK_FALSE(notifications.callback_failed);
     const auto path = remuxer.AddPushUrl(directory.File("ended.mp4"));
@@ -558,9 +543,9 @@ TEST_CASE("声明双轨但EOF确认一路无包时录制排空已有轨道",
       });
   REQUIRE(stream != capture.streams.end());
   Notifications notifications;
-  mw::streamer::AsyncRemuxer remuxer;
+  mw::streamer::Remuxer remuxer;
   notifications.Bind(remuxer);
-  remuxer.Start(capture.streams);
+  REQUIRE(remuxer.Start(capture.streams));
   const auto path = remuxer.AddPushUrl(directory.File("partial_track.mp4"));
   std::size_t submitted = 0;
   for (std::size_t index = 0; index < capture.packets.size(); ++index) {
@@ -572,9 +557,7 @@ TEST_CASE("声明双轨但EOF确认一路无包时录制排空已有轨道",
   }
   REQUIRE(submitted == 100);
   remuxer.Drain();
-  REQUIRE(notifications.Wait());
   remuxer.Stop();
-  CHECK(notifications.ended == 1);
   CHECK_FALSE(notifications.callback_failed);
   const auto error_text = std::accumulate(
       notifications.errors.begin(), notifications.errors.end(), std::string{},
@@ -604,9 +587,9 @@ TEST_CASE("零B帧与AAC负priming启动回放使用共同媒体时间起点",
   encoder_test::Capture capture;
   EncodeMarkers(capture, 0);
   Notifications notifications;
-  mw::streamer::AsyncRemuxer remuxer;
+  mw::streamer::Remuxer remuxer;
   notifications.Bind(remuxer);
-  remuxer.Start(capture.streams);
+  REQUIRE(remuxer.Start(capture.streams));
   const auto path = remuxer.AddPushUrl(directory.File("zero_b_frames.mp4"));
   const auto playlist =
       remuxer.AddPushUrl(directory.File("zero_b_frames.m3u8"));
@@ -622,9 +605,7 @@ TEST_CASE("零B帧与AAC负priming启动回放使用共同媒体时间起点",
     REQUIRE(remuxer.SubmitPacket(capture.packets[index]));
   }
   remuxer.Drain();
-  REQUIRE(notifications.Wait());
   remuxer.Stop();
-  CHECK(notifications.ended == 1);
   CHECK_FALSE(notifications.callback_failed);
   const auto error_text = std::accumulate(
       notifications.errors.begin(), notifications.errors.end(), std::string{},

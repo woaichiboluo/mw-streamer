@@ -28,7 +28,9 @@ extern "C" {
 
 #include <fmt/format.h>
 
+#include "mw/log.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/platform/thread.h"
 
 #ifndef _WIN32
 #include <arpa/inet.h>
@@ -526,13 +528,25 @@ class StallingHttpServer final {
       throw std::runtime_error("Cannot query HTTP port");
     }
     url_ = fmt::format("http://127.0.0.1:{}/live.flv", ntohs(address.sin_port));
-    worker_ = std::thread([this] { Run(); });
+    if (!worker_.Start([this]() noexcept {
+          try {
+            Run();
+          } catch (const std::exception& error) {
+            MW_LOG_ERROR("streamer", "HTTP test server failed: {}",
+                         error.what());
+          } catch (...) {
+            MW_LOG_ERROR("streamer", "HTTP test server failed: unknown error");
+          }
+        })) {
+      close(listener_);
+      throw std::runtime_error("Cannot start HTTP server thread");
+    }
   }
 
   ~StallingHttpServer() {
     stop_.store(true);
     changed_.notify_all();
-    worker_.join();
+    worker_.Join();
     close(listener_);
   }
 
@@ -582,7 +596,7 @@ class StallingHttpServer final {
   std::mutex mutex_;
   std::condition_variable changed_;
   bool accepted_ = false;
-  std::thread worker_;
+  mw::streamer::internal::Thread worker_;
 };
 
 TEST_CASE("AvInput interrupts stalled opening on timeout and explicit cancel",

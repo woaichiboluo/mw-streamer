@@ -193,10 +193,8 @@ class TrackFilter final {
 
 class AvFrameSource::Impl final {
  public:
-  Impl(AvDecoder* video, AvDecoder* audio, AvEncoderConfig config,
-       OnFailed on_failed)
+  Impl(AvDecoder* video, AvDecoder* audio, AvEncoderConfig config)
       : config_(std::move(config)),
-        on_failed_(std::move(on_failed)),
         video_(video, AVMEDIA_TYPE_VIDEO),
         audio_(audio, AVMEDIA_TYPE_AUDIO) {
     if ((!video && !audio) || config_.fps.num <= 0 || config_.fps.den <= 0) {
@@ -239,6 +237,11 @@ class AvFrameSource::Impl final {
   ~Impl() { Stop(); }
   bool Start() noexcept {
     return worker_.Start([this]() noexcept { Run(); });
+  }
+
+  void SetOnError(OnError on_error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    on_error_ = std::move(on_error);
   }
 
   AvFrameSourceReadResult TryReadFrame() {
@@ -717,9 +720,11 @@ class AvFrameSource::Impl final {
       }
     } catch (...) {
       const auto failure = std::current_exception();
+      OnError on_error;
       {
         std::lock_guard<std::mutex> lock(mutex_);
         error_ = failure;
+        on_error = std::move(on_error_);
       }
       changed_.notify_all();
       if (mw::log::ShouldLog("streamer", mw::log::LogLevel::kError)) {
@@ -740,9 +745,9 @@ class AvFrameSource::Impl final {
                        frame_index_);
         }
       }
-      if (on_failed_) {
+      if (on_error) {
         try {
-          on_failed_(failure);
+          on_error(failure);
         } catch (const std::exception& observer_error) {
           MW_LOG_ERROR("streamer", "AvFrameSource[{}] 错误通知异常: {}",
                        static_cast<const void*>(this), observer_error.what());
@@ -755,7 +760,7 @@ class AvFrameSource::Impl final {
   }
 
   AvEncoderConfig config_;
-  const OnFailed on_failed_;
+  OnError on_error_;
   Track video_;
   Track audio_;
   ffmpeg::CodecParameters audio_parameters_;
@@ -782,14 +787,16 @@ class AvFrameSource::Impl final {
 };
 
 AvFrameSource::AvFrameSource(AvDecoder* video, AvDecoder* audio,
-                             AvEncoderConfig config, OnFailed on_failed)
-    : impl_(std::make_unique<Impl>(video, audio, std::move(config),
-                                   std::move(on_failed))) {
+                             AvEncoderConfig config)
+    : impl_(std::make_unique<Impl>(video, audio, std::move(config))) {
   if (!impl_->Start()) {
     throw std::runtime_error("AvFrameSource 工作线程启动失败");
   }
 }
 AvFrameSource::~AvFrameSource() = default;
+void AvFrameSource::SetOnError(OnError on_error) {
+  impl_->SetOnError(std::move(on_error));
+}
 AvFrameSourceReadResult AvFrameSource::TryReadFrame() {
   return impl_->TryReadFrame();
 }

@@ -9,10 +9,6 @@
 #include <stdexcept>
 #include <utility>
 
-extern "C" {
-#include <libavutil/error.h>
-}
-
 #include "Http/HttpSession.h"
 #include "Record/RemuxRecorder.h"
 #include "Rtsp/RtspSession.h"
@@ -24,6 +20,13 @@ extern "C" {
 
 namespace mw::streamer::internal {
 namespace {
+
+std::exception_ptr PushError(const std::string& target,
+                             const toolkit::SockException& error) {
+  return std::make_exception_ptr(std::runtime_error(
+      fmt::format("ZLM output error: target={} code={} {}", target,
+                  static_cast<int>(error.getErrCode()), error.what())));
+}
 
 std::atomic<std::uint64_t> next_source_id{0};
 std::mutex listeners_mutex;
@@ -182,8 +185,8 @@ void OutputRegistration::Add(Entry entry) {
   entries_.push_back(std::move(entry));
 }
 
-RemuxerOutputInfo OutputRegistration::info() const {
-  RemuxerOutputInfo result;
+Remuxer::OutputInfo OutputRegistration::info() const {
+  Remuxer::OutputInfo result;
   for (const auto& entry : entries_) {
     switch (entry.kind) {
       case Kind::kPush:
@@ -368,9 +371,8 @@ void RemuxOutput::Close() {
   if (error) std::rethrow_exception(error);
 }
 
-void RemuxOutput::Error(std::string_view target, int code,
-                        std::string_view message) {
-  if (!closed_ && on_error_) on_error_(target, code, message);
+void RemuxOutput::Error(std::exception_ptr error) {
+  if (!closed_ && on_error_) on_error_(error);
 }
 
 toolkit::EventPoller::Ptr RemuxOutput::getOwnerPoller(mediakit::MediaSource&) {
@@ -392,21 +394,24 @@ void RemuxOutput::StartPushers() {
           muxer_->getMediaSource(target.schema), -1, poller_);
       std::weak_ptr<RemuxOutput> weak = shared_from_this();
       const auto url = target.url;
-      pusher->setPushCallbackOnce([weak,
-                                   url](const toolkit::SockException& error) {
-        if (auto self = weak.lock(); self && error) {
-          self->Error(url, static_cast<int>(error.getErrCode()), error.what());
-        }
-      });
+      pusher->setPushCallbackOnce(
+          [weak, url](const toolkit::SockException& error) {
+            if (auto self = weak.lock(); self && !self->closed_ && error) {
+              MW_LOG_WARNING(
+                  "streamer",
+                  "Remuxer 推流连接失败，将自动重连: target={} code={} {}", url,
+                  static_cast<int>(error.getErrCode()), error.what());
+            }
+          });
       pusher->setOnClose([weak, url](const toolkit::SockException& error) {
         if (auto self = weak.lock()) {
-          self->Error(url, static_cast<int>(error.getErrCode()), error.what());
+          self->Error(PushError(url, error));
         }
       });
       pusher->publish(url);
       target.pusher = std::move(pusher);
-    } catch (const std::exception& error) {
-      Error(target.url, AVERROR_EXTERNAL, error.what());
+    } catch (...) {
+      Error(std::current_exception());
     }
   }
 }

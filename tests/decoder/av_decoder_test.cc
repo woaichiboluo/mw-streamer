@@ -446,13 +446,15 @@ TEST_CASE(
   REQUIRE(native_error == AVERROR_INVALIDDATA);
 
   std::atomic<std::size_t> callbacks{0};
+  std::atomic<std::size_t> replacement_callbacks{0};
   std::mutex mutex;
   std::exception_ptr observed;
   bool callback_error_matches = false;
   AvDecoderReadStatus callback_read_status = AvDecoderReadStatus::kEof;
   AvDecoderConfig config;
   config.thread_count = 1;
-  AvDecoder decoder(source.stream, config, [&](std::exception_ptr error) {
+  AvDecoder decoder(source.stream, config);
+  decoder.SetOnError([&](std::exception_ptr error) {
     {
       std::lock_guard<std::mutex> lock(mutex);
       observed = error;
@@ -463,20 +465,41 @@ TEST_CASE(
     ++callbacks;
     throw std::runtime_error("observer failure");
   });
+  bool replaced = false;
+  bool cleared = false;
+  SECTION("throwing observer can query the failure and request stop") {}
+  SECTION("replacement invokes only the new observer") {
+    replaced = true;
+    decoder.SetOnError([&](std::exception_ptr error) {
+      observed = error;
+      ++replacement_callbacks;
+    });
+  }
+  SECTION("cleared observer leaves the original failure queryable") {
+    cleared = true;
+    decoder.SetOnError({});
+  }
   REQUIRE(decoder.PushPacket(invalid, 1));
-  REQUIRE(WaitFor([&] { return callbacks.load() != 0; }));
+  REQUIRE(WaitFor([&] {
+    return cleared ? decoder.error() != nullptr
+                   : callbacks.load() + replacement_callbacks.load() != 0;
+  }));
   decoder.Stop();
-  CHECK(callbacks.load() == 1);
+  CHECK(callbacks.load() == (replaced || cleared ? 0u : 1u));
+  CHECK(replacement_callbacks.load() == (replaced ? 1u : 0u));
   CHECK(decoder.TryReadFrame().status == AvDecoderReadStatus::kNull);
   CHECK_FALSE(decoder.PushPacket(source.packets.front(), 2));
   CHECK_FALSE(decoder.PushEof(2));
   std::lock_guard<std::mutex> lock(mutex);
-  CHECK(callback_error_matches);
-  CHECK(callback_read_status == AvDecoderReadStatus::kNull);
-  CHECK(observed == decoder.error());
-  REQUIRE(observed != nullptr);
+  if (!replaced && !cleared) {
+    CHECK(callback_error_matches);
+    CHECK(callback_read_status == AvDecoderReadStatus::kNull);
+  }
+  const auto retained_error = decoder.error();
+  CHECK(observed == (cleared ? nullptr : retained_error));
+  REQUIRE(retained_error != nullptr);
   try {
-    std::rethrow_exception(observed);
+    std::rethrow_exception(retained_error);
   } catch (const ffmpeg::FfmpegException& error) {
     CHECK(error.error_code() == native_error);
   }

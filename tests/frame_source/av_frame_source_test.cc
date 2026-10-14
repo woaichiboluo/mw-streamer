@@ -1004,23 +1004,45 @@ TEST_CASE(
     "[av-frame-source][error][notification]") {
   const auto track = ReadTrack("h264_aac.mp4");
   std::atomic<std::size_t> notifications{0};
+  std::atomic<std::size_t> replacement_notifications{0};
   std::exception_ptr observed;
   AvDecoder decoder(track.stream, SingleThreadConfig());
-  AvFrameSource source(&decoder, nullptr, {}, [&](std::exception_ptr error) {
+  AvFrameSource source(&decoder, nullptr, {});
+  source.SetOnError([&](std::exception_ptr error) {
     observed = error;
     ++notifications;
     throw std::runtime_error("observer failure");
   });
+  bool replaced = false;
+  bool cleared = false;
+  SECTION("throwing observer retains the upstream failure") {}
+  SECTION("replacement invokes only the new observer") {
+    replaced = true;
+    source.SetOnError([&](std::exception_ptr error) {
+      observed = error;
+      ++replacement_notifications;
+    });
+  }
+  SECTION("cleared observer leaves the upstream failure queryable") {
+    cleared = true;
+    source.SetOnError({});
+  }
   ffmpeg::Packet invalid;
   REQUIRE(av_new_packet(invalid.get(), 1) >= 0);
   invalid->data[0] = 0;
   invalid->stream_index = track.stream.stream_index;
   REQUIRE(decoder.PushPacket(invalid, 0));
-  REQUIRE(WaitFor([&] { return notifications.load() != 0; }));
+  REQUIRE(WaitFor([&] {
+    return cleared
+               ? source.error() != nullptr
+               : notifications.load() + replacement_notifications.load() != 0;
+  }));
   source.Stop();
-  CHECK(notifications.load() == 1);
+  CHECK(notifications.load() == (replaced || cleared ? 0u : 1u));
+  CHECK(replacement_notifications.load() == (replaced ? 1u : 0u));
   CHECK(source.TryReadFrame().status == AvFrameSourceReadStatus::kNull);
-  CHECK(observed == source.error());
+  const auto source_error = source.error();
+  CHECK(observed == (cleared ? nullptr : source_error));
   const auto decoder_error = decoder.error();
   REQUIRE(decoder_error != nullptr);
   std::string decoder_error_message;
@@ -1031,9 +1053,9 @@ TEST_CASE(
     decoder_error_message = error.what();
   }
   REQUIRE_FALSE(decoder_error_message.empty());
-  REQUIRE(observed != nullptr);
+  REQUIRE(source_error != nullptr);
   try {
-    std::rethrow_exception(observed);
+    std::rethrow_exception(source_error);
   } catch (const ffmpeg::FfmpegException& error) {
     CHECK(error.error_code() == AVERROR_INVALIDDATA);
     CHECK(std::string(error.what()) == decoder_error_message);

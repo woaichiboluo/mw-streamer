@@ -17,7 +17,6 @@
 #include <mutex>
 #include <string>
 #include <thread>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -37,8 +36,7 @@ extern "C" {
 #include "Util/util.h"
 #include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/init/init.h"
-#include "mw/streamer/remuxer/async_remuxer.h"
-#include "mw/streamer/remuxer/sync_remuxer.h"
+#include "mw/streamer/remuxer/remuxer.h"
 
 namespace hls_test {
 
@@ -123,14 +121,9 @@ inline Encoded Encode() {
   return result;
 }
 
-template <typename Remuxer>
-void Feed(Remuxer& remuxer, const Encoded& encoded) {
+inline void Feed(mw::streamer::Remuxer& remuxer, const Encoded& encoded) {
   for (std::size_t index = 0; index < encoded.packets.size(); ++index) {
-    if constexpr (std::is_same_v<Remuxer, mw::streamer::AsyncRemuxer>) {
-      REQUIRE(remuxer.SubmitPacket(encoded.packets[index]));
-    } else {
-      REQUIRE(remuxer.SubmitPacket(0, encoded.packets[index]));
-    }
+    REQUIRE(remuxer.SubmitPacket(encoded.packets[index]));
   }
 }
 
@@ -380,7 +373,7 @@ std::filesystem::path ExerciseMedia() {
   const auto name = Name();
   const auto port = ReservePort();
   Remuxer remuxer;
-  remuxer.Start(encoded.streams);
+  REQUIRE(remuxer.Start(encoded.streams));
   const auto url = remuxer.AddHlsPublish("live", name, "127.0.0.1", port);
   REQUIRE(url == "http://127.0.0.1:" + std::to_string(port) + "/live/" + name +
                      "/hls.m3u8");
@@ -424,9 +417,9 @@ void ExerciseLifecycle() {
   const auto first_name = Name(), second_name = Name();
   const auto port = ReservePort();
   Remuxer first, second, duplicate;
-  first.Start(encoded.streams);
-  second.Start(encoded.streams);
-  duplicate.Start(encoded.streams);
+  REQUIRE(first.Start(encoded.streams));
+  REQUIRE(second.Start(encoded.streams));
+  REQUIRE(duplicate.Start(encoded.streams));
   const auto first_url =
       first.AddHlsPublish("live", first_name, "127.0.0.1", port);
   const auto second_url =
@@ -456,7 +449,7 @@ void ExerciseLifecycle() {
   const auto second_segment = second_url.substr(0, second_url.rfind('/') + 1) +
                               Segments(second_playlist.body).front();
   REQUIRE(Get(second_segment).status == "200");
-  first.Start(encoded.streams);
+  REQUIRE(first.Start(encoded.streams));
   REQUIRE(first.AddHlsPublish("live", first_name, "127.0.0.1", port) ==
           first_url);
   Feed(first, encoded);

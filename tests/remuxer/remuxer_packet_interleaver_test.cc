@@ -3,19 +3,19 @@
 #include <stdexcept>
 #include <vector>
 
-#include "../encoder/encoder_test_support.h"
 #include "mw/streamer/remuxer/packet_interleaver.h"
+#include "remuxer_test_support.h"
 
 namespace {
 namespace ffmpeg = mw::streamer::ffmpeg;
 using mw::streamer::internal::PacketInterleaver;
 ffmpeg::StreamInfo Video() {
-  auto stream = encoder_test::VideoStream();
+  auto stream = remuxer_test::VideoStream();
   stream.time_base = {1001, 30000};
   return stream;
 }
 ffmpeg::StreamInfo Audio() {
-  auto stream = encoder_test::AudioStream();
+  auto stream = remuxer_test::AudioStream();
   stream.time_base = {1, 48000};
   return stream;
 }

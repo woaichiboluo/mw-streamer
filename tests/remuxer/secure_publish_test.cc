@@ -7,7 +7,6 @@
 #include <memory>
 #include <string>
 #include <thread>
-#include <type_traits>
 #include <vector>
 
 #include "tls_test_support.h"
@@ -19,8 +18,7 @@ extern "C" {
 #include "../encoder/encoder_test_support.h"
 #include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/init/init.h"
-#include "mw/streamer/remuxer/async_remuxer.h"
-#include "mw/streamer/remuxer/sync_remuxer.h"
+#include "mw/streamer/remuxer/remuxer.h"
 
 namespace {
 
@@ -216,14 +214,13 @@ void RequireDecodedTs(const std::string& bytes,
   REQUIRE(audio_frames >= 40);
 }
 
-template <typename Remuxer>
 void ExerciseHttps(const tls_test::CertFixture& certificate) {
   Runtime runtime(Config(certificate.combined_file()));
   const auto encoded = Encode();
-  Remuxer secure, plain, conflict;
-  secure.Start(encoded.streams);
-  plain.Start(encoded.streams);
-  conflict.Start(encoded.streams);
+  mw::streamer::Remuxer secure, plain, conflict;
+  REQUIRE(secure.Start(encoded.streams));
+  REQUIRE(plain.Start(encoded.streams));
+  REQUIRE(conflict.Start(encoded.streams));
   const auto secure_port = tls_test::ReservePort();
   const auto plain_port = tls_test::ReservePort();
   const auto secure_url =
@@ -237,13 +234,8 @@ void ExerciseHttps(const tls_test::CertFixture& certificate) {
   REQUIRE_THROWS(
       conflict.AddHlsPublish("live", Name(), "127.0.0.1", plain_port, true));
   for (std::size_t index = 0; index < encoded.packets.size(); ++index) {
-    if constexpr (std::is_same_v<Remuxer, mw::streamer::AsyncRemuxer>) {
-      REQUIRE(secure.SubmitPacket(encoded.packets[index]));
-      REQUIRE(plain.SubmitPacket(encoded.packets[index]));
-    } else {
-      REQUIRE(secure.SubmitPacket(0, encoded.packets[index]));
-      REQUIRE(plain.SubmitPacket(0, encoded.packets[index]));
-    }
+    REQUIRE(secure.SubmitPacket(encoded.packets[index]));
+    REQUIRE(plain.SubmitPacket(encoded.packets[index]));
   }
   const auto playlist = Playlist(secure_url, certificate);
   REQUIRE(playlist.body.find("#EXTM3U") == 0);
@@ -272,13 +264,7 @@ void ExerciseHttps(const tls_test::CertFixture& certificate) {
 TEST_CASE("HTTPS HLS实际校验证书并解码异步输出TS",
           "[remuxer][async][https][tls]") {
   tls_test::CertFixture certificate;
-  ExerciseHttps<mw::streamer::AsyncRemuxer>(certificate);
-}
-
-TEST_CASE("HTTPS HLS实际校验证书并解码原包输出TS",
-          "[remuxer][sync][https][tls]") {
-  tls_test::CertFixture certificate;
-  ExerciseHttps<mw::streamer::SyncRemuxer>(certificate);
+  ExerciseHttps(certificate);
 }
 
 TEST_CASE("TLS初始化拒绝缺少私钥并允许随后重新初始化", "[init][tls]") {
@@ -304,8 +290,8 @@ TEST_CASE("HTTPS发布要求本次初始化配置证书且Shutdown清除旧证�
   {
     Runtime runtime(Config(certificate.combined_file()));
     const auto encoded = Encode();
-    mw::streamer::SyncRemuxer remuxer;
-    remuxer.Start(encoded.streams);
+    mw::streamer::Remuxer remuxer;
+    REQUIRE(remuxer.Start(encoded.streams));
     REQUIRE(remuxer
                 .AddHlsPublish("live", Name(), "127.0.0.1",
                                tls_test::ReservePort(), true)
@@ -314,8 +300,8 @@ TEST_CASE("HTTPS发布要求本次初始化配置证书且Shutdown清除旧证�
   }
   Runtime runtime(Config());
   const auto encoded = Encode();
-  mw::streamer::SyncRemuxer remuxer;
-  remuxer.Start(encoded.streams);
+  mw::streamer::Remuxer remuxer;
+  REQUIRE(remuxer.Start(encoded.streams));
   REQUIRE_THROWS(remuxer.AddHlsPublish("live", Name(), "127.0.0.1",
                                        tls_test::ReservePort(), true));
   REQUIRE_THROWS(remuxer.AddRtspPublish("live", Name(), "127.0.0.1",

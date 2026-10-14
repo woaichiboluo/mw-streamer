@@ -26,8 +26,10 @@ extern "C" {
 
 #include <fmt/format.h>
 
+#include "mw/log.h"
 #include "mw/streamer/ffmpeg/av_dictionary.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/platform/thread.h"
 
 #ifndef _WIN32
 #include <arpa/inet.h>
@@ -566,29 +568,39 @@ class StalledHttpServer final {
       throw std::runtime_error("Cannot query HTTP port");
     }
     url_ = fmt::format("http://127.0.0.1:{}/live.flv", ntohs(address.sin_port));
-    worker_ = std::thread([this] {
-      pollfd descriptor{listener_, POLLIN, 0};
-      while (!stop_.load()) {
-        if (poll(&descriptor, 1, 20) > 0) break;
-      }
-      if (stop_.load()) return;
-      const int client = accept(listener_, nullptr, nullptr);
-      if (client < 0) return;
-      {
-        std::lock_guard<std::mutex> lock(mutex_);
-        accepted_ = true;
-      }
-      changed_.notify_all();
-      std::unique_lock<std::mutex> lock(mutex_);
-      changed_.wait(lock, [this] { return stop_.load(); });
-      shutdown(client, SHUT_RDWR);
-      close(client);
-    });
+    if (!worker_.Start([this]() noexcept {
+          try {
+            pollfd descriptor{listener_, POLLIN, 0};
+            while (!stop_.load()) {
+              if (poll(&descriptor, 1, 20) > 0) break;
+            }
+            if (stop_.load()) return;
+            const int client = accept(listener_, nullptr, nullptr);
+            if (client < 0) return;
+            {
+              std::lock_guard<std::mutex> lock(mutex_);
+              accepted_ = true;
+            }
+            changed_.notify_all();
+            std::unique_lock<std::mutex> lock(mutex_);
+            changed_.wait(lock, [this] { return stop_.load(); });
+            shutdown(client, SHUT_RDWR);
+            close(client);
+          } catch (const std::exception& error) {
+            MW_LOG_ERROR("streamer", "HTTP test server failed: {}",
+                         error.what());
+          } catch (...) {
+            MW_LOG_ERROR("streamer", "HTTP test server failed: unknown error");
+          }
+        })) {
+      close(listener_);
+      throw std::runtime_error("Cannot start HTTP server thread");
+    }
   }
   ~StalledHttpServer() {
     stop_.store(true);
     changed_.notify_all();
-    worker_.join();
+    worker_.Join();
     close(listener_);
   }
   const std::string& url() const { return url_; }
@@ -604,7 +616,7 @@ class StalledHttpServer final {
   std::mutex mutex_;
   std::condition_variable changed_;
   bool accepted_ = false;
-  std::thread worker_;
+  mw::streamer::internal::Thread worker_;
 };
 
 TEST_CASE("AvInputProxy Stop cancels opening I/O and empty consumers",

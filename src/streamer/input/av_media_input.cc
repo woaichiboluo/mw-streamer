@@ -411,27 +411,28 @@ class AvMediaInput::Impl final {
     }
     auto created = std::make_shared<Session>();
     created->description = info;
-    const auto on_failed = [this](std::exception_ptr error) {
+    const auto on_error = [this](std::exception_ptr error) {
       Failed(std::move(error));
     };
     if (const auto* stream = FindStream(*info, info->video_stream_index)) {
       created->video =
-          device_ ? std::make_unique<AvDecoder>(
-                        *stream, *device_, config_.video_decoder, on_failed)
-                  : std::make_unique<AvDecoder>(*stream, config_.video_decoder,
-                                                on_failed);
+          device_ ? std::make_unique<AvDecoder>(*stream, *device_,
+                                                config_.video_decoder)
+                  : std::make_unique<AvDecoder>(*stream, config_.video_decoder);
+      created->video->SetOnError(on_error);
     }
     if (const auto* stream = FindStream(*info, info->audio_stream_index)) {
-      created->audio = std::make_unique<AvDecoder>(
-          *stream, config_.audio_decoder, on_failed);
+      created->audio =
+          std::make_unique<AvDecoder>(*stream, config_.audio_decoder);
+      created->audio->SetOnError(on_error);
     }
     if (!created->video && !created->audio) {
       throw std::invalid_argument("AvMediaInput 输入没有所选音视频轨道");
     }
     if (config_.mode == AvMediaInputMode::kLive) {
       created->source = std::make_unique<AvFrameSource>(
-          created->video.get(), created->audio.get(), config_.output,
-          on_failed);
+          created->video.get(), created->audio.get(), config_.output);
+      created->source->SetOnError(on_error);
     }
     {
       std::lock_guard<std::mutex> lock(mutex_);

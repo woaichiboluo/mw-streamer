@@ -8,13 +8,13 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -31,15 +31,14 @@
 #include "Util/NoticeCenter.h"
 #include "mw/streamer/init/init.h"
 #include "mw/streamer/input/ffmpeg_input.h"
-#include "mw/streamer/remuxer/async_remuxer.h"
-#include "mw/streamer/remuxer/sync_remuxer.h"
+#include "mw/streamer/remuxer/remuxer.h"
 #include "tls_test_support.h"
 
 namespace {
 
 using namespace std::chrono_literals;
 namespace ffmpeg = mw::streamer::ffmpeg;
-using mw::streamer::AsyncRemuxer;
+using mw::streamer::Remuxer;
 
 class Runtime final {
  public:
@@ -125,7 +124,6 @@ Encoded Encode() {
 
 // Replay actual encoded GOPs. Native packet DTS is converted only for the
 // cancellable wall-clock pacing used by this network test.
-template <typename Remuxer>
 class Replay final {
  public:
   Replay(Remuxer& remuxer, const Encoded& encoded)
@@ -165,12 +163,7 @@ class Replay final {
               av_rescale_q(shift, AVRational{1, 1000000000}, packet->time_base);
           packet->pts += ticks;
           packet->dts += ticks;
-          bool accepted;
-          if constexpr (std::is_same_v<Remuxer, AsyncRemuxer>) {
-            accepted = remuxer_.SubmitPacket(packet);
-          } else {
-            accepted = remuxer_.SubmitPacket(0, packet);
-          }
+          const bool accepted = remuxer_.SubmitPacket(packet);
           if (!accepted) {
             valid_ = false;
             return;
@@ -638,14 +631,16 @@ TEST_CASE("动态RTMP RTSP SRT推流共享编码源且断线仅重连故障目�
   RtspServer rtsp(0, tls);
   std::mutex errors_mutex;
   std::vector<std::string> errors;
-  AsyncRemuxer remuxer;
-  remuxer.SetOnError(
-      [&](std::string_view target, int code, std::string_view message) {
-        std::lock_guard<std::mutex> lock(errors_mutex);
-        errors.push_back(std::string(target) + " code=" + std::to_string(code) +
-                         " " + std::string(message));
-      });
-  remuxer.Start(encoded.streams);
+  Remuxer remuxer;
+  remuxer.SetOnError([&](std::exception_ptr error) {
+    try {
+      std::rethrow_exception(error);
+    } catch (const std::exception& exception) {
+      std::lock_guard<std::mutex> lock(errors_mutex);
+      errors.emplace_back(exception.what());
+    }
+  });
+  REQUIRE(remuxer.Start(encoded.streams));
   const auto first_name = Name();
   const auto second_name = Name();
   const auto first_url = rtmp.Url(first_name);
@@ -707,61 +702,6 @@ TEST_CASE("动态RTMP RTSP SRT推流共享编码源且断线仅重连故障目�
   remuxer.Stop();
 }
 
-TEST_CASE("SyncRemuxer通过已验证TLS连接持续转推RTMP和RTSP媒体",
-          "[remuxer][sync][network][push][tls]") {
-  tls_test::CertFixture certificate;
-  Runtime runtime(true, &certificate);
-  const auto encoded = Encode();
-  RtmpReceiver rtmp(true);
-  RtspServer rtsp(0, true);
-  const auto rtmp_name = Name();
-  const auto rtsp_name = Name();
-  RegisteredSource received("network", rtsp_name);
-  std::mutex errors_mutex;
-  std::vector<std::string> errors;
-  mw::streamer::SyncRemuxer remuxer;
-  remuxer.SetOnError(
-      [&](std::string_view target, int code, std::string_view message) {
-        std::lock_guard<std::mutex> lock(errors_mutex);
-        errors.push_back(std::string(target) + " code=" + std::to_string(code) +
-                         " " + std::string(message));
-      });
-  remuxer.Start(encoded.streams);
-  const auto rtmp_url = rtmp.Url(rtmp_name);
-  const auto rtsp_url = rtsp.Url(rtsp_name);
-  CHECK(remuxer.AddPushUrl(rtmp_url) == rtmp_url);
-  CHECK(remuxer.AddPushUrl(rtsp_url) == rtsp_url);
-  Replay replay(remuxer, encoded);
-  const auto rtmp_received = rtmp.Wait(rtmp_name, 25);
-  const auto rtsp_received = received.Wait();
-  {
-    std::lock_guard<std::mutex> lock(errors_mutex);
-    std::string diagnostics;
-    for (const auto& error : errors) diagnostics += error + '\n';
-    INFO(diagnostics);
-    REQUIRE(rtmp_received);
-    REQUIRE(rtsp_received);
-  }
-  received.Read();
-  REQUIRE(received.WaitPackets());
-  const auto first = rtmp.Get(rtmp_name);
-  REQUIRE_FALSE(first.video.empty());
-  CHECK_FALSE(first.video.front().empty());
-  REQUIRE(rtmp.Wait(rtmp_name, first.stamps.size() + 5));
-  const auto later = rtmp.Get(rtmp_name);
-  CHECK(later.connections == 1);
-  CHECK(std::is_sorted(later.stamps.begin(), later.stamps.end()));
-  CHECK(later.stamps.back() > first.stamps.back());
-  CHECK(rtmp.error().empty());
-  replay.Stop();
-  CHECK(replay.valid());
-  remuxer.Stop();
-  {
-    std::lock_guard<std::mutex> lock(errors_mutex);
-    CHECK(errors.empty());
-  }
-}
-
 TEST_CASE("RTSPS和RTMPS推流拒绝不可信证书及不匹配的服务端身份",
           "[remuxer][async][network][push][tls][verification]") {
   const bool wrong_identity = GENERATE(false, true);
@@ -782,29 +722,43 @@ TEST_CASE("RTSPS和RTMPS推流拒绝不可信证书及不匹配的服务端身�
   std::mutex errors_mutex;
   std::condition_variable errors_changed;
   bool rtmp_failed = false, rtsp_failed = false;
-  std::vector<std::string> errors;
-  AsyncRemuxer remuxer;
-  remuxer.SetOnError([&](std::string_view target, int code,
-                         std::string_view message) {
+  std::vector<std::exception_ptr> errors;
+  Remuxer remuxer;
+  remuxer.SetOnError([&](std::exception_ptr error) {
     {
       std::lock_guard<std::mutex> lock(errors_mutex);
-      if (target == rtmp_url) rtmp_failed = true;
-      if (target == rtsp_url) rtsp_failed = true;
-      errors.push_back(std::string(target) + " code=" + std::to_string(code) +
-                       " " + std::string(message));
+      errors.push_back(error);
     }
     errors_changed.notify_all();
   });
-  remuxer.Start(encoded.streams);
+  REQUIRE(remuxer.Start(encoded.streams));
   remuxer.AddPushUrl(rtmp_url);
   remuxer.AddPushUrl(rtsp_url);
   Replay replay(remuxer, encoded);
   {
     std::unique_lock<std::mutex> lock(errors_mutex);
-    const auto failed = errors_changed.wait_for(
-        lock, 15s, [&] { return rtmp_failed && rtsp_failed; });
+    const auto failed = errors_changed.wait_for(lock, 15s, [&] {
+      for (const auto& error : errors) {
+        REQUIRE(error != nullptr);
+        try {
+          std::rethrow_exception(error);
+        } catch (const std::runtime_error& exception) {
+          const std::string message = exception.what();
+          CHECK(message.find("code=") != std::string::npos);
+          if (message.find(rtmp_url) != std::string::npos) rtmp_failed = true;
+          if (message.find(rtsp_url) != std::string::npos) rtsp_failed = true;
+        }
+      }
+      return rtmp_failed && rtsp_failed;
+    });
     std::string diagnostics;
-    for (const auto& error : errors) diagnostics += error + '\n';
+    for (const auto& error : errors) {
+      try {
+        std::rethrow_exception(error);
+      } catch (const std::runtime_error& exception) {
+        diagnostics += std::string(exception.what()) + '\n';
+      }
+    }
     INFO(diagnostics);
     REQUIRE(failed);
   }
@@ -827,9 +781,9 @@ TEST_CASE("本地RTSP发布重命名同源并共享监听且冲突不破坏已�
   const auto app = Name();
   const auto first_name = Name();
   const auto second_name = Name();
-  AsyncRemuxer first, second;
-  first.Start(encoded.streams);
-  second.Start(encoded.streams);
+  Remuxer first, second;
+  REQUIRE(first.Start(encoded.streams));
+  REQUIRE(second.Start(encoded.streams));
   first.AddRtspPublish(app, first_name, "127.0.0.1", port);
   CHECK_THROWS_AS(second.AddRtspPublish(app, first_name, "127.0.0.1", port),
                   std::invalid_argument);
@@ -866,8 +820,8 @@ TEST_CASE("运行中添加本地RTSP发布保留媒体源身份和时间线",
   Runtime runtime;
   const auto encoded = Encode();
   RtmpReceiver rtmp;
-  AsyncRemuxer remuxer;
-  remuxer.Start(encoded.streams);
+  Remuxer remuxer;
+  REQUIRE(remuxer.Start(encoded.streams));
   const auto target = Name();
   remuxer.AddPushUrl(rtmp.Url(target));
   Replay replay(remuxer, encoded);
@@ -909,13 +863,13 @@ TEST_CASE("运行中添加本地RTSP发布保留媒体源身份和时间线",
   REQUIRE_NOTHROW(RtspServer{port});
 }
 
-TEST_CASE("AsyncRemuxer单包交付背压在Drain和Stop时解除",
+TEST_CASE("Remuxer单包交付背压在Drain和Stop时解除",
           "[remuxer][async][backpressure]") {
   Runtime runtime(false, nullptr, true, 1);
   const auto encoded = Encode();
   REQUIRE(encoded.packets.size() >= 2);
-  AsyncRemuxer remuxer;
-  remuxer.Start(encoded.streams);
+  Remuxer remuxer;
+  REQUIRE(remuxer.Start(encoded.streams));
   encoder_test::Gate gate;
   encoder_test::ReleaseGate release{gate};
   toolkit::EventPollerPool::Instance().getPoller()->async(
@@ -946,7 +900,7 @@ TEST_CASE("AsyncRemuxer单包交付背压在Drain和Stop时解除",
   }
 }
 
-TEST_CASE("AsyncRemuxer启动缺轨超过十秒报告fatal并停止接受",
+TEST_CASE("Remuxer启动缺轨超过十秒报告fatal并停止接受",
           "[remuxer][async][startup]") {
   Runtime runtime;
   const auto encoded = Encode();
@@ -955,26 +909,18 @@ TEST_CASE("AsyncRemuxer启动缺轨超过十秒报告fatal并停止接受",
         return packet->stream_index == encoder_test::VideoStream().stream_index;
       });
   REQUIRE(video != encoded.packets.end());
-  AsyncRemuxer remuxer;
+  Remuxer remuxer;
   std::mutex mutex;
   std::condition_variable changed;
   int errors = 0;
-  int ended = 0;
-  std::string message;
-  remuxer.SetOnError(
-      [&](std::string_view target, int, std::string_view text) noexcept {
-        std::lock_guard<std::mutex> lock(mutex);
-        if (!target.empty()) return;
-        ++errors;
-        message = text;
-        changed.notify_all();
-      });
-  remuxer.SetOnEnded([&]() noexcept {
+  std::exception_ptr failure;
+  remuxer.SetOnError([&](std::exception_ptr error) noexcept {
     std::lock_guard<std::mutex> lock(mutex);
-    ++ended;
+    ++errors;
+    failure = error;
     changed.notify_all();
   });
-  remuxer.Start(encoded.streams);
+  REQUIRE(remuxer.Start(encoded.streams));
   REQUIRE(remuxer.SubmitPacket(*video));
   auto later = video->Ref();
   const auto ticks = av_rescale_q(12, AVRational{1, 1}, later->time_base);
@@ -988,16 +934,20 @@ TEST_CASE("AsyncRemuxer启动缺轨超过十秒报告fatal并停止接受",
   CHECK_FALSE(remuxer.SubmitPacket(later));
   remuxer.Stop();
   CHECK(errors == 1);
-  CHECK(ended == 1);
-  CHECK(message.find("10") != std::string::npos);
+  REQUIRE(failure != nullptr);
+  try {
+    std::rethrow_exception(failure);
+  } catch (const std::runtime_error& exception) {
+    CHECK(std::string(exception.what()).find("10") != std::string::npos);
+  }
 }
 
-TEST_CASE("AsyncRemuxer拒绝在自身poller提交避免背压自锁",
+TEST_CASE("Remuxer拒绝在自身poller提交避免背压自锁",
           "[remuxer][async][backpressure]") {
   Runtime runtime(false, nullptr, true, 1);
   const auto encoded = Encode();
-  AsyncRemuxer remuxer;
-  remuxer.Start(encoded.streams);
+  Remuxer remuxer;
+  REQUIRE(remuxer.Start(encoded.streams));
   std::promise<bool> result;
   auto complete = result.get_future();
   toolkit::EventPollerPool::Instance().getPoller()->async([&] {

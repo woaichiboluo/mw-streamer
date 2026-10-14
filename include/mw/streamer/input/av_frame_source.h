@@ -44,7 +44,7 @@ class MW_STREAMER_API AvFrameSource final {
   // Once on terminal worker failure, outside locks. Query/read/RequestStop are
   // allowed; Stop/destruction on this callback's worker are forbidden.
   // Failure retains the original exception; reads never turn it into EOF.
-  using OnFailed = std::function<void(std::exception_ptr)>;
+  using OnError = std::function<void(std::exception_ptr)>;
 
   // Borrow optional Decoder tracks (at least one). Copies their descriptions
   // and the output config, including channel layout. Decoders must outlive
@@ -56,13 +56,18 @@ class MW_STREAMER_API AvFrameSource final {
   // EOF before initializing either filter. Their earliest available first-frame
   // PTS defines the shared origin, preserving relative audio/video timing.
   // Missing timestamps are not synthesized.
-  AvFrameSource(AvDecoder* video, AvDecoder* audio, AvEncoderConfig config = {},
-                OnFailed on_failed = {});
+  AvFrameSource(AvDecoder* video, AvDecoder* audio,
+                AvEncoderConfig config = {});
   ~AvFrameSource();
   AvFrameSource(const AvFrameSource&) = delete;
   AvFrameSource& operator=(const AvFrameSource&) = delete;
   AvFrameSource(AvFrameSource&&) = delete;
   AvFrameSource& operator=(AvFrameSource&&) = delete;
+
+  // Register before submitting packets to the borrowed Decoders. Registration
+  // and replacement are thread-safe; a terminal error already observed is not
+  // replayed. The worker invokes its callback outside locks.
+  void SetOnError(OnError on_error);
 
   // Nonblocking cache-only read; never decodes or runs filters on the caller.
   // Initially/new generation prebuffers min(4, capacity) periods. EOF or a

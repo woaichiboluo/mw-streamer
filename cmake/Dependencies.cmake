@@ -19,6 +19,35 @@ if(NOT TARGET fmt::fmt)
     FetchContent_MakeAvailable(fmt)
 endif()
 
+if(NOT TARGET ZLMediaKit::MediaKit)
+    find_package(OpenSSL REQUIRED)
+    find_package(SRT REQUIRED)
+    set(ENABLE_MSVC_MT OFF CACHE BOOL "Use the DLL MSVC runtime in ZLMediaKit" FORCE)
+    add_subdirectory("${PROJECT_SOURCE_DIR}/third_party/ZLMediaKit"
+        "${PROJECT_BINARY_DIR}/third_party/ZLMediaKit")
+    target_link_libraries(ZLToolKit PUBLIC mw::log)
+
+    # Treat SDK headers as external while keeping first-party warnings strict.
+    foreach(sdk_target zlmediakit ext-codec ZLToolKit mov flv mpeg zlmediakit_srt_adapter)
+        get_target_property(sdk_includes ${sdk_target} INTERFACE_INCLUDE_DIRECTORIES)
+        if(sdk_includes)
+            set_property(TARGET ${sdk_target} APPEND PROPERTY
+                INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${sdk_includes}")
+        endif()
+    endforeach()
+endif()
+
+function(mw_copy_test_runtime_dlls target)
+    if(WIN32)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_RUNTIME_DLLS:${target}> $<TARGET_FILE_DIR:${target}>
+            COMMAND_EXPAND_LISTS
+            VERBATIM
+        )
+    endif()
+endfunction()
+
 if(NOT TARGET spdlog::spdlog)
     set(SPDLOG_BUILD_ALL OFF CACHE BOOL "Build all spdlog artifacts" FORCE)
     set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "Build shared spdlog library" FORCE)

@@ -6,12 +6,12 @@
 #include <mutex>
 #include <new>
 #include <stdexcept>
-#include <thread>
 #include <utility>
 
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/platform/thread.h"
 
 namespace mw::streamer {
 namespace {
@@ -76,10 +76,9 @@ AVPixelFormat AlphaFormat(AVPixelFormat format) {
 class AvDecoder::Impl final {
  public:
   Impl(const ffmpeg::StreamInfo& stream, AvDecoderConfig config,
-       OnFailed on_failed, const ffmpeg::HwDeviceContext* device = nullptr)
+       const ffmpeg::HwDeviceContext* device = nullptr)
       : stream_(stream),
         config_(std::move(config)),
-        on_failed_(std::move(on_failed)),
         context_(FindDecoder(stream, config_, device)) {
     if (config_.packet_watermark == 0 || config_.frame_capacity == 0 ||
         config_.thread_count < 0) {
@@ -114,10 +113,17 @@ class AvDecoder::Impl final {
     }
     ffmpeg::FfmpegException::throwIfError(
         avcodec_open2(context, context->codec, nullptr), "avcodec_open2");
-    worker_ = std::thread(&Impl::Run, this);
+    if (!worker_.Start([this]() noexcept { Run(); })) {
+      throw std::runtime_error("启动 AvDecoder 解码线程失败");
+    }
   }
 
   ~Impl() { Stop(); }
+
+  void SetOnError(OnError callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    on_error_ = std::move(callback);
+  }
 
   bool PushPacket(ffmpeg::Packet packet, std::uint64_t generation) {
     if (!packet.get() || !packet->data || packet->size <= 0 ||
@@ -177,7 +183,7 @@ class AvDecoder::Impl final {
 
   void Stop() noexcept {
     RequestStop();
-    if (worker_.joinable()) worker_.join();
+    worker_.Join();
     std::lock_guard<std::mutex> lock(mutex_);
     packets_.clear();
     frames_.clear();
@@ -337,16 +343,18 @@ class AvDecoder::Impl final {
       }
     } catch (...) {
       const auto failure = std::current_exception();
+      OnError callback;
       {
         std::lock_guard<std::mutex> lock(mutex_);
         error_ = failure;
         packets_.clear();
+        callback = std::move(on_error_);
       }
       MW_LOG_ERROR("streamer", "AvDecoder 轨道 {} 解码失败",
                    stream_.stream_index);
-      if (on_failed_) {
+      if (callback) {
         try {
-          on_failed_(failure);
+          callback(failure);
         } catch (const std::exception& observer_error) {
           MW_LOG_ERROR("streamer", "AvDecoder 错误通知异常: {}",
                        observer_error.what());
@@ -359,7 +367,7 @@ class AvDecoder::Impl final {
 
   const ffmpeg::StreamInfo stream_;
   const AvDecoderConfig config_;
-  const OnFailed on_failed_;
+  OnError on_error_;
   ffmpeg::CodecContext context_;
   mutable std::mutex mutex_;
   std::condition_variable changed_;
@@ -369,19 +377,19 @@ class AvDecoder::Impl final {
   std::exception_ptr error_;
   std::deque<Input> packets_;
   std::deque<AvDecoderReadResult> frames_;
-  std::thread worker_;
+  internal::Thread worker_;
 };
 
-AvDecoder::AvDecoder(const ffmpeg::StreamInfo& stream, AvDecoderConfig config,
-                     OnFailed on_failed)
-    : impl_(std::make_unique<Impl>(stream, std::move(config),
-                                   std::move(on_failed))) {}
+AvDecoder::AvDecoder(const ffmpeg::StreamInfo& stream, AvDecoderConfig config)
+    : impl_(std::make_unique<Impl>(stream, std::move(config))) {}
 AvDecoder::AvDecoder(const ffmpeg::StreamInfo& stream,
                      const ffmpeg::HwDeviceContext& device,
-                     AvDecoderConfig config, OnFailed on_failed)
-    : impl_(std::make_unique<Impl>(stream, std::move(config),
-                                   std::move(on_failed), &device)) {}
+                     AvDecoderConfig config)
+    : impl_(std::make_unique<Impl>(stream, std::move(config), &device)) {}
 AvDecoder::~AvDecoder() = default;
+void AvDecoder::SetOnError(OnError callback) {
+  impl_->SetOnError(std::move(callback));
+}
 bool AvDecoder::PushPacket(ffmpeg::Packet packet, std::uint64_t generation) {
   return impl_->PushPacket(std::move(packet), generation);
 }

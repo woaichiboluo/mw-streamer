@@ -55,24 +55,27 @@ class MW_STREAMER_API AvDecoder final {
   // A terminal worker failure is retained in error() and notified once outside
   // locks, on the decoder worker. Observers may query, read or RequestStop, but
   // must not call Stop or destroy this object. Callback exceptions are logged.
-  using OnFailed = std::function<void(std::exception_ptr)>;
+  using OnError = std::function<void(std::exception_ptr)>;
 
   // Copies stream parameters, opens the codec and starts its worker. Invalid
   // arguments/opening/thread creation failures throw synchronously.
   explicit AvDecoder(const ffmpeg::StreamInfo& stream,
-                     AvDecoderConfig config = {}, OnFailed on_failed = {});
+                     AvDecoderConfig config = {});
   // Shares the caller's device reference; never creates a hardware device.
   // A CPU device uses software decoding. CUDA video stays on the GPU and
   // cannot fall back to software; audio uses CPU decoding. Use the same device
   // instance for all hardware decoders/encoders. Returned frames retain it.
   AvDecoder(const ffmpeg::StreamInfo& stream,
-            const ffmpeg::HwDeviceContext& device, AvDecoderConfig config = {},
-            OnFailed on_failed = {});
+            const ffmpeg::HwDeviceContext& device, AvDecoderConfig config = {});
   ~AvDecoder();
   AvDecoder(const AvDecoder&) = delete;
   AvDecoder& operator=(const AvDecoder&) = delete;
   AvDecoder(AvDecoder&&) = delete;
   AvDecoder& operator=(AvDecoder&&) = delete;
+
+  // Thread-safe registration/replacement. Register before submitting packets;
+  // failures that have already occurred are not replayed.
+  void SetOnError(OnError callback);
 
   // Transfers a nonempty media packet reference to the input queue.
   // Returns false after Stop
@@ -86,7 +89,7 @@ class MW_STREAMER_API AvDecoder final {
   // Never waits for media. Returns queued frames/EOF in order, then kNull.
   // Frames own their storage independently of codec lifetime. PTS uses
   // best_effort_timestamp in the original stream time base.
-  // Failure is observed through error()/OnFailed, not disguised as normal EOF.
+  // Failure is observed through error()/OnError, not disguised as normal EOF.
   AvDecoderReadResult TryReadFrame();
   // Only a queue watermark: EOF does not prevent requesting the next
   // generation. Already-ended generations still reject further input.

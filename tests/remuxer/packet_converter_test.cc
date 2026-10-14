@@ -14,13 +14,13 @@ extern "C" {
 #include <libavutil/mem.h>
 }
 
-#include "../encoder/encoder_test_support.h"
 #include "ext-codec/AAC.h"
 #include "ext-codec/H264.h"
 #include "ext-codec/H265.h"
 #include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/init/init.h"
 #include "mw/streamer/remuxer/packet_converter.h"
+#include "remuxer_test_support.h"
 
 namespace {
 
@@ -146,7 +146,7 @@ Encoded Video(const char* name) {
   }
   auto encoder = OpenVideo(name, 64, 64, options);
   Encoded output;
-  Encode(*encoder.get(), encoder_test::VideoFrame(0), output, 4);
+  Encode(*encoder.get(), remuxer_test::VideoFrame(0), output, 4);
   return output;
 }
 
@@ -163,7 +163,7 @@ Encoded Audio() {
       avcodec_open2(context, context->codec, nullptr),
       "打开包转换测试音频编码器");
   Encoded output;
-  Encode(*context, encoder_test::AudioFrame(1024), output, 7);
+  Encode(*context, remuxer_test::AudioFrame(1024), output, 7);
   return output;
 }
 
@@ -186,8 +186,8 @@ Encoded MultiSliceVideo(const char* name) {
   frame->width = kWidth;
   frame->height = kHeight;
   frame->format = AV_PIX_FMT_YUV420P;
-  frame->time_base = encoder_test::kVideoTimeBase;
-  frame->pts = encoder_test::kVideoStart;
+  frame->time_base = remuxer_test::kVideoTimeBase;
+  frame->pts = remuxer_test::kVideoStart;
   frame->duration = 1;
   ffmpeg::FfmpegException::throwIfError(av_frame_get_buffer(frame.get(), 0),
                                         "分配多slice视频测试帧");

@@ -10,7 +10,7 @@ extern "C" {
 
 #include "Common/Runtime.h"
 #include "mw/streamer/ffmpeg/error.h"
-#include "mw/streamer/platform/platform.h"
+#include "mw/streamer/platform/runtime.h"
 
 namespace mw::streamer {
 class MwStreamerContext final {
