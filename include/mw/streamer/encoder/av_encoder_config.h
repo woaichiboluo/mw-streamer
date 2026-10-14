@@ -23,10 +23,12 @@ struct AvEncoderConfig {
   int height = 0;
   AVRational fps{30, 1};
   // The final image's pixel layout, including CUDA surfaces' software format.
-  // NONE preserves the source layout. Frame-rate conversion does not change it.
-  AVPixelFormat video_pixel_format = AV_PIX_FMT_NONE;
+  // NONE disables channel video output. Input FPS conversion preserves its
+  // source layout; the compositor produces this target layout.
+  AVPixelFormat video_pixel_format = AV_PIX_FMT_NV12;
   int audio_sample_rate = 48000;
   // Native FFmpeg AAC accepts planar float samples, not packed S32.
+  // NONE disables channel audio output.
   AVSampleFormat audio_sample_format = AV_SAMPLE_FMT_FLTP;
   // Borrowed when passed to a module's constructor; that module must deep-copy
   // the layout. Native layouts such as stereo need no external allocation.

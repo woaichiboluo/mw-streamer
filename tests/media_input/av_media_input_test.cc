@@ -380,13 +380,20 @@ class TemporaryMedia final {
 TEST_CASE("AvMediaInput Live emits configured FLTP audio and FPS video bundles",
           "[av-media-input][live]") {
   int fps = 30;
+  bool audio_disabled = false;
   SECTION("30 FPS with 1600 audio samples") {}
   SECTION("25 FPS with 1920 audio samples") { fps = 25; }
+  SECTION("disabled channel audio still converts to FLTP") {
+    audio_disabled = true;
+  }
   AvMediaInputConfig config;
   config.output.fps = {fps, 1};
+  if (audio_disabled) config.output.audio_sample_format = AV_SAMPLE_FMT_NONE;
   config.video_decoder.thread_count = 1;
   config.audio_decoder.thread_count = 1;
   AvMediaInput input(config);
+  if (audio_disabled)
+    CHECK(config.output.audio_sample_format == AV_SAMPLE_FMT_NONE);
   REQUIRE(input.Start(SamplePath()));
   std::size_t count = 0;
   bool eof = false;
@@ -634,7 +641,7 @@ TEST_CASE(
   }
   SECTION("invalid live FPS") { config.output.fps = {0, 1}; }
   SECTION("invalid live audio sample format") {
-    config.output.audio_sample_format = AV_SAMPLE_FMT_NONE;
+    config.output.audio_sample_format = AV_SAMPLE_FMT_NB;
   }
   CHECK_THROWS_AS(AvMediaInput(config), std::invalid_argument);
 }

@@ -15,8 +15,10 @@
 namespace mw::streamer {
 
 struct SchedulerConfig {
-  // All Live inputs must use this target frame rate and audio format.
-  // Width/height must be positive and the software pixel format explicit.
+  // All Live inputs must use this target frame rate and, when audio output is
+  // enabled, this audio format. NONE disables the corresponding output track;
+  // at least one track must be enabled. Enabled video needs positive dimensions
+  // and a software pixel format. Inputs still consume all their source tracks.
   // Construction validates and fixes the complete output format. Conversion
   // remains in Input; Scheduler neither resizes nor resamples.
   AvEncoderConfig output;
@@ -83,6 +85,9 @@ class MW_STREAMER_API Scheduler final {
   Scheduler(Scheduler&&) = delete;
   Scheduler& operator=(Scheduler&&) = delete;
 
+  // Enabled tracks always deliver data: missing audio becomes silence, missing
+  // video holds the last output or uses the default zero-filled picture.
+  // Disabled tracks remain empty and their processing callbacks are not run.
   // Configure callbacks before Start or after Stop. Empty video/audio callbacks
   // restore their defaults. Output callbacks use the channel worker; video
   // callbacks use the video worker. Query/RequestStop are allowed
@@ -99,11 +104,13 @@ class MW_STREAMER_API Scheduler final {
   // Retains distinct Live inputs, including an empty set. Scheduler is their
   // sole frame reader. Start/Stop/destruction are externally serialized.
   // Input EOF/failure never ends the channel. Underflow retains the last
-  // picture with silent audio. All-failed/empty inputs bypass filters and
-  // produce a CPU zero-filled picture and silence in the fixed output format.
+  // picture with silent audio. All-failed/empty inputs bypass filters; enabled
+  // video holds the last output or starts with a CPU zero-filled picture, and
+  // enabled audio produces silence in the fixed output format.
   // Loop boundaries do not reset channel cadence or the channel clock.
-  // Returns true after all frame sinks initialize and both workers enter their
-  // threads. Failure logs and returns false without starting frame processing.
+  // Returns true after all frame sinks initialize and required workers enter
+  // their threads. Pure audio does not create a video worker. Failure logs and
+  // returns false without starting frame processing.
   // Stop is required before restarting a running/finished worker session.
   [[nodiscard]] bool Start(
       std::vector<std::shared_ptr<AvMediaInput>> inputs) noexcept;

@@ -142,46 +142,59 @@ class Scheduler::Impl final {
  public:
   explicit Impl(SchedulerConfig config) : config_(std::move(config)) {
     const auto& output = config_.output;
+    const bool video_enabled = output.video_pixel_format != AV_PIX_FMT_NONE;
+    const bool audio_enabled = output.audio_sample_format != AV_SAMPLE_FMT_NONE;
     const auto* pixel = av_pix_fmt_desc_get(output.video_pixel_format);
-    if (!pixel || (pixel->flags & AV_PIX_FMT_FLAG_HWACCEL) ||
-        output.width <= 0 || output.height <= 0 ||
-        av_image_check_size(static_cast<unsigned>(output.width),
-                            static_cast<unsigned>(output.height), 0,
-                            nullptr) < 0 ||
+    if ((!video_enabled && !audio_enabled) ||
+        (video_enabled &&
+         (!pixel || (pixel->flags & AV_PIX_FMT_FLAG_HWACCEL) ||
+          output.width <= 0 || output.height <= 0 ||
+          av_image_check_size(static_cast<unsigned>(output.width),
+                              static_cast<unsigned>(output.height), 0,
+                              nullptr) < 0)) ||
         output.fps.num <= 0 || output.fps.den <= 0 ||
-        output.audio_sample_rate <= 0 ||
-        !av_get_sample_fmt_name(output.audio_sample_format) ||
-        !av_channel_layout_check(&output.audio_channel_layout)) {
+        (audio_enabled &&
+         (output.audio_sample_rate <= 0 ||
+          !av_get_sample_fmt_name(output.audio_sample_format) ||
+          !av_channel_layout_check(&output.audio_channel_layout)))) {
       throw std::invalid_argument("Scheduler 输出格式无效");
     }
-    const auto numerator =
-        static_cast<std::int64_t>(output.audio_sample_rate) * output.fps.den;
-    const auto maximum =
-        av_rescale_rnd(numerator, 1, output.fps.num, AV_ROUND_UP);
-    if (numerator < output.fps.num ||
-        maximum > std::numeric_limits<int>::max() / 2 ||
-        av_rescale_q(1, av_inv_q(output.fps), kNanoseconds) <= 0) {
-      throw std::invalid_argument("Scheduler 输出周期或音频样本数量超出范围");
+    if (av_rescale_q(1, av_inv_q(output.fps), kNanoseconds) <= 0) {
+      throw std::invalid_argument("Scheduler 输出周期超出范围");
     }
-    max_samples_ = static_cast<int>(maximum);
-    variable_cadence_ = numerator % output.fps.num != 0;
-    Check(av_channel_layout_copy(&audio_format_->ch_layout,
-                                 &output.audio_channel_layout),
-          "复制 Scheduler 音频布局");
-    audio_format_->format = output.audio_sample_format;
-    audio_format_->sample_rate = output.audio_sample_rate;
-    config_.output.audio_channel_layout = audio_format_->ch_layout;
-    default_video_->format = output.video_pixel_format;
-    default_video_->width = output.width;
-    default_video_->height = output.height;
-    default_video_->time_base = av_inv_q(output.fps);
-    Check(av_frame_get_buffer(default_video_.get(), 0),
-          "分配 Scheduler 默认画面");
-    for (auto* buffer : default_video_->buf) {
-      if (buffer) std::memset(buffer->data, 0, buffer->size);
+    if (audio_enabled) {
+      const auto numerator =
+          static_cast<std::int64_t>(output.audio_sample_rate) * output.fps.den;
+      const auto maximum =
+          av_rescale_rnd(numerator, 1, output.fps.num, AV_ROUND_UP);
+      if (numerator < output.fps.num ||
+          maximum > std::numeric_limits<int>::max() / 2) {
+        throw std::invalid_argument("Scheduler 输出周期或音频样本数量超出范围");
+      }
+      max_samples_ = static_cast<int>(maximum);
+      variable_cadence_ = numerator % output.fps.num != 0;
+      Check(av_channel_layout_copy(&audio_format_->ch_layout,
+                                   &output.audio_channel_layout),
+            "复制 Scheduler 音频布局");
+      audio_format_->format = output.audio_sample_format;
+      audio_format_->sample_rate = output.audio_sample_rate;
+      config_.output.audio_channel_layout = audio_format_->ch_layout;
+      default_audio_ = CreateSilence(max_samples_);
+      if (variable_cadence_) shorter_audio_ = CreateSilence(max_samples_ - 1);
+    } else {
+      config_.output.audio_channel_layout = {};
     }
-    default_audio_ = CreateSilence(max_samples_);
-    if (variable_cadence_) shorter_audio_ = CreateSilence(max_samples_ - 1);
+    if (video_enabled) {
+      default_video_->format = output.video_pixel_format;
+      default_video_->width = output.width;
+      default_video_->height = output.height;
+      default_video_->time_base = av_inv_q(output.fps);
+      Check(av_frame_get_buffer(default_video_.get(), 0),
+            "分配 Scheduler 默认画面");
+      for (auto* buffer : default_video_->buf) {
+        if (buffer) std::memset(buffer->data, 0, buffer->size);
+      }
+    }
   }
 
   ~Impl() { Stop(); }
@@ -212,8 +225,11 @@ class Scheduler::Impl final {
       MW_LOG_ERROR("streamer", "Scheduler 启动失败: Output 初始化失败");
       return false;
     }
-    auto video = std::make_unique<VideoExecutor>();
-    if (!video->Start()) return false;
+    std::unique_ptr<VideoExecutor> video;
+    if (config_.output.video_pixel_format != AV_PIX_FMT_NONE) {
+      video = std::make_unique<VideoExecutor>();
+      if (!video->Start()) return false;
+    }
     slots_.clear();
     slots_.reserve(inputs.size());
     for (auto& input : inputs) {
@@ -222,6 +238,7 @@ class Scheduler::Impl final {
       slots_.push_back(std::move(slot));
     }
     video_ = std::move(video);
+    last_output_video_.reset();
     stopping_ = false;
     SetStatus(SchedulerState::kRunning);
     if (worker_.Start([this]() noexcept { Run(); })) return true;
@@ -270,6 +287,7 @@ class Scheduler::Impl final {
   }
 
   int Samples(std::uint64_t number) const {
+    if (config_.output.audio_sample_format == AV_SAMPLE_FMT_NONE) return 0;
     // The fractional phase matches Caspar's progressive channel, which
     // increments frame_counter before indexing its cadence vector.
     const auto tick = static_cast<std::int64_t>(number);
@@ -428,7 +446,8 @@ class Scheduler::Impl final {
           slot.latest.state = SchedulerInputState::kRunning;
           slot.last_video = std::move(read.video);
           slot.last_audio = std::move(read.audio);
-          if (slot.last_audio)
+          if (slot.last_audio &&
+              config_.output.audio_sample_format != AV_SAMPLE_FMT_NONE)
             audio = PrepareAudio(slot, *slot.last_audio, samples);
           fresh = true;
         } else if (!Terminal(slot.latest.state)) {
@@ -441,7 +460,9 @@ class Scheduler::Impl final {
       if (!fresh || Terminal(slot.latest.state)) {
         slot.audio.reset();
         audio.reset();
-        if (slot.last_audio) audio = Silence(samples);
+        if (slot.last_audio &&
+            config_.output.audio_sample_format != AV_SAMPLE_FMT_NONE)
+          audio = Silence(samples);
       }
       slot.latest.frame.video = slot.last_video;
       slot.latest.frame.audio = std::move(audio);
@@ -451,12 +472,25 @@ class Scheduler::Impl final {
   }
 
   bool Deliver(PendingTick tick) {
-    auto video = tick.video.get();
+    auto video = tick.video.valid() ? tick.video.get() : ffmpeg::Frame{};
     if (stopping_) return false;
     MediaFrame frame;
-    if (HasData(video)) frame.video = std::move(video);
-    if (HasData(tick.audio)) frame.audio = std::move(tick.audio);
-    if (!frame.video && !frame.audio) return false;
+    if (config_.output.video_pixel_format != AV_PIX_FMT_NONE) {
+      if (HasData(video)) {
+        last_output_video_ = video.Ref();
+      } else {
+        video = last_output_video_ ? last_output_video_->Ref()
+                                   : default_video_.Ref();
+        video->pts = static_cast<std::int64_t>(tick.tick.frame_number);
+        video->time_base = av_inv_q(config_.output.fps);
+        video->duration = 1;
+      }
+      frame.video = std::move(video);
+    }
+    if (config_.output.audio_sample_format != AV_SAMPLE_FMT_NONE) {
+      frame.audio = HasData(tick.audio) ? std::move(tick.audio)
+                                        : Silence(tick.tick.audio_samples);
+    }
     bool synchronized = false;
     if (output_) {
       if (!output_->Send({frame, tick.tick.frame_number,
@@ -491,18 +525,20 @@ class Scheduler::Impl final {
         std::all_of(inputs->begin(), inputs->end(), [](const auto& input) {
           return input.state == SchedulerInputState::kFailed;
         });
-    auto video = video_->Submit([this, inputs, tick, all_failed] {
-      if (all_failed) {
-        auto frame = default_video_.Ref();
-        frame->pts = static_cast<std::int64_t>(tick.frame_number);
-        frame->duration = 1;
-        return frame;
-      }
-      return on_video_ ? on_video_(*inputs, tick) : SelectTrack(*inputs, true);
-    });
-    auto audio = all_failed  ? Silence(tick.audio_samples)
-                 : on_audio_ ? on_audio_(*inputs, tick)
-                             : SelectTrack(*inputs, false);
+    std::future<ffmpeg::Frame> video;
+    if (video_)
+      video = video_->Submit([this, inputs, tick, all_failed] {
+        if (all_failed) {
+          return ffmpeg::Frame{};
+        }
+        return on_video_ ? on_video_(*inputs, tick)
+                         : SelectTrack(*inputs, true);
+      });
+    auto audio =
+        config_.output.audio_sample_format == AV_SAMPLE_FMT_NONE || all_failed
+            ? ffmpeg::Frame{}
+        : on_audio_ ? on_audio_(*inputs, tick)
+                    : SelectTrack(*inputs, false);
     return {tick, sample_index, std::move(video), std::move(audio)};
   }
 
@@ -534,6 +570,7 @@ class Scheduler::Impl final {
   SchedulerConfig config_;
   ffmpeg::Frame audio_format_;
   ffmpeg::Frame default_video_;
+  std::optional<ffmpeg::Frame> last_output_video_;
   ffmpeg::Frame default_audio_;
   std::optional<ffmpeg::Frame> shorter_audio_;
   int max_samples_ = 0;

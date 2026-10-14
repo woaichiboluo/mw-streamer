@@ -25,6 +25,9 @@ struct AvMediaInputConfig {
   AvDecoderConfig video_decoder;
   AvDecoderConfig audio_decoder;
   // Used only in Live mode. Batch exposes unfiltered source frames.
+  // This is input conversion configuration, not channel track selection.
+  // NONE audio is normalized internally to FLTP; source audio is still
+  // consumed, while Scheduler may disable its output with the original config.
   AvEncoderConfig output;
 };
 

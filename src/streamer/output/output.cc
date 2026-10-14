@@ -33,13 +33,18 @@ class Output::Impl final {
   }
 
   bool Start(const AvEncoderConfig& format) noexcept {
+    const bool has_video = format.video_pixel_format != AV_PIX_FMT_NONE;
+    const bool has_audio = format.audio_sample_format != AV_SAMPLE_FMT_NONE;
     const auto* pixel_format = av_pix_fmt_desc_get(format.video_pixel_format);
-    if (format.width <= 0 || format.height <= 0 || !pixel_format ||
-        (pixel_format->flags & AV_PIX_FMT_FLAG_HWACCEL) ||
-        format.fps.num <= 0 || format.fps.den <= 0 ||
-        format.audio_sample_rate <= 0 ||
-        !av_get_sample_fmt_name(format.audio_sample_format) ||
-        !av_channel_layout_check(&format.audio_channel_layout)) {
+    if ((!has_video && !has_audio) || format.fps.num <= 0 ||
+        format.fps.den <= 0 ||
+        (has_video &&
+         (format.width <= 0 || format.height <= 0 || !pixel_format ||
+          (pixel_format->flags & AV_PIX_FMT_FLAG_HWACCEL))) ||
+        (has_audio &&
+         (format.audio_sample_rate <= 0 ||
+          !av_get_sample_fmt_name(format.audio_sample_format) ||
+          !av_channel_layout_check(&format.audio_channel_layout)))) {
       MW_LOG_ERROR("streamer", "Output 频道格式无效");
       return false;
     }
@@ -48,16 +53,18 @@ class Output::Impl final {
       return false;
     }
     if (!initialized_) {
-      ffmpeg::Frame audio_format;
-      const int result = av_channel_layout_copy(&audio_format->ch_layout,
-                                                &format.audio_channel_layout);
-      if (result < 0) {
-        MW_LOG_ERROR("streamer", "复制 Output 音频布局失败: error={}", result);
-        return false;
+      if (has_audio) {
+        const int result = av_channel_layout_copy(&audio_format_->ch_layout,
+                                                  &format.audio_channel_layout);
+        if (result < 0) {
+          MW_LOG_ERROR("streamer", "复制 Output 音频布局失败: error={}",
+                       result);
+          return false;
+        }
       }
       format_ = format;
-      audio_format_ = std::move(audio_format);
-      format_.audio_channel_layout = audio_format_->ch_layout;
+      format_.audio_channel_layout =
+          has_audio ? audio_format_->ch_layout : AVChannelLayout{};
       initialized_ = true;
     }
     bool success = true;
@@ -136,13 +143,16 @@ class Output::Impl final {
   }
 
   bool SameFormat(const AvEncoderConfig& format) const {
-    return format.width == format_.width && format.height == format_.height &&
-           av_cmp_q(format.fps, format_.fps) == 0 &&
+    return av_cmp_q(format.fps, format_.fps) == 0 &&
            format.video_pixel_format == format_.video_pixel_format &&
-           format.audio_sample_rate == format_.audio_sample_rate &&
+           (format.video_pixel_format == AV_PIX_FMT_NONE ||
+            (format.width == format_.width &&
+             format.height == format_.height)) &&
            format.audio_sample_format == format_.audio_sample_format &&
-           av_channel_layout_compare(&format.audio_channel_layout,
-                                     &format_.audio_channel_layout) == 0;
+           (format.audio_sample_format == AV_SAMPLE_FMT_NONE ||
+            (format.audio_sample_rate == format_.audio_sample_rate &&
+             av_channel_layout_compare(&format.audio_channel_layout,
+                                       &format_.audio_channel_layout) == 0));
   }
 
   bool WaitPending(const std::atomic<bool>* cancelled) {

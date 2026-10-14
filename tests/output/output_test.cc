@@ -320,13 +320,67 @@ TEST_CASE("Output rejects invalid collections and channel formats",
   auto format = Format();
   SECTION("width") { format.width = 0; }
   SECTION("height") { format.height = 0; }
-  SECTION("pixel format") { format.video_pixel_format = AV_PIX_FMT_NONE; }
+  SECTION("pixel format") { format.video_pixel_format = AV_PIX_FMT_NB; }
   SECTION("hardware format") { format.video_pixel_format = AV_PIX_FMT_CUDA; }
   SECTION("fps") { format.fps.den = 0; }
   SECTION("sample rate") { format.audio_sample_rate = 0; }
-  SECTION("sample format") { format.audio_sample_format = AV_SAMPLE_FMT_NONE; }
+  SECTION("sample format") { format.audio_sample_format = AV_SAMPLE_FMT_NB; }
   SECTION("audio layout") { format.audio_channel_layout = {}; }
+  SECTION("no tracks") {
+    format.video_pixel_format = AV_PIX_FMT_NONE;
+    format.audio_sample_format = AV_SAMPLE_FMT_NONE;
+  }
   CHECK_FALSE(output.Start(format));
+}
+
+TEST_CASE("Output initializes only enabled track formats",
+          "[output][validation][lifecycle]") {
+  auto frame_sink = std::make_shared<TestFrameSink>();
+  Output output({frame_sink});
+  auto format = Format();
+  SECTION("video only ignores audio parameters") {
+    format.audio_sample_format = AV_SAMPLE_FMT_NONE;
+    format.audio_sample_rate = 0;
+    frame_sink->on_initialize_ = [](const AvEncoderConfig& initialized) {
+      CHECK(initialized.audio_sample_format == AV_SAMPLE_FMT_NONE);
+      CHECK(initialized.audio_channel_layout.nb_channels == 0);
+    };
+    REQUIRE(output.Start(format));
+    format.audio_sample_rate = 44100;
+    format.audio_channel_layout = {};
+    CHECK(output.Start(format));
+    format.audio_channel_layout = AV_CHANNEL_LAYOUT_MONO;
+    format.audio_sample_format = AV_SAMPLE_FMT_FLTP;
+    CHECK_FALSE(output.Start(format));
+  }
+  SECTION("audio only ignores video parameters") {
+    format.video_pixel_format = AV_PIX_FMT_NONE;
+    format.width = 0;
+    format.height = 0;
+    frame_sink->on_initialize_ = [](const AvEncoderConfig& initialized) {
+      CHECK(initialized.video_pixel_format == AV_PIX_FMT_NONE);
+    };
+    REQUIRE(output.Start(format));
+    format.width = 1280;
+    format.height = 720;
+    CHECK(output.Start(format));
+    format.video_pixel_format = AV_PIX_FMT_NV12;
+    CHECK_FALSE(output.Start(format));
+  }
+  CHECK(frame_sink->initializes_ == 1);
+  CHECK(output.Send({}));
+}
+
+TEST_CASE("Output requires a valid clock for single track formats",
+          "[output][validation]") {
+  auto format = Format();
+  SECTION("video only") { format.audio_sample_format = AV_SAMPLE_FMT_NONE; }
+  SECTION("audio only") { format.video_pixel_format = AV_PIX_FMT_NONE; }
+  format.fps = {0, 1};
+  auto frame_sink = std::make_shared<TestFrameSink>();
+  Output output({frame_sink});
+  CHECK_FALSE(output.Start(format));
+  CHECK(frame_sink->initializes_ == 0);
 }
 
 TEST_CASE("Output reuses an equivalent format without initializing again",

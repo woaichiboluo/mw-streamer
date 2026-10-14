@@ -50,6 +50,8 @@ class MW_STREAMER_API AvFrameSource final {
   // and the output config, including channel layout. Decoders must outlive
   // this source; stop the source before destroying them. One frame consumer
   // may run concurrently; lifecycle calls must be serialized.
+  // Input conversion consumes every selected track; an audio decoder requires
+  // a valid audio conversion format even if channel audio output is disabled.
   // Every generation waits for each selected track's first decoded frame or
   // EOF before initializing either filter. Their earliest available first-frame
   // PTS defines the shared origin, preserving relative audio/video timing.

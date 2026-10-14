@@ -635,24 +635,25 @@ TEST_CASE("Scheduler prepares fractional audio cadence across sample formats",
          sample_counts[0] != sample_counts[4]));
 }
 
-TEST_CASE("Scheduler empty filters suppress output tracks",
+TEST_CASE("Scheduler empty filters receive default picture and silence",
           "[scheduler][filter][empty]") {
   AudioFile file;
   auto input = OpenInput(file.path());
   Scheduler scheduler(Config());
-  bool empty = true;
+  bool complete = true;
   std::atomic<int> callbacks{0};
   scheduler.SetOnAudio([&](const auto&, const SchedulerTick&) {
     ++callbacks;
     return ffmpeg::Frame{};
   });
-  scheduler.SetOnOutput(
-      [&](const MediaFrame& frame) { empty &= !frame.video && !frame.audio; });
+  scheduler.SetOnOutput([&](const MediaFrame& frame) {
+    complete &= frame.video.has_value() && frame.audio.has_value();
+  });
   REQUIRE(scheduler.Start({input}));
   REQUIRE(WaitFor([&] { return callbacks.load() >= 5; }));
   scheduler.Stop();
   input->Stop();
-  CHECK(empty);
+  CHECK(complete);
   CHECK(callbacks > 0);
 }
 
@@ -1163,8 +1164,12 @@ TEST_CASE("Scheduler constructor requires a complete CPU output format",
   auto config = Config();
   SECTION("zero width") { config.output.width = 0; }
   SECTION("zero height") { config.output.height = 0; }
-  SECTION("unspecified pixel format") {
+  SECTION("both tracks disabled") {
     config.output.video_pixel_format = AV_PIX_FMT_NONE;
+    config.output.audio_sample_format = AV_SAMPLE_FMT_NONE;
+  }
+  SECTION("invalid pixel format") {
+    config.output.video_pixel_format = AV_PIX_FMT_NB;
   }
   SECTION("hardware pixel format") {
     config.output.video_pixel_format = AV_PIX_FMT_CUDA;
@@ -1192,3 +1197,145 @@ TEST_CASE("Scheduler accepts an input before it starts",
 }
 
 }  // namespace
+
+TEST_CASE("Scheduler output tracks follow config while inputs are waiting",
+          "[scheduler][output][tracks][waiting]") {
+  auto config = Config();
+  SECTION("audio and video") {}
+  SECTION("video only ignores disabled audio parameters") {
+    config.output.audio_sample_format = AV_SAMPLE_FMT_NONE;
+    config.output.audio_sample_rate = 0;
+    config.output.audio_channel_layout = {};
+  }
+  SECTION("audio only ignores disabled video parameters") {
+    config.output.video_pixel_format = AV_PIX_FMT_NONE;
+    config.output.width = 0;
+    config.output.height = 0;
+  }
+  const bool video_enabled =
+      config.output.video_pixel_format != AV_PIX_FMT_NONE;
+  const bool audio_enabled =
+      config.output.audio_sample_format != AV_SAMPLE_FMT_NONE;
+  auto input = std::make_shared<AvMediaInput>();
+  auto sink = std::make_shared<SchedulerTestFrameSink>();
+  auto output =
+      std::make_shared<Output>(std::vector<std::shared_ptr<FrameSink>>{sink});
+  Scheduler scheduler(config);
+  scheduler.SetOutput(output);
+  std::atomic<int> video_calls{0};
+  std::atomic<int> audio_calls{0};
+  std::atomic<int> outputs{0};
+  bool valid = true;
+  scheduler.SetOnVideo([&](const auto&, const SchedulerTick&) {
+    ++video_calls;
+    return ffmpeg::Frame{};
+  });
+  scheduler.SetOnAudio([&](const auto&, const SchedulerTick& tick) {
+    ++audio_calls;
+    valid &= tick.audio_samples == 1600;
+    return ffmpeg::Frame{};
+  });
+  scheduler.SetOnOutput([&](const MediaFrame& frame) {
+    valid &= frame.video.has_value() == video_enabled;
+    valid &= frame.audio.has_value() == audio_enabled;
+    if (frame.video) {
+      valid &= frame.video->get()->data[0] != nullptr;
+      valid &= frame.video->get()->format == config.output.video_pixel_format;
+    }
+    if (frame.audio) {
+      const auto* audio = frame.audio->get();
+      valid &= audio->nb_samples == 1600;
+      for (int channel = 0; channel < audio->ch_layout.nb_channels; ++channel)
+        for (int index = 0; index < audio->nb_samples * 4; ++index)
+          valid &= audio->extended_data[channel][index] == 0;
+    }
+    ++outputs;
+  });
+  REQUIRE(scheduler.Start({input}));
+  REQUIRE(WaitFor([&] { return outputs.load() >= 3; }));
+  scheduler.Stop();
+  CHECK(valid);
+  CHECK((video_calls.load() > 0) == video_enabled);
+  CHECK((audio_calls.load() > 0) == audio_enabled);
+  const auto frames = sink->frames();
+  REQUIRE_FALSE(frames.empty());
+  CHECK(frames.front().audio_samples == (audio_enabled ? 1600 : 0));
+  for (const auto& frame : frames) {
+    CHECK(frame.frame.video.has_value() == video_enabled);
+    CHECK(frame.frame.audio.has_value() == audio_enabled);
+  }
+}
+
+TEST_CASE(
+    "Scheduler holds its last processed picture when filters return empty",
+    "[scheduler][output][video][hold]") {
+  auto config = Config();
+  config.output.audio_sample_format = AV_SAMPLE_FMT_NONE;
+  Scheduler scheduler(config);
+  auto input = std::make_shared<AvMediaInput>();
+  std::atomic<int> outputs{0};
+  int video_calls = 0;
+  bool held = true;
+  scheduler.SetOnVideo([&](const auto&, const SchedulerTick&) {
+    if (++video_calls != 1) return ffmpeg::Frame{};
+    ffmpeg::Frame frame;
+    frame->format = AV_PIX_FMT_GRAY8;
+    frame->width = 8;
+    frame->height = 8;
+    if (av_frame_get_buffer(frame.get(), 0) < 0)
+      throw std::runtime_error("分配测试画面失败");
+    std::memset(frame->data[0], 37, 8);
+    return frame;
+  });
+  scheduler.SetOnOutput([&](const MediaFrame& frame) {
+    held &= frame.video.has_value() && !frame.audio;
+    if (frame.video) held &= frame.video->get()->data[0][0] == 37;
+    ++outputs;
+  });
+  REQUIRE(scheduler.Start({input}));
+  REQUIRE(WaitFor([&] { return outputs.load() >= 4; }));
+  scheduler.Stop();
+  CHECK(held);
+}
+
+TEST_CASE("Scheduler disabled outputs still consume complete live inputs",
+          "[scheduler][output][tracks][eof]") {
+  auto config = Config();
+  bool video_enabled = true;
+  SECTION("video output consumes audio source") {
+    config.output.audio_sample_format = AV_SAMPLE_FMT_NONE;
+  }
+  SECTION("audio output consumes video and audio source") {
+    config.output.video_pixel_format = AV_PIX_FMT_NONE;
+    video_enabled = false;
+  }
+  AudioFile file;
+  auto input =
+      OpenInput(video_enabled ? file.path() : VideoPath(), config.output);
+  Scheduler scheduler(config);
+  std::atomic<int> eof_ticks{0};
+  std::atomic<int> outputs{0};
+  bool valid = true;
+  const auto observe = [&](const Scheduler::Inputs& inputs) {
+    if (inputs[0].state == SchedulerInputState::kEof) ++eof_ticks;
+  };
+  scheduler.SetOnVideo([&](const auto& inputs, const SchedulerTick&) {
+    observe(inputs);
+    return FirstTrack(inputs, false);
+  });
+  scheduler.SetOnAudio([&](const auto& inputs, const SchedulerTick&) {
+    observe(inputs);
+    return FirstTrack(inputs, true);
+  });
+  scheduler.SetOnOutput([&](const MediaFrame& frame) {
+    valid &= frame.video.has_value() == video_enabled;
+    valid &= frame.audio.has_value() == !video_enabled;
+    ++outputs;
+  });
+  REQUIRE(scheduler.Start({input}));
+  REQUIRE(WaitFor([&] { return eof_ticks.load() >= 2; }));
+  scheduler.Stop();
+  input->Stop();
+  CHECK(valid);
+  CHECK(outputs > 0);
+}

@@ -71,6 +71,11 @@ class AvMediaInput::Impl final {
     ValidateDecoderConfig(config_.video_decoder);
     ValidateDecoderConfig(config_.audio_decoder);
     if (config_.mode == AvMediaInputMode::kLive) {
+      // Channel track selection belongs to Scheduler. Keep consuming source
+      // audio in a concrete conversion format even when output is disabled.
+      if (config_.output.audio_sample_format == AV_SAMPLE_FMT_NONE) {
+        config_.output.audio_sample_format = AV_SAMPLE_FMT_FLTP;
+      }
       if (config_.output.fps.num <= 0 || config_.output.fps.den <= 0 ||
           config_.output.audio_sample_rate <= 0 ||
           !av_get_sample_fmt_name(config_.output.audio_sample_format) ||
