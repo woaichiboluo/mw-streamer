@@ -1,37 +1,93 @@
 #ifndef MW_STREAMER_SCHEDULER_SCHEDULER_H_
 #define MW_STREAMER_SCHEDULER_SCHEDULER_H_
 
+#include <cstdint>
+#include <exception>
 #include <functional>
 #include <memory>
-#include <string_view>
+#include <vector>
 
 #include "mw/export.h"
-#include "mw/streamer/input/input_frame_source.h"
+#include "mw/streamer/encoder/av_encoder_config.h"
+#include "mw/streamer/input/av_media_input.h"
 #include "mw/streamer/media_frame.h"
 
 namespace mw::streamer {
 
-struct MW_STREAMER_API SchedulerConfig {
-  AVRational video_frame_rate{30, 1};
+enum class SchedulerEndPolicy { kAnyInput, kAllInputs };
+
+struct SchedulerConfig {
+  // All Live inputs must use this target frame rate and audio format.
+  // Conversion remains in Input; Scheduler neither resizes nor resamples.
+  AvEncoderConfig output;
+  SchedulerEndPolicy end_policy = SchedulerEndPolicy::kAllInputs;
 };
 
-// Pulls native decoded media through FFmpeg bwdif/fps and asynchronous audio
-// resampling, then delivers one MediaFrame per channel tick. Its picture and
-// corresponding audio samples are consumed together. Frame callbacks are serial
-// on the channel worker. Configure callbacks before Start; serialize Start/Stop
-// and never join from callbacks.
+enum class SchedulerInputState {
+  kWaiting,
+  kRunning,
+  kUnderflow,
+  kEof,
+  kFailed,
+  kStopped,
+};
+
+struct SchedulerInputFrame {
+  // Vector position is the stable input identity, including terminal slots.
+  // Underflow/terminal slots retain the last picture with silent audio.
+  // A track that has never produced a frame remains empty. A real short audio
+  // tail holds its last sample; Input's single-track EOF behavior is retained.
+  MediaFrame frame;
+  SchedulerInputState state = SchedulerInputState::kWaiting;
+  std::uint64_t generation = 0;
+  std::uint64_t frame_index = 0;
+  std::int64_t pts_us = AV_NOPTS_VALUE;
+};
+
+struct SchedulerTick {
+  // Scheduling identity, not encoding PTS. A short pipeline returns this
+  // tick's picture and audio together on the following channel iteration.
+  std::uint64_t frame_number = 0;
+  int audio_samples = 0;  // Per channel, common to all prepared audio frames.
+};
+
+enum class SchedulerState { kStopped, kRunning, kEnded, kFailed };
+
+struct SchedulerStatus {
+  SchedulerState state = SchedulerState::kStopped;
+  std::exception_ptr error;
+};
+
+// pull all inputs, submit video, process audio,
+// consume the previous tick, then pace output. One persistent video worker
+// overlaps video processing with the channel worker's audio processing.
+// At most two ticks are in flight while awaiting the previous video result.
+//
+// All callbacks must not throw. Inputs are read-only, including their shared
+// media buffers. The audio callback returns the prepared format/sample count.
+// Each callback is serial, but video and audio callbacks may run concurrently;
+// shared user filter state must therefore be synchronized by the caller.
+// Scheduler never flushes user filter caches or generates encoding PTS.
 class MW_STREAMER_API Scheduler final {
  public:
-  using OnReady = std::function<void(const std::vector<ffmpeg::StreamInfo>&)>;
-  // Video retains CPU/CUDA buffers. Audio is packed S32 at 48000 Hz and
-  // source channel layout. Output time is video ticks/cumulative audio samples.
-  // Source audio EOF retains its last block while video continues.
-  // Temporary producer underflow repeats the picture with silence.
-  // Initial/loop resets with fewer than four queued frames peek the first
-  // picture with silence without consuming it.
-  using OnFrame = std::function<void(const MediaFrame&)>;
+  using Inputs = std::vector<SchedulerInputFrame>;
+  // Default: Ref() the first nonempty corresponding track in input order.
+  // An empty AVFrame (no data[0]) represents no corresponding output track.
+  using OnVideo =
+      std::function<ffmpeg::Frame(const Inputs&, const SchedulerTick&)>;
+  using OnAudio =
+      std::function<ffmpeg::Frame(const Inputs&, const SchedulerTick&)>;
+  using OnOutput = std::function<void(const MediaFrame&)>;
+  // Normal channel EOF only, after every submitted callback and output has
+  // finished. User filters may release resources here; no tail is requested.
+  using OnEof = std::function<void()>;
+  // Consumer notification, after OnEof. Does not mean a consumer has drained
+  // its own encoders, queues, files or network outputs.
   using OnEnded = std::function<void()>;
-  using OnError = std::function<void(int, std::string_view)>;
+  // Whole-channel failure, after accepted tasks have finished. kAllInputs
+  // reports failure only once all inputs terminate, preserving the first
+  // input exception. Cancellation does not invoke EOF/end/failure callbacks.
+  using OnFailed = std::function<void(std::exception_ptr)>;
 
   explicit Scheduler(SchedulerConfig config = {});
   ~Scheduler();
@@ -40,28 +96,32 @@ class MW_STREAMER_API Scheduler final {
   Scheduler(Scheduler&&) = delete;
   Scheduler& operator=(Scheduler&&) = delete;
 
-  // Once on the filter producer after graph negotiation, before frame delivery.
-  // CUDA stream descriptions contain the surface's software pixel layout.
-  void SetOnReady(OnReady callback) noexcept;
-  // One callback contains both tracks for the tick. Performance callback time
-  // for each present track measures this shared boundary, not exclusive work.
-  void SetOnFrame(OnFrame callback) noexcept;
-  void SetOnEnded(OnEnded callback) noexcept;
-  // Fatal source/filter/callback errors request workers to stop. The external
-  // pipeline calls Stop; OnError runs outside locks and must not call Stop.
-  void SetOnError(OnError callback) noexcept;
+  // Configure callbacks before Start or after Stop. Empty video/audio callbacks
+  // restore their defaults. Output/EOF/end/failure callbacks use the channel
+  // worker; video callbacks use the video worker. Query/RequestStop are allowed
+  // in callbacks; Start/Stop/configuration/destruction are forbidden there.
+  void SetOnVideo(OnVideo callback);
+  void SetOnAudio(OnAudio callback);
+  void SetOnOutput(OnOutput callback);
+  void SetOnEof(OnEof callback);
+  void SetOnEnded(OnEnded callback);
+  void SetOnFailed(OnFailed callback);
 
-  // Input has already selected the required tracks. The source must contain
-  // at most one video and one audio track, and at least one of those types.
-  bool Start(const DecodedInputSource& source) noexcept;
-  // Reopening queues another segment. Old filters and bundles drain first.
-  // source.flush instead discards pending old segments and frames for a seek;
-  // channel time stays continuous. Rejected after Drain/Stop.
-  bool QueueSource(const DecodedInputSource& source) noexcept;
-  // No more segments. Drain native filters/bundles and call OnEnded once.
-  void Drain() noexcept;
-  // Wake workers without joining; request before stopping upstream Input.
+  // Retains a fixed nonempty set of distinct, externally started Live inputs.
+  // Scheduler is their sole frame reader. Start/Stop/destruction are externally
+  // serialized; Stop and finish old reads before restarting any bound Input.
+  // Input generations/loop EOF do not reset the channel cadence or clock.
+  // Cached loop boundaries are skipped within the same tick; audio carry is
+  // retained across drained generations, and cleared on real underflow or
+  // discontinuities without a preceding source EOF.
+  void Start(std::vector<std::shared_ptr<AvMediaInput>> inputs);
+  // Terminal state is published before terminal notification callbacks return.
+  // Stop joins those callbacks before their captured resources may be released.
+  SchedulerStatus status() const;
   void RequestStop() noexcept;
+  // Cancels pacing, joins both workers and releases all input references.
+  // Does not stop Input, interrupt user callbacks, or report a normal EOF.
+  // A natural Ended/Failed status remains available after Stop.
   void Stop() noexcept;
 
  private:
