@@ -306,7 +306,7 @@ TEST_CASE(
   config.output.audio_sample_format = AV_SAMPLE_FMT_S32;
   AvMediaInput input(config);
   CHECK(input.mode() == AvMediaInputMode::kBatch);
-  input.Start(SamplePath());
+  REQUIRE(input.Start(SamplePath()));
   CheckBatch(input, reference);
   REQUIRE(WaitFor(
       [&] { return input.status().state == AvMediaInputState::kEnded; }));
@@ -387,7 +387,7 @@ TEST_CASE("AvMediaInput Live emits configured FLTP audio and FPS video bundles",
   config.video_decoder.thread_count = 1;
   config.audio_decoder.thread_count = 1;
   AvMediaInput input(config);
-  input.Start(SamplePath());
+  REQUIRE(input.Start(SamplePath()));
   std::size_t count = 0;
   bool eof = false;
   bool short_tail = false;
@@ -437,7 +437,7 @@ TEST_CASE("AvMediaInput looping exposes both generations of Batch and Live EOF",
   auto config = BatchConfig(true);
   if (!batch) config.mode = AvMediaInputMode::kLive;
   AvMediaInput input(config);
-  input.Start(SamplePath());
+  REQUIRE(input.Start(SamplePath()));
   if (batch) {
     CheckBatch(input, ReadNative(SamplePath()), 2);
   } else {
@@ -485,7 +485,7 @@ TEST_CASE(
   CHECK(reference.audio.has_value() == audio_only);
   CHECK(reference.video.has_value() == !audio_only);
   AvMediaInput input(BatchConfig());
-  input.Start(path);
+  REQUIRE(input.Start(path));
   CheckBatch(input, reference);
   CHECK((audio_only ? input.TryReadVideo() : input.TryReadAudio()).status ==
         AvDecoderReadStatus::kNull);
@@ -503,7 +503,7 @@ TEST_CASE(
   config.video_decoder.frame_capacity = 64;
   config.audio_decoder.frame_capacity = 128;
   AvMediaInput input(config);
-  input.Start(SamplePath());
+  REQUIRE(input.Start(SamplePath()));
   REQUIRE(WaitFor(
       [&] { return input.status().state == AvMediaInputState::kDraining; }));
   std::this_thread::sleep_for(20ms);
@@ -530,7 +530,7 @@ TEST_CASE("AvMediaInput retries a missing source and recovers when it appears",
           "[av-media-input][retry][recovery]") {
   TemporaryMedia temporary;
   AvMediaInput input(BatchConfig());
-  input.Start(temporary.path());
+  REQUIRE(input.Start(temporary.path()));
   REQUIRE(WaitFor([&] {
     return input.status().state == AvMediaInputState::kWaitingRetry;
   }));
@@ -552,7 +552,7 @@ TEST_CASE(
   std::atomic<std::size_t> callbacks{0};
   AvMediaInput input(BatchConfig());
   input.SetOnStateChanged([&](const auto&) { ++callbacks; });
-  input.Start(missing.path());
+  REQUIRE(input.Start(missing.path()));
   REQUIRE(WaitFor([&] {
     return input.status().state == AvMediaInputState::kWaitingRetry;
   }));
@@ -588,7 +588,7 @@ TEST_CASE(
       ++failed_callbacks;
     }
   });
-  input.Start(missing ? temporary.path() : SamplePath());
+  REQUIRE(input.Start(missing ? temporary.path() : SamplePath()));
   REQUIRE(WaitFor(
       [&] { return input.status().state == AvMediaInputState::kFailed; }));
   input.Stop();
@@ -614,12 +614,15 @@ TEST_CASE(
   CHECK_THROWS_AS(batch.TryReadFrame(), std::logic_error);
   CHECK(batch.TryReadVideo().status == AvDecoderReadStatus::kNull);
   AvMediaInput live;
+  static_assert(noexcept(live.Start("")));
   CHECK_THROWS_AS(live.TryReadVideo(), std::logic_error);
   CHECK_THROWS_AS(live.TryReadAudio(), std::logic_error);
   CHECK(live.TryReadFrame().status == AvFrameSourceReadStatus::kNull);
-  CHECK_THROWS_AS(live.Start(""), std::invalid_argument);
-  CHECK_THROWS_AS(live.Start(std::string_view("a\0b", 3)),
-                  std::invalid_argument);
+  CHECK_FALSE(live.Start(""));
+  CHECK_FALSE(live.Start("  \t\n"));
+  CHECK(live.status().state == AvMediaInputState::kStopped);
+  CHECK(live.status().error == nullptr);
+  CHECK_FALSE(live.Start(std::string_view("a\0b", 3)));
   AvMediaInputConfig config;
   SECTION("invalid mode") { config.mode = static_cast<AvMediaInputMode>(-1); }
   SECTION("zero packet capacity") { config.proxy.input.packet_capacity = 0; }
@@ -660,7 +663,7 @@ TEST_CASE(
       input.RequestStop();
     throw std::runtime_error("observer failure");
   });
-  input.Start(SamplePath());
+  REQUIRE(input.Start(SamplePath()));
   if (cancel) {
     REQUIRE(WaitFor(
         [&] { return input.status().state == AvMediaInputState::kStopped; }));
@@ -684,7 +687,7 @@ TEST_CASE(
     "[av-media-input][ownership][restart]") {
   const auto path = SamplePath("h264_video.mp4");
   AvMediaInput input(BatchConfig());
-  input.Start(path);
+  REQUIRE(input.Start(path));
   mw::streamer::AvDecoderReadResult retained;
   REQUIRE(WaitFor([&] {
     retained = input.TryReadVideo();
@@ -699,8 +702,8 @@ TEST_CASE(
   CHECK(input.TryReadVideo().status == AvDecoderReadStatus::kNull);
   CHECK(Record(*retained.frame->get()) == before);
   CHECK(info->video_stream_index == 0);
-  input.Start(path);
-  CHECK_THROWS_AS(input.Start(path), std::logic_error);
+  REQUIRE(input.Start(path));
+  CHECK_FALSE(input.Start(path));
   CheckBatch(input, ReadNative(path));
   REQUIRE(WaitFor(
       [&] { return input.status().state == AvMediaInputState::kEnded; }));
@@ -765,7 +768,7 @@ TEST_CASE(
             backend == 0 ? "h264" : "h264_cuvid";
         config.video_decoder.thread_count = backend == 0 ? 0 : 2;
         inputs[backend] = std::make_unique<AvMediaInput>(device, config);
-        inputs[backend]->Start(SamplePath(name));
+        REQUIRE(inputs[backend]->Start(SamplePath(name)));
       }
       std::array<std::size_t, 2> counts{};
       std::array<bool, 2> video_eof{};

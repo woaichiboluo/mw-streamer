@@ -10,7 +10,6 @@
 #include <new>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <utility>
 
 extern "C" {
@@ -26,6 +25,7 @@ extern "C" {
 
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/platform/thread.h"
 
 namespace mw::streamer {
 namespace {
@@ -198,9 +198,8 @@ class TrackFilter final {
 class AvFrameSource::Impl final {
  public:
   Impl(AvDecoder* video, AvDecoder* audio, AvEncoderConfig config,
-       std::int64_t start_time_us, OnFailed on_failed)
+       OnFailed on_failed)
       : config_(std::move(config)),
-        initial_start_us_(start_time_us),
         on_failed_(std::move(on_failed)),
         video_(video, AVMEDIA_TYPE_VIDEO),
         audio_(audio, AVMEDIA_TYPE_AUDIO) {
@@ -234,16 +233,17 @@ class AvFrameSource::Impl final {
                 audio != nullptr);
     MW_LOG_DEBUG("streamer",
                  "AvFrameSource[{}] 输出配置: fps={}/{}, sample_rate={}, "
-                 "sample_format={}, channels={}, capacity={}, start_us={}",
+                 "sample_format={}, channels={}, capacity={}",
                  static_cast<const void*>(this), config_.fps.num,
                  config_.fps.den, config_.audio_sample_rate,
                  static_cast<int>(config_.audio_sample_format),
-                 config_.audio_channel_layout.nb_channels, capacity_,
-                 initial_start_us_);
+                 config_.audio_channel_layout.nb_channels, capacity_);
   }
 
   ~Impl() { Stop(); }
-  void Start() { worker_ = std::thread(&Impl::Run, this); }
+  bool Start() noexcept {
+    return worker_.Start([this]() noexcept { Run(); });
+  }
 
   AvFrameSourceReadResult TryReadFrame() {
     AvFrameSourceReadResult result;
@@ -330,7 +330,7 @@ class AvFrameSource::Impl final {
   void Stop() noexcept {
     RequestStop();
     const bool joined = worker_.joinable();
-    if (joined) worker_.join();
+    worker_.Join();
     std::size_t discarded = 0;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -411,8 +411,8 @@ class AvFrameSource::Impl final {
       producing_generation_ = generation;
     }
     changed_.notify_all();
-    start_us_ = initial ? initial_start_us_ : AV_NOPTS_VALUE;
-    origin_ready_ = start_us_ != AV_NOPTS_VALUE;
+    start_us_ = AV_NOPTS_VALUE;
+    origin_ready_ = false;
     generation_finished_ = false;
     frame_index_ = 0;
     last_end_us_ = AV_NOPTS_VALUE;
@@ -436,6 +436,8 @@ class AvFrameSource::Impl final {
 
   bool FindOrigin() {
     if (origin_ready_) return true;
+    // Arrival order must not choose the origin: a later-arriving track may
+    // have an earlier presentation timestamp. Empty tracks contribute EOF.
     for (const auto* track : {&video_, &audio_}) {
       if (track->decoder &&
           (!track->pending || track->pending->generation != *generation_)) {
@@ -757,7 +759,6 @@ class AvFrameSource::Impl final {
   }
 
   AvEncoderConfig config_;
-  const std::int64_t initial_start_us_;
   const OnFailed on_failed_;
   Track video_;
   Track audio_;
@@ -781,15 +782,16 @@ class AvFrameSource::Impl final {
   std::optional<std::uint64_t> producing_generation_;
   std::optional<std::uint64_t> read_generation_;
   bool prebuffering_ = true;
-  std::thread worker_;
+  internal::Thread worker_;
 };
 
 AvFrameSource::AvFrameSource(AvDecoder* video, AvDecoder* audio,
-                             AvEncoderConfig config, std::int64_t start_time_us,
-                             OnFailed on_failed)
+                             AvEncoderConfig config, OnFailed on_failed)
     : impl_(std::make_unique<Impl>(video, audio, std::move(config),
-                                   start_time_us, std::move(on_failed))) {
-  impl_->Start();
+                                   std::move(on_failed))) {
+  if (!impl_->Start()) {
+    throw std::runtime_error("AvFrameSource 工作线程启动失败");
+  }
 }
 AvFrameSource::~AvFrameSource() = default;
 AvFrameSourceReadResult AvFrameSource::TryReadFrame() {

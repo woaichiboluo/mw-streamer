@@ -38,6 +38,8 @@ set(MW_STREAMER_SOURCES
     streamer/decoder/av_decoder.cc
     streamer/input/av_frame_source.cc
     streamer/input/av_media_input.cc
+    streamer/output/output.cc
+    streamer/platform/thread.cc
     streamer/scheduler/scheduler.cc
 )
 

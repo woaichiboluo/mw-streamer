@@ -50,10 +50,11 @@ class MW_STREAMER_API AvFrameSource final {
   // and the output config, including channel layout. Decoders must outlive
   // this source; stop the source before destroying them. One frame consumer
   // may run concurrently; lifecycle calls must be serialized.
-  // The initial container start time, if known, aligns both filter graphs.
-  // Later generations derive a shared origin from their first decoded frames.
+  // Every generation waits for each selected track's first decoded frame or
+  // EOF before initializing either filter. Their earliest available first-frame
+  // PTS defines the shared origin, preserving relative audio/video timing.
+  // Missing timestamps are not synthesized.
   AvFrameSource(AvDecoder* video, AvDecoder* audio, AvEncoderConfig config = {},
-                std::int64_t start_time_us = AV_NOPTS_VALUE,
                 OnFailed on_failed = {});
   ~AvFrameSource();
   AvFrameSource(const AvFrameSource&) = delete;

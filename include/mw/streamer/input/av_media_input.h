@@ -78,10 +78,11 @@ class MW_STREAMER_API AvMediaInput final {
   AvMediaInput& operator=(AvMediaInput&&) = delete;
 
   void SetOnStateChanged(OnStateChanged callback);
-  // Asynchronous opening/initialization. Errors in workers are reported through
-  // status, never frame reads. Invalid URL/lifecycle/configuration throws.
+  // Returns true after the controller enters its thread; connection and media
+  // initialization remain asynchronous, with errors reported through status.
+  // Invalid URL/restart or thread creation failure logs and returns false.
   // Stop and finish old reads before restarting; generations restart at zero.
-  void Start(std::string_view url);
+  [[nodiscard]] bool Start(std::string_view url) noexcept;
   // Batch only, nonblocking. Consume every present track to relieve
   // backpressure and complete draining. Absent tracks/opening/failure/Stop
   // return kNull. Source format/time bases/PTS are unchanged. Each generation's

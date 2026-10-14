@@ -8,7 +8,6 @@
 #include <mutex>
 #include <new>
 #include <stdexcept>
-#include <thread>
 #include <utility>
 
 extern "C" {
@@ -18,6 +17,7 @@ extern "C" {
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/av_dictionary.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/platform/thread.h"
 
 namespace mw::streamer {
 namespace {
@@ -152,7 +152,9 @@ class AvInput::Impl final {
         info_ = std::move(info);
       }
       Publish(AvInputState::kOpened);
-      worker_ = std::thread(&Impl::Run, this);
+      if (!worker_.Start([this]() noexcept { Run(); })) {
+        throw std::runtime_error("AvInput 工作线程启动失败");
+      }
     } catch (...) {
       OpenFailed(std::current_exception());
       throw;
@@ -209,7 +211,7 @@ class AvInput::Impl final {
       if (status_.state == AvInputState::kClosed) return;
     }
     RequestCancel();
-    if (worker_.joinable()) worker_.join();
+    worker_.Join();
     avformat_close_input(&format_);
     deadline_ns_.store(0);
     {
@@ -407,7 +409,7 @@ class AvInput::Impl final {
   AvInputInfo info_;
   std::deque<ffmpeg::Packet> packets_;
   AVFormatContext* format_ = nullptr;
-  std::thread worker_;
+  internal::Thread worker_;
   OnStateChanged on_state_changed_;
 };
 

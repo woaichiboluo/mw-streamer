@@ -6,11 +6,11 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <utility>
 
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/platform/thread.h"
 
 namespace mw::streamer {
 namespace {
@@ -67,13 +67,17 @@ class AvInputProxy::Impl final {
     on_state_changed_ = std::move(callback);
   }
 
-  void Start(std::string_view url) {
+  bool Start(std::string_view url) noexcept {
     if (url.empty() || url.find('\0') != std::string_view::npos ||
         url.find_first_not_of(" \t\r\n\f\v") == std::string_view::npos) {
-      throw std::invalid_argument("AvInputProxy 地址不能为空或包含空字符");
+      MW_LOG_ERROR("streamer", "AvInputProxy[{}] 启动失败: 地址无效",
+                   static_cast<const void*>(this));
+      return false;
     }
     if (worker_.joinable()) {
-      throw std::logic_error("重新启动 AvInputProxy 前需要 Stop");
+      MW_LOG_ERROR("streamer", "AvInputProxy[{}] 启动失败: 重新启动前需要 Stop",
+                   static_cast<const void*>(this));
+      return false;
     }
     url_ = url;
     MW_LOG_INFO("streamer", "AvInputProxy[{}] 启动: 循环={} 最大重试={}",
@@ -87,29 +91,17 @@ class AvInputProxy::Impl final {
       status_.state = AvInputProxyState::kConnecting;
       terminal_.reset();
     }
-    try {
-      worker_ = std::thread(&Impl::Run, this);
-    } catch (...) {
-      {
-        std::lock_guard<std::mutex> lock(mutex_);
-        status_.state = AvInputProxyState::kFailed;
-        status_.error = std::current_exception();
-      }
-      changed_.notify_all();
-      if (log::ShouldLog("streamer", log::LogLevel::kCritical)) {
-        try {
-          throw;
-        } catch (const std::exception& failure) {
-          MW_LOG_CRITICAL("streamer", "AvInputProxy[{}] 无法创建控制线程: {}",
-                          static_cast<const void*>(this), failure.what());
-        } catch (...) {
-          MW_LOG_CRITICAL("streamer",
-                          "AvInputProxy[{}] 无法创建控制线程: 未知异常",
-                          static_cast<const void*>(this));
-        }
-      }
-      throw;
+    if (worker_.Start([this]() noexcept { Run(); })) return true;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopping_ = true;
+      available_ = false;
+      status_ = {};
+      terminal_.reset();
     }
+    url_.clear();
+    changed_.notify_all();
+    return false;
   }
 
   AvInputProxyReadResult Read(bool wait) {
@@ -197,7 +189,7 @@ class AvInputProxy::Impl final {
 
   void Stop() noexcept {
     RequestStop();
-    if (worker_.joinable()) worker_.join();
+    worker_.Join();
   }
 
   AvInputProxyStatus status() const {
@@ -432,7 +424,7 @@ class AvInputProxy::Impl final {
   std::optional<AvInputStatus> terminal_;
   std::shared_ptr<AvInput> input_;
   std::string url_;
-  std::thread worker_;
+  internal::Thread worker_;
   OnStateChanged on_state_changed_;
 };
 
@@ -442,7 +434,9 @@ AvInputProxy::~AvInputProxy() = default;
 void AvInputProxy::SetOnStateChanged(OnStateChanged callback) {
   impl_->SetOnStateChanged(std::move(callback));
 }
-void AvInputProxy::Start(std::string_view url) { impl_->Start(url); }
+bool AvInputProxy::Start(std::string_view url) noexcept {
+  return impl_->Start(url);
+}
 AvInputProxyReadResult AvInputProxy::ReadPacket() { return impl_->Read(true); }
 AvInputProxyReadResult AvInputProxy::TryReadPacket() {
   return impl_->Read(false);

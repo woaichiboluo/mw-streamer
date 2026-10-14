@@ -2,7 +2,6 @@
 #define MW_STREAMER_SCHEDULER_SCHEDULER_H_
 
 #include <cstdint>
-#include <exception>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -11,16 +10,16 @@
 #include "mw/streamer/encoder/av_encoder_config.h"
 #include "mw/streamer/input/av_media_input.h"
 #include "mw/streamer/media_frame.h"
+#include "mw/streamer/output/output.h"
 
 namespace mw::streamer {
 
-enum class SchedulerEndPolicy { kAnyInput, kAllInputs };
-
 struct SchedulerConfig {
   // All Live inputs must use this target frame rate and audio format.
-  // Conversion remains in Input; Scheduler neither resizes nor resamples.
+  // Width/height must be positive and the software pixel format explicit.
+  // Construction validates and fixes the complete output format. Conversion
+  // remains in Input; Scheduler neither resizes nor resamples.
   AvEncoderConfig output;
-  SchedulerEndPolicy end_policy = SchedulerEndPolicy::kAllInputs;
 };
 
 enum class SchedulerInputState {
@@ -51,11 +50,10 @@ struct SchedulerTick {
   int audio_samples = 0;  // Per channel, common to all prepared audio frames.
 };
 
-enum class SchedulerState { kStopped, kRunning, kEnded, kFailed };
+enum class SchedulerState { kStopped, kRunning };
 
 struct SchedulerStatus {
   SchedulerState state = SchedulerState::kStopped;
-  std::exception_ptr error;
 };
 
 // pull all inputs, submit video, process audio,
@@ -63,8 +61,8 @@ struct SchedulerStatus {
 // overlaps video processing with the channel worker's audio processing.
 // At most two ticks are in flight while awaiting the previous video result.
 //
-// All callbacks must not throw. Inputs are read-only, including their shared
-// media buffers. The audio callback returns the prepared format/sample count.
+// Callbacks must not throw. Inputs, including shared media buffers, are
+// read-only. The audio callback returns the prepared format/sample count.
 // Each callback is serial, but video and audio callbacks may run concurrently;
 // shared user filter state must therefore be synchronized by the caller.
 // Scheduler never flushes user filter caches or generates encoding PTS.
@@ -78,17 +76,6 @@ class MW_STREAMER_API Scheduler final {
   using OnAudio =
       std::function<ffmpeg::Frame(const Inputs&, const SchedulerTick&)>;
   using OnOutput = std::function<void(const MediaFrame&)>;
-  // Normal channel EOF only, after every submitted callback and output has
-  // finished. User filters may release resources here; no tail is requested.
-  using OnEof = std::function<void()>;
-  // Consumer notification, after OnEof. Does not mean a consumer has drained
-  // its own encoders, queues, files or network outputs.
-  using OnEnded = std::function<void()>;
-  // Whole-channel failure, after accepted tasks have finished. kAllInputs
-  // reports failure only once all inputs terminate, preserving the first
-  // input exception. Cancellation does not invoke EOF/end/failure callbacks.
-  using OnFailed = std::function<void(std::exception_ptr)>;
-
   explicit Scheduler(SchedulerConfig config = {});
   ~Scheduler();
   Scheduler(const Scheduler&) = delete;
@@ -97,31 +84,33 @@ class MW_STREAMER_API Scheduler final {
   Scheduler& operator=(Scheduler&&) = delete;
 
   // Configure callbacks before Start or after Stop. Empty video/audio callbacks
-  // restore their defaults. Output/EOF/end/failure callbacks use the channel
-  // worker; video callbacks use the video worker. Query/RequestStop are allowed
+  // restore their defaults. Output callbacks use the channel worker; video
+  // callbacks use the video worker. Query/RequestStop are allowed
   // in callbacks; Start/Stop/configuration/destruction are forbidden there.
   void SetOnVideo(OnVideo callback);
   void SetOnAudio(OnAudio callback);
   void SetOnOutput(OnOutput callback);
-  void SetOnEof(OnEof callback);
-  void SetOnEnded(OnEnded callback);
-  void SetOnFailed(OnFailed callback);
+  // Optional fixed-set fan-out, exclusively driven by this Scheduler. Start
+  // initializes frame sinks once. Stop cancels only admission waits; frame
+  // sinks remain alive until their owners release them. A healthy clocked frame
+  // sink replaces system pacing. Bind before Start or after Stop.
+  void SetOutput(std::shared_ptr<Output> output);
 
-  // Retains a fixed nonempty set of distinct, externally started Live inputs.
-  // Scheduler is their sole frame reader. Start/Stop/destruction are externally
-  // serialized; Stop and finish old reads before restarting any bound Input.
-  // Input generations/loop EOF do not reset the channel cadence or clock.
-  // Cached loop boundaries are skipped within the same tick; audio carry is
-  // retained across drained generations, and cleared on real underflow or
-  // discontinuities without a preceding source EOF.
-  void Start(std::vector<std::shared_ptr<AvMediaInput>> inputs);
-  // Terminal state is published before terminal notification callbacks return.
-  // Stop joins those callbacks before their captured resources may be released.
+  // Retains distinct Live inputs, including an empty set. Scheduler is their
+  // sole frame reader. Start/Stop/destruction are externally serialized.
+  // Input EOF/failure never ends the channel. Underflow retains the last
+  // picture with silent audio. All-failed/empty inputs bypass filters and
+  // produce a CPU zero-filled picture and silence in the fixed output format.
+  // Loop boundaries do not reset channel cadence or the channel clock.
+  // Returns true after all frame sinks initialize and both workers enter their
+  // threads. Failure logs and returns false without starting frame processing.
+  // Stop is required before restarting a running/finished worker session.
+  [[nodiscard]] bool Start(
+      std::vector<std::shared_ptr<AvMediaInput>> inputs) noexcept;
   SchedulerStatus status() const;
   void RequestStop() noexcept;
-  // Cancels pacing, joins both workers and releases all input references.
-  // Does not stop Input, interrupt user callbacks, or report a normal EOF.
-  // A natural Ended/Failed status remains available after Stop.
+  // Cancels pacing/admission waits and joins workers before releasing inputs.
+  // Does not stop Input or Output, nor interrupt user callbacks.
   void Stop() noexcept;
 
  private:

@@ -74,10 +74,10 @@ class MW_STREAMER_API AvInputProxy final {
   AvInputProxy& operator=(AvInputProxy&&) = delete;
 
   void SetOnStateChanged(OnStateChanged callback);
-  // Returns after launching the control worker. Connection errors are delivered
-  // through status notifications; invalid calls/thread creation may throw.
-  // Call Stop and finish old reads before another Start.
-  void Start(std::string_view url);
+  // Returns true after the control worker enters its thread, without waiting
+  // for a connection. Invalid URL/restart or thread creation failure logs and
+  // returns false. Call Stop and finish old reads before another Start.
+  [[nodiscard]] bool Start(std::string_view url) noexcept;
   // Reports EOF for each completed generation, with its generation/info.
   // Reading EOF triggers reopening when loop is enabled; until then the ended
   // input remains current. Each looping generation reports EOF exactly once.

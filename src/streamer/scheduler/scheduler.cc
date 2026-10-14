@@ -1,25 +1,29 @@
 #include "mw/streamer/scheduler/scheduler.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <future>
 #include <limits>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
-#include <thread>
 #include <utility>
 
 extern "C" {
 #include <libavutil/audio_fifo.h>
+#include <libavutil/imgutils.h>
 #include <libavutil/mathematics.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/samplefmt.h>
 }
 
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/platform/thread.h"
 
 namespace mw::streamer {
 namespace {
@@ -48,14 +52,16 @@ ffmpeg::Frame SelectTrack(const Scheduler::Inputs& inputs, bool video) {
 // and the worker finishes all accepted tasks before destruction returns.
 class VideoExecutor final {
  public:
-  VideoExecutor() : worker_([this] { Run(); }) {}
+  bool Start() noexcept {
+    return worker_.Start([this]() noexcept { Run(); });
+  }
   ~VideoExecutor() {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       stopping_ = true;
     }
     changed_.notify_one();
-    worker_.join();
+    worker_.Join();
   }
 
   std::future<ffmpeg::Frame> Submit(std::function<ffmpeg::Frame()> work) {
@@ -89,7 +95,7 @@ class VideoExecutor final {
   std::condition_variable changed_;
   bool stopping_ = false;
   std::deque<std::packaged_task<ffmpeg::Frame()>> tasks_;
-  std::thread worker_;
+  internal::Thread worker_;
 };
 
 struct FifoDeleter {
@@ -121,10 +127,11 @@ struct InputSlot {
   std::optional<ffmpeg::Frame> last_audio;
   std::optional<std::uint64_t> eof_generation;
   std::unique_ptr<AVAudioFifo, FifoDeleter> audio;
-  std::exception_ptr failure;
 };
 
 struct PendingTick {
+  SchedulerTick tick;
+  std::uint64_t audio_sample_index;
   std::future<ffmpeg::Frame> video;
   ffmpeg::Frame audio;
 };
@@ -135,13 +142,17 @@ class Scheduler::Impl final {
  public:
   explicit Impl(SchedulerConfig config) : config_(std::move(config)) {
     const auto& output = config_.output;
-    if (output.fps.num <= 0 || output.fps.den <= 0 ||
+    const auto* pixel = av_pix_fmt_desc_get(output.video_pixel_format);
+    if (!pixel || (pixel->flags & AV_PIX_FMT_FLAG_HWACCEL) ||
+        output.width <= 0 || output.height <= 0 ||
+        av_image_check_size(static_cast<unsigned>(output.width),
+                            static_cast<unsigned>(output.height), 0,
+                            nullptr) < 0 ||
+        output.fps.num <= 0 || output.fps.den <= 0 ||
         output.audio_sample_rate <= 0 ||
         !av_get_sample_fmt_name(output.audio_sample_format) ||
-        !av_channel_layout_check(&output.audio_channel_layout) ||
-        (config_.end_policy != SchedulerEndPolicy::kAnyInput &&
-         config_.end_policy != SchedulerEndPolicy::kAllInputs)) {
-      throw std::invalid_argument("Scheduler 输出配置或终止策略无效");
+        !av_channel_layout_check(&output.audio_channel_layout)) {
+      throw std::invalid_argument("Scheduler 输出格式无效");
     }
     const auto numerator =
         static_cast<std::int64_t>(output.audio_sample_rate) * output.fps.den;
@@ -160,6 +171,17 @@ class Scheduler::Impl final {
     audio_format_->format = output.audio_sample_format;
     audio_format_->sample_rate = output.audio_sample_rate;
     config_.output.audio_channel_layout = audio_format_->ch_layout;
+    default_video_->format = output.video_pixel_format;
+    default_video_->width = output.width;
+    default_video_->height = output.height;
+    default_video_->time_base = av_inv_q(output.fps);
+    Check(av_frame_get_buffer(default_video_.get(), 0),
+          "分配 Scheduler 默认画面");
+    for (auto* buffer : default_video_->buf) {
+      if (buffer) std::memset(buffer->data, 0, buffer->size);
+    }
+    default_audio_ = CreateSilence(max_samples_);
+    if (variable_cadence_) shorter_audio_ = CreateSilence(max_samples_ - 1);
   }
 
   ~Impl() { Stop(); }
@@ -169,19 +191,29 @@ class Scheduler::Impl final {
       throw std::logic_error("配置或重新启动 Scheduler 前需要 Stop");
   }
 
-  void Start(std::vector<std::shared_ptr<AvMediaInput>> inputs) {
-    CheckConfigurable();
-    if (inputs.empty()) throw std::invalid_argument("Scheduler 输入集合为空");
-    for (std::size_t index = 0; index < inputs.size(); ++index) {
-      if (!inputs[index] || inputs[index]->mode() != AvMediaInputMode::kLive)
-        throw std::invalid_argument("Scheduler 需要非空 Live 输入");
-      for (std::size_t previous = 0; previous < index; ++previous) {
-        if (inputs[previous] == inputs[index])
-          throw std::invalid_argument("Scheduler 不能重复消费同一路输入");
-      }
-      if (inputs[index]->status().state == AvMediaInputState::kStopped)
-        throw std::invalid_argument("Scheduler 输入必须先由外部启动");
+  bool Start(std::vector<std::shared_ptr<AvMediaInput>> inputs) noexcept {
+    if (worker_.joinable()) {
+      MW_LOG_ERROR("streamer", "Scheduler 启动失败: 重新启动前需要 Stop");
+      return false;
     }
+    for (std::size_t index = 0; index < inputs.size(); ++index) {
+      if (!inputs[index] || inputs[index]->mode() != AvMediaInputMode::kLive) {
+        MW_LOG_ERROR("streamer", "Scheduler 启动失败: 需要非空 Live 输入");
+        return false;
+      }
+      for (std::size_t previous = 0; previous < index; ++previous) {
+        if (inputs[previous] == inputs[index]) {
+          MW_LOG_ERROR("streamer", "Scheduler 启动失败: 输入重复");
+          return false;
+        }
+      }
+    }
+    if (output_ && !output_->Start(config_.output)) {
+      MW_LOG_ERROR("streamer", "Scheduler 启动失败: Output 初始化失败");
+      return false;
+    }
+    auto video = std::make_unique<VideoExecutor>();
+    if (!video->Start()) return false;
     slots_.clear();
     slots_.reserve(inputs.size());
     for (auto& input : inputs) {
@@ -189,17 +221,15 @@ class Scheduler::Impl final {
       slot.input = std::move(input);
       slots_.push_back(std::move(slot));
     }
+    video_ = std::move(video);
     stopping_ = false;
     SetStatus(SchedulerState::kRunning);
-    try {
-      video_ = std::make_unique<VideoExecutor>();
-      worker_ = std::thread([this] { Run(); });
-    } catch (...) {
-      video_.reset();
-      slots_.clear();
-      SetStatus(SchedulerState::kStopped);
-      throw;
-    }
+    if (worker_.Start([this]() noexcept { Run(); })) return true;
+    stopping_ = true;
+    video_.reset();
+    slots_.clear();
+    SetStatus(SchedulerState::kStopped);
+    return false;
   }
 
   SchedulerStatus status() const {
@@ -215,9 +245,15 @@ class Scheduler::Impl final {
     changed_.notify_all();
   }
 
+  void SetOutput(std::shared_ptr<Output> output) {
+    CheckConfigurable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    output_ = std::move(output);
+  }
+
   void Stop() noexcept {
     RequestStop();
-    if (worker_.joinable()) worker_.join();
+    worker_.Join();
     video_.reset();
     slots_.clear();
   }
@@ -225,16 +261,12 @@ class Scheduler::Impl final {
   OnVideo on_video_;
   OnAudio on_audio_;
   OnOutput on_output_;
-  OnEof on_eof_;
-  OnEnded on_ended_;
-  OnFailed on_failed_;
+  std::shared_ptr<Output> output_;
 
  private:
-  enum class Completion { kNone, kEof, kFailed, kStopped };
-
-  void SetStatus(SchedulerState state, std::exception_ptr error = {}) {
+  void SetStatus(SchedulerState state) {
     std::lock_guard<std::mutex> lock(mutex_);
-    status_ = {state, std::move(error)};
+    status_ = {state};
   }
 
   int Samples(std::uint64_t number) const {
@@ -265,7 +297,7 @@ class Scheduler::Impl final {
     return frame;
   }
 
-  ffmpeg::Frame Silence(int samples) const {
+  ffmpeg::Frame CreateSilence(int samples) const {
     auto frame = AllocateAudio(samples);
     Check(av_samples_set_silence(frame->extended_data, 0, samples,
                                  frame->ch_layout.nb_channels,
@@ -274,17 +306,19 @@ class Scheduler::Impl final {
     return frame;
   }
 
+  ffmpeg::Frame Silence(int samples) const {
+    // Samples() produces only the floor/ceiling of the samples-per-tick ratio.
+    // Shared buffers stay read-only; each tick receives its own frame header.
+    return samples == max_samples_ ? default_audio_.Ref()
+                                   : shorter_audio_->Ref();
+  }
+
   ffmpeg::Frame PrepareAudio(InputSlot& slot, const ffmpeg::Frame& source,
                              int samples) const {
-    if (!HasData(source) || source->nb_samples <= 0 ||
-        source->nb_samples > max_samples_ ||
-        source->format != audio_format_->format ||
-        source->sample_rate != audio_format_->sample_rate ||
-        av_channel_layout_compare(&source->ch_layout,
-                                  &audio_format_->ch_layout) != 0) {
-      throw std::invalid_argument("Scheduler 输入音频与频道目标格式不一致");
-    }
-    if (!variable_cadence_ && source->nb_samples == samples)
+    // Input owns format conversion and supplies nonempty audio. Only cadence
+    // reconciliation belongs here; a different sample count is not an error.
+    if (!variable_cadence_ && source->nb_samples == samples &&
+        (!slot.audio || av_audio_fifo_size(slot.audio.get()) == 0))
       return source.Ref();
 
     if (!slot.audio) {
@@ -295,15 +329,12 @@ class Scheduler::Impl final {
       // Like Caspar's audio mixer, one initial silent sample allows sources
       // with a different fractional cadence phase to retain their samples.
       if (variable_cadence_) {
-        auto first = Silence(1);
-        auto planes = AudioPlanes(first);
+        auto planes = AudioPlanes(default_audio_);
         Check(av_audio_fifo_write(slot.audio.get(), planes.data(), 1),
               "初始化 Scheduler 音频 cadence");
       }
     }
-    if (av_audio_fifo_size(slot.audio.get()) + source->nb_samples >
-        max_samples_ * 2)
-      throw std::invalid_argument("Scheduler 输入音频 cadence 与频道不一致");
+    const int previous_samples = av_audio_fifo_size(slot.audio.get());
     auto input_planes = AudioPlanes(source);
     Check(av_audio_fifo_write(slot.audio.get(), input_planes.data(),
                               source->nb_samples),
@@ -313,14 +344,35 @@ class Scheduler::Impl final {
     const int received =
         av_audio_fifo_read(slot.audio.get(), output_planes.data(), samples);
     Check(received, "读取 Scheduler 本拍音频");
-    // A real short tail holds its last sample per channel, as Caspar does.
-    // Producer underflow follows a separate path and always outputs silence.
     for (int index = received; index < samples; ++index) {
       Check(av_samples_copy(output->extended_data, source->extended_data, index,
                             source->nb_samples - 1, 1,
                             audio_format_->ch_layout.nb_channels,
                             config_.output.audio_sample_format),
             "补足 Scheduler 音频尾样本");
+    }
+    const int remaining = av_audio_fifo_size(slot.audio.get());
+    if (remaining > max_samples_ * 2 || remaining > source->nb_samples) {
+      const int retained = std::min(max_samples_ * 2, source->nb_samples);
+      MW_LOG_WARNING("streamer",
+                     "Scheduler 音频余量超限: remaining={} retained={}",
+                     remaining, retained);
+      av_audio_fifo_reset(slot.audio.get());
+      const int offset = std::max(samples - previous_samples, 0);
+      const int channels_per_plane =
+          av_sample_fmt_is_planar(config_.output.audio_sample_format)
+              ? 1
+              : audio_format_->ch_layout.nb_channels;
+      const auto offset_bytes =
+          static_cast<std::size_t>(offset) *
+          static_cast<std::size_t>(channels_per_plane) *
+          static_cast<std::size_t>(
+              av_get_bytes_per_sample(config_.output.audio_sample_format));
+      for (auto& plane : input_planes)
+        plane = static_cast<std::uint8_t*>(plane) + offset_bytes;
+      Check(
+          av_audio_fifo_write(slot.audio.get(), input_planes.data(), retained),
+          "保留 Scheduler 音频余量");
     }
     return output;
   }
@@ -329,10 +381,6 @@ class Scheduler::Impl final {
     if (Terminal(slot.latest.state)) return;
     if (status.state == AvMediaInputState::kFailed) {
       slot.latest.state = SchedulerInputState::kFailed;
-      slot.failure = status.error;
-      if (!slot.failure)
-        slot.failure = std::make_exception_ptr(
-            std::runtime_error("Scheduler 输入发生不可恢复失败"));
       MW_LOG_ERROR("streamer", "Scheduler 输入终止失败: input={}",
                    static_cast<const void*>(slot.input.get()));
     } else if (status.state == AvMediaInputState::kStopped) {
@@ -402,117 +450,97 @@ class Scheduler::Impl final {
     return result;
   }
 
-  Completion Completed(std::exception_ptr& failure) const {
-    bool any = false;
-    bool all = true;
-    bool stopped = false;
-    for (const auto& slot : slots_) {
-      const bool terminal = Terminal(slot.latest.state);
-      any |= terminal;
-      all &= terminal;
-      stopped |= slot.latest.state == SchedulerInputState::kStopped;
-      if (slot.failure && !failure) failure = slot.failure;
-    }
-    const bool completed =
-        config_.end_policy == SchedulerEndPolicy::kAnyInput ? any : all;
-    if (!completed) return Completion::kNone;
-    if (failure) return Completion::kFailed;
-    return stopped ? Completion::kStopped : Completion::kEof;
-  }
-
-  void Deliver(PendingTick tick) {
+  bool Deliver(PendingTick tick) {
     auto video = tick.video.get();
-    if (stopping_) return;
+    if (stopping_) return false;
     MediaFrame frame;
     if (HasData(video)) frame.video = std::move(video);
     if (HasData(tick.audio)) frame.audio = std::move(tick.audio);
-    if (on_output_ && (frame.video || frame.audio)) on_output_(frame);
+    if (!frame.video && !frame.audio) return false;
+    bool synchronized = false;
+    if (output_) {
+      if (!output_->Send({frame, tick.tick.frame_number,
+                          tick.audio_sample_index, tick.tick.audio_samples},
+                         &stopping_))
+        return false;
+      synchronized = output_->HasSynchronizationClock();
+    }
+    if (!stopping_ && on_output_) on_output_(frame);
+    return synchronized;
   }
 
-  void Pace(std::optional<Clock::time_point>& origin, std::uint64_t iteration) {
-    if (!origin) origin = Clock::now();
+  void Pace(std::optional<Clock::time_point>& origin, std::uint64_t iteration,
+            bool synchronized) {
+    if (synchronized) {
+      origin.reset();
+      return;
+    }
     const auto offset =
         av_rescale_q(static_cast<std::int64_t>(iteration),
                      av_inv_q(config_.output.fps), kNanoseconds);
-    const auto deadline = *origin + std::chrono::nanoseconds(offset);
+    const auto elapsed = std::chrono::nanoseconds(offset);
+    if (!origin) origin = Clock::now() - elapsed;
     std::unique_lock<std::mutex> lock(mutex_);
-    changed_.wait_until(lock, deadline, [this] { return stopping_.load(); });
+    changed_.wait_until(lock, *origin + elapsed,
+                        [this] { return stopping_.load(); });
+  }
+
+  PendingTick Produce(const SchedulerTick& tick, std::uint64_t sample_index) {
+    auto inputs = std::make_shared<const Inputs>(Collect(tick.audio_samples));
+    const bool all_failed =
+        std::all_of(inputs->begin(), inputs->end(), [](const auto& input) {
+          return input.state == SchedulerInputState::kFailed;
+        });
+    auto video = video_->Submit([this, inputs, tick, all_failed] {
+      if (all_failed) {
+        auto frame = default_video_.Ref();
+        frame->pts = static_cast<std::int64_t>(tick.frame_number);
+        frame->duration = 1;
+        return frame;
+      }
+      return on_video_ ? on_video_(*inputs, tick) : SelectTrack(*inputs, true);
+    });
+    auto audio = all_failed  ? Silence(tick.audio_samples)
+                 : on_audio_ ? on_audio_(*inputs, tick)
+                             : SelectTrack(*inputs, false);
+    return {tick, sample_index, std::move(video), std::move(audio)};
   }
 
   void Run() noexcept {
-    Completion completion = Completion::kNone;
-    std::exception_ptr failure;
-    try {
-      MW_LOG_INFO("streamer", "Scheduler 频道启动: inputs={} fps={}/{}",
-                  slots_.size(), config_.output.fps.num,
-                  config_.output.fps.den);
-      std::deque<PendingTick> pending;
-      std::optional<Clock::time_point> origin;
-      std::uint64_t number = 0;
-      while (!stopping_) {
-        SchedulerTick tick{number, Samples(number)};
-        auto inputs =
-            std::make_shared<const Inputs>(Collect(tick.audio_samples));
-        // Check the whole set before submitting either filter: an any-input
-        // EOF must not create an incomplete final composition.
-        completion = Completed(failure);
-        if (completion != Completion::kNone || stopping_) break;
-        auto video = video_->Submit([this, inputs, tick] {
-          return on_video_ ? on_video_(*inputs, tick)
-                           : SelectTrack(*inputs, true);
-        });
-        auto audio =
-            on_audio_ ? on_audio_(*inputs, tick) : SelectTrack(*inputs, false);
-        pending.push_back({std::move(video), std::move(audio)});
-        if (pending.size() > 1) {
-          auto previous = std::move(pending.front());
-          pending.pop_front();
-          Deliver(std::move(previous));
-        }
-        MW_LOG_TRACE("streamer", "Scheduler 拍结束: tick={} audio_samples={}",
-                     number, tick.audio_samples);
-        Pace(origin, number);
-        ++number;
-      }
-      while (!stopping_ && !pending.empty()) {
+    MW_LOG_INFO("streamer", "Scheduler 频道启动: inputs={} fps={}/{}",
+                slots_.size(), config_.output.fps.num, config_.output.fps.den);
+    std::deque<PendingTick> pending;
+    std::optional<Clock::time_point> origin;
+    std::uint64_t number = 0;
+    std::uint64_t audio_sample_index = 0;
+    while (!stopping_) {
+      SchedulerTick tick{number, Samples(number)};
+      bool synchronized = false;
+      pending.push_back(Produce(tick, audio_sample_index));
+      if (pending.size() > 1) {
         auto previous = std::move(pending.front());
         pending.pop_front();
-        Deliver(std::move(previous));
+        synchronized = Deliver(std::move(previous));
       }
-    } catch (...) {
-      completion = Completion::kFailed;
-      failure = std::current_exception();
+      audio_sample_index += static_cast<std::uint64_t>(tick.audio_samples);
+      Pace(origin, number, synchronized);
+      ++number;
     }
-    // In cancellation/error paths a submitted video task may still be running.
-    // Join it before terminal notifications allow the user to free filters.
+    // Accepted tasks finish before Stop permits releasing filter resources.
     video_.reset();
-    if (stopping_ || completion == Completion::kStopped) {
-      SetStatus(SchedulerState::kStopped);
-    } else if (completion == Completion::kFailed) {
-      SetStatus(SchedulerState::kFailed, failure);
-      try {
-        std::rethrow_exception(failure);
-      } catch (const std::exception& error) {
-        MW_LOG_ERROR("streamer", "Scheduler 频道失败: {}", error.what());
-      } catch (...) {
-        MW_LOG_ERROR("streamer", "Scheduler 频道发生未知失败");
-      }
-      if (on_failed_) on_failed_(failure);
-    } else {
-      SetStatus(SchedulerState::kEnded);
-      MW_LOG_INFO("streamer", "Scheduler 频道 EOF，已排空短流水");
-      if (on_eof_) on_eof_();
-      if (on_ended_) on_ended_();
-    }
+    SetStatus(SchedulerState::kStopped);
   }
 
   SchedulerConfig config_;
   ffmpeg::Frame audio_format_;
+  ffmpeg::Frame default_video_;
+  ffmpeg::Frame default_audio_;
+  std::optional<ffmpeg::Frame> shorter_audio_;
   int max_samples_ = 0;
   bool variable_cadence_ = false;
   std::vector<InputSlot> slots_;
   std::unique_ptr<VideoExecutor> video_;
-  std::thread worker_;
+  internal::Thread worker_;
   std::atomic<bool> stopping_{false};
   mutable std::mutex mutex_;
   std::condition_variable changed_;
@@ -535,20 +563,12 @@ void Scheduler::SetOnOutput(OnOutput callback) {
   impl_->CheckConfigurable();
   impl_->on_output_ = std::move(callback);
 }
-void Scheduler::SetOnEof(OnEof callback) {
-  impl_->CheckConfigurable();
-  impl_->on_eof_ = std::move(callback);
+void Scheduler::SetOutput(std::shared_ptr<Output> output) {
+  impl_->SetOutput(std::move(output));
 }
-void Scheduler::SetOnEnded(OnEnded callback) {
-  impl_->CheckConfigurable();
-  impl_->on_ended_ = std::move(callback);
-}
-void Scheduler::SetOnFailed(OnFailed callback) {
-  impl_->CheckConfigurable();
-  impl_->on_failed_ = std::move(callback);
-}
-void Scheduler::Start(std::vector<std::shared_ptr<AvMediaInput>> inputs) {
-  impl_->Start(std::move(inputs));
+bool Scheduler::Start(
+    std::vector<std::shared_ptr<AvMediaInput>> inputs) noexcept {
+  return impl_->Start(std::move(inputs));
 }
 SchedulerStatus Scheduler::status() const { return impl_->status(); }
 void Scheduler::RequestStop() noexcept { impl_->RequestStop(); }

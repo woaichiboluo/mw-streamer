@@ -24,7 +24,8 @@ TEST_CASE("Proxy packets become cached audiovisual source bundles across loops",
   input_config.loop = true;
   input_config.input.packet_capacity = 2;
   mw::streamer::AvInputProxy proxy(input_config);
-  proxy.Start(fmt::format("{}/h264_aac.mp4", MW_AV_FRAME_SOURCE_TEST_DATA_DIR));
+  REQUIRE(proxy.Start(
+      fmt::format("{}/h264_aac.mp4", MW_AV_FRAME_SOURCE_TEST_DATA_DIR)));
   const auto deadline = std::chrono::steady_clock::now() + 5s;
   mw::streamer::AvInputProxyReadResult packet;
   do {
@@ -54,8 +55,7 @@ TEST_CASE("Proxy packets become cached audiovisual source bundles across loops",
   output.width = 1920;
   output.height = 1080;
   output.video_pixel_format = AV_PIX_FMT_RGB24;
-  mw::streamer::AvFrameSource source(video.get(), audio.get(), output,
-                                     info->start_time_us);
+  mw::streamer::AvFrameSource source(video.get(), audio.get(), output);
   CHECK(source.frame_capacity() == 6);
   std::array<std::size_t, 2> count{};
   std::array<bool, 2> eof{};

@@ -155,7 +155,7 @@ TEST_CASE("AvInputProxy nonloop source preserves every packet and reports EOF",
   config.input.packet_capacity = 2;
   AvInputProxy proxy(config);
   CHECK(proxy.ReadPacket().status == AvInputReadStatus::kNull);
-  proxy.Start(SamplePath());
+  REQUIRE(proxy.Start(SamplePath()));
   std::uint64_t generation = 0;
   std::shared_ptr<const mw::streamer::AvInputInfo> info;
   for (std::size_t index = 0; index < expected.size(); ++index) {
@@ -207,7 +207,7 @@ TEST_CASE("AvInputProxy exposes EOF before reopening each complete generation",
   config.loop = true;
   config.input.packet_capacity = 1;
   AvInputProxy proxy(config);
-  proxy.Start(SamplePath());
+  REQUIRE(proxy.Start(SamplePath()));
   std::optional<ffmpeg::Packet> retained_packet;
   std::shared_ptr<const mw::streamer::AvInputInfo> retained_info;
   auto read = [&] {
@@ -275,7 +275,7 @@ TEST_CASE(
   config.loop = loop;
   config.input.packet_capacity = 1;
   AvInputProxy proxy(config);
-  proxy.Start(SamplePath());
+  REQUIRE(proxy.Start(SamplePath()));
   mw::streamer::AvInputProxyReadResult tail;
   std::uint64_t generation = 0;
   std::shared_ptr<const mw::streamer::AvInputInfo> info;
@@ -350,7 +350,7 @@ TEST_CASE("AvInputProxy delivers EOF even when the next open fails",
       removed = std::filesystem::remove(file.path(), removal_error);
     }
   });
-  proxy.Start(file.path());
+  REQUIRE(proxy.Start(file.path()));
   std::shared_ptr<const mw::streamer::AvInputInfo> info;
   std::uint64_t generation = 0;
   for (const auto& expected : source.packets) {
@@ -403,7 +403,7 @@ TEST_CASE(
     events.push_back(status);
   });
   const auto started = std::chrono::steady_clock::now();
-  proxy.Start(missing.path());
+  REQUIRE(proxy.Start(missing.path()));
   CHECK(proxy.ReadPacket().status == AvInputReadStatus::kNull);
   CHECK(std::chrono::steady_clock::now() - started >= 2900ms);
   const auto final_status = proxy.status();
@@ -438,7 +438,7 @@ TEST_CASE("AvInputProxy reconnect success resets consecutive retry count",
   AvInputProxyConfig config;
   config.input.packet_capacity = 1;
   AvInputProxy proxy(config);
-  proxy.Start(source.path());
+  REQUIRE(proxy.Start(source.path()));
   REQUIRE(WaitFor([&] {
     return proxy.status().state == AvInputProxyState::kWaitingRetry;
   }));
@@ -474,7 +474,7 @@ TEST_CASE(
     events.push_back(status);
   });
   const auto started = std::chrono::steady_clock::now();
-  proxy.Start(missing.path());
+  REQUIRE(proxy.Start(missing.path()));
   CHECK(proxy.ReadPacket().status == AvInputReadStatus::kNull);
   CHECK(std::chrono::steady_clock::now() - started >= 22900ms);
   CHECK(proxy.status().state == AvInputProxyState::kFailed);
@@ -500,7 +500,7 @@ TEST_CASE("AvInputProxy Stop cancels backoff and wakes a waiting consumer",
           "[av-input-proxy][retry][stop]") {
   TemporarySource missing;
   AvInputProxy proxy;
-  proxy.Start(missing.path());
+  REQUIRE(proxy.Start(missing.path()));
   REQUIRE(WaitFor([&] {
     return proxy.status().state == AvInputProxyState::kWaitingRetry;
   }));
@@ -514,7 +514,7 @@ TEST_CASE("AvInputProxy Stop cancels backoff and wakes a waiting consumer",
   CHECK(received.get().status == AvInputReadStatus::kNull);
   CHECK(proxy.status().state == AvInputProxyState::kStopped);
   proxy.Stop();
-  proxy.Start(SamplePath());
+  REQUIRE(proxy.Start(SamplePath()));
   CHECK(proxy.ReadPacket().status == AvInputReadStatus::kPacket);
 }
 
@@ -533,7 +533,7 @@ TEST_CASE("AvInputProxy observers may request Stop and throw without deadlock",
     }
     throw std::runtime_error("observer failure");
   });
-  proxy.Start(missing.path());
+  REQUIRE(proxy.Start(missing.path()));
   CHECK(proxy.ReadPacket().status == AvInputReadStatus::kNull);
   REQUIRE(WaitFor([&] {
     return observed_retry.load() &&
@@ -613,7 +613,7 @@ TEST_CASE("AvInputProxy Stop cancels opening I/O and empty consumers",
   AvInputProxyConfig config;
   config.input.open_timeout = 5s;
   AvInputProxy proxy(config);
-  proxy.Start(server.url());
+  REQUIRE(proxy.Start(server.url()));
   REQUIRE(server.WaitAccepted());
   CHECK(proxy.status().state == AvInputProxyState::kConnecting);
   CHECK(proxy.TryReadPacket().status == AvInputReadStatus::kNull);
@@ -629,5 +629,26 @@ TEST_CASE("AvInputProxy Stop cancels opening I/O and empty consumers",
 }
 
 #endif
+
+TEST_CASE("AvInputProxy Start reports failure without changing its session",
+          "[av-input-proxy][start][validation]") {
+  AvInputProxyConfig config;
+  config.max_retries = 0;
+  AvInputProxy proxy(config);
+  static_assert(noexcept(proxy.Start("")));
+  CHECK_FALSE(proxy.Start(""));
+  CHECK_FALSE(proxy.Start(" \t\n"));
+  CHECK_FALSE(proxy.Start(std::string_view("a\0b", 3)));
+  CHECK(proxy.status().state == AvInputProxyState::kStopped);
+  CHECK(proxy.status().error == nullptr);
+  REQUIRE(proxy.Start(SamplePath()));
+  CHECK_FALSE(proxy.Start(SamplePath()));
+  CHECK(proxy.ReadPacket().status == AvInputReadStatus::kPacket);
+  proxy.Stop();
+  CHECK(proxy.status().state == AvInputProxyState::kStopped);
+  REQUIRE(proxy.Start(SamplePath()));
+  CHECK(proxy.ReadPacket().status == AvInputReadStatus::kPacket);
+  proxy.Stop();
+}
 
 }  // namespace

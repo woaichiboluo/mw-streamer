@@ -561,6 +561,116 @@ AvDecoderConfig SingleThreadConfig() {
   return config;
 }
 
+TEST_CASE("AvFrameSource starts every generation at received content",
+          "[av-frame-source][origin][generation]") {
+  std::int64_t next_origin = 105000000;
+  SECTION("loop repeats the same content") {}
+  SECTION("live reconnection advances timestamps") { next_origin = 106000000; }
+  SECTION("network file reconnection restarts timestamps") { next_origin = 0; }
+  const auto original = PcmTrack(44100);
+  AvEncoderConfig config;
+  AvDecoder audio(original.stream, SingleThreadConfig());
+  AvFrameSource source(nullptr, &audio, config);
+  for (std::uint64_t generation = 0; generation < 2; ++generation) {
+    const auto origin = generation == 0 ? 105000000 : next_origin;
+    const auto track = Shifted(original, origin);
+    const auto reference = FilterReference(track, config, origin);
+    REQUIRE(reference.frames.size() == 30);
+    Push(audio, track, generation);
+    for (std::size_t index = 0; index < reference.frames.size(); ++index) {
+      const auto result = ReadAvailable(source);
+      REQUIRE(result.status == AvFrameSourceReadStatus::kFrame);
+      REQUIRE(result.pts_us >= origin);
+      CHECK(result.generation == generation);
+      CHECK(result.frame_index == index);
+      REQUIRE(result.audio.has_value());
+      CheckRecord(Record(*result.audio->get()), reference.frames[index]);
+    }
+    const auto eof = ReadAvailable(source);
+    CHECK(eof.status == AvFrameSourceReadStatus::kEof);
+    CHECK(eof.generation == generation);
+    CHECK(eof.frame_index == 30);
+    CHECK(eof.pts_us == origin + 1000000);
+  }
+}
+
+TEST_CASE("AvFrameSource waits for both tracks before choosing a shared origin",
+          "[av-frame-source][origin][audio-video]") {
+  bool video_first = true;
+  bool audio_earlier = true;
+  SECTION("later video arrives before earlier audio") {}
+  SECTION("earlier video arrives before later audio") { audio_earlier = false; }
+  SECTION("earlier audio arrives before later video") { video_first = false; }
+  SECTION("later audio arrives before earlier video") {
+    video_first = false;
+    audio_earlier = false;
+  }
+  const auto video_track =
+      Shifted(ReadTrack("h264_aac.mp4"), audio_earlier ? 105200000 : 105000000);
+  const auto audio_track =
+      Shifted(PcmTrack(), audio_earlier ? 105000000 : 105200000);
+  AvEncoderConfig config;
+  const auto video_reference = FilterReference(video_track, config, 105000000);
+  const auto audio_reference = FilterReference(audio_track, config, 105000000);
+  AvDecoder video(video_track.stream, SingleThreadConfig());
+  AvDecoder audio(audio_track.stream, SingleThreadConfig());
+  AvFrameSource source(&video, &audio, config);
+  auto& first = video_first ? video : audio;
+  Push(first, video_first ? video_track : audio_track, 0);
+  // At least two decoded frames prove the first track is ready; the other
+  // track has not received any packets and must still gate initialization.
+  REQUIRE(WaitFor([&] { return first.buffered_frames() >= 2; }));
+  CHECK(source.buffered_frames() == 0);
+  CHECK(source.TryReadFrame().status == AvFrameSourceReadStatus::kNull);
+  Push(video_first ? audio : video, video_first ? audio_track : video_track, 0);
+  CheckGeneration(source, video_reference, audio_reference, 0);
+}
+
+TEST_CASE("AvFrameSource video-only generations start at received content",
+          "[av-frame-source][origin][single-track][generation]") {
+  std::int64_t next_origin = 105000000;
+  SECTION("loop repeats the same content") {}
+  SECTION("live reconnection advances timestamps") { next_origin = 106000000; }
+  SECTION("network file reconnection restarts timestamps") { next_origin = 0; }
+  const auto original = ReadTrack("h264_aac.mp4");
+  AvEncoderConfig config;
+  AvDecoder video(original.stream, SingleThreadConfig());
+  AvFrameSource source(&video, nullptr, config);
+  for (std::uint64_t generation = 0; generation < 2; ++generation) {
+    const auto origin = generation == 0 ? 105000000 : next_origin;
+    const auto track = Shifted(original, origin);
+    const auto reference = FilterReference(track, config, origin);
+    REQUIRE_FALSE(reference.frames.empty());
+    Push(video, track, generation);
+    CheckGeneration(source, reference, {}, generation);
+  }
+}
+
+TEST_CASE("AvFrameSource empty track EOF releases shared origin initialization",
+          "[av-frame-source][origin][empty][eof]") {
+  bool empty_video = true;
+  SECTION("video has no decoded frames") {}
+  SECTION("audio has no decoded frames") { empty_video = false; }
+  const auto video_track = Shifted(ReadTrack("h264_aac.mp4"), 105000000);
+  const auto audio_track = Shifted(PcmTrack(44100), 105000000);
+  AvEncoderConfig config;
+  const auto video_reference =
+      empty_video ? FilteredReference{}
+                  : FilterReference(video_track, config, 105000000);
+  const auto audio_reference =
+      empty_video ? FilterReference(audio_track, config, 105000000)
+                  : FilteredReference{};
+  AvDecoder video(video_track.stream, SingleThreadConfig());
+  AvDecoder audio(audio_track.stream, SingleThreadConfig());
+  AvFrameSource source(&video, &audio, config);
+  auto& present = empty_video ? audio : video;
+  Push(present, empty_video ? audio_track : video_track, 0);
+  REQUIRE(WaitFor([&] { return present.buffered_frames() >= 2; }));
+  CHECK(source.TryReadFrame().status == AvFrameSourceReadStatus::kNull);
+  REQUIRE((empty_video ? video : audio).PushEof(0));
+  CheckGeneration(source, video_reference, audio_reference, 0);
+}
+
 TEST_CASE(
     "AvFrameSource bundles native FPS video and resampled audio into cached "
     "periods",
@@ -572,7 +682,7 @@ TEST_CASE(
   const auto audio_reference = FilterReference(audio_track, config);
   AvDecoder video(video_track.stream, SingleThreadConfig());
   AvDecoder audio(audio_track.stream, SingleThreadConfig());
-  AvFrameSource source(&video, &audio, config, 0);
+  AvFrameSource source(&video, &audio, config);
   Push(video, video_track, 0);
   Push(audio, audio_track, 0);
   CheckGeneration(source, video_reference, audio_reference, 0);
@@ -603,7 +713,7 @@ TEST_CASE(
   const auto reference = FilterReference(track, config);
   AvDecoder decoder(track.stream, SingleThreadConfig());
   AvFrameSource source(audio_only ? nullptr : &decoder,
-                       audio_only ? &decoder : nullptr, config, 0);
+                       audio_only ? &decoder : nullptr, config);
   CHECK(source.frame_capacity() ==
         static_cast<std::size_t>(
             std::max(1, (config.fps.num / config.fps.den) / 4)));
@@ -634,7 +744,7 @@ TEST_CASE(
   }
   AvDecoder video(video_track.stream, SingleThreadConfig());
   AvDecoder audio(audio_track.stream, SingleThreadConfig());
-  AvFrameSource source(&video, &audio, config, 0);
+  AvFrameSource source(&video, &audio, config);
   Push(video, video_track, 0);
   Push(audio, audio_track, 0);
   CheckGeneration(source, video_reference, audio_reference, 0);
@@ -649,7 +759,7 @@ TEST_CASE(
   const auto reference = FilterReference(track, config);
   REQUIRE(reference.frames.size() == 6);
   AvDecoder decoder(track.stream, SingleThreadConfig());
-  AvFrameSource source(&decoder, nullptr, config, 0);
+  AvFrameSource source(&decoder, nullptr, config);
   Push(decoder, track, 0, false);
   REQUIRE(WaitFor([&] { return source.buffered_frames() == 3; }));
   CHECK(source.TryReadFrame().status == AvFrameSourceReadStatus::kNull);
@@ -664,7 +774,7 @@ TEST_CASE(
     "[av-frame-source][backpressure][stop][ownership]") {
   const auto track = ReadTrack("h264_aac.mp4");
   AvDecoder decoder(track.stream, SingleThreadConfig());
-  AvFrameSource source(&decoder, nullptr, {}, 0);
+  AvFrameSource source(&decoder, nullptr, {});
   Push(decoder, track, 0);
   REQUIRE(WaitFor(
       [&] { return source.buffered_frames() == source.frame_capacity(); }));
@@ -699,7 +809,7 @@ TEST_CASE(
       FilterReference(next_audio, config, 10000000);
   AvDecoder video(video_track.stream, SingleThreadConfig());
   AvDecoder audio(audio_track.stream, SingleThreadConfig());
-  AvFrameSource source(&video, &audio, config, 0);
+  AvFrameSource source(&video, &audio, config);
   Push(video, video_track, 0);
   Push(audio, audio_track, 0);
   Push(video, next_video, 1);
@@ -726,7 +836,7 @@ TEST_CASE(
       FilterReference(next_audio, config, 10000000);
   AvDecoder video(full_video.stream, SingleThreadConfig());
   AvDecoder audio(full_audio.stream, SingleThreadConfig());
-  AvFrameSource source(&video, &audio, config, 0);
+  AvFrameSource source(&video, &audio, config);
   Push(video, old_video, 0, false);
   Push(audio, old_audio, 0, false);
   REQUIRE(WaitFor([&] { return source.buffered_frames() == 3; }));
@@ -754,7 +864,7 @@ TEST_CASE(
     "[av-frame-source][empty][nonblocking][eof]") {
   const auto track = ReadTrack("h264_aac.mp4");
   AvDecoder decoder(track.stream, SingleThreadConfig());
-  AvFrameSource source(&decoder, nullptr, {}, 0);
+  AvFrameSource source(&decoder, nullptr, {});
   const auto started = std::chrono::steady_clock::now();
   for (int index = 0; index < 1000; ++index) {
     CHECK(source.TryReadFrame().status == AvFrameSourceReadStatus::kNull);
@@ -846,7 +956,7 @@ TEST_CASE(
         decoders[index] =
             std::make_unique<AvDecoder>(track.stream, device, decoder_config);
         sources[index] = std::make_unique<AvFrameSource>(decoders[index].get(),
-                                                         nullptr, config, 0);
+                                                         nullptr, config);
         Push(*decoders[index], track, 0);
       }
       for (std::size_t index = 0; index < reference.frames.size(); ++index) {
@@ -896,7 +1006,7 @@ TEST_CASE(
   std::atomic<std::size_t> notifications{0};
   std::exception_ptr observed;
   AvDecoder decoder(track.stream, SingleThreadConfig());
-  AvFrameSource source(&decoder, nullptr, {}, 0, [&](std::exception_ptr error) {
+  AvFrameSource source(&decoder, nullptr, {}, [&](std::exception_ptr error) {
     observed = error;
     ++notifications;
     throw std::runtime_error("observer failure");

@@ -27,7 +27,8 @@ TEST_CASE("Proxy selected packets feed separate decoders across looping EOF",
   const auto started = std::chrono::steady_clock::now();
   const auto overall_deadline = started + 30s;
   auto progress_deadline = started + 3s;
-  proxy.Start(fmt::format("{}/h264_aac.mp4", MW_AV_DECODER_TEST_DATA_DIR));
+  REQUIRE(
+      proxy.Start(fmt::format("{}/h264_aac.mp4", MW_AV_DECODER_TEST_DATA_DIR)));
   mw::streamer::AvInputProxyReadResult input;
   do {
     input = proxy.TryReadPacket();

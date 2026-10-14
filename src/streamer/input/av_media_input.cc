@@ -6,12 +6,12 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <utility>
 
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/codec_parameters.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/platform/thread.h"
 
 namespace mw::streamer {
 namespace {
@@ -114,13 +114,17 @@ class AvMediaInput::Impl final {
     on_state_changed_ = std::move(callback);
   }
 
-  void Start(std::string_view url) {
+  bool Start(std::string_view url) noexcept {
     if (url.empty() || url.find('\0') != std::string_view::npos ||
         url.find_first_not_of(" \t\r\n\f\v") == std::string_view::npos) {
-      throw std::invalid_argument("AvMediaInput 地址无效");
+      MW_LOG_ERROR("streamer", "AvMediaInput[{}] 启动失败: 地址无效",
+                   static_cast<const void*>(this));
+      return false;
     }
     if (worker_.joinable()) {
-      throw std::logic_error("重新启动 AvMediaInput 前需要 Stop");
+      MW_LOG_ERROR("streamer", "AvMediaInput[{}] 启动失败: 重新启动前需要 Stop",
+                   static_cast<const void*>(this));
+      return false;
     }
     url_ = url;
     {
@@ -139,31 +143,21 @@ class AvMediaInput::Impl final {
                 static_cast<const void*>(this),
                 config_.mode == AvMediaInputMode::kBatch ? "batch" : "live",
                 config_.proxy.loop);
-    try {
-      worker_ = std::thread(&Impl::Run, this);
-    } catch (...) {
-      const auto failure = std::current_exception();
-      {
-        std::lock_guard<std::mutex> lock(mutex_);
-        failure_ = failure;
-        status_.state = AvMediaInputState::kFailed;
-        status_.error = failure_;
-      }
-      if (mw::log::ShouldLog("streamer", mw::log::LogLevel::kCritical)) {
-        try {
-          std::rethrow_exception(failure);
-        } catch (const std::exception& error) {
-          MW_LOG_CRITICAL("streamer",
-                          "AvMediaInput [{}] 无法创建调度工作线程: {}",
-                          static_cast<const void*>(this), error.what());
-        } catch (...) {
-          MW_LOG_CRITICAL("streamer",
-                          "AvMediaInput [{}] 创建调度工作线程发生未知异常",
-                          static_cast<const void*>(this));
-        }
-      }
-      throw;
+    if (worker_.Start([this]() noexcept { Run(); })) return true;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopping_ = true;
+      failure_ = {};
+      status_ = {};
+      proxy_events_.clear();
+      video_eof_.reset();
+      audio_eof_.reset();
+      live_eof_.reset();
+      final_generation_.reset();
     }
+    url_.clear();
+    changed_.notify_all();
+    return false;
   }
 
   AvDecoderReadResult ReadBatch(bool video) {
@@ -256,7 +250,7 @@ class AvMediaInput::Impl final {
   }
   void Stop() noexcept {
     RequestStop();
-    if (worker_.joinable()) worker_.join();
+    worker_.Join();
   }
 
  private:
@@ -432,7 +426,7 @@ class AvMediaInput::Impl final {
     if (config_.mode == AvMediaInputMode::kLive) {
       created->source = std::make_unique<AvFrameSource>(
           created->video.get(), created->audio.get(), config_.output,
-          info->start_time_us, on_failed);
+          on_failed);
     }
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -567,7 +561,9 @@ class AvMediaInput::Impl final {
     try {
       // Start publishes an immediate snapshot; notify it on this worker too.
       Publish(AvMediaInputState::kConnecting, nullptr, true);
-      if (!Stopping()) proxy_.Start(url_);
+      if (!Stopping() && !proxy_.Start(url_)) {
+        throw std::runtime_error("AvMediaInput 无法启动输入代理");
+      }
       while (!Stopping()) {
         CheckFailure();
         bool progress = ProcessEvents(session);
@@ -624,7 +620,7 @@ class AvMediaInput::Impl final {
   std::optional<std::uint64_t> final_generation_;
   OnStateChanged on_state_changed_;
   std::string url_;
-  std::thread worker_;
+  internal::Thread worker_;
 };
 
 AvMediaInput::AvMediaInput(AvMediaInputConfig config)
@@ -636,7 +632,9 @@ AvMediaInput::~AvMediaInput() = default;
 void AvMediaInput::SetOnStateChanged(OnStateChanged callback) {
   impl_->SetOnStateChanged(std::move(callback));
 }
-void AvMediaInput::Start(std::string_view url) { impl_->Start(url); }
+bool AvMediaInput::Start(std::string_view url) noexcept {
+  return impl_->Start(url);
+}
 AvDecoderReadResult AvMediaInput::TryReadVideo() {
   return impl_->ReadBatch(true);
 }
