@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -376,6 +377,250 @@ class TemporaryMedia final {
  private:
   std::filesystem::path path_;
 };
+
+class DiscontinuousHls final {
+ public:
+  explicit DiscontinuousHls(const std::vector<int>& offsets = {300, 1}) {
+    directory_ =
+        std::filesystem::temp_directory_path() /
+        fmt::format(
+            "mw-discontinuous-hls-{}",
+            std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directory(directory_);
+    const auto source = ReadNative(SamplePath());
+    REQUIRE(source.video.has_value());
+    REQUIRE(source.audio.has_value());
+    std::string contents =
+        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:3\n"
+        "#EXT-X-MEDIA-SEQUENCE:0\n";
+    for (std::size_t index = 0; index < offsets.size(); ++index) {
+      const auto name = fmt::format("segment{}.ts", index);
+      CreateSegment(source, name.c_str(), offsets[index]);
+      if (index != 0) contents += "#EXT-X-DISCONTINUITY\n";
+      contents += fmt::format("#EXTINF:2.0,\n{}\n", name);
+    }
+    contents += "#EXT-X-ENDLIST\n";
+    std::ofstream playlist(directory_ / "index.m3u8");
+    playlist.write(contents.data(),
+                   static_cast<std::streamsize>(contents.size()));
+    REQUIRE(playlist.good());
+  }
+
+  ~DiscontinuousHls() {
+    std::error_code error;
+    std::filesystem::remove_all(directory_, error);
+  }
+
+  std::string path() const { return (directory_ / "index.m3u8").string(); }
+
+ private:
+  void CreateSegment(const NativeSource& source, const char* name,
+                     int offset_seconds) {
+    struct OutputDeleter {
+      void operator()(AVFormatContext* context) const {
+        if (context->pb) avio_closep(&context->pb);
+        avformat_free_context(context);
+      }
+    };
+    const auto filename = (directory_ / name).string();
+    AVFormatContext* raw = nullptr;
+    const int allocated = avformat_alloc_output_context2(
+        &raw, nullptr, "mpegts", filename.c_str());
+    std::unique_ptr<AVFormatContext, OutputDeleter> output(raw);
+    REQUIRE(allocated >= 0);
+    REQUIRE(output != nullptr);
+    output->avoid_negative_ts = AVFMT_AVOID_NEG_TS_DISABLED;
+    for (const auto* track : {&*source.video, &*source.audio}) {
+      auto* stream = avformat_new_stream(output.get(), nullptr);
+      REQUIRE(stream != nullptr);
+      REQUIRE(avcodec_parameters_copy(
+                  stream->codecpar, track->stream.codec_parameters.get()) >= 0);
+      stream->codecpar->codec_tag = 0;
+      stream->time_base = track->stream.time_base;
+    }
+    REQUIRE(avio_open(&output->pb, filename.c_str(), AVIO_FLAG_WRITE) >= 0);
+    AVDictionary* options = nullptr;
+    av_dict_set(&options, "mpegts_copyts", "1", 0);
+    const int header = avformat_write_header(output.get(), &options);
+    av_dict_free(&options);
+    REQUIRE(header >= 0);
+    std::size_t stream_index = 0;
+    for (const auto* track : {&*source.video, &*source.audio}) {
+      const auto time_base = output->streams[stream_index]->time_base;
+      const auto offset =
+          av_rescale_q(offset_seconds, AVRational{1, 1}, time_base);
+      for (const auto& original : track->packets) {
+        auto packet = original;
+        av_packet_rescale_ts(packet.get(), track->stream.time_base, time_base);
+        packet->stream_index = static_cast<int>(stream_index);
+        if (packet->pts != AV_NOPTS_VALUE) packet->pts += offset;
+        if (packet->dts != AV_NOPTS_VALUE) packet->dts += offset;
+        REQUIRE(av_interleaved_write_frame(output.get(), packet.get()) >= 0);
+      }
+      ++stream_index;
+    }
+    REQUIRE(av_write_trailer(output.get()) >= 0);
+  }
+
+  std::filesystem::path directory_;
+};
+
+TEST_CASE("AvMediaInput Live corrects HLS timestamp discontinuities",
+          "[av-media-input][live][discontinuity]") {
+  AvMediaInputConfig config;
+  std::vector<int> offsets{300, 1};
+  SECTION("backward jump with native demuxer wrap correction") {}
+  SECTION("forward jump") { offsets = {300, 900}; }
+  SECTION("forward then backward jump") { offsets = {1, 300, 1}; }
+  DiscontinuousHls source(offsets);
+  const auto expected_frames = offsets.size() * 20;
+  config.output.fps = {10, 1};
+  config.video_decoder.thread_count = 1;
+  config.audio_decoder.thread_count = 1;
+  AvMediaInput input(config);
+  REQUIRE(input.Start(source.path()));
+  std::size_t count = 0;
+  std::size_t eof_count = 0;
+  std::optional<std::int64_t> previous_video_pts;
+  std::optional<std::int64_t> previous_audio_pts;
+  const bool finished = WaitFor([&] {
+    REQUIRE(input.status().state != AvMediaInputState::kFailed);
+    const auto result = input.TryReadFrame();
+    if (result.status == AvFrameSourceReadStatus::kNull) return false;
+    CHECK(result.generation == 0);
+    if (result.status == AvFrameSourceReadStatus::kEof) {
+      ++eof_count;
+      return true;
+    }
+    REQUIRE(result.video.has_value());
+    REQUIRE(result.audio.has_value());
+    const auto video_pts = result.video->get()->pts;
+    const auto audio_pts = result.audio->get()->pts;
+    if (previous_video_pts) {
+      // Resampling/rounding may add up to two tail periods; video can end
+      // first.
+      if (count < expected_frames) {
+        CHECK(video_pts == *previous_video_pts + 1);
+      } else {
+        CHECK((video_pts == *previous_video_pts ||
+               video_pts == *previous_video_pts + 1));
+      }
+    }
+    if (previous_audio_pts) CHECK(audio_pts > *previous_audio_pts);
+    previous_video_pts = video_pts;
+    previous_audio_pts = audio_pts;
+    ++count;
+    REQUIRE(count <= expected_frames + 2);
+    return false;
+  });
+  REQUIRE(finished);
+  // Every two-second segment survives without dropping or padding a long gap.
+  CHECK(count >= expected_frames);
+  CHECK(count <= expected_frames + 2);
+  CHECK(eof_count == 1);
+  REQUIRE(WaitFor(
+      [&] { return input.status().state == AvMediaInputState::kEnded; }));
+  CHECK(input.TryReadFrame().status == AvFrameSourceReadStatus::kNull);
+}
+
+TEST_CASE("AvMediaInput Live resets HLS timestamp correction on each loop",
+          "[av-media-input][live][loop][discontinuity]") {
+  DiscontinuousHls source;
+  AvMediaInputConfig config;
+  config.proxy.loop = true;
+  config.output.fps = {10, 1};
+  config.video_decoder.thread_count = 1;
+  config.audio_decoder.thread_count = 1;
+  AvMediaInput input(config);
+  REQUIRE(input.Start(source.path()));
+  std::array<std::size_t, 2> counts{};
+  std::array<bool, 2> ended{};
+  std::array<std::optional<std::int64_t>, 2> first_video_pts;
+  std::array<std::optional<std::int64_t>, 2> first_audio_pts;
+  const bool finished = WaitFor([&] {
+    REQUIRE(input.status().state != AvMediaInputState::kFailed);
+    const auto result = input.TryReadFrame();
+    if (result.status == AvFrameSourceReadStatus::kNull) return false;
+    REQUIRE(result.generation < ended.size());
+    const auto generation = static_cast<std::size_t>(result.generation);
+    CHECK_FALSE(ended[generation]);
+    if (generation == 1) CHECK(ended[0]);
+    if (result.status == AvFrameSourceReadStatus::kEof) {
+      CHECK(result.frame_index == counts[generation]);
+      ended[generation] = true;
+      return ended[1];
+    }
+    REQUIRE(result.video.has_value());
+    REQUIRE(result.audio.has_value());
+    if (counts[generation] == 0) {
+      first_video_pts[generation] = result.video->get()->pts;
+      first_audio_pts[generation] = result.audio->get()->pts;
+    }
+    CHECK(result.frame_index == counts[generation]);
+    ++counts[generation];
+    REQUIRE(counts[generation] <= 42);
+    return false;
+  });
+  REQUIRE(finished);
+  CHECK(counts[0] >= 40);
+  CHECK(counts[0] == counts[1]);
+  REQUIRE(first_video_pts[0].has_value());
+  REQUIRE(first_audio_pts[0].has_value());
+  CHECK(first_video_pts[0] == first_video_pts[1]);
+  CHECK(first_audio_pts[0] == first_audio_pts[1]);
+  const auto info = input.info();
+  REQUIRE(info != nullptr);
+  CHECK(info->timestamp_discontinuities);
+  CHECK(input.status().state != AvMediaInputState::kEnded);
+  input.Stop();
+}
+
+TEST_CASE("AvMediaInput Batch preserves HLS timestamp discontinuities",
+          "[av-media-input][batch][discontinuity]") {
+  DiscontinuousHls source;
+  const auto native = ReadNative(source.path());
+  REQUIRE(native.video.has_value());
+  REQUIRE(native.audio.has_value());
+  const std::array<std::vector<FrameRecord>, 2> expected{
+      DecodeNative(*native.video), DecodeNative(*native.audio)};
+  AvMediaInput input(BatchConfig());
+  REQUIRE(input.Start(source.path()));
+  std::array<std::optional<std::int64_t>, 2> previous_pts;
+  std::array<bool, 2> jumped{};
+  std::array<bool, 2> ended{};
+  std::array<std::size_t, 2> counts{};
+  const bool finished = WaitFor([&] {
+    REQUIRE(input.status().state != AvMediaInputState::kFailed);
+    for (std::size_t index = 0; index < ended.size(); ++index) {
+      if (ended[index]) continue;
+      const auto result =
+          index == 0 ? input.TryReadVideo() : input.TryReadAudio();
+      if (result.status == AvDecoderReadStatus::kNull) continue;
+      CHECK(result.generation == 0);
+      if (result.status == AvDecoderReadStatus::kEof) {
+        ended[index] = true;
+        continue;
+      }
+      REQUIRE(result.frame.has_value());
+      REQUIRE(counts[index] < expected[index].size());
+      CHECK(result.frame->get()->pts == expected[index][counts[index]].pts);
+      const auto pts_us =
+          av_rescale_q(result.frame->get()->pts, result.time_base,
+                       AVRational{1, AV_TIME_BASE});
+      if (previous_pts[index] && (pts_us < *previous_pts[index] - 100000000 ||
+                                  pts_us > *previous_pts[index] + 100000000))
+        jumped[index] = true;
+      previous_pts[index] = pts_us;
+      ++counts[index];
+    }
+    return ended[0] && ended[1];
+  });
+  REQUIRE(finished);
+  CHECK(counts[0] == 40);
+  CHECK(counts[1] > 180);
+  CHECK(jumped[0]);
+  CHECK(jumped[1]);
+}
 
 TEST_CASE("AvMediaInput Live emits configured FLTP audio and FPS video bundles",
           "[av-media-input][live]") {

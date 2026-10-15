@@ -158,4 +158,8 @@ Remuxer::OutputInfo EncodePushSink::output_info() const {
   return impl_->remuxer().output_info();
 }
 
+std::vector<Remuxer::PushStatus> EncodePushSink::push_statuses() const {
+  return impl_->remuxer().push_statuses();
+}
+
 }  // namespace mw::streamer

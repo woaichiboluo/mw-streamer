@@ -12,6 +12,7 @@
 #include "mw/streamer/ffmpeg/codec_parameters.h"
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/platform/thread.h"
+#include "timestamp_discontinuity.h"
 
 namespace mw::streamer {
 namespace {
@@ -132,6 +133,8 @@ class AvMediaInput::Impl final {
       return false;
     }
     url_ = url;
+    timestamps_.reset();
+    timestamp_generation_.reset();
     {
       std::lock_guard<std::mutex> lock(mutex_);
       stopping_ = false;
@@ -527,6 +530,14 @@ class AvMediaInput::Impl final {
                           : session->audio.get();
       if (!decoder)
         throw std::logic_error("AvMediaInput Packet 缺少对应 Decoder");
+      if (config_.mode == AvMediaInputMode::kLive) {
+        if (!timestamps_ || timestamp_generation_ != result.generation) {
+          timestamps_ =
+              std::make_unique<internal::TimestampDiscontinuity>(*result.info);
+          timestamp_generation_ = result.generation;
+        }
+        timestamps_->Process(*result.packet);
+      }
       if (!decoder->PushPacket(std::move(*result.packet), result.generation)) {
         if (Stopping()) return false;
         if (const auto failure = decoder->error())
@@ -612,6 +623,9 @@ class AvMediaInput::Impl final {
   std::optional<ffmpeg::HwDeviceContext> device_;
   ffmpeg::CodecParameters output_audio_;
   AvInputProxy proxy_;
+  // Dispatcher-only state; native packet headers are private to Live input.
+  std::unique_ptr<internal::TimestampDiscontinuity> timestamps_;
+  std::optional<std::uint64_t> timestamp_generation_;
   mutable std::mutex mutex_;
   std::condition_variable changed_;
   bool stopping_ = false;

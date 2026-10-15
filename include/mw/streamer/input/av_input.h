@@ -59,6 +59,10 @@ struct AvInputInfo {
   std::int64_t start_time_us = AV_NOPTS_VALUE;
   std::int64_t duration_us = AV_NOPTS_VALUE;
   std::map<std::string, std::string> metadata;
+  // Mirrors the demuxer's AVFMT_TS_DISCONT capability (e.g. HLS/MPEG-TS).
+  // Raw AvInput packets retain native timestamps; Live consumers may correct
+  // discontinuities before decoding/filtering.
+  bool timestamp_discontinuities = false;
 };
 
 enum class AvInputReadStatus { kPacket, kEof, kNull };

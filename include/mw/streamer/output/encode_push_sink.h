@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "mw/export.h"
 #include "mw/streamer/ffmpeg/hw_device_context.h"
@@ -16,9 +17,10 @@ namespace mw::streamer {
 
 // Owns an Encoder and Remuxer without another queue or worker. Retains the
 // caller's CPU/CUDA device reference. Requires Init before initialization;
-// destroy the sink before Shutdown. Serialize Initialize, Send, output
-// additions and destruction externally. Output owns shared references to this
-// sink.
+// destroy the sink before Shutdown. Serialize Initialize, output additions
+// and destruction externally. Serialize Send calls with each other; after
+// initialization they may overlap output additions. Output owns shared
+// references to this sink.
 class MW_STREAMER_API EncodePushSink final : public FrameSink {
  public:
   // Once on the first terminal Encoder/Remuxer failure, outside locks on that
@@ -68,6 +70,8 @@ class MW_STREAMER_API EncodePushSink final : public FrameSink {
                             const std::string& ip, std::uint16_t port,
                             bool tls);
   Remuxer::OutputInfo output_info() const;
+  // Same synchronous snapshot and raw SDK status contract as Remuxer.
+  std::vector<Remuxer::PushStatus> push_statuses() const;
 
  private:
   class Impl;

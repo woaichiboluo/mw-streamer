@@ -40,8 +40,10 @@ set(MW_STREAMER_SOURCES
     streamer/decoder/av_decoder.cc
     streamer/input/av_frame_source.cc
     streamer/input/av_media_input.cc
+    streamer/input/timestamp_discontinuity.cc
     streamer/output/output.cc
     streamer/output/encode_push_sink.cc
+    streamer/pipeline/single_live_pipeline.cc
     streamer/platform/thread.cc
     streamer/scheduler/scheduler.cc
     streamer/encoder/av_encoder.cc

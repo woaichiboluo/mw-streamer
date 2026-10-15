@@ -65,10 +65,10 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
           }
           std::rethrow_exception(error);
         }
-        if (!poller_) poller_ = poller;
         output_ = std::move(output);
         converter_ = std::move(converter);
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!poller_) poller_ = poller;
         interleaver_ = std::move(interleaver);
         timestamps_ = std::move(timestamps);
         handoff_.reset();
@@ -122,6 +122,21 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
   Remuxer::OutputInfo output_info() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return output_info_;
+  }
+
+  std::vector<Remuxer::PushStatus> push_statuses() const {
+    toolkit::EventPoller::Ptr poller;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      poller = poller_;
+    }
+    std::vector<Remuxer::PushStatus> result;
+    if (poller) {
+      Sync(poller, [&] {
+        if (output_) result = output_->push_statuses();
+      });
+    }
+    return result;
   }
 
   void Drain() noexcept {
@@ -384,6 +399,10 @@ void Remuxer::Drain() noexcept { impl_->Drain(); }
 void Remuxer::Stop() noexcept { impl_->Stop(); }
 Remuxer::OutputInfo Remuxer::output_info() const {
   return impl_->output_info();
+}
+
+std::vector<Remuxer::PushStatus> Remuxer::push_statuses() const {
+  return impl_->push_statuses();
 }
 
 }  // namespace mw::streamer

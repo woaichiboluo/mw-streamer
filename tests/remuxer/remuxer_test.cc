@@ -255,6 +255,7 @@ TEST_CASE("Remuxer 查询注册输出地址且停止保留地址快照", "[remux
   const auto runtime = InitRuntime();
   Remuxer remuxer;
   const std::string target = "rtsp://127.0.0.1:8554/live/remote";
+  CHECK(remuxer.push_statuses().empty());
   CHECK(remuxer.AddPushUrl(target) == target);
   CHECK(remuxer.AddPushUrl(target) == target);
   remuxer.AddRtspPublish("live", "camera", "127.0.0.1", 8555);
@@ -264,6 +265,7 @@ TEST_CASE("Remuxer 查询注册输出地址且停止保留地址快照", "[remux
   CHECK(planned.output_urls == std::vector<std::string>{target});
   CHECK(planned.rtsp_url == "rtsp://127.0.0.1:8555/live/camera");
   CHECK(planned.hls_url == "http://127.0.0.1:8080/live/camera/hls.m3u8");
+  CHECK(remuxer.push_statuses().empty());
   remuxer.Stop();
   CHECK(remuxer.output_info().output_urls == planned.output_urls);
   CHECK(remuxer.output_info().rtsp_url == planned.rtsp_url);
@@ -457,6 +459,7 @@ TEST_CASE("Remuxer 真实 RTSP 连接失败自动重试且健康录制继续完�
     remuxer.SetOnError([&](std::exception_ptr error) { errors.Add(error); });
     output = remuxer.AddPushUrl(directory.File("healthy.mp4"));
     REQUIRE(remuxer.Start(media.streams));
+    CHECK(remuxer.push_statuses().empty());
     CHECK(remuxer.AddPushUrl(target) == target);
     REQUIRE(media.packets.size() > 1);
     const auto initial_packets = media.packets.size() / 2;
@@ -464,10 +467,23 @@ TEST_CASE("Remuxer 真实 RTSP 连接失败自动重试且健康录制继续完�
       REQUIRE(remuxer.SubmitPacket(media.packets[index]));
     // Allow the local connect failure and the SDK's two-second retry delay.
     CHECK_FALSE(errors.WaitForError(std::chrono::seconds(6)));
+    const auto statuses = remuxer.push_statuses();
+    REQUIRE(statuses.size() == 1);
+    CHECK(statuses.front().url == target);
+    CHECK(statuses.front().status == 1);
+    const auto second_target = target + "_second";
+    CHECK(remuxer.AddPushUrl(second_target) == second_target);
+    CHECK(remuxer.AddPushUrl(target) == target);
+    const auto updated = remuxer.push_statuses();
+    REQUIRE(updated.size() == 2);
+    CHECK(updated[0].url == target);
+    CHECK(updated[1].url == second_target);
+    CHECK(updated[1].status == 1);
     for (std::size_t index = initial_packets; index < media.packets.size();
          ++index)
       REQUIRE(remuxer.SubmitPacket(media.packets[index]));
     remuxer.Stop();
+    CHECK(remuxer.push_statuses().empty());
   }
   runtime.reset();
   CHECK(errors.Count() == 0);

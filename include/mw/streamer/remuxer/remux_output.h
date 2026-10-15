@@ -72,6 +72,7 @@ class RemuxOutput final : public mediakit::MediaSourceEvent,
                             bool tls);
   void InputFrame(const mediakit::Frame::Ptr& frame);
   bool tracks_ready() const;
+  std::vector<Remuxer::PushStatus> push_statuses() const;
   void Flush();
   // Releases every output even if recording finalization throws. Call once.
   void Close();

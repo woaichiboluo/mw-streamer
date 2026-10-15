@@ -94,6 +94,11 @@ class MW_STREAMER_API AvMediaInput final {
   AvDecoderReadResult TryReadVideo();
   AvDecoderReadResult TryReadAudio();
   // Live only, nonblocking read of cached converted/bundled audio/video.
+  // Before decoding, Live applies FFmpeg CLI-style DTS/PTS discontinuity
+  // correction for HLS/MPEG-TS and discards extreme invalid timestamps in
+  // other formats. Filter PTS thus follows the corrected media timeline;
+  // Batch and raw AvInput retain their native timestamps. This does not
+  // change connection generations or synthesize missing packet timestamps.
   // Calling this in Batch mode throws. EOF is visible for each normally drained
   // generation.
   AvFrameSourceReadResult TryReadFrame();

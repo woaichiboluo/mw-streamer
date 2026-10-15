@@ -28,6 +28,14 @@ class MW_STREAMER_API Remuxer final {
     std::string hls_url;
   };
 
+  struct PushStatus {
+    std::string url;
+    // Raw PusherProxy status: 0 is normal, 1 is attempting to push.
+    // The SDK may retain 0 briefly after disconnection; this is not proof
+    // of continuous packet delivery or successful remote playback.
+    int status = 1;
+  };
+
   // Once per terminal session failure, on the output poller outside locks.
   // Stops accepting packets before notifying and closes the session afterward.
   // Preserves processing exceptions; unrecoverable ZLM output errors are
@@ -94,6 +102,11 @@ class MW_STREAMER_API Remuxer final {
   // are planned addresses. Stop preserves the snapshot until new additions
   // or Start, while clearing the configured outputs.
   OutputInfo output_info() const;
+  // Queries the output poller synchronously. Returns all currently created
+  // network pushers in registration order. Pending targets, local recordings
+  // and RTSP/HLS publications are excluded. Empty before Start/after closure.
+  // Safe concurrently with control calls and from error callbacks.
+  std::vector<PushStatus> push_statuses() const;
   // Rejects new packets/targets, drains accepted packets and finalizes files.
   // Live network delivery is managed by ZLM.
   void Drain() noexcept;

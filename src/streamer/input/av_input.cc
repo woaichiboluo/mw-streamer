@@ -118,6 +118,8 @@ class AvInput::Impl final {
               "avformat_find_stream_info");
       deadline_ns_.store(0);
       AvInputInfo info;
+      info.timestamp_discontinuities =
+          (format_->iformat->flags & AVFMT_TS_DISCONT) != 0;
       info.start_time_us = format_->start_time;
       info.duration_us = format_->duration;
       info.metadata = ffmpeg::AvDictionary::ToMap(format_->metadata);

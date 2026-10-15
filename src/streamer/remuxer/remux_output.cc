@@ -343,6 +343,15 @@ void RemuxOutput::InputFrame(const mediakit::Frame::Ptr& frame) {
 
 bool RemuxOutput::tracks_ready() const { return muxer_->isAllTrackReady(); }
 
+std::vector<Remuxer::PushStatus> RemuxOutput::push_statuses() const {
+  std::vector<Remuxer::PushStatus> result;
+  for (const auto& target : targets_) {
+    if (target.pusher)
+      result.push_back({target.url, target.pusher->getStatus()});
+  }
+  return result;
+}
+
 void RemuxOutput::Flush() { muxer_->flush(); }
 
 void RemuxOutput::Close() {
