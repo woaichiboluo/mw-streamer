@@ -35,9 +35,6 @@ enum class AvInputProxyState {
 
 struct AvInputProxyStatus {
   AvInputProxyState state = AvInputProxyState::kStopped;
-  // Each new connection attempt has its own generation, starting at zero on
-  // Start. Finish old consumer calls before starting a new proxy session.
-  std::uint64_t generation = 0;
   std::uint64_t retry_count = 0;
   std::chrono::seconds retry_delay{0};
   // Original exception for WaitingRetry/Failed; cleared on a successful open.
@@ -48,7 +45,6 @@ struct AvInputProxyStatus {
 struct AvInputProxyReadResult {
   AvInputReadStatus status = AvInputReadStatus::kNull;
   std::optional<ffmpeg::Packet> packet;
-  std::uint64_t generation = 0;
   // This packet's immutable description, even if a later attempt is already
   // current. Does not retain an AvInput or its connection resources.
   std::shared_ptr<const AvInputInfo> info;
@@ -78,9 +74,9 @@ class MW_STREAMER_API AvInputProxy final {
   // for a connection. Invalid URL/restart or thread creation failure logs and
   // returns false. Call Stop and finish old reads before another Start.
   [[nodiscard]] bool Start(std::string_view url) noexcept;
-  // Reports EOF for each completed generation, with its generation/info.
+  // Reports EOF for each completed input, with its immutable description.
   // Reading EOF triggers reopening when loop is enabled; until then the ended
-  // input remains current. Each looping generation reports EOF exactly once.
+  // input remains current. Each looping input reports EOF exactly once.
   // Waits through connection attempts; final failure/Stop return kNull.
   // Source errors belong to status notifications, not the read result.
   AvInputProxyReadResult ReadPacket();

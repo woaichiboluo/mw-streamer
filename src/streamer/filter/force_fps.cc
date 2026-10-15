@@ -45,10 +45,8 @@ class ForceFps::Impl final {
   bool TryPushFrame(const AvDecoderReadResult& input) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (stopped_) {
-      MW_LOG_DEBUG(
-          "streamer",
-          "ForceFps 停止后拒绝入队: instance={} generation={} stream={}",
-          fmt::ptr(this), input.generation, input.stream_index);
+      MW_LOG_DEBUG("streamer", "ForceFps 停止后拒绝入队: instance={} stream={}",
+                   fmt::ptr(this), input.stream_index);
       return false;
     }
     if (inputs_.size() >= capacity_) {
@@ -78,21 +76,15 @@ class ForceFps::Impl final {
     } else {
       throw std::invalid_argument("ForceFps 不接受空读取结果");
     }
-    if (submitted_generation_ &&
-        (input.generation < *submitted_generation_ ||
-         (input.generation == *submitted_generation_ && submitted_eof_))) {
-      throw std::invalid_argument("ForceFps 输入代次或 EOF 顺序无效");
-    }
     inputs_.push_back(input);
-    submitted_generation_ = input.generation;
-    submitted_eof_ = input.status == AvDecoderReadStatus::kEof;
-    MW_LOG_TRACE(
-        "streamer",
-        "ForceFps 接受入队: instance={} eof={} generation={} stream={} "
-        "pts={} time_base={}/{} queue={}/{}",
-        fmt::ptr(this), submitted_eof_, input.generation, input.stream_index,
-        submitted_eof_ ? input.end_pts : input.frame->get()->pts,
-        input.time_base.num, input.time_base.den, inputs_.size(), capacity_);
+    const bool eof = input.status == AvDecoderReadStatus::kEof;
+    MW_LOG_TRACE("streamer",
+                 "ForceFps 接受入队: instance={} eof={} stream={} "
+                 "pts={} time_base={}/{} queue={}/{}",
+                 fmt::ptr(this), eof, input.stream_index,
+                 eof ? input.end_pts : input.frame->get()->pts,
+                 input.time_base.num, input.time_base.den, inputs_.size(),
+                 capacity_);
     return true;
   }
 
@@ -101,20 +93,6 @@ class ForceFps::Impl final {
     if (stopped_) return {};
     while (!inputs_.empty()) {
       const auto& input = inputs_.front();
-      if (!generation_ || input.generation != *generation_) {
-        if (generation_) {
-          MW_LOG_INFO("streamer",
-                      "ForceFps 切换代次并清空历史: instance={} generation={} "
-                      "previous_generation={}",
-                      fmt::ptr(this), input.generation, *generation_);
-        } else {
-          MW_LOG_DEBUG("streamer",
-                       "ForceFps 建立初始代次: instance={} generation={}",
-                       fmt::ptr(this), input.generation);
-        }
-        ClearHistory();
-        generation_ = input.generation;
-      }
       if (input.status == AvDecoderReadStatus::kEof) {
         auto output = input;
         if (output.end_pts != AV_NOPTS_VALUE) {
@@ -123,12 +101,12 @@ class ForceFps::Impl final {
         }
         output.time_base = time_base_;
         MW_LOG_TRACE("streamer",
-                     "ForceFps 输出 EOF: instance={} generation={} stream={} "
+                     "ForceFps 输出 EOF: instance={} stream={} "
                      "input_end_pts={} input_time_base={}/{} end_pts={} "
                      "time_base={}/{}",
-                     fmt::ptr(this), output.generation, output.stream_index,
-                     input.end_pts, input.time_base.num, input.time_base.den,
-                     output.end_pts, time_base_.num, time_base_.den);
+                     fmt::ptr(this), output.stream_index, input.end_pts,
+                     input.time_base.num, input.time_base.den, output.end_pts,
+                     time_base_.num, time_base_.den);
         PopInput();
         ClearHistory();
         return output;
@@ -140,38 +118,35 @@ class ForceFps::Impl final {
       if (discontinuity) {
         MW_LOG_INFO(
             "streamer",
-            "ForceFps PTS 跳变重新锚定: instance={} generation={} stream={} "
+            "ForceFps PTS 跳变重新锚定: instance={} stream={} "
             "previous_input_pts={} next_pts={} current_pts={} time_base={}/{} "
             "input_pts={} input_time_base={}/{}",
-            fmt::ptr(this), input.generation, input.stream_index,
-            *last_input_pts_, next_pts_.value_or(AV_NOPTS_VALUE), pts,
-            time_base_.num, time_base_.den, input.frame->get()->pts,
-            input.time_base.num, input.time_base.den);
+            fmt::ptr(this), input.stream_index, *last_input_pts_,
+            next_pts_.value_or(AV_NOPTS_VALUE), pts, time_base_.num,
+            time_base_.den, input.frame->get()->pts, input.time_base.num,
+            input.time_base.den);
       }
       if (next_pts_ && !discontinuity) {
         if (pts < *next_pts_) {
           MW_LOG_TRACE("streamer",
                        "ForceFps 跳过输入输出槽并缓存最新图像: instance={} "
-                       "generation={} "
                        "stream={} reason=pts<next current_pts={} next_pts={} "
                        "time_base={}/{} input_pts={} input_time_base={}/{}",
-                       fmt::ptr(this), input.generation, input.stream_index,
-                       pts, *next_pts_, time_base_.num, time_base_.den,
-                       input.frame->get()->pts, input.time_base.num,
-                       input.time_base.den);
+                       fmt::ptr(this), input.stream_index, pts, *next_pts_,
+                       time_base_.num, time_base_.den, input.frame->get()->pts,
+                       input.time_base.num, input.time_base.den);
           // Keep the latest picture even when it has no output slot yet.
           Remember(input, false);
           PopInput();
           continue;
         }
         if (pts > *next_pts_) {
-          MW_LOG_TRACE(
-              "streamer",
-              "ForceFps 使用缓存图像补齐输出槽: instance={} generation={} "
-              "stream={} current_pts={} next_pts={} time_base={}/{} "
-              "duplicate={}",
-              fmt::ptr(this), input.generation, input.stream_index, pts,
-              *next_pts_, time_base_.num, time_base_.den, last_used_);
+          MW_LOG_TRACE("streamer",
+                       "ForceFps 使用缓存图像补齐输出槽: instance={} "
+                       "stream={} current_pts={} next_pts={} time_base={}/{} "
+                       "duplicate={}",
+                       fmt::ptr(this), input.stream_index, pts, *next_pts_,
+                       time_base_.num, time_base_.den, last_used_);
           auto output = Output(*last_, *next_pts_, last_used_);
           last_used_ = true;
           ++*next_pts_;
@@ -204,9 +179,6 @@ class ForceFps::Impl final {
                 fmt::ptr(this), inputs_.size());
     inputs_.clear();
     ClearHistory();
-    generation_.reset();
-    submitted_generation_.reset();
-    submitted_eof_ = false;
     stopped_ = false;
   }
 
@@ -216,13 +188,13 @@ class ForceFps::Impl final {
   void PopInput() {
     const auto& input = inputs_.front();
     const bool eof = input.status == AvDecoderReadStatus::kEof;
-    MW_LOG_TRACE(
-        "streamer",
-        "ForceFps 消费出队: instance={} eof={} generation={} stream={} "
-        "pts={} time_base={}/{} remaining_queue={}/{}",
-        fmt::ptr(this), eof, input.generation, input.stream_index,
-        eof ? input.end_pts : input.frame->get()->pts, input.time_base.num,
-        input.time_base.den, inputs_.size() - 1, capacity_);
+    MW_LOG_TRACE("streamer",
+                 "ForceFps 消费出队: instance={} eof={} stream={} "
+                 "pts={} time_base={}/{} remaining_queue={}/{}",
+                 fmt::ptr(this), eof, input.stream_index,
+                 eof ? input.end_pts : input.frame->get()->pts,
+                 input.time_base.num, input.time_base.den, inputs_.size() - 1,
+                 capacity_);
     inputs_.pop_front();
   }
 
@@ -243,11 +215,11 @@ class ForceFps::Impl final {
   AvDecoderReadResult Output(const AvDecoderReadResult& input, std::int64_t pts,
                              bool duplicate) const {
     MW_LOG_TRACE("streamer",
-                 "ForceFps 输出帧: instance={} generation={} stream={} "
+                 "ForceFps 输出帧: instance={} stream={} "
                  "duplicate={} input_pts={} input_time_base={}/{} pts={} "
                  "time_base={}/{}",
-                 fmt::ptr(this), input.generation, input.stream_index,
-                 duplicate, input.frame->get()->pts, input.time_base.num,
+                 fmt::ptr(this), input.stream_index, duplicate,
+                 input.frame->get()->pts, input.time_base.num,
                  input.time_base.den, pts, time_base_.num, time_base_.den);
     auto output = input;
     auto* frame = output.frame->get();
@@ -269,14 +241,13 @@ class ForceFps::Impl final {
       MW_LOG_TRACE("streamer",
                    "ForceFps 丢弃未使用缓存帧: instance={} "
                    "reason=replaced_before_output "
-                   "generation={} stream={} pts={} time_base={}/{} "
-                   "replacement_generation={} replacement_pts={} "
+                   "stream={} pts={} time_base={}/{} "
+                   "replacement_pts={} "
                    "replacement_time_base={}/{}",
-                   fmt::ptr(this), last_->generation, last_->stream_index,
+                   fmt::ptr(this), last_->stream_index,
                    last_->frame->get()->pts, last_->time_base.num,
-                   last_->time_base.den, input.generation,
-                   input.frame->get()->pts, input.time_base.num,
-                   input.time_base.den);
+                   last_->time_base.den, input.frame->get()->pts,
+                   input.time_base.num, input.time_base.den);
     }
     last_ = input;
     last_used_ = used;
@@ -287,9 +258,9 @@ class ForceFps::Impl final {
       MW_LOG_TRACE(
           "streamer",
           "ForceFps 丢弃未使用缓存帧: instance={} reason=history_reset "
-          "generation={} stream={} pts={} time_base={}/{}",
-          fmt::ptr(this), last_->generation, last_->stream_index,
-          last_->frame->get()->pts, last_->time_base.num, last_->time_base.den);
+          "stream={} pts={} time_base={}/{}",
+          fmt::ptr(this), last_->stream_index, last_->frame->get()->pts,
+          last_->time_base.num, last_->time_base.den);
     }
     last_.reset();
     last_used_ = false;
@@ -306,9 +277,6 @@ class ForceFps::Impl final {
   bool last_used_ = false;
   std::optional<std::int64_t> last_input_pts_;
   std::optional<std::int64_t> next_pts_;
-  std::optional<std::uint64_t> generation_;
-  std::optional<std::uint64_t> submitted_generation_;
-  bool submitted_eof_ = false;
 };
 
 ForceFps::ForceFps(ForceFpsConfig config)

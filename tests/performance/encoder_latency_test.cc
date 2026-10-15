@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cmath>
@@ -18,6 +19,7 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/buffer.h>
+#include <libavutil/mathematics.h>
 }
 
 #include "mw/log.h"
@@ -30,7 +32,6 @@ namespace ffmpeg = mw::streamer::ffmpeg;
 namespace fs = std::filesystem;
 using mw::streamer::AvEncoder;
 using mw::streamer::AvEncoderConfig;
-using mw::streamer::MediaFrame;
 using namespace std::chrono_literals;
 
 class EncoderLatencyLog final {
@@ -90,13 +91,13 @@ AvEncoderConfig VideoConfig() {
   return config;
 }
 
-MediaFrame VideoFrame(std::uint8_t marker) {
-  MediaFrame media;
-  auto& frame = media.video.emplace();
+ffmpeg::Frame VideoFrame(std::uint8_t marker) {
+  ffmpeg::Frame frame;
   frame->format = AV_PIX_FMT_NV12;
   frame->width = frame->height = 64;
-  frame->pts = 12345;
+  frame->pts = 123000 + static_cast<std::int64_t>(marker) * 3000;
   frame->time_base = {1, 90000};
+  frame->duration = 3000;
   if (av_frame_get_buffer(frame.get(), 0) < 0)
     throw std::runtime_error("分配 latency 视频测试帧失败");
   for (int plane = 0; plane < 2; ++plane) {
@@ -107,15 +108,17 @@ MediaFrame VideoFrame(std::uint8_t marker) {
   frame->opaque_ref = av_buffer_alloc(1);
   if (!frame->opaque_ref) throw std::bad_alloc();
   frame->opaque_ref->data[0] = marker;
-  return media;
+  return frame;
 }
 
-MediaFrame AudioFrame() {
-  MediaFrame media;
-  auto& frame = media.audio.emplace();
+ffmpeg::Frame AudioFrame() {
+  ffmpeg::Frame frame;
   frame->format = AV_SAMPLE_FMT_FLTP;
   frame->sample_rate = 48000;
   frame->nb_samples = 2048;
+  frame->pts = 480000;
+  frame->time_base = {1, 48000};
+  frame->duration = frame->nb_samples;
   av_channel_layout_default(&frame->ch_layout, 2);
   if (av_frame_get_buffer(frame.get(), 0) < 0)
     throw std::runtime_error("分配 latency 音频测试帧失败");
@@ -124,7 +127,7 @@ MediaFrame AudioFrame() {
   frame->opaque_ref = av_buffer_alloc(1);
   if (!frame->opaque_ref) throw std::bad_alloc();
   frame->opaque_ref->data[0] = 91;
-  return media;
+  return frame;
 }
 
 bool CopiesOpaque(const AVCodec& codec) {
@@ -198,35 +201,45 @@ TEST_CASE("视频编码 latency 跟随 B 帧重排并保留原始 opaque",
   config.video_options["x264-params"] =
       "b-adapt=0:rc-lookahead=0:sync-lookahead=0";
   REQUIRE(encoder.Start(config));
-  std::vector<MediaFrame> sources;
+  std::vector<ffmpeg::Frame> sources;
   for (std::uint8_t index = 0; index < 12; ++index) {
     sources.push_back(VideoFrame(index));
-    REQUIRE(encoder.SubmitFrame(sources.back()));
-    // Pace a finite input while allowing the realtime queue to do its work.
-    // Assertions use actual output, rather than treating admission as success.
-    std::this_thread::sleep_for(10ms);
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    // Retry the same frame until admitted; a full queue must not change its
+    // timestamp or opaque source association.
+    while (!encoder.TryPushVideo(sources.back())) {
+      REQUIRE_FALSE(encoder.error());
+      REQUIRE(std::chrono::steady_clock::now() < deadline);
+      std::this_thread::sleep_for(1ms);
+    }
   }
   encoder.Stop();
   REQUIRE_FALSE(encoder.error());
-  REQUIRE(packets.size() >= 3);
+  REQUIRE(packets.size() == sources.size());
   bool reordered = false;
   for (std::size_t index = 0; index < packets.size(); ++index) {
     const auto& packet = packets[index];
-    REQUIRE(packet->pts >= 0);
-    REQUIRE(packet->pts < static_cast<std::int64_t>(sources.size()));
+    const auto source = std::find_if(
+        sources.begin(), sources.end(), [&](const ffmpeg::Frame& frame) {
+          return packet->pts ==
+                 av_rescale_q(frame->pts, frame->time_base, packet->time_base);
+        });
+    REQUIRE(source != sources.end());
     if (index && packet->pts < packets[index - 1]->pts) reordered = true;
     if (CopiesOpaque(*codec)) {
-      const auto& source =
-          *sources[static_cast<std::size_t>(packet->pts)].video;
       REQUIRE(packet->opaque_ref != nullptr);
-      REQUIRE(packet->opaque_ref->data == source->opaque_ref->data);
-      REQUIRE(packet->opaque_ref->data[0] == packet->pts);
+      REQUIRE(packet->opaque_ref->data == (*source)->opaque_ref->data);
+      REQUIRE(packet->opaque_ref->data[0] ==
+              static_cast<std::uint8_t>(source - sources.begin()));
     }
   }
   REQUIRE(reordered);
   for (std::size_t index = 0; index < sources.size(); ++index) {
-    const auto& frame = *sources[index].video;
-    REQUIRE(frame->pts == 12345);
+    const auto& frame = sources[index];
+    REQUIRE(frame->pts == 123000 + static_cast<std::int64_t>(index) * 3000);
+    REQUIRE(frame->time_base.num == 1);
+    REQUIRE(frame->time_base.den == 90000);
+    REQUIRE(frame->duration == 3000);
     REQUIRE(frame->opaque_ref->size == 1);
     REQUIRE(frame->opaque_ref->data[0] == index);
   }
@@ -257,7 +270,7 @@ TEST_CASE("当前编码包的 latency 在进入阻塞回调前结束",
   });
   REQUIRE(encoder.Start(VideoConfig()));
   const auto started = std::chrono::steady_clock::now();
-  REQUIRE(encoder.SubmitFrame(VideoFrame(1)));
+  REQUIRE(encoder.TryPushVideo(VideoFrame(1)));
   bool received = false;
   {
     std::unique_lock lock(mutex);
@@ -301,14 +314,18 @@ TEST_CASE("音频编码不支持关联时明确报告 N/A 且保留滤镜来源"
   config.audio_sample_format = AV_SAMPLE_FMT_FLTP;
   REQUIRE(encoder.Start(config));
   auto frame = AudioFrame();
-  auto* original = (*frame.audio)->opaque_ref->data;
-  REQUIRE(encoder.SubmitFrame(frame));
+  auto* original = frame->opaque_ref->data;
+  REQUIRE(encoder.TryPushAudio(frame));
   encoder.Stop();
   REQUIRE_FALSE(encoder.error());
   REQUIRE(packets > 0);
-  REQUIRE((*frame.audio)->opaque_ref->data == original);
-  REQUIRE((*frame.audio)->opaque_ref->size == 1);
-  REQUIRE((*frame.audio)->opaque_ref->data[0] == 91);
+  REQUIRE(frame->pts == 480000);
+  REQUIRE(frame->time_base.num == 1);
+  REQUIRE(frame->time_base.den == 48000);
+  REQUIRE(frame->duration == 2048);
+  REQUIRE(frame->opaque_ref->data == original);
+  REQUIRE(frame->opaque_ref->size == 1);
+  REQUIRE(frame->opaque_ref->data[0] == 91);
   const auto contents = log.Read();
   const auto summary = Summary(contents, "encode.audio");
   INFO(summary);

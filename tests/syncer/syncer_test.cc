@@ -1,5 +1,6 @@
 #include "mw/streamer/timing/syncer.h"
 
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
@@ -8,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -97,7 +99,7 @@ SyncerConfig MixedConfig() {
   return config;
 }
 
-AvDecoderReadResult VideoInput(std::int64_t pts, std::uint64_t generation = 0) {
+AvDecoderReadResult VideoInput(std::int64_t pts) {
   AvDecoderReadResult input;
   input.status = AvDecoderReadStatus::kFrame;
   input.frame = Video(99);
@@ -105,13 +107,11 @@ AvDecoderReadResult VideoInput(std::int64_t pts, std::uint64_t generation = 0) {
   (*input.frame)->duration = 40000;
   (*input.frame)->time_base = AVRational{1, 1000000};
   input.time_base = AVRational{1, 1000000};
-  input.generation = generation;
   return input;
 }
 
 AvDecoderReadResult AudioInput(std::int64_t pts, int rate = 48000,
-                               int samples = 960,
-                               std::uint64_t generation = 0) {
+                               int samples = 960) {
   AvDecoderReadResult input;
   input.status = AvDecoderReadStatus::kFrame;
   input.frame.emplace();
@@ -128,15 +128,21 @@ AvDecoderReadResult AudioInput(std::int64_t pts, int rate = 48000,
   frame->duration = samples;
   frame->time_base = AVRational{1, rate};
   input.time_base = frame->time_base;
-  input.generation = generation;
   input.stream_index = 1;
   return input;
 }
 
-AvDecoderReadResult Eof(std::uint64_t generation = 0) {
+AvDecoderReadResult Eof() {
   AvDecoderReadResult input;
   input.status = AvDecoderReadStatus::kEof;
-  input.generation = generation;
+  return input;
+}
+
+AvDecoderReadResult FpsVideoInput(std::int64_t pts) {
+  auto input = VideoInput(pts);
+  input.time_base = AVRational{1, 25};
+  (*input.frame)->time_base = input.time_base;
+  (*input.frame)->duration = 1;
   return input;
 }
 
@@ -476,18 +482,78 @@ TEST_CASE("Syncer fractional frame rate stays exact across a long paced stream",
   }
 }
 
-TEST_CASE(
-    "Syncer backward jumps and generation resets preserve output continuity",
-    "[syncer][timing]") {
-  const auto generation = GENERATE(std::uint64_t{0}, std::uint64_t{1});
+TEST_CASE("Syncer backward PTS jumps preserve output continuity",
+          "[syncer][timing]") {
   SyncerTiming timing(VideoConfig());
   auto first = VideoInput(50000000);
   REQUIRE(timing.Step(true, &first, 0).frame);
-  auto restart = VideoInput(0, generation);
+  auto restart = VideoInput(0);
   auto result = timing.Step(true, &restart, 40000);
   REQUIRE(result.consumed);
   REQUIRE(result.frame);
   REQUIRE(PtsUs(*result.frame) == kStart + 40000);
+}
+
+TEST_CASE("Syncer shared correction converges after interleaved PTS resets",
+          "[syncer][timing]") {
+  const bool video_leads = GENERATE(true, false);
+  const bool forward_start_shift = GENERATE(false, true);
+  auto config = MixedConfig();
+  config.forward_start_shift = forward_start_shift;
+  SyncerTiming timing(config);
+  std::vector<AvDecoderReadResult> video{FpsVideoInput(1250),
+                                         FpsVideoInput(1251)};
+  std::vector<AvDecoderReadResult> audio;
+  if (video_leads) {
+    for (int index = 0; index < 4; ++index) {
+      audio.push_back(AudioInput(2400000 + index * 960, 48000, 960));
+    }
+  } else {
+    audio.push_back(AudioInput(2400000, 48000, 3840));
+  }
+  const auto old_video_count = video.size();
+  const auto old_audio_count = audio.size();
+  constexpr std::size_t kFrames = 100;
+  for (std::size_t index = 0; index < kFrames; ++index) {
+    video.push_back(FpsVideoInput(static_cast<std::int64_t>(index)));
+    audio.push_back(
+        AudioInput(static_cast<std::int64_t>(index) * 1920, 48000, 1920));
+  }
+  std::vector<std::int64_t> video_pts;
+  std::vector<std::int64_t> audio_pts;
+  std::size_t video_index = 0;
+  std::size_t audio_index = 0;
+  std::int64_t now = 0;
+  for (int iteration = 0; iteration < 10000; ++iteration) {
+    auto wake = std::numeric_limits<std::int64_t>::max();
+    for (bool is_video : {true, false}) {
+      const auto& inputs = is_video ? video : audio;
+      auto& index = is_video ? video_index : audio_index;
+      auto& outputs = is_video ? video_pts : audio_pts;
+      const auto old_count = is_video ? old_video_count : old_audio_count;
+      if (index == inputs.size()) continue;
+      const auto step = timing.Step(is_video, &inputs[index], now);
+      wake = std::min(wake, step.wake_us);
+      if (step.consumed) {
+        REQUIRE(step.frame);
+        if (index >= old_count) outputs.push_back(PtsUs(*step.frame));
+        ++index;
+      }
+    }
+    if (video_index == video.size() && audio_index == audio.size()) break;
+    REQUIRE(wake != std::numeric_limits<std::int64_t>::max());
+    now = std::max(now, wake);
+  }
+  REQUIRE(video_pts.size() == kFrames);
+  REQUIRE(audio_pts.size() == kFrames);
+  // A 1/25 video time base must feed its quantized correction back to the
+  // shared state; otherwise audio permanently retains a 13.333 ms residual.
+  for (std::size_t index = 10; index < kFrames; ++index) {
+    CAPTURE(video_leads, forward_start_shift, index);
+    REQUIRE(video_pts[index] == audio_pts[index]);
+    REQUIRE(video_pts[index] - video_pts[index - 1] == 40000);
+    REQUIRE(audio_pts[index] - audio_pts[index - 1] == 40000);
+  }
 }
 
 TEST_CASE("Syncer large forward jumps do not leak the source discontinuity",
@@ -548,7 +614,7 @@ TEST_CASE("Syncer consumes EOF and continues the live media timeline",
   const auto backups = DrainAt(timing, true, 2000000);
   REQUIRE_FALSE(backups.empty());
   REQUIRE(PtsUs(backups.front()) == kStart + 40000);
-  auto next = VideoInput(0, 1);
+  auto next = VideoInput(0);
   auto resumed = timing.Step(true, &next, 2040000);
   REQUIRE(resumed.consumed);
   REQUIRE(resumed.frame);
@@ -607,38 +673,89 @@ class CallbackGate {
   bool open_ = false;
 };
 
-TEST_CASE("Syncer full queue blocks its producer and stopping wakes it",
-          "[syncer][thread]") {
-  auto config = VideoConfig();
+TEST_CASE(
+    "Syncer full queues reject input without waiting and allow FIFO retry",
+    "[syncer][thread]") {
+  const bool video = GENERATE(true, false);
+  auto config = MixedConfig();
   config.input_capacity = 1;
   CallbackGate gate;
+  std::mutex mutex;
+  std::condition_variable changed;
+  std::vector<std::int64_t> timestamps;
   Syncer syncer(config);
-  syncer.SetOnVideoFrame([&](ffmpeg::Frame) { gate.Enter(); });
+  const auto record = [&](ffmpeg::Frame frame) {
+    {
+      std::lock_guard lock(mutex);
+      timestamps.push_back(PtsUs(frame));
+      changed.notify_all();
+    }
+    gate.Enter();
+  };
+  if (video) {
+    syncer.SetOnVideoFrame(record);
+  } else {
+    syncer.SetOnAudioFrame(record);
+  }
+  const auto push = [&](const AvDecoderReadResult& input) {
+    return video ? syncer.TryPushVideo(input) : syncer.TryPushAudio(input);
+  };
+  const auto input = [&](int index) {
+    return video ? VideoInput(index * 40000) : AudioInput(index * 960);
+  };
+  REQUIRE_FALSE(push(input(0)));
   REQUIRE(syncer.Start());
-  REQUIRE(syncer.PushVideo(VideoInput(0)));
+  REQUIRE(push(input(0)));
   const bool entered = gate.WaitEntered();
   if (!entered) {
     gate.Open();
     syncer.Stop();
-    FAIL("Scheduler did not deliver the first frame");
+    FAIL("Syncer did not deliver the first frame");
   }
-  const bool queued = syncer.PushVideo(VideoInput(40000));
-  std::promise<void> started;
+  const bool queued = push(input(1));
+  const auto rejected = input(2);
+  const auto* storage = (*rejected.frame)->data[0];
   auto producer = std::async(std::launch::async, [&] {
-    started.set_value();
-    return syncer.PushVideo(VideoInput(80000));
+    const bool frame = push(rejected);
+    const bool eof = push(Eof());
+    const bool peer = video ? syncer.TryPushAudio(AudioInput(0))
+                            : syncer.TryPushVideo(VideoInput(0));
+    return std::vector<bool>{frame, eof, peer};
   });
-  started.get_future().wait();
-  const auto blocked = producer.wait_for(20ms);
-  syncer.RequestStop();
-  const auto released = producer.wait_for(1s);
+  const auto ready = producer.wait_for(1s);
+  // Always release a regressed blocking implementation before asserting.
+  if (ready != std::future_status::ready) syncer.RequestStop();
   gate.Open();
+  const auto accepted = producer.get();
+  bool consumed = false;
+  bool retried = false;
+  bool delivered = false;
+  if (ready == std::future_status::ready) {
+    {
+      std::unique_lock lock(mutex);
+      consumed =
+          changed.wait_for(lock, 1s, [&] { return timestamps.size() >= 2; });
+    }
+    retried = push(rejected);
+    {
+      std::unique_lock lock(mutex);
+      delivered =
+          changed.wait_for(lock, 1s, [&] { return timestamps.size() >= 3; });
+    }
+  }
   syncer.Stop();
-  const bool accepted = producer.get();
   REQUIRE(queued);
-  REQUIRE(blocked == std::future_status::timeout);
-  REQUIRE(released == std::future_status::ready);
-  REQUIRE_FALSE(accepted);
+  REQUIRE(ready == std::future_status::ready);
+  REQUIRE(accepted == std::vector<bool>{false, false, true});
+  REQUIRE((*rejected.frame)->data[0] == storage);
+  REQUIRE((*rejected.frame)->pts == (video ? 80000 : 1920));
+  REQUIRE(consumed);
+  REQUIRE(retried);
+  REQUIRE(delivered);
+  const auto step = video ? 40000 : 20000;
+  REQUIRE(timestamps ==
+          std::vector<std::int64_t>{kStart, kStart + step, kStart + 2 * step});
+  REQUIRE_FALSE(push(rejected));
   REQUIRE_FALSE(syncer.error());
 }
 
@@ -666,8 +783,8 @@ TEST_CASE("Syncer delivers paced audio and video serially on its own thread",
   });
   REQUIRE(syncer.Start());
   for (int i = 0; i < 3; ++i) {
-    REQUIRE(syncer.PushVideo(VideoInput(i * 40000)));
-    REQUIRE(syncer.PushAudio(AudioInput(i * 960)));
+    REQUIRE(syncer.TryPushVideo(VideoInput(i * 40000)));
+    REQUIRE(syncer.TryPushAudio(AudioInput(i * 960)));
   }
   bool delivered;
   {
@@ -686,7 +803,7 @@ TEST_CASE("Syncer delivers paced audio and video serially on its own thread",
     REQUIRE(thread == threads.front());
     REQUIRE(thread != std::this_thread::get_id());
   }
-  REQUIRE_FALSE(syncer.PushVideo(VideoInput(120000)));
+  REQUIRE_FALSE(syncer.TryPushVideo(VideoInput(120000)));
   REQUIRE(threads.size() == count_after_stop);
 }
 
@@ -701,14 +818,14 @@ TEST_CASE(
     gate.Enter();
   });
   REQUIRE(syncer.Start());
-  REQUIRE(syncer.PushVideo(VideoInput(0)));
+  REQUIRE(syncer.TryPushVideo(VideoInput(0)));
   const bool entered = gate.WaitEntered();
   if (!entered) {
     gate.Open();
     syncer.Stop();
-    FAIL("Scheduler did not enter callback");
+    FAIL("Syncer did not enter callback");
   }
-  const bool queued = syncer.PushVideo(VideoInput(40000));
+  const bool queued = syncer.TryPushVideo(VideoInput(40000));
   auto stopped = std::async(std::launch::async, [&] { syncer.Stop(); });
   const auto waiting = stopped.wait_for(20ms);
   gate.Open();
@@ -718,11 +835,11 @@ TEST_CASE(
   REQUIRE(waiting == std::future_status::timeout);
   REQUIRE(finished == std::future_status::ready);
   REQUIRE(count == 1);
-  REQUIRE_FALSE(syncer.PushVideo(VideoInput(80000)));
+  REQUIRE_FALSE(syncer.TryPushVideo(VideoInput(80000)));
   REQUIRE(count == 1);
 }
 
-TEST_CASE("Syncer worker stays live across EOF and a subsequent generation",
+TEST_CASE("Syncer worker stays live across EOF and subsequent PTS resets",
           "[syncer][thread]") {
   Syncer syncer(VideoConfig());
   std::promise<void> resumed;
@@ -735,9 +852,9 @@ TEST_CASE("Syncer worker stays live across EOF and a subsequent generation",
     }
   });
   REQUIRE(syncer.Start());
-  REQUIRE(syncer.PushVideo(VideoInput(50000000)));
-  REQUIRE(syncer.PushVideo(Eof()));
-  REQUIRE(syncer.PushVideo(VideoInput(0, 1)));
+  REQUIRE(syncer.TryPushVideo(VideoInput(50000000)));
+  REQUIRE(syncer.TryPushVideo(Eof()));
+  REQUIRE(syncer.TryPushVideo(VideoInput(0)));
   auto ready = resumed.get_future();
   const auto status = ready.wait_for(2s);
   syncer.Stop();
@@ -746,6 +863,99 @@ TEST_CASE("Syncer worker stays live across EOF and a subsequent generation",
   REQUIRE(timestamps[0] == kStart);
   REQUIRE(timestamps[1] == kStart + 40000);
   REQUIRE_FALSE(syncer.error());
+}
+
+TEST_CASE("Syncer worker realigns later media after staggered PTS resets",
+          "[syncer][thread]") {
+  const bool video_leads = GENERATE(true, false);
+  const bool reversed_admission = GENERATE(false, true);
+  constexpr std::size_t kFrames = 16;
+  auto config = MixedConfig();
+  config.input_capacity = 64;
+  std::vector<std::int64_t> video_pts(kFrames, AV_NOPTS_VALUE);
+  std::vector<std::int64_t> audio_pts(kFrames, AV_NOPTS_VALUE);
+  std::promise<void> entered;
+  std::promise<void> release;
+  auto released = release.get_future().share();
+  std::mutex mutex;
+  std::condition_variable changed;
+  std::size_t delivered = 0;
+  bool first_video = true;
+  const auto record = [&](bool video, const ffmpeg::Frame& frame) {
+    const int index = frame->data[0][0] - 32;
+    if (index < 0 || index >= static_cast<int>(kFrames)) return;
+    std::lock_guard lock(mutex);
+    auto& pts =
+        (video ? video_pts : audio_pts)[static_cast<std::size_t>(index)];
+    if (pts == AV_NOPTS_VALUE) {
+      pts = PtsUs(frame);
+      ++delivered;
+      changed.notify_all();
+    }
+  };
+  Syncer syncer(config);
+  syncer.SetOnVideoFrame([&](ffmpeg::Frame frame) {
+    if (first_video) {
+      first_video = false;
+      entered.set_value();
+      released.wait_for(2s);
+    }
+    record(true, frame);
+  });
+  syncer.SetOnAudioFrame([&](ffmpeg::Frame frame) { record(false, frame); });
+  const auto push_new = [&](bool video, std::size_t index) {
+    auto input = video ? FpsVideoInput(static_cast<std::int64_t>(index))
+                       : AudioInput(static_cast<std::int64_t>(index) * 1920,
+                                    48000, 1920);
+    const auto marker = static_cast<std::uint8_t>(32 + index);
+    if (video) {
+      (*input.frame)->data[0][0] = marker;
+    } else {
+      std::memset((*input.frame)->data[0], marker, 3840);
+    }
+    return video ? syncer.TryPushVideo(input) : syncer.TryPushAudio(input);
+  };
+  REQUIRE(syncer.Start());
+  REQUIRE(syncer.TryPushVideo(FpsVideoInput(1250)));
+  REQUIRE(entered.get_future().wait_for(2s) == std::future_status::ready);
+  REQUIRE(syncer.TryPushAudio(
+      AudioInput(2400000, 48000, video_leads ? 960 : 3840)));
+  if (video_leads) {
+    REQUIRE(syncer.TryPushVideo(FpsVideoInput(1251)));
+    if (reversed_admission) REQUIRE(push_new(true, 0));
+    for (int index = 1; index < 4; ++index) {
+      REQUIRE(syncer.TryPushAudio(AudioInput(2400000 + index * 960)));
+    }
+  } else {
+    if (reversed_admission) REQUIRE(push_new(false, 0));
+    REQUIRE(syncer.TryPushVideo(FpsVideoInput(1251)));
+  }
+  // Cover both queued old data and an old input submitted after the peer's
+  // PTS reset. Per-track FIFO order stays unchanged in either admission order.
+  for (std::size_t index = 0; index < kFrames; ++index) {
+    if (index != 0 || !reversed_admission || !video_leads) {
+      REQUIRE(push_new(true, index));
+    }
+    if (index != 0 || !reversed_admission || video_leads) {
+      REQUIRE(push_new(false, index));
+    }
+  }
+  release.set_value();
+  bool complete;
+  {
+    std::unique_lock lock(mutex);
+    complete =
+        changed.wait_for(lock, 3s, [&] { return delivered == 2 * kFrames; });
+  }
+  syncer.Stop();
+  REQUIRE(complete);
+  REQUIRE_FALSE(syncer.error());
+  for (std::size_t index = 10; index < kFrames; ++index) {
+    CAPTURE(video_leads, reversed_admission, index);
+    REQUIRE(video_pts[index] == audio_pts[index]);
+    REQUIRE(video_pts[index] - video_pts[index - 1] == 40000);
+    REQUIRE(audio_pts[index] - audio_pts[index - 1] == 40000);
+  }
 }
 
 TEST_CASE("Syncer RequestStop is safe in callbacks and restart begins fresh",
@@ -758,7 +968,7 @@ TEST_CASE("Syncer RequestStop is safe in callbacks and restart begins fresh",
   });
   REQUIRE(syncer.Start());
   REQUIRE_FALSE(syncer.Start());
-  REQUIRE(syncer.PushVideo(VideoInput(50000000, 8)));
+  REQUIRE(syncer.TryPushVideo(VideoInput(50000000)));
   auto first_future = first.get_future();
   const auto first_status = first_future.wait_for(2s);
   syncer.Stop();
@@ -770,7 +980,7 @@ TEST_CASE("Syncer RequestStop is safe in callbacks and restart begins fresh",
     second.set_value(PtsUs(frame));
   });
   REQUIRE(syncer.Start());
-  REQUIRE(syncer.PushVideo(VideoInput(0)));
+  REQUIRE(syncer.TryPushVideo(VideoInput(0)));
   auto second_future = second.get_future();
   const auto second_status = second_future.wait_for(2s);
   syncer.Stop();
@@ -794,7 +1004,7 @@ TEST_CASE(
     throw std::logic_error("Error observer failed");
   });
   REQUIRE(syncer.Start());
-  REQUIRE(syncer.PushVideo(VideoInput(0)));
+  REQUIRE(syncer.TryPushVideo(VideoInput(0)));
   auto error_future = error.get_future();
   const auto status = error_future.wait_for(2s);
   syncer.Stop();
@@ -803,10 +1013,10 @@ TEST_CASE(
   REQUIRE(syncer.error());
   REQUIRE_THROWS_WITH(std::rethrow_exception(error_future.get()),
                       "Business callback failed");
-  REQUIRE_FALSE(syncer.PushVideo(VideoInput(40000)));
+  REQUIRE_FALSE(syncer.TryPushVideo(VideoInput(40000)));
 }
 
-TEST_CASE("Syncer validates disabled tracks and rejects reversed generations",
+TEST_CASE("Syncer validates disabled tracks and accepts input after EOF",
           "[syncer][thread]") {
   REQUIRE_THROWS_AS(Syncer{SyncerConfig{}}, std::invalid_argument);
   auto config = VideoConfig();
@@ -814,15 +1024,14 @@ TEST_CASE("Syncer validates disabled tracks and rejects reversed generations",
   REQUIRE_THROWS_AS(Syncer{config}, std::invalid_argument);
   Syncer syncer(VideoConfig());
   REQUIRE(syncer.Start());
-  REQUIRE_THROWS_AS(syncer.PushAudio(AudioInput(0)), std::invalid_argument);
-  REQUIRE_THROWS_AS(syncer.PushVideo({}), std::invalid_argument);
-  REQUIRE(syncer.PushVideo(VideoInput(0, 2)));
-  REQUIRE_THROWS_AS(syncer.PushVideo(VideoInput(40000, 1)),
-                    std::invalid_argument);
-  REQUIRE(syncer.PushVideo(Eof(2)));
-  REQUIRE_THROWS_AS(syncer.PushVideo(VideoInput(80000, 2)),
-                    std::invalid_argument);
+  REQUIRE_THROWS_AS(syncer.TryPushAudio(AudioInput(0)), std::invalid_argument);
+  REQUIRE_THROWS_AS(syncer.TryPushVideo({}), std::invalid_argument);
+  REQUIRE(syncer.TryPushVideo(VideoInput(0)));
+  REQUIRE(syncer.TryPushVideo(VideoInput(40000)));
+  REQUIRE(syncer.TryPushVideo(Eof()));
+  REQUIRE(syncer.TryPushVideo(VideoInput(80000)));
   syncer.Stop();
+  REQUIRE_FALSE(syncer.error());
 }
 
 TEST_CASE("Syncer disables video by format even with a supplied backup",
@@ -841,8 +1050,8 @@ TEST_CASE("Syncer disables video by format even with a supplied backup",
     delivered.set_value(std::move(frame));
   });
   REQUIRE(syncer.Start());
-  REQUIRE_THROWS_AS(syncer.PushVideo(VideoInput(0)), std::invalid_argument);
-  REQUIRE(syncer.PushAudio(AudioInput(0)));
+  REQUIRE_THROWS_AS(syncer.TryPushVideo(VideoInput(0)), std::invalid_argument);
+  REQUIRE(syncer.TryPushAudio(AudioInput(0)));
   auto ready = delivered.get_future();
   const auto status = ready.wait_for(2s);
   syncer.Stop();
@@ -881,7 +1090,7 @@ TEST_CASE(
     delivered.set_value(std::move(frame));
   });
   REQUIRE(syncer.Start());
-  REQUIRE(syncer.PushVideo(input));
+  REQUIRE(syncer.TryPushVideo(input));
   auto ready = delivered.get_future();
   const auto status = ready.wait_for(2s);
   syncer.Stop();
@@ -1028,7 +1237,7 @@ TEST_CASE("Syncer retains CUDA surfaces for both real frames and backup output",
       delivered.set_value(std::move(frame));
     });
     REQUIRE(syncer.Start());
-    REQUIRE(syncer.PushVideo(input));
+    REQUIRE(syncer.TryPushVideo(input));
     auto ready = delivered.get_future();
     const auto status = ready.wait_for(2s);
     syncer.Stop();
@@ -1063,7 +1272,7 @@ TEST_CASE("Syncer retains CUDA surfaces for both real frames and backup output",
       delivered.set_value(std::move(frame));
     });
     REQUIRE(syncer.Start());
-    REQUIRE(syncer.PushVideo(input));
+    REQUIRE(syncer.TryPushVideo(input));
     auto ready = delivered.get_future();
     const auto status = ready.wait_for(2s);
     syncer.Stop();

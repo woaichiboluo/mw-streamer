@@ -10,8 +10,7 @@ set_tests_properties(mw_latency_unit_tests PROPERTIES TIMEOUT 30)
 
 add_executable(mw_stage_latency_tests
     input_decoder_latency_test.cc
-    encoder_latency_test.cc
-    filter_latency_test.cc)
+    encoder_latency_test.cc)
 target_compile_definitions(mw_stage_latency_tests PRIVATE
     MW_STREAMER_LATENCY_TEST_DATA_DIR="${MW_STREAMER_TEST_DATA_DIR}"
     MW_STREAMER_PERFORMANCE_TEST_DATA_DIR="${MW_STREAMER_TEST_DATA_DIR}")

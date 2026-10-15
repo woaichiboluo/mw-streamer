@@ -108,7 +108,6 @@ class AvInputProxy::Impl final {
     for (;;) {
       std::shared_ptr<AvInput> input;
       std::shared_ptr<const AvInputInfo> description;
-      std::uint64_t generation = 0;
       {
         std::unique_lock<std::mutex> lock(mutex_);
         if (wait) {
@@ -118,34 +117,32 @@ class AvInputProxy::Impl final {
                     terminal_->state == AvInputState::kEnded);
           });
         }
-        generation = status_.generation;
         description = status_.info;
         if (stopping_ || status_.state == AvInputProxyState::kStopped ||
             status_.state == AvInputProxyState::kFailed) {
-          return {AvInputReadStatus::kNull, {}, generation, description};
+          return {AvInputReadStatus::kNull, {}, description};
         }
         if (status_.state == AvInputProxyState::kEnded ||
             (!config_.loop && terminal_ &&
              terminal_->state == AvInputState::kEnded)) {
-          return {AvInputReadStatus::kEof, {}, generation, description};
+          return {AvInputReadStatus::kEof, {}, description};
         }
         if (!available_) {
-          return {AvInputReadStatus::kNull, {}, generation, description};
+          return {AvInputReadStatus::kNull, {}, description};
         }
         input = input_;
       }
       auto result = wait ? input->ReadPacket() : input->TryReadPacket();
       if (result.status == AvInputReadStatus::kPacket) {
-        MW_LOG_TRACE("streamer", "AvInputProxy[{}] 返回包: 代次={} 流={}",
-                     static_cast<const void*>(this), generation,
+        MW_LOG_TRACE("streamer", "AvInputProxy[{}] 返回包: 流={}",
+                     static_cast<const void*>(this),
                      (*result.packet)->stream_index);
-        return {result.status, std::move(result.packet), generation,
-                description};
+        return {result.status, std::move(result.packet), description};
       }
       if (result.status == AvInputReadStatus::kEof) {
         {
           std::lock_guard<std::mutex> lock(mutex_);
-          // Only the consumer acknowledges EOF. Keep this generation's result
+          // Only the consumer acknowledges EOF. Keep this input's result
           // intact even if the control worker immediately replaces the input.
           if (!stopping_ && input_ == input && !terminal_) {
             terminal_ = AvInputStatus{AvInputState::kEnded, {}};
@@ -153,12 +150,12 @@ class AvInputProxy::Impl final {
           }
         }
         changed_.notify_all();
-        MW_LOG_DEBUG("streamer", "AvInputProxy[{}] 消费 EOF: 代次={} 循环={}",
-                     static_cast<const void*>(this), generation, config_.loop);
-        return {result.status, {}, generation, description};
+        MW_LOG_DEBUG("streamer", "AvInputProxy[{}] 消费 EOF: 循环={}",
+                     static_cast<const void*>(this), config_.loop);
+        return {result.status, {}, description};
       }
       if (!wait) {
-        return {AvInputReadStatus::kNull, {}, generation, description};
+        return {AvInputReadStatus::kNull, {}, description};
       }
       std::unique_lock<std::mutex> lock(mutex_);
       changed_.wait(lock, [this, &input] {
@@ -171,19 +168,17 @@ class AvInputProxy::Impl final {
   void RequestStop() noexcept {
     std::shared_ptr<AvInput> input;
     bool requested;
-    std::uint64_t generation;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       requested = !stopping_;
       stopping_ = true;
       input = input_;
-      generation = status_.generation;
     }
     changed_.notify_all();
     if (input) input->RequestCancel();
     if (requested) {
-      MW_LOG_DEBUG("streamer", "AvInputProxy[{}] 请求停止: 代次={}",
-                   static_cast<const void*>(this), generation);
+      MW_LOG_DEBUG("streamer", "AvInputProxy[{}] 请求停止",
+                   static_cast<const void*>(this));
     }
   }
 
@@ -203,11 +198,12 @@ class AvInputProxy::Impl final {
   }
 
  private:
-  void InputChanged(std::uint64_t generation, const AvInputStatus& status) {
+  void InputChanged(const std::shared_ptr<AvInput>& input,
+                    const AvInputStatus& status) {
     std::shared_ptr<AvInput> cancel;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (generation != status_.generation) return;
+      if (input != input_) return;
       // Open resets its cancellation flag before notifying Opening. Reapply a
       // concurrent stop here so stopping before Open cannot lose cancellation.
       if (stopping_ && status.state == AvInputState::kOpening) cancel = input_;
@@ -237,23 +233,22 @@ class AvInputProxy::Impl final {
     changed_.notify_all();
     if (state == AvInputProxyState::kConnected ||
         state == AvInputProxyState::kStopped) {
-      MW_LOG_INFO("streamer", "AvInputProxy[{}] 状态: {} -> {} 代次={}",
+      MW_LOG_INFO("streamer", "AvInputProxy[{}] 状态: {} -> {}",
                   static_cast<const void*>(this), StateName(previous),
-                  StateName(state), snapshot.generation);
+                  StateName(state));
     } else if (state == AvInputProxyState::kWaitingRetry) {
       MW_LOG_WARNING("streamer",
-                     "AvInputProxy[{}] 等待重连: 代次={} 重试={}/{} 延迟={}s",
-                     static_cast<const void*>(this), snapshot.generation,
-                     retries, config_.max_retries, delay.count());
+                     "AvInputProxy[{}] 等待重连: 重试={}/{} 延迟={}s",
+                     static_cast<const void*>(this), retries,
+                     config_.max_retries, delay.count());
     } else if (state == AvInputProxyState::kFailed) {
-      MW_LOG_ERROR("streamer", "AvInputProxy[{}] 输入终止: 代次={} 重试={}/{}",
-                   static_cast<const void*>(this), snapshot.generation, retries,
+      MW_LOG_ERROR("streamer", "AvInputProxy[{}] 输入终止: 重试={}/{}",
+                   static_cast<const void*>(this), retries,
                    config_.max_retries);
     } else {
-      MW_LOG_DEBUG("streamer",
-                   "AvInputProxy[{}] 状态: {} -> {} 代次={} 重试={}",
+      MW_LOG_DEBUG("streamer", "AvInputProxy[{}] 状态: {} -> {} 重试={}",
                    static_cast<const void*>(this), StateName(previous),
-                   StateName(state), snapshot.generation, retries);
+                   StateName(state), retries);
     }
     const auto failure_level = state == AvInputProxyState::kWaitingRetry
                                    ? log::LogLevel::kWarning
@@ -263,35 +258,29 @@ class AvInputProxy::Impl final {
         std::rethrow_exception(snapshot.error);
       } catch (const ffmpeg::FfmpegException& failure) {
         if (state == AvInputProxyState::kWaitingRetry) {
-          MW_LOG_WARNING("streamer",
-                         "AvInputProxy[{}] 重连原因: 代次={} 错误码={} {}",
-                         static_cast<const void*>(this), snapshot.generation,
-                         failure.error_code(), failure.what());
+          MW_LOG_WARNING("streamer", "AvInputProxy[{}] 重连原因: 错误码={} {}",
+                         static_cast<const void*>(this), failure.error_code(),
+                         failure.what());
         } else {
-          MW_LOG_ERROR("streamer",
-                       "AvInputProxy[{}] 终止原因: 代次={} 错误码={} {}",
-                       static_cast<const void*>(this), snapshot.generation,
-                       failure.error_code(), failure.what());
+          MW_LOG_ERROR("streamer", "AvInputProxy[{}] 终止原因: 错误码={} {}",
+                       static_cast<const void*>(this), failure.error_code(),
+                       failure.what());
         }
       } catch (const std::exception& failure) {
         if (state == AvInputProxyState::kWaitingRetry) {
-          MW_LOG_WARNING("streamer", "AvInputProxy[{}] 重连原因: 代次={} {}",
-                         static_cast<const void*>(this), snapshot.generation,
-                         failure.what());
+          MW_LOG_WARNING("streamer", "AvInputProxy[{}] 重连原因: {}",
+                         static_cast<const void*>(this), failure.what());
         } else {
-          MW_LOG_ERROR("streamer", "AvInputProxy[{}] 终止原因: 代次={} {}",
-                       static_cast<const void*>(this), snapshot.generation,
-                       failure.what());
+          MW_LOG_ERROR("streamer", "AvInputProxy[{}] 终止原因: {}",
+                       static_cast<const void*>(this), failure.what());
         }
       } catch (...) {
         if (state == AvInputProxyState::kWaitingRetry) {
-          MW_LOG_WARNING("streamer",
-                         "AvInputProxy[{}] 重连原因: 代次={} 未知异常",
-                         static_cast<const void*>(this), snapshot.generation);
+          MW_LOG_WARNING("streamer", "AvInputProxy[{}] 重连原因: 未知异常",
+                         static_cast<const void*>(this));
         } else {
-          MW_LOG_ERROR("streamer",
-                       "AvInputProxy[{}] 终止原因: 代次={} 未知异常",
-                       static_cast<const void*>(this), snapshot.generation);
+          MW_LOG_ERROR("streamer", "AvInputProxy[{}] 终止原因: 未知异常",
+                       static_cast<const void*>(this));
         }
       }
     }
@@ -299,12 +288,11 @@ class AvInputProxy::Impl final {
     try {
       on_state_changed_(snapshot);
     } catch (const std::exception& failure) {
-      MW_LOG_ERROR("streamer", "AvInputProxy[{}] 状态通知异常: 代次={} {}",
-                   static_cast<const void*>(this), snapshot.generation,
-                   failure.what());
+      MW_LOG_ERROR("streamer", "AvInputProxy[{}] 状态通知异常: {}",
+                   static_cast<const void*>(this), failure.what());
     } catch (...) {
-      MW_LOG_ERROR("streamer", "AvInputProxy[{}] 状态通知发生未知异常: 代次={}",
-                   static_cast<const void*>(this), snapshot.generation);
+      MW_LOG_ERROR("streamer", "AvInputProxy[{}] 状态通知发生未知异常",
+                   static_cast<const void*>(this));
     }
   }
 
@@ -327,24 +315,23 @@ class AvInputProxy::Impl final {
   }
 
   void Run() noexcept {
-    std::uint64_t generation = 0;
     std::uint64_t retries = 0;
     try {
       while (!Stopping()) {
         auto input = std::make_shared<AvInput>(config_.input);
-        input->SetOnStateChanged([this, generation](const auto& status) {
-          InputChanged(generation, status);
+        input->SetOnStateChanged([this, weak_input = std::weak_ptr<AvInput>(
+                                            input)](const auto& status) {
+          if (const auto current = weak_input.lock())
+            InputChanged(current, status);
         });
         {
           std::lock_guard<std::mutex> lock(mutex_);
           input_ = input;
-          status_.generation = generation;
           status_.info.reset();
           terminal_.reset();
         }
-        MW_LOG_DEBUG("streamer",
-                     "AvInputProxy[{}] 连接尝试: 代次={} AvInput={}",
-                     static_cast<const void*>(this), generation,
+        MW_LOG_DEBUG("streamer", "AvInputProxy[{}] 连接尝试: AvInput={}",
+                     static_cast<const void*>(this),
                      static_cast<const void*>(input.get()));
         Publish(AvInputProxyState::kConnecting, retries);
         if (Stopping()) {
@@ -379,8 +366,8 @@ class AvInputProxy::Impl final {
             Publish(AvInputProxyState::kEnded);
             return;
           }
-          MW_LOG_DEBUG("streamer", "AvInputProxy[{}] 循环重开: 完成代次={}",
-                       static_cast<const void*>(this), generation);
+          MW_LOG_DEBUG("streamer", "AvInputProxy[{}] 循环重开",
+                       static_cast<const void*>(this));
         } else if (terminal.state == AvInputState::kFailed) {
           if (config_.max_retries >= 0 &&
               retries >= static_cast<std::uint64_t>(config_.max_retries)) {
@@ -397,7 +384,6 @@ class AvInputProxy::Impl final {
         } else {
           break;
         }
-        ++generation;
       }
     } catch (...) {
       const auto error = std::current_exception();

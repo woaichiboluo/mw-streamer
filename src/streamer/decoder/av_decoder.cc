@@ -81,9 +81,9 @@ class AvDecoder::Impl final {
       : stream_(stream),
         config_(std::move(config)),
         context_(FindDecoder(stream, config_, device)) {
-    if (config_.packet_watermark == 0 || config_.frame_capacity == 0 ||
+    if (config_.packet_capacity == 0 || config_.frame_capacity == 0 ||
         config_.thread_count < 0) {
-      throw std::invalid_argument("AvDecoder 缓存水位必须为正，线程数不能为负");
+      throw std::invalid_argument("AvDecoder 缓存容量必须为正，线程数不能为负");
     }
     auto* context = context_.get();
     ffmpeg::FfmpegException::throwIfError(
@@ -133,15 +133,17 @@ class AvDecoder::Impl final {
     on_error_ = std::move(callback);
   }
 
-  bool PushPacket(ffmpeg::Packet packet, std::uint64_t generation) {
+  bool TryPushPacket(const ffmpeg::Packet& packet) {
     if (!packet.get() || !packet->data || packet->size <= 0 ||
         packet->stream_index != stream_.stream_index) {
       throw std::invalid_argument("AvDecoder Packet 为空或不属于当前轨道");
     }
-    return Push(std::move(packet), generation);
+    return TryPush(InputKind::kPacket, &packet);
   }
 
-  bool PushEof(std::uint64_t generation) { return Push({}, generation); }
+  bool TryPushEof() { return TryPush(InputKind::kEof); }
+
+  bool TryReset() { return TryPush(InputKind::kReset); }
 
   AvDecoderReadResult TryReadFrame() {
     AvDecoderReadResult result;
@@ -157,11 +159,6 @@ class AvDecoder::Impl final {
     }
     changed_.notify_all();
     return result;
-  }
-
-  bool wants_packet() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return !stopping_ && !error_ && packets_.size() < config_.packet_watermark;
   }
 
   std::size_t buffered_packets() const {
@@ -224,24 +221,25 @@ class AvDecoder::Impl final {
         config_.thread_count == 0 ? 2 : config_.thread_count;
   }
 
+  enum class InputKind { kPacket, kEof, kReset };
+
   struct Input {
+    InputKind kind;
     std::optional<ffmpeg::Packet> packet;
-    std::uint64_t generation;
   };
 
-  bool Push(std::optional<ffmpeg::Packet> packet, std::uint64_t generation) {
+  bool TryPush(InputKind kind, const ffmpeg::Packet* packet = nullptr) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (stopping_ || error_) return false;
-      if (submitted_generation_ &&
-          (generation < *submitted_generation_ ||
-           (generation == *submitted_generation_ && submitted_eof_))) {
-        throw std::logic_error("AvDecoder 不接受旧代或已提交 EOF 的同代输入");
+      if (submitted_eof_ && kind != InputKind::kReset) {
+        throw std::logic_error(
+            "AvDecoder 提交 EOF 后需要先 Reset 才能继续输入");
       }
-      const bool eof = !packet;
-      packets_.push_back({std::move(packet), generation});
-      submitted_generation_ = generation;
-      submitted_eof_ = eof;
+      if (packets_.size() >= config_.packet_capacity) return false;
+      packets_.push_back({kind, packet ? std::optional<ffmpeg::Packet>(*packet)
+                                       : std::nullopt});
+      submitted_eof_ = kind == InputKind::kEof;
     }
     changed_.notify_all();
     return true;
@@ -284,7 +282,7 @@ class AvDecoder::Impl final {
 
   void Run() noexcept {
     try {
-      std::optional<std::uint64_t> generation;
+      bool started = false;
       bool drained = false;
       std::int64_t next_pts = AV_NOPTS_VALUE;
       for (;;) {
@@ -293,14 +291,13 @@ class AvDecoder::Impl final {
           if (stopping_) return;
         }
         // Receive buffered frames first. Only EAGAIN requests another packet.
-        if (generation && !drained) {
+        if (started && !drained) {
           ffmpeg::Frame frame;
           const int received =
               avcodec_receive_frame(context_.get(), frame.get());
           if (received == AVERROR_EOF) {
             if (!Emit({AvDecoderReadStatus::kEof,
                        {},
-                       *generation,
                        stream_.stream_index,
                        stream_.time_base,
                        next_pts})) {
@@ -322,7 +319,7 @@ class AvDecoder::Impl final {
             frame->time_base = stream_.time_base;
             next_pts = FrameEndPts(frame);
             if (!Emit({AvDecoderReadStatus::kFrame, std::move(frame),
-                       *generation, stream_.stream_index, stream_.time_base,
+                       stream_.stream_index, stream_.time_base,
                        AV_NOPTS_VALUE})) {
               return;
             }
@@ -338,14 +335,15 @@ class AvDecoder::Impl final {
           input = std::move(packets_.front());
           packets_.pop_front();
         }
-        if (!generation || *generation != input.generation) {
-          if (generation) context_.FlushBuffers();
-          generation = input.generation;
+        if (input.kind == InputKind::kReset) {
+          context_.FlushBuffers();
+          started = false;
           drained = false;
           next_pts = AV_NOPTS_VALUE;
+          continue;
         }
         // EOF is ordered behind all submitted packets. After a drain the codec
-        // waits for a new generation, instead of closing its worker/context.
+        // waits for Reset, instead of closing its worker/context.
 #ifdef AV_CODEC_FLAG_COPY_OPAQUE
         if (input.packet) {
           latency_.Attach(input.packet->get()->opaque_ref, latency_.Begin());
@@ -355,6 +353,7 @@ class AvDecoder::Impl final {
             avcodec_send_packet(context_.get(),
                                 input.packet ? input.packet->get() : nullptr),
             "avcodec_send_packet");
+        started = true;
       }
     } catch (...) {
       const auto failure = std::current_exception();
@@ -387,7 +386,6 @@ class AvDecoder::Impl final {
   mutable std::mutex mutex_;
   std::condition_variable changed_;
   bool stopping_ = false;
-  std::optional<std::uint64_t> submitted_generation_;
   bool submitted_eof_ = false;
   std::exception_ptr error_;
   std::deque<Input> packets_;
@@ -406,14 +404,12 @@ AvDecoder::~AvDecoder() = default;
 void AvDecoder::SetOnError(OnError callback) {
   impl_->SetOnError(std::move(callback));
 }
-bool AvDecoder::PushPacket(ffmpeg::Packet packet, std::uint64_t generation) {
-  return impl_->PushPacket(std::move(packet), generation);
+bool AvDecoder::TryPushPacket(const ffmpeg::Packet& packet) {
+  return impl_->TryPushPacket(packet);
 }
-bool AvDecoder::PushEof(std::uint64_t generation) {
-  return impl_->PushEof(generation);
-}
+bool AvDecoder::TryPushEof() { return impl_->TryPushEof(); }
+bool AvDecoder::TryReset() { return impl_->TryReset(); }
 AvDecoderReadResult AvDecoder::TryReadFrame() { return impl_->TryReadFrame(); }
-bool AvDecoder::wants_packet() const { return impl_->wants_packet(); }
 std::size_t AvDecoder::buffered_packets() const {
   return impl_->buffered_packets();
 }

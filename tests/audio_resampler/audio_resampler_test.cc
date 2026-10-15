@@ -24,8 +24,7 @@ namespace ffmpeg = mw::streamer::ffmpeg;
 
 AvDecoderReadResult Audio(int samples, std::int64_t pts, int rate = 48000,
                           AVSampleFormat format = AV_SAMPLE_FMT_FLTP,
-                          int channels = 2, std::uint64_t generation = 1,
-                          int stream_index = 7) {
+                          int channels = 2, int stream_index = 7) {
   ffmpeg::Frame frame;
   frame->format = format;
   frame->sample_rate = rate;
@@ -55,19 +54,17 @@ AvDecoderReadResult Audio(int samples, std::int64_t pts, int rate = 48000,
   AvDecoderReadResult result;
   result.status = AvDecoderReadStatus::kFrame;
   result.frame = std::move(frame);
-  result.generation = generation;
   result.stream_index = stream_index;
   result.time_base = {1, rate};
   return result;
 }
 
 AvDecoderReadResult Eof(std::int64_t end_pts, int rate = 48000,
-                        std::uint64_t generation = 1, int stream_index = 7) {
+                        int stream_index = 7) {
   AvDecoderReadResult result;
   result.status = AvDecoderReadStatus::kEof;
   result.end_pts = end_pts;
   result.time_base = {1, rate};
-  result.generation = generation;
   result.stream_index = stream_index;
   return result;
 }
@@ -76,7 +73,6 @@ struct Capture {
   std::vector<float> pcm;
   std::vector<std::int64_t> pts;
   std::vector<int> samples;
-  std::vector<std::uint64_t> generations;
   std::vector<int> streams;
   std::vector<AvDecoderReadResult> eof;
 };
@@ -112,7 +108,6 @@ void Drain(AudioResampler& resampler, Capture& capture, int rate = 48000) {
     REQUIRE(frame.duration == frame.nb_samples);
     REQUIRE(frame.best_effort_timestamp == frame.pts);
     REQUIRE(frame.pkt_dts == AV_NOPTS_VALUE);
-    capture.generations.push_back(result.generation);
     capture.streams.push_back(result.stream_index);
     CaptureFrame(frame, capture);
   }
@@ -318,11 +313,12 @@ TEST_CASE(
   REQUIRE(actual.eof.size() == 1);
 }
 
-TEST_CASE("AudioResampler drains old generations before admitting new timing",
-          "[audio-resampler]") {
+TEST_CASE(
+    "AudioResampler drains the previous stream before admitting a new stream",
+    "[audio-resampler]") {
   AudioResampler resampler;
   auto old_input = Audio(100, 44100, 44100);
-  auto new_input = Audio(100, 48000 * 31, 48000, AV_SAMPLE_FMT_S16, 1, 2, 9);
+  auto new_input = Audio(100, 0, 44100, AV_SAMPLE_FMT_FLTP, 2, 9);
   NativeSwr old_oracle(*old_input.frame->get(), AudioResamplerConfig{});
   NativeSwr new_oracle(*new_input.frame->get(), AudioResamplerConfig{});
   Capture expected;
@@ -333,22 +329,21 @@ TEST_CASE("AudioResampler drains old generations before admitting new timing",
   new_oracle.Flush(expected);
   REQUIRE(resampler.TryPushFrame(old_input));
   REQUIRE(resampler.TryPushFrame(new_input));
-  REQUIRE(resampler.TryPushFrame(Eof(48000 * 31 + 123, 48000, 2, 9)));
+  REQUIRE(resampler.TryPushFrame(Eof(100, 44100, 9)));
   Capture actual;
   Drain(resampler, actual);
   CheckPcm(actual, expected);
   REQUIRE(actual.pts == expected.pts);
-  REQUIRE(actual.generations.size() == expected.pts.size());
-  for (std::size_t index = 0; index < actual.generations.size(); ++index) {
-    REQUIRE(actual.generations[index] == (index < old_frames ? 1 : 2));
+  REQUIRE(actual.streams.size() == expected.pts.size());
+  for (std::size_t index = 0; index < actual.streams.size(); ++index) {
     REQUIRE(actual.streams[index] == (index < old_frames ? 7 : 9));
   }
   REQUIRE(actual.eof.size() == 1);
-  REQUIRE(actual.eof.front().end_pts == 48000 * 31 + 123);
-  REQUIRE(actual.eof.front().generation == 2);
+  REQUIRE(actual.eof.front().end_pts ==
+          av_rescale_q(100, {1, 44100}, {1, 48000}));
 }
 
-TEST_CASE("AudioResampler drains changed source format in the same generation",
+TEST_CASE("AudioResampler drains changed source format before rebuilding",
           "[audio-resampler]") {
   AudioResampler resampler;
   auto old_input = Audio(100, 0, 44100);
@@ -367,6 +362,34 @@ TEST_CASE("AudioResampler drains changed source format in the same generation",
   Drain(resampler, actual);
   CheckPcm(actual, expected);
   REQUIRE(actual.pts == expected.pts);
+}
+
+TEST_CASE("AudioResampler drains EOF then resumes with the same source format",
+          "[audio-resampler]") {
+  AudioResampler resampler;
+  auto first = Audio(100, 44100, 44100);
+  auto restarted = Audio(100, 0, 44100);
+  NativeSwr first_oracle(*first.frame->get(), AudioResamplerConfig{});
+  NativeSwr restarted_oracle(*restarted.frame->get(), AudioResamplerConfig{});
+  Capture expected;
+  first_oracle.Convert(&first, expected);
+  first_oracle.Flush(expected);
+  const auto before_restart = expected.pts.size();
+  restarted_oracle.Convert(&restarted, expected);
+  restarted_oracle.Flush(expected);
+  REQUIRE(resampler.TryPushFrame(first));
+  REQUIRE(resampler.TryPushFrame(Eof(44200, 44100)));
+  REQUIRE(resampler.TryPushFrame(restarted));
+  REQUIRE(resampler.TryPushFrame(Eof(100, 44100)));
+  Capture actual;
+  Drain(resampler, actual);
+  CheckPcm(actual, expected);
+  REQUIRE(actual.pts == expected.pts);
+  REQUIRE(actual.samples == expected.samples);
+  REQUIRE(actual.pts[before_restart] < actual.pts.front());
+  REQUIRE(actual.eof.size() == 2);
+  REQUIRE(actual.eof[0].end_pts == av_rescale_q(44200, {1, 44100}, {1, 48000}));
+  REQUIRE(actual.eof[1].end_pts == av_rescale_q(100, {1, 44100}, {1, 48000}));
 }
 
 TEST_CASE("AudioResampler preserves jumps and jitter instead of synchronizing",
@@ -456,18 +479,18 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "AudioResampler rejected EOF or generation cannot change admission state",
+    "AudioResampler rejected EOF or PTS jump cannot change processing order",
     "[audio-resampler]") {
   AudioResamplerConfig config;
   config.input_capacity = 1;
   AudioResampler resampler(config);
   REQUIRE(resampler.TryPushFrame(Audio(128, 0)));
   REQUIRE_FALSE(resampler.TryPushFrame(Eof(128)));
-  REQUIRE_FALSE(resampler.TryPushFrame(
-      Audio(128, 96000, 48000, AV_SAMPLE_FMT_FLTP, 2, 2)));
+  REQUIRE_FALSE(
+      resampler.TryPushFrame(Audio(128, 96000, 48000, AV_SAMPLE_FMT_FLTP, 2)));
   Capture actual;
   Drain(resampler, actual);
-  // Both rejected submissions leave the older generation open for more audio.
+  // Rejected inputs leave the existing converter available for more audio.
   REQUIRE(resampler.TryPushFrame(Audio(128, 128)));
   Drain(resampler, actual);
   REQUIRE(resampler.TryPushFrame(Eof(256)));
@@ -502,12 +525,15 @@ TEST_CASE("AudioResampler invalid submissions do not poison valid processing",
   REQUIRE_THROWS_AS(resampler.TryPushFrame(input), std::invalid_argument);
   REQUIRE(resampler.TryPushFrame(Audio(128, 48000)));
   REQUIRE(resampler.TryPushFrame(Eof(48128)));
-  REQUIRE_THROWS_AS(resampler.TryPushFrame(Audio(128, 48128)),
-                    std::invalid_argument);
+  REQUIRE_THROWS_AS(resampler.TryPushFrame(input), std::invalid_argument);
+  REQUIRE(resampler.TryPushFrame(Audio(128, 0)));
   Capture actual;
   Drain(resampler, actual);
-  REQUIRE(actual.pts.front() == 48000);
+  REQUIRE(actual.pts == std::vector<std::int64_t>{48000, 0});
+  REQUIRE(actual.samples == std::vector<int>{128, 128});
+  REQUIRE(actual.pcm.size() == 256 * 2);
   REQUIRE(actual.eof.size() == 1);
+  REQUIRE(actual.eof.front().end_pts == 48128);
 }
 
 TEST_CASE("AudioResampler owns custom target layouts independently",

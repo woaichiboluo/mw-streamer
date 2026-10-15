@@ -1,7 +1,9 @@
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -195,13 +197,55 @@ AvDecoderReadResult ReadAvailable(AvDecoder& decoder) {
   }
 }
 
-void PushGeneration(AvDecoder& decoder, const Source& source,
-                    std::uint64_t generation) {
-  for (const auto& packet : source.packets) {
-    REQUIRE(decoder.PushPacket(packet, generation));
+// The producer retries the same item while the test consumes bounded output.
+// Unwinding stops the decoder before joining, so failed assertions cannot hang.
+class SourceFeeder {
+ public:
+  SourceFeeder(AvDecoder& decoder, const Source& source, int replays = 1)
+      : decoder_(decoder), worker_([this, &source, replays] {
+          try {
+            const auto submit = [&](auto push) {
+              const auto deadline = std::chrono::steady_clock::now() + 5s;
+              while (!push()) {
+                if (decoder_.error() || stopping_.load() ||
+                    std::chrono::steady_clock::now() >= deadline) {
+                  throw std::runtime_error(
+                      "Decoder input did not accept retry");
+                }
+                std::this_thread::sleep_for(1ms);
+              }
+            };
+            for (int replay = 0; replay < replays; ++replay) {
+              if (replay) submit([&] { return decoder_.TryReset(); });
+              for (const auto& packet : source.packets) {
+                submit([&] { return decoder_.TryPushPacket(packet); });
+              }
+              submit([&] { return decoder_.TryPushEof(); });
+            }
+          } catch (...) {
+            failure_ = std::current_exception();
+          }
+        }) {}
+
+  ~SourceFeeder() {
+    if (worker_.joinable()) {
+      stopping_.store(true);
+      decoder_.RequestStop();
+      worker_.join();
+    }
   }
-  REQUIRE(decoder.PushEof(generation));
-}
+
+  void Join() {
+    worker_.join();
+    if (failure_) std::rethrow_exception(failure_);
+  }
+
+ private:
+  AvDecoder& decoder_;
+  std::atomic<bool> stopping_{false};
+  std::exception_ptr failure_;
+  std::thread worker_;
+};
 
 FrameRecord Download(const ffmpeg::Frame& frame) {
   ffmpeg::Frame downloaded;
@@ -226,7 +270,7 @@ TEST_CASE(
             ? "h264"
             : "hevc";
     AvDecoder decoder(source.stream, cpu, config);
-    PushGeneration(decoder, source, 0);
+    SourceFeeder feeder(decoder, source);
     for (const auto& frame : expected) {
       const auto result = ReadAvailable(decoder);
       REQUIRE(result.status == AvDecoderReadStatus::kFrame);
@@ -236,6 +280,7 @@ TEST_CASE(
       CHECK(Record(*result.frame->get(), result.frame->get()->pts) == frame);
     }
     CHECK(ReadAvailable(decoder).status == AvDecoderReadStatus::kEof);
+    feeder.Join();
   }
 }
 
@@ -275,7 +320,7 @@ TEST_CASE(
 
 TEST_CASE(
     "AvDecoder CUDA native and cuvid workers share one device across "
-    "generations",
+    "ordered resets",
     "[.][av-decoder][cuda]") {
   bool explicit_native = true;
   SECTION("explicit native decoder") {}
@@ -301,15 +346,18 @@ TEST_CASE(
       cuvid_config.thread_count = 2;
       AvDecoder native(source.stream, device, native_config);
       AvDecoder cuvid(source.stream, device, cuvid_config);
-      for (std::uint64_t generation = 0; generation < 2; ++generation) {
-        PushGeneration(native, source, generation);
-        PushGeneration(cuvid, source, generation);
+      for (int replay = 0; replay < 2; ++replay) {
+        if (replay != 0) {
+          REQUIRE(native.TryReset());
+          REQUIRE(cuvid.TryReset());
+        }
+        SourceFeeder native_feeder(native, source);
+        SourceFeeder cuvid_feeder(cuvid, source);
         for (std::size_t index = 0; index < expected.size(); ++index) {
           for (auto* decoder : {&native, &cuvid}) {
             const auto result = ReadAvailable(*decoder);
             REQUIRE(result.status == AvDecoderReadStatus::kFrame);
             REQUIRE(result.frame.has_value());
-            CHECK(result.generation == generation);
             CHECK(result.stream_index == source.stream.stream_index);
             CHECK(result.time_base.num == source.stream.time_base.num);
             CHECK(result.time_base.den == source.stream.time_base.den);
@@ -320,7 +368,7 @@ TEST_CASE(
             REQUIRE(pool->device_ref != nullptr);
             CHECK(pool->device_ref->data == shared_device);
             CHECK(Download(*result.frame) == expected[index]);
-            if (generation == 0 && index == 0) {
+            if (replay == 0 && index == 0) {
               retained.push_back(result.frame->Ref());
               retained_records.push_back(expected[index]);
             }
@@ -329,10 +377,11 @@ TEST_CASE(
         for (auto* decoder : {&native, &cuvid}) {
           const auto eof = ReadAvailable(*decoder);
           CHECK(eof.status == AvDecoderReadStatus::kEof);
-          CHECK(eof.generation == generation);
           CHECK_FALSE(eof.frame.has_value());
           CHECK(decoder->TryReadFrame().status == AvDecoderReadStatus::kNull);
         }
+        native_feeder.Join();
+        cuvid_feeder.Join();
       }
       native.Stop();
       cuvid.Stop();
@@ -352,7 +401,7 @@ TEST_CASE(
   const auto audio = ReadSource("h264_aac.mp4", AVMEDIA_TYPE_AUDIO);
   const auto expected = ReferenceDecode(audio);
   AvDecoder decoder(audio.stream, device);
-  PushGeneration(decoder, audio, 0);
+  SourceFeeder feeder(decoder, audio);
   for (const auto& frame : expected) {
     const auto result = ReadAvailable(decoder);
     REQUIRE(result.status == AvDecoderReadStatus::kFrame);
@@ -361,6 +410,7 @@ TEST_CASE(
     CHECK(Record(*result.frame->get(), result.frame->get()->pts) == frame);
   }
   CHECK(ReadAvailable(decoder).status == AvDecoderReadStatus::kEof);
+  feeder.Join();
   auto unsupported = ReadSource("h264_aac.mp4").stream;
   unsupported.codec_parameters.get()->codec_id = AV_CODEC_ID_RAWVIDEO;
   unsupported.codec_parameters.get()->format = AV_PIX_FMT_YUV420P;

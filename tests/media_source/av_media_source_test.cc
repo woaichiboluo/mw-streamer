@@ -183,8 +183,8 @@ void CheckRecord(const FrameRecord& actual, const FrameRecord& expected) {
   }
 }
 
-std::vector<std::vector<FrameRecord>> DecodeNativeGenerations(
-    const Track& track, std::size_t generations) {
+std::vector<std::vector<FrameRecord>> DecodeNativeCycles(const Track& track,
+                                                         std::size_t cycles) {
   const auto* codec =
       avcodec_find_decoder(track.stream.codec_parameters.get()->codec_id);
   REQUIRE((codec != nullptr));
@@ -209,10 +209,10 @@ std::vector<std::vector<FrameRecord>> DecodeNativeGenerations(
     }
   };
   std::vector<std::vector<FrameRecord>> output;
-  for (std::size_t generation = 0; generation < generations; ++generation) {
+  for (std::size_t cycle = 0; cycle < cycles; ++cycle) {
     // Native flush retains codec state such as AAC's PNS random sequence.
     // Looping input reuses its codec, so reopening is not an equivalent oracle.
-    if (generation != 0) avcodec_flush_buffers(context.get());
+    if (cycle != 0) avcodec_flush_buffers(context.get());
     for (const auto& packet : track.packets) {
       REQUIRE((avcodec_send_packet(context.get(), packet.get()) >= 0));
       REQUIRE((receive() == AVERROR(EAGAIN)));
@@ -226,7 +226,7 @@ std::vector<std::vector<FrameRecord>> DecodeNativeGenerations(
 }
 
 std::vector<FrameRecord> DecodeNative(const Track& track) {
-  auto output = DecodeNativeGenerations(track, 1);
+  auto output = DecodeNativeCycles(track, 1);
   return std::move(output.front());
 }
 
@@ -240,57 +240,59 @@ AvMediaSourceConfig SourceConfig(bool loop = false) {
 }
 
 void CheckSource(AvMediaSource& input, const NativeSource& reference,
-                 std::size_t generations = 1) {
-  const auto video =
-      reference.video ? DecodeNativeGenerations(*reference.video, generations)
-                      : std::vector<std::vector<FrameRecord>>(generations);
-  const auto audio =
-      reference.audio ? DecodeNativeGenerations(*reference.audio, generations)
-                      : std::vector<std::vector<FrameRecord>>(generations);
-  std::vector<std::array<std::size_t, 2>> counts(generations);
-  std::vector<std::array<bool, 2>> ended(generations);
-  std::optional<std::uint64_t> first_generation;
+                 std::size_t cycles = 1, bool video_first = false) {
+  const auto video = reference.video
+                         ? DecodeNativeCycles(*reference.video, cycles)
+                         : std::vector<std::vector<FrameRecord>>(cycles);
+  const auto audio = reference.audio
+                         ? DecodeNativeCycles(*reference.audio, cycles)
+                         : std::vector<std::vector<FrameRecord>>(cycles);
+  std::vector<std::array<std::size_t, 2>> counts(cycles);
+  std::vector<std::array<bool, 2>> ended(cycles);
+  std::array<std::size_t, 2> eof_counts{};
   const auto consume = [&](bool video_track) {
     const auto result =
         video_track ? input.TryReadVideo() : input.TryReadAudio();
     if (result.status == AvDecoderReadStatus::kNull) return false;
-    if (!first_generation) first_generation = result.generation;
-    REQUIRE((result.generation >= *first_generation));
-    REQUIRE((result.generation - *first_generation < generations));
-    const auto generation =
-        static_cast<std::size_t>(result.generation - *first_generation);
     const std::size_t index = video_track ? 0 : 1;
-    const auto& expected = video_track ? video[generation] : audio[generation];
+    const auto cycle = eof_counts[index];
+    REQUIRE((cycle < cycles));
+    const auto& expected = video_track ? video[cycle] : audio[cycle];
     const auto& track = video_track ? reference.video : reference.audio;
     REQUIRE(track.has_value());
-    CHECK_FALSE(ended[generation][index]);
-    if (generation > 0) CHECK(ended[generation - 1][index]);
+    CHECK_FALSE(ended[cycle][index]);
+    if (cycle > 0) CHECK(ended[cycle - 1][index]);
     CHECK((result.stream_index == track->stream.stream_index));
     CHECK((result.time_base.num == track->stream.time_base.num));
     CHECK((result.time_base.den == track->stream.time_base.den));
     if (result.status == AvDecoderReadStatus::kEof) {
-      CHECK((counts[generation][index] == expected.size()));
+      CHECK((counts[cycle][index] == expected.size()));
       CHECK_FALSE(result.frame.has_value());
-      ended[generation][index] = true;
+      ended[cycle][index] = true;
+      ++eof_counts[index];
     } else {
       REQUIRE((result.status == AvDecoderReadStatus::kFrame));
       REQUIRE(result.frame.has_value());
-      REQUIRE((counts[generation][index] < expected.size()));
-      CAPTURE(generation, index, counts[generation][index]);
+      REQUIRE((counts[cycle][index] < expected.size()));
+      CAPTURE(cycle, index, counts[cycle][index]);
       CheckRecord(Record(*result.frame->get()),
-                  expected[counts[generation][index]++]);
+                  expected[counts[cycle][index]++]);
     }
     return true;
   };
-  const bool finished = WaitFor([&] {
-    REQUIRE((input.status().state != AvMediaSourceState::kFailed));
-    bool progress = false;
-    if (reference.video && !ended.back()[0]) progress |= consume(true);
-    if (reference.audio && !ended.back()[1]) progress |= consume(false);
-    static_cast<void>(progress);
-    return (!reference.video || ended.back()[0]) &&
-           (!reference.audio || ended.back()[1]);
-  });
+  const bool finished = WaitFor(
+      [&] {
+        REQUIRE((input.status().state != AvMediaSourceState::kFailed));
+        bool progress = false;
+        if (reference.video && !ended.back()[0]) progress |= consume(true);
+        if (reference.audio && !ended.back()[1] &&
+            (!video_first || !reference.video || ended.back()[0]))
+          progress |= consume(false);
+        static_cast<void>(progress);
+        return (!reference.video || ended.back()[0]) &&
+               (!reference.audio || ended.back()[1]);
+      },
+      std::chrono::seconds(cycles * 3 + 2));
   REQUIRE(finished);
 }
 
@@ -311,6 +313,58 @@ class TemporaryMedia final {
   std::string path() const { return path_.string(); }
   void RestoreVideo() {
     std::filesystem::copy_file(SamplePath("h264_video.mp4"), path_);
+  }
+  void CreateOrderedAv() {
+    struct OutputDeleter {
+      void operator()(AVFormatContext* context) const {
+        if (context->pb) avio_closep(&context->pb);
+        avformat_free_context(context);
+      }
+    };
+    AVFormatContext* raw = nullptr;
+    REQUIRE((avformat_alloc_output_context2(&raw, nullptr, "nut",
+                                            path().c_str()) >= 0));
+    std::unique_ptr<AVFormatContext, OutputDeleter> output(raw);
+    REQUIRE((output != nullptr));
+    auto* video = avformat_new_stream(output.get(), nullptr);
+    auto* audio = avformat_new_stream(output.get(), nullptr);
+    REQUIRE((video != nullptr));
+    REQUIRE((audio != nullptr));
+    video->time_base = {1, 25};
+    video->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+    video->codecpar->codec_id = AV_CODEC_ID_RAWVIDEO;
+    video->codecpar->format = AV_PIX_FMT_GRAY8;
+    video->codecpar->codec_tag = avcodec_pix_fmt_to_codec_tag(AV_PIX_FMT_GRAY8);
+    video->codecpar->width = 8;
+    video->codecpar->height = 8;
+    audio->time_base = {1, 48000};
+    audio->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
+    audio->codecpar->codec_id = AV_CODEC_ID_PCM_S16LE;
+    audio->codecpar->sample_rate = 48000;
+    audio->codecpar->format = AV_SAMPLE_FMT_S16;
+    audio->codecpar->bits_per_coded_sample = 16;
+    audio->codecpar->block_align = 2;
+    av_channel_layout_default(&audio->codecpar->ch_layout, 1);
+    REQUIRE((avio_open(&output->pb, path().c_str(), AVIO_FLAG_WRITE) >= 0));
+    REQUIRE((avformat_write_header(output.get(), nullptr) >= 0));
+    // Video precedes three separately decoded audio packets. With capacity one,
+    // unread audio leaves one queued frame, one held frame and one queued
+    // packet. Video can accept EOF first; audio must reject EOF and then the
+    // next Reset.
+    for (int index = 0; index < 4; ++index) {
+      ffmpeg::Packet packet;
+      const bool is_video = index == 0;
+      REQUIRE((av_new_packet(packet.get(), is_video ? 64 : 16) >= 0));
+      packet->stream_index = is_video ? video->index : audio->index;
+      packet->pts = is_video ? 0 : (index - 1) * 8;
+      packet->dts = packet->pts;
+      packet->duration = is_video ? 1 : 8;
+      packet->flags |= AV_PKT_FLAG_KEY;
+      std::memset(packet->data, index + 1,
+                  static_cast<std::size_t>(packet->size));
+      REQUIRE((av_write_frame(output.get(), packet.get()) >= 0));
+    }
+    REQUIRE((av_write_trailer(output.get()) >= 0));
   }
   void CreateAudio() {
     struct OutputDeleter {
@@ -562,7 +616,6 @@ TEST_CASE(
   CheckSource(input, ReadNative(path));
   REQUIRE(WaitFor(
       [&] { return input.status().state == AvMediaSourceState::kEnded; }));
-  CHECK((input.status().generation == 0));
   CHECK((Record(*retained.frame->get()) == before));
   CHECK((info->streams.front().codec_parameters.get()->codec_id ==
          AV_CODEC_ID_H264));
@@ -611,12 +664,121 @@ TEST_CASE(
 
 TEST_CASE("AvMediaSource loops retain frame contents and per-track EOF order",
           "[av-media-source][loop][eof]") {
-  AvMediaSource input(SourceConfig(true));
+  bool video_first = false;
+  SECTION("both tracks are consumed together") {}
+  SECTION("audio retains old frames while video completes two loops") {
+    video_first = true;
+  }
+  const auto reference = ReadNative(SamplePath());
+  auto config = SourceConfig(true);
+  if (video_first) {
+    REQUIRE(reference.audio.has_value());
+    config.audio_decoder.frame_capacity =
+        DecodeNative(*reference.audio).size() * 2 + 2;
+  }
+  AvMediaSource input(config);
   REQUIRE(input.Start(SamplePath()));
-  CheckSource(input, ReadNative(SamplePath()), 2);
+  CheckSource(input, reference, 2, video_first);
   CHECK((input.status().state != AvMediaSourceState::kEnded));
   input.Stop();
   CHECK((input.status().state == AvMediaSourceState::kStopped));
+}
+
+TEST_CASE("AvMediaSource bounded packet queues preserve compressed loop output",
+          "[av-media-source][backpressure][loop][oracle]") {
+  auto config = SourceConfig(true);
+  config.video_decoder.packet_capacity = 1;
+  config.audio_decoder.packet_capacity = 1;
+  config.video_decoder.frame_capacity = 1;
+  config.audio_decoder.frame_capacity = 1;
+  AvMediaSource input(config);
+  REQUIRE(input.Start(SamplePath()));
+  REQUIRE(WaitFor(
+      [&] { return input.status().state == AvMediaSourceState::kRunning; }));
+  std::this_thread::sleep_for(50ms);
+  CheckSource(input, ReadNative(SamplePath()), 3);
+  CHECK((input.status().state != AvMediaSourceState::kEnded));
+  input.Stop();
+}
+
+TEST_CASE(
+    "AvMediaSource retries partial EOF and Reset without duplicating input",
+    "[av-media-source][backpressure][eof][reset][oracle]") {
+  bool loop = false;
+  SECTION("final EOF waits for both consumers") {}
+  SECTION("loop reset follows both accepted EOFs") { loop = true; }
+  TemporaryMedia temporary;
+  temporary.CreateOrderedAv();
+  const auto native = ReadNative(temporary.path());
+  REQUIRE(native.video.has_value());
+  REQUIRE(native.audio.has_value());
+  const std::size_t cycles = loop ? 3 : 1;
+  const std::array<std::vector<std::vector<FrameRecord>>, 2> expected{
+      DecodeNativeCycles(*native.video, cycles),
+      DecodeNativeCycles(*native.audio, cycles)};
+  REQUIRE((expected[0][0].size() == 1));
+  REQUIRE((expected[1][0].size() == 3));
+  auto config = SourceConfig(loop);
+  config.video_decoder.packet_capacity = 1;
+  config.audio_decoder.packet_capacity = 1;
+  config.video_decoder.frame_capacity = 1;
+  config.audio_decoder.frame_capacity = 1;
+  AvMediaSource input(config);
+  REQUIRE(input.Start(temporary.path()));
+  std::array<std::size_t, 2> eof_counts{};
+  std::array<std::size_t, 2> frame_counts{};
+  const auto consume = [&](std::size_t track) {
+    REQUIRE((input.status().state != AvMediaSourceState::kFailed));
+    const auto result =
+        track == 0 ? input.TryReadVideo() : input.TryReadAudio();
+    if (result.status == AvDecoderReadStatus::kNull) return false;
+    REQUIRE((eof_counts[track] < cycles));
+    const auto& frames = expected[track][eof_counts[track]];
+    if (result.status == AvDecoderReadStatus::kEof) {
+      CHECK((frame_counts[track] == frames.size()));
+      CHECK_FALSE(result.frame.has_value());
+      ++eof_counts[track];
+      frame_counts[track] = 0;
+    } else {
+      REQUIRE((result.status == AvDecoderReadStatus::kFrame));
+      REQUIRE(result.frame.has_value());
+      REQUIRE((frame_counts[track] < frames.size()));
+      CheckRecord(Record(*result.frame->get()), frames[frame_counts[track]++]);
+    }
+    return true;
+  };
+  REQUIRE(WaitFor([&] {
+    consume(0);
+    return eof_counts[0] == 1;
+  }));
+  const auto check_stalled_video = [&] {
+    const auto until = std::chrono::steady_clock::now() + 30ms;
+    do {
+      CHECK_FALSE(consume(0));
+      CHECK((input.status().state != AvMediaSourceState::kEnded));
+      std::this_thread::sleep_for(1ms);
+    } while (std::chrono::steady_clock::now() < until);
+  };
+  // The video's accepted EOF must not be retried while audio rejects its EOF.
+  check_stalled_video();
+  REQUIRE(WaitFor([&] { return consume(1); }));
+  REQUIRE((frame_counts[1] == 1));
+  // Freeing one audio frame lets its EOF enter the queue, but Reset is still
+  // blocked behind it. A partial Reset must not release next-cycle video.
+  check_stalled_video();
+  REQUIRE(WaitFor([&] {
+    for (std::size_t track = 0; track < 2; ++track) {
+      if (eof_counts[track] < cycles) consume(track);
+    }
+    return eof_counts[0] == cycles && eof_counts[1] == cycles;
+  }));
+  if (loop) {
+    CHECK((input.status().state != AvMediaSourceState::kEnded));
+  } else {
+    REQUIRE(WaitFor(
+        [&] { return input.status().state == AvMediaSourceState::kEnded; }));
+  }
+  input.Stop();
 }
 
 TEST_CASE("AvMediaSource validates arguments without introducing output modes",
@@ -632,6 +794,12 @@ TEST_CASE("AvMediaSource validates arguments without introducing output modes",
   CHECK((input.TryReadAudio().status == AvDecoderReadStatus::kNull));
   AvMediaSourceConfig config;
   SECTION("zero packet capacity") { config.proxy.input.packet_capacity = 0; }
+  SECTION("zero video packet capacity") {
+    config.video_decoder.packet_capacity = 0;
+  }
+  SECTION("zero audio packet capacity") {
+    config.audio_decoder.packet_capacity = 0;
+  }
   SECTION("zero video frame capacity") {
     config.video_decoder.frame_capacity = 0;
   }
@@ -644,6 +812,8 @@ TEST_CASE("AvMediaSource validates arguments without introducing output modes",
 TEST_CASE("AvMediaSource stops under unread-track backpressure and restarts",
           "[av-media-source][backpressure][restart]") {
   auto config = SourceConfig(true);
+  config.video_decoder.packet_capacity = 1;
+  config.audio_decoder.packet_capacity = 1;
   config.video_decoder.frame_capacity = 1;
   config.audio_decoder.frame_capacity = 1;
   AvMediaSource input(config);
@@ -710,18 +880,15 @@ TEST_CASE("AvMediaSource supports independent concurrent readers during Stop",
   for (std::size_t index = 0; index < results.size(); ++index) {
     CAPTURE(index);
     REQUIRE((errors[index] == nullptr));
-    std::uint64_t generation = 0;
     std::size_t count = 0;
     std::size_t eof_count = 0;
     const auto& track = index == 0 ? *native.video : *native.audio;
     for (const auto& result : results[index]) {
-      CHECK((result.generation == generation));
       CHECK((result.stream_index == track.stream.stream_index));
       CHECK((result.time_base.num == track.stream.time_base.num));
       CHECK((result.time_base.den == track.stream.time_base.den));
       if (result.status == AvDecoderReadStatus::kEof) {
         CHECK((count == expected[index].size()));
-        ++generation;
         ++eof_count;
         count = 0;
       } else {

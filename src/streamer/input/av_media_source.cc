@@ -1,5 +1,6 @@
 #include "mw/streamer/input/av_media_source.h"
 
+#include <array>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -25,16 +26,11 @@ const ffmpeg::StreamInfo* FindStream(const AvInputInfo& info, int index) {
 }
 
 void ValidateDecoderConfig(const AvDecoderConfig& config) {
-  if (config.packet_watermark == 0 || config.frame_capacity == 0 ||
+  if (config.packet_capacity == 0 || config.frame_capacity == 0 ||
       config.thread_count < 0 ||
       config.decoder_name.find('\0') != std::string::npos) {
     throw std::invalid_argument("AvMediaSource 解码配置无效");
   }
-}
-
-void Acknowledge(std::optional<std::uint64_t>& position,
-                 std::uint64_t generation) {
-  if (!position || *position < generation) position = generation;
 }
 
 const char* StateName(AvMediaSourceState state) {
@@ -109,9 +105,9 @@ class AvMediaSource::Impl final {
       status_ = {};
       status_.state = AvMediaSourceState::kConnecting;
       proxy_events_.clear();
-      video_eof_.reset();
-      audio_eof_.reset();
-      final_generation_.reset();
+      video_eof_ = false;
+      audio_eof_ = false;
+      final_eof_submitted_ = false;
     }
     MW_LOG_INFO("streamer", "AvMediaSource [{}] 启动: loop={}",
                 static_cast<const void*>(this), config_.proxy.loop);
@@ -122,9 +118,9 @@ class AvMediaSource::Impl final {
       failure_ = {};
       status_ = {};
       proxy_events_.clear();
-      video_eof_.reset();
-      audio_eof_.reset();
-      final_generation_.reset();
+      video_eof_ = false;
+      audio_eof_ = false;
+      final_eof_submitted_ = false;
     }
     url_.clear();
     changed_.notify_all();
@@ -140,21 +136,19 @@ class AvMediaSource::Impl final {
     if (result.status == AvDecoderReadStatus::kEof) {
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        Acknowledge(video ? video_eof_ : audio_eof_, result.generation);
+        (video ? video_eof_ : audio_eof_) = true;
       }
       changed_.notify_all();
-      MW_LOG_DEBUG("streamer",
-                   "AvMediaSource [{}] 消费 EOF: stream={} generation={}",
-                   static_cast<const void*>(this), result.stream_index,
-                   result.generation);
+      MW_LOG_DEBUG("streamer", "AvMediaSource [{}] 消费 EOF: stream={}",
+                   static_cast<const void*>(this), result.stream_index);
     } else if (result.status == AvDecoderReadStatus::kFrame &&
                mw::log::ShouldLog("streamer", mw::log::LogLevel::kTrace)) {
       MW_LOG_TRACE("streamer",
-                   "AvMediaSource [{}] 消费帧: stream={} generation={} "
+                   "AvMediaSource [{}] 消费帧: stream={} "
                    "pts={} time_base={}/{}",
                    static_cast<const void*>(this), result.stream_index,
-                   result.generation, result.frame->get()->pts,
-                   result.time_base.num, result.time_base.den);
+                   result.frame->get()->pts, result.time_base.num,
+                   result.time_base.den);
     }
     return result;
   }
@@ -202,8 +196,17 @@ class AvMediaSource::Impl final {
       if (audio) audio->Stop();
     }
     std::shared_ptr<const AvInputInfo> description;
+    // Description of the last input whose packets were dispatched. State
+    // notifications may describe a newer input before old reads finish.
+    std::shared_ptr<const AvInputInfo> dispatched_info;
     std::unique_ptr<AvDecoder> video;
     std::unique_ptr<AvDecoder> audio;
+  };
+
+  struct PendingInput {
+    AvInputProxyReadResult input;
+    std::array<bool, 2> reset_submitted{};
+    std::array<bool, 2> eof_submitted{};
   };
 
   std::shared_ptr<Session> ReadSession() const {
@@ -250,7 +253,6 @@ class AvMediaSource::Impl final {
       auto next = status_;
       next.state = state;
       if (connection) {
-        next.generation = connection->generation;
         next.retry_count = connection->retry_count;
         next.retry_delay = connection->retry_delay;
         next.error = connection->error;
@@ -263,7 +265,6 @@ class AvMediaSource::Impl final {
         next.retry_delay = {};
       }
       if (!force && next.state == status_.state &&
-          next.generation == status_.generation &&
           next.retry_count == status_.retry_count &&
           next.retry_delay == status_.retry_delay &&
           next.error == status_.error && next.info == status_.info)
@@ -277,32 +278,26 @@ class AvMediaSource::Impl final {
         if (snapshot.error) std::rethrow_exception(snapshot.error);
       } catch (const ffmpeg::FfmpegException& error) {
         MW_LOG_ERROR(
-            "streamer",
-            "AvMediaSource [{}] 终止失败: generation={} code={} error={}",
-            static_cast<const void*>(this), snapshot.generation,
-            error.error_code(), error.what());
+            "streamer", "AvMediaSource [{}] 终止失败: code={} error={}",
+            static_cast<const void*>(this), error.error_code(), error.what());
       } catch (const std::exception& error) {
-        MW_LOG_ERROR(
-            "streamer", "AvMediaSource [{}] 终止失败: generation={} error={}",
-            static_cast<const void*>(this), snapshot.generation, error.what());
+        MW_LOG_ERROR("streamer", "AvMediaSource [{}] 终止失败: error={}",
+                     static_cast<const void*>(this), error.what());
       } catch (...) {
-        MW_LOG_ERROR("streamer",
-                     "AvMediaSource [{}] 未知终止异常: generation={}",
-                     static_cast<const void*>(this), snapshot.generation);
+        MW_LOG_ERROR("streamer", "AvMediaSource [{}] 未知终止异常",
+                     static_cast<const void*>(this));
       }
     } else if (state == AvMediaSourceState::kRunning ||
                state == AvMediaSourceState::kEnded ||
                state == AvMediaSourceState::kStopped) {
-      MW_LOG_INFO("streamer", "AvMediaSource [{}] 状态={}: generation={}",
-                  static_cast<const void*>(this), StateName(state),
-                  snapshot.generation);
+      MW_LOG_INFO("streamer", "AvMediaSource [{}] 状态={}",
+                  static_cast<const void*>(this), StateName(state));
     } else {
       MW_LOG_DEBUG("streamer",
-                   "AvMediaSource [{}] 状态={}: generation={} retries={} "
+                   "AvMediaSource [{}] 状态={}: retries={} "
                    "retry_delay_s={}",
                    static_cast<const void*>(this), StateName(state),
-                   snapshot.generation, snapshot.retry_count,
-                   snapshot.retry_delay.count());
+                   snapshot.retry_count, snapshot.retry_delay.count());
     }
     if (!on_state_changed_) return;
     try {
@@ -401,7 +396,6 @@ class AvMediaSource::Impl final {
         case AvInputProxyState::kConnected: {
           std::lock_guard<std::mutex> lock(mutex_);
           status_.info = event.info;
-          status_.generation = event.generation;
         }
           Initialize(event.info, session);
           Publish(AvMediaSourceState::kRunning, &event);
@@ -421,64 +415,85 @@ class AvMediaSource::Impl final {
     return progress;
   }
 
-  bool WantsPacket(const std::shared_ptr<Session>& session) const {
-    return !session || (session->video && session->video->wants_packet()) ||
-           (session->audio && session->audio->wants_packet());
+  bool SubmitControl(const Session& session, bool reset,
+                     std::array<bool, 2>& submitted) {
+    bool progress = false;
+    const std::array<AvDecoder*, 2> decoders{session.video.get(),
+                                             session.audio.get()};
+    for (std::size_t index = 0; index < decoders.size(); ++index) {
+      if (submitted[index]) continue;
+      auto* decoder = decoders[index];
+      if (!decoder || (reset ? decoder->TryReset() : decoder->TryPushEof())) {
+        submitted[index] = true;
+        progress = true;
+      } else if (const auto failure = decoder->error()) {
+        std::rethrow_exception(failure);
+      }
+    }
+    return progress;
   }
 
-  bool Dispatch(std::shared_ptr<Session>& session) {
-    auto result = proxy_.TryReadPacket();
-    if (result.status == AvInputReadStatus::kNull) return false;
-    Initialize(result.info, session);
-    if (Stopping()) return false;
+  bool Dispatch(std::shared_ptr<Session>& session,
+                std::optional<PendingInput>& pending) {
+    bool progress = false;
+    if (!pending) {
+      auto input = proxy_.TryReadPacket();
+      if (input.status == AvInputReadStatus::kNull) return false;
+      Initialize(input.info, session);
+      pending.emplace();
+      pending->input = std::move(input);
+      progress = true;
+    }
+    if (Stopping()) return progress;
+    const auto& result = pending->input;
+    if (session->dispatched_info && session->dispatched_info != result.info) {
+      // Both tracks must accept their ordered reset before the first new
+      // packet/EOF. Remember partial submission across queue-full retries.
+      progress |= SubmitControl(*session, true, pending->reset_submitted);
+      if (!pending->reset_submitted[0] || !pending->reset_submitted[1])
+        return progress;
+    }
+    session->dispatched_info = result.info;
     if (result.status == AvInputReadStatus::kEof) {
-      MW_LOG_DEBUG("streamer",
-                   "AvMediaSource [{}] 分发源 EOF: generation={} loop={}",
-                   static_cast<const void*>(this), result.generation,
-                   config_.proxy.loop);
-      for (auto* decoder : {session->video.get(), session->audio.get()}) {
-        if (decoder && !decoder->PushEof(result.generation)) {
-          if (Stopping()) return false;
-          if (const auto failure = decoder->error())
-            std::rethrow_exception(failure);
-          throw std::logic_error("AvMediaSource Decoder 拒绝 EOF");
-        }
-      }
+      progress |= SubmitControl(*session, false, pending->eof_submitted);
+      if (!pending->eof_submitted[0] || !pending->eof_submitted[1])
+        return progress;
+      MW_LOG_DEBUG("streamer", "AvMediaSource [{}] 已分发源 EOF: loop={}",
+                   static_cast<const void*>(this), config_.proxy.loop);
       if (!config_.proxy.loop) {
-        final_generation_ = result.generation;
+        final_eof_submitted_ = true;
         Publish(AvMediaSourceState::kDraining);
       }
     } else {
-      if (mw::log::ShouldLog("streamer", mw::log::LogLevel::kTrace)) {
-        MW_LOG_TRACE("streamer",
-                     "AvMediaSource [{}] 分发包: stream={} generation={} "
-                     "pts={} dts={} size={}",
-                     static_cast<const void*>(this),
-                     result.packet->get()->stream_index, result.generation,
-                     result.packet->get()->pts, result.packet->get()->dts,
-                     result.packet->get()->size);
-      }
       auto* decoder = result.packet->get()->stream_index ==
                               session->description->video_stream_index
                           ? session->video.get()
                           : session->audio.get();
       if (!decoder)
         throw std::logic_error("AvMediaSource Packet 缺少对应 Decoder");
-      if (!decoder->PushPacket(std::move(*result.packet), result.generation)) {
-        if (Stopping()) return false;
+      if (!decoder->TryPushPacket(*result.packet)) {
         if (const auto failure = decoder->error())
           std::rethrow_exception(failure);
-        throw std::logic_error("AvMediaSource Decoder 拒绝 Packet");
+        return progress;
+      }
+      if (mw::log::ShouldLog("streamer", mw::log::LogLevel::kTrace)) {
+        MW_LOG_TRACE("streamer",
+                     "AvMediaSource [{}] 分发包: stream={} "
+                     "pts={} dts={} size={}",
+                     static_cast<const void*>(this),
+                     result.packet->get()->stream_index,
+                     result.packet->get()->pts, result.packet->get()->dts,
+                     result.packet->get()->size);
       }
     }
+    pending.reset();
     return true;
   }
 
   bool Drained(const std::shared_ptr<Session>& session) const {
-    if (!final_generation_ || !session) return false;
+    if (!final_eof_submitted_ || !session) return false;
     std::lock_guard<std::mutex> lock(mutex_);
-    return (!session->video || video_eof_ == final_generation_) &&
-           (!session->audio || audio_eof_ == final_generation_);
+    return (!session->video || video_eof_) && (!session->audio || audio_eof_);
   }
 
   void Cleanup(std::shared_ptr<Session>& session) noexcept {
@@ -497,6 +512,7 @@ class AvMediaSource::Impl final {
 
   void Run() noexcept {
     std::shared_ptr<Session> session;
+    std::optional<PendingInput> pending;
     bool ended = false;
     try {
       // Start publishes an immediate snapshot; notify it on this worker too.
@@ -513,8 +529,7 @@ class AvMediaSource::Impl final {
           ended = true;
           break;
         }
-        if (!final_generation_ && WantsPacket(session))
-          progress |= Dispatch(session);
+        if (!final_eof_submitted_) progress |= Dispatch(session, pending);
         if (!progress) {
           std::unique_lock<std::mutex> lock(mutex_);
           changed_.wait_for(lock, std::chrono::milliseconds(1), [this] {
@@ -553,10 +568,10 @@ class AvMediaSource::Impl final {
   AvMediaSourceStatus status_;
   std::deque<AvInputProxyStatus> proxy_events_;
   std::shared_ptr<Session> session_;
-  std::optional<std::uint64_t> video_eof_;
-  std::optional<std::uint64_t> audio_eof_;
+  bool video_eof_ = false;
+  bool audio_eof_ = false;
   // Written only by the dispatcher after successfully submitting packet EOF.
-  std::optional<std::uint64_t> final_generation_;
+  bool final_eof_submitted_ = false;
   OnStateChanged on_state_changed_;
   std::string url_;
   internal::Thread worker_;

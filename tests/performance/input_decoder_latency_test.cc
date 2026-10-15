@@ -205,7 +205,8 @@ TEST_CASE("Input latency counts successful reads and finalizes once per open",
 }
 
 TEST_CASE(
-    "Decode latency accounts for drained frames and preserves user opaque",
+    "Decode latency preserves user opaque and counts drained frames across "
+    "reset",
     "[latency][av-decoder][opaque][eof]") {
   AVMediaType type = AVMEDIA_TYPE_VIDEO;
   SECTION("video B frame drain") {}
@@ -224,32 +225,43 @@ TEST_CASE(
     config.thread_count = 1;
     config.frame_capacity = 2;
     mw::streamer::AvDecoder decoder(fixture.stream, config);
-    for (const auto& packet : fixture.packets) {
-      REQUIRE(decoder.PushPacket(packet, 0));
-      CHECK(packet->opaque_ref->size == 1);
-      CHECK(packet->opaque_ref->data[0] == 73);
-    }
-    REQUIRE(decoder.PushEof(0));
-    const auto deadline = std::chrono::steady_clock::now() + 5s;
-    std::size_t frames = 0;
-    for (;;) {
-      auto result = decoder.TryReadFrame();
-      REQUIRE(decoder.error() == nullptr);
-      REQUIRE(std::chrono::steady_clock::now() < deadline);
-      if (result.status == mw::streamer::AvDecoderReadStatus::kEof) break;
-      if (result.status == mw::streamer::AvDecoderReadStatus::kNull) {
-        std::this_thread::sleep_for(1ms);
-        continue;
-      }
-      REQUIRE(result.frame.has_value());
+    for (int replay = 0; replay < 2; ++replay) {
+      if (replay != 0) REQUIRE(decoder.TryReset());
+      const auto deadline = std::chrono::steady_clock::now() + 5s;
+      std::size_t packet_index = 0;
+      bool eof_submitted = false;
+      std::size_t frames = 0;
+      for (;;) {
+        if (packet_index < fixture.packets.size()) {
+          const auto& packet = fixture.packets[packet_index];
+          if (decoder.TryPushPacket(packet)) {
+            CHECK(packet->opaque_ref->size == 1);
+            CHECK(packet->opaque_ref->data[0] == 73);
+            ++packet_index;
+          }
+        } else if (!eof_submitted) {
+          eof_submitted = decoder.TryPushEof();
+        }
+        auto result = decoder.TryReadFrame();
+        REQUIRE(decoder.error() == nullptr);
+        REQUIRE(std::chrono::steady_clock::now() < deadline);
+        if (result.status == mw::streamer::AvDecoderReadStatus::kEof) break;
+        if (result.status == mw::streamer::AvDecoderReadStatus::kNull) {
+          std::this_thread::sleep_for(1ms);
+          continue;
+        }
+        REQUIRE(result.frame.has_value());
 #ifdef AV_CODEC_FLAG_COPY_OPAQUE
-      REQUIRE(result.frame->get()->opaque_ref != nullptr);
-      CHECK(result.frame->get()->opaque_ref->size == 1);
-      CHECK(result.frame->get()->opaque_ref->data[0] == 73);
+        REQUIRE(result.frame->get()->opaque_ref != nullptr);
+        CHECK(result.frame->get()->opaque_ref->size == 1);
+        CHECK(result.frame->get()->opaque_ref->data[0] == 73);
 #endif
-      ++frames;
+        ++frames;
+      }
+      CHECK(packet_index == fixture.packets.size());
+      CHECK(eof_submitted);
+      CHECK(frames == fixture.frames);
     }
-    CHECK(frames == fixture.frames);
     decoder.Stop();
     decoder.Stop();
     for (const auto& packet : fixture.packets) {
@@ -261,11 +273,11 @@ TEST_CASE(
       type == AVMEDIA_TYPE_VIDEO ? "decode.video" : "decode.audio";
   const auto reports = Summaries(logging.Read(), stage);
   REQUIRE(reports.size() == 1);
-  CHECK(Counter(reports.front(), "samples") == fixture.frames);
+  CHECK(Counter(reports.front(), "samples") == fixture.frames * 2);
 #ifdef AV_CODEC_FLAG_COPY_OPAQUE
   CHECK(Counter(reports.front(), "unavailable") == 0);
 #else
-  CHECK(Counter(reports.front(), "unavailable") == fixture.frames);
+  CHECK(Counter(reports.front(), "unavailable") == fixture.frames * 2);
 #endif
 }
 
@@ -282,20 +294,23 @@ TEST_CASE("Disabled input and decode latency leave packets and logs unchanged",
     input.Close();
     mw::streamer::AvDecoderConfig config;
     config.thread_count = 1;
-    config.frame_capacity = fixture.frames + 1;
+    config.frame_capacity = 2;
     mw::streamer::AvDecoder decoder(fixture.stream, config);
     auto& packet = fixture.packets.front();
     packet->opaque_ref = av_buffer_alloc(1);
     REQUIRE(packet->opaque_ref != nullptr);
     const auto* original = packet->opaque_ref->data;
-    REQUIRE(decoder.PushPacket(packet, 0));
-    for (std::size_t index = 1; index < fixture.packets.size(); ++index) {
-      REQUIRE(decoder.PushPacket(fixture.packets[index], 0));
-    }
-    REQUIRE(decoder.PushEof(0));
     const auto deadline = std::chrono::steady_clock::now() + 5s;
+    std::size_t packet_index = 0;
+    bool eof_submitted = false;
     std::size_t frames = 0;
     for (;;) {
+      if (packet_index < fixture.packets.size()) {
+        if (decoder.TryPushPacket(fixture.packets[packet_index]))
+          ++packet_index;
+      } else if (!eof_submitted) {
+        eof_submitted = decoder.TryPushEof();
+      }
       const auto result = decoder.TryReadFrame();
       REQUIRE(decoder.error() == nullptr);
       REQUIRE(std::chrono::steady_clock::now() < deadline);
@@ -306,6 +321,8 @@ TEST_CASE("Disabled input and decode latency leave packets and logs unchanged",
         std::this_thread::sleep_for(1ms);
       }
     }
+    CHECK(packet_index == fixture.packets.size());
+    CHECK(eof_submitted);
     CHECK(frames == fixture.frames);
     decoder.Stop();
     CHECK(packet->opaque_ref->data == original);

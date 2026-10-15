@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <limits>
-#include <map>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -89,8 +88,8 @@ bool Apart(std::int64_t a, std::int64_t b, std::int64_t tolerance) {
   return difference >= tolerance || difference <= -tolerance;
 }
 
-// Audio and video share a pacing offset within each source generation.
-// Retain mappings only for generations still used by either track.
+// Like realtime's team, audio and video share one pacing offset. Source
+// timestamp jumps reanchor it; connection metadata never changes the clock.
 class PacingClock final {
  public:
   PacingClock(const SyncerConfig& config, const void* log_context)
@@ -102,26 +101,8 @@ class PacingClock final {
     std::int64_t wake_us = kNoWake;
   };
 
-  Decision Schedule(bool video, std::uint64_t generation, std::int64_t pts,
-                    std::int64_t now) {
-    auto& track_generation = video ? video_generation_ : audio_generation_;
-    if (track_generation && *track_generation != generation) {
-      MW_LOG_INFO("streamer",
-                  "Syncer[{}] 实时映射切换代次 track={} old_generation={} "
-                  "generation={} input_pts_us={} now_us={}",
-                  log_context_, TrackName(video), *track_generation, generation,
-                  pts, now);
-    }
-    track_generation = generation;
-    auto& offset = offsets_[generation];
-    for (auto it = offsets_.begin(); it != offsets_.end();) {
-      if (it->first != generation && it->first != video_generation_ &&
-          it->first != audio_generation_) {
-        it = offsets_.erase(it);
-      } else {
-        ++it;
-      }
-    }
+  Decision Schedule(bool video, std::int64_t pts, std::int64_t now) {
+    auto& offset = offset_;
     bool reset = !offset;
     bool forward = false;
     const char* reset_reason = "initial";
@@ -143,22 +124,21 @@ class PacingClock final {
                  difference < -config_.negative_time_discard->count()) {
         MW_LOG_DEBUG("streamer",
                      "Syncer[{}] 丢弃迟到输入 reason=late_discard track={} "
-                     "generation={} input_pts_us={} now_us={} due_us={} "
+                     "input_pts_us={} now_us={} due_us={} "
                      "diff_us={} offset_us={}",
-                     log_context_, TrackName(video), generation, pts, now, due,
-                     difference, *offset);
+                     log_context_, TrackName(video), pts, now, due, difference,
+                     *offset);
         return {false, true, now};
       } else if (difference > 0) {
         auto& wait = video ? video_wait_ : audio_wait_;
-        if (!wait || wait->generation != generation || wait->pts != pts ||
-            wait->due != due) {
+        if (!wait || wait->pts != pts || wait->due != due) {
           MW_LOG_TRACE("streamer",
-                       "Syncer[{}] 等待交付时刻 track={} generation={} "
+                       "Syncer[{}] 等待交付时刻 track={} "
                        "input_pts_us={} now_us={} due_us={} diff_us={} "
                        "offset_us={}",
-                       log_context_, TrackName(video), generation, pts, now,
-                       due, difference, *offset);
-          wait = Wait{generation, pts, due};
+                       log_context_, TrackName(video), pts, now, due,
+                       difference, *offset);
+          wait = Wait{pts, due};
         }
         return {false, false, due};
       }
@@ -169,13 +149,13 @@ class PacingClock final {
       const bool had_offset = offset.has_value();
       const auto old_offset = offset.value_or(0);
       offset = !offset || forward ? candidate : std::min(*offset, candidate);
-      MW_LOG_INFO(
-          "streamer",
-          "Syncer[{}] 建立或重同步实时映射 reason={} track={} "
-          "generation={} input_pts_us={} now_us={} due_us={} diff_us={} "
-          "had_offset={} old_offset_us={} new_offset_us={}",
-          log_context_, reset_reason, TrackName(video), generation, pts, now,
-          previous_due, previous_difference, had_offset, old_offset, *offset);
+      MW_LOG_INFO("streamer",
+                  "Syncer[{}] 建立或重同步实时映射 reason={} track={} "
+                  "input_pts_us={} now_us={} due_us={} diff_us={} "
+                  "had_offset={} old_offset_us={} new_offset_us={}",
+                  log_context_, reset_reason, TrackName(video), pts, now,
+                  previous_due, previous_difference, had_offset, old_offset,
+                  *offset);
     }
     return {true, false, now};
   }
@@ -184,15 +164,12 @@ class PacingClock final {
   const SyncerConfig& config_;
   const void* log_context_;
   struct Wait {
-    std::uint64_t generation;
     std::int64_t pts;
     std::int64_t due;
   };
   std::optional<Wait> video_wait_;
   std::optional<Wait> audio_wait_;
-  std::optional<std::uint64_t> video_generation_;
-  std::optional<std::uint64_t> audio_generation_;
-  std::map<std::uint64_t, std::optional<std::int64_t>> offsets_;
+  std::optional<std::int64_t> offset_;
 };
 
 // Hold the last advancing real timestamp for two seconds, then extrapolate
@@ -254,7 +231,6 @@ struct Track {
   std::optional<std::int64_t> pending_real_pts;
   std::int64_t suspended_until = 0;
   // Diagnostics only: these fields never participate in scheduling decisions.
-  std::optional<std::uint64_t> generation;
   bool timed_out = false;
   const char* output_source = nullptr;
 };
@@ -309,21 +285,19 @@ class SyncerTiming::Impl final {
     }
     std::int64_t due = kNoWake;
     if (head) {
-      track.generation = head->generation;
       if (head->status == AvDecoderReadStatus::kEof) {
-        // EOF closes this input generation while live output continues.
+        // Like a live sentinel, consume EOF and keep both clocks running.
         MW_LOG_INFO("streamer",
                     "Syncer[{}] 消费输入 EOF，继续实时输出: track={} "
-                    "generation={} end_pts={} time_base={}/{} now_us={}",
-                    log_context_, TrackName(video), head->generation,
-                    head->end_pts, head->time_base.num, head->time_base.den,
-                    now);
+                    "end_pts={} time_base={}/{} now_us={}",
+                    log_context_, TrackName(video), head->end_pts,
+                    head->time_base.num, head->time_base.den, now);
         track.released = false;
         return {true, {}, now};
       }
       if (!track.released) {
         const auto decision = pacing_.Schedule(
-            video, head->generation,
+            video,
             Rescale(head->frame->get()->pts, head->time_base, kMicroseconds),
             now);
         if (decision.discard) return {true, {}, now};
@@ -337,12 +311,11 @@ class SyncerTiming::Impl final {
     }
     if (!track.timed_out) {
       track.timed_out = true;
-      MW_LOG_INFO(
-          "streamer",
-          "Syncer[{}] 输入超时 track={} has_generation={} generation={} "
-          "now_us={} deadline_us={} has_head={}",
-          log_context_, TrackName(video), track.generation.has_value(),
-          track.generation.value_or(0), now, track.wait_until, head != nullptr);
+      MW_LOG_INFO("streamer",
+                  "Syncer[{}] 输入超时 track={} "
+                  "now_us={} deadline_us={} has_head={}",
+                  log_context_, TrackName(video), now, track.wait_until,
+                  head != nullptr);
     }
     const auto rtc = clock_.Now(now);
     if (!track.next) track.next = FromUs(config_.start_ts.count(), track);
@@ -371,10 +344,10 @@ class SyncerTiming::Impl final {
                      std::int64_t now) {
     if (video && av_cmp_q(track.time_base, input.time_base) != 0) {
       MW_LOG_INFO("streamer",
-                  "Syncer[{}] 视频时间基变更: generation={} old_tb={}/{} "
+                  "Syncer[{}] 视频时间基变更: old_tb={}/{} "
                   "new_tb={}/{} input_pts={} now_us={}",
-                  log_context_, input.generation, track.time_base.num,
-                  track.time_base.den, input.time_base.num, input.time_base.den,
+                  log_context_, track.time_base.num, track.time_base.den,
+                  input.time_base.num, input.time_base.den,
                   input.frame->get()->pts, now);
       ChangeTimeBase(track, input.time_base);
     }
@@ -389,31 +362,32 @@ class SyncerTiming::Impl final {
       track.shift = Subtract(pts, original);
       clock_.shift = ToUs(*track.shift, track);
       MW_LOG_INFO("streamer",
-                  "Syncer[{}] 输出时间轴首次锚定 track={} generation={} "
+                  "Syncer[{}] 输出时间轴首次锚定 track={} "
                   "input_pts={} input_tb={}/{} mapped_pts={} output_tb={}/{} "
                   "local_shift={} shared_shift_us={} now_us={}",
-                  log_context_, TrackName(video), input.generation,
-                  input.frame->get()->pts, input.time_base.num,
-                  input.time_base.den, pts, track.time_base.num,
-                  track.time_base.den, *track.shift, *clock_.shift, now);
+                  log_context_, TrackName(video), input.frame->get()->pts,
+                  input.time_base.num, input.time_base.den, pts,
+                  track.time_base.num, track.time_base.den, *track.shift,
+                  *clock_.shift, now);
     } else {
-      if (!track.shift || Apart(ToUs(*track.shift, track), *clock_.shift,
-                                Add(config_.max_streams_diff.count(), 1))) {
+      const bool desync =
+          track.shift && Apart(ToUs(*track.shift, track), *clock_.shift,
+                               Add(config_.max_streams_diff.count(), 1));
+      if (!track.shift || desync) {
         // Adopt the shared shift only when the difference exceeds the
         // configured tolerance; timestamp discontinuity includes equality.
         const bool had_shift = track.shift.has_value();
         const auto old_shift = track.shift.value_or(0);
         track.shift = FromUs(*clock_.shift, track);
         MW_LOG_INFO("streamer",
-                    "Syncer[{}] 采纳共享时间偏移 track={} generation={} "
+                    "Syncer[{}] 采纳共享时间偏移 track={} "
                     "input_pts={} input_tb={}/{} output_tb={}/{} had_shift={} "
                     "old_local_shift={} new_local_shift={} shared_shift_us={} "
                     "mapped_pts={:.0f} has_next={} next_pts={} now_us={}",
-                    log_context_, TrackName(video), input.generation,
-                    input.frame->get()->pts, input.time_base.num,
-                    input.time_base.den, track.time_base.num,
-                    track.time_base.den, had_shift, old_shift, *track.shift,
-                    *clock_.shift,
+                    log_context_, TrackName(video), input.frame->get()->pts,
+                    input.time_base.num, input.time_base.den,
+                    track.time_base.num, track.time_base.den, had_shift,
+                    old_shift, *track.shift, *clock_.shift,
                     static_cast<long double>(original) + *track.shift,
                     track.next.has_value(), track.next.value_or(0), now);
       }
@@ -434,6 +408,11 @@ class SyncerTiming::Impl final {
         }
         Adjust(track, video, input, original, pts, "backward_jump", now);
         pts = *track.next;
+      } else if (desync) {
+        // Sentinel also publishes the adopted local shift when this track
+        // stayed continuous. Its time base may round the shared shift, and
+        // peers must see that representable value to complete synchronization.
+        clock_.shift = ToUs(*track.shift, track);
       }
     }
     return Real(track, video, input, pts, now);
@@ -474,13 +453,13 @@ class SyncerTiming::Impl final {
     // additional checked timestamp arithmetic or overflow failures.
     MW_LOG_INFO(
         "streamer",
-        "Syncer[{}] 修正输出时间偏移 reason={} track={} generation={} "
+        "Syncer[{}] 修正输出时间偏移 reason={} track={} "
         "input_pts={} input_tb={}/{} mapped_pts={} next_pts={} "
         "output_tb={}/{} diff_us={:.3f} old_local_shift={} new_local_shift={} "
         "old_shared_shift_us={} new_shared_shift_us={} now_us={}",
-        log_context_, reason, TrackName(video), input.generation,
-        input.frame->get()->pts, input.time_base.num, input.time_base.den,
-        mapped_pts, *track.next, track.time_base.num, track.time_base.den,
+        log_context_, reason, TrackName(video), input.frame->get()->pts,
+        input.time_base.num, input.time_base.den, mapped_pts, *track.next,
+        track.time_base.num, track.time_base.den,
         DiagnosticDifferenceUs(mapped_pts, *track.next, track.time_base),
         old_local, *track.shift, old_shared, *clock_.shift, now);
   }
@@ -493,12 +472,11 @@ class SyncerTiming::Impl final {
     track.filled_us = 0;
     MW_LOG_DEBUG("streamer",
                  "Syncer[{}] 开始填充批次 reason={} track={} "
-                 "has_generation={} generation={} next_pts={} target_pts={} "
+                 "next_pts={} target_pts={} "
                  "output_tb={}/{} now_us={}",
                  log_context_, forward ? "forward_jump" : "timeout",
-                 TrackName(video), track.generation.has_value(),
-                 track.generation.value_or(0), *track.next, target,
-                 track.time_base.num, track.time_base.den, now);
+                 TrackName(video), *track.next, target, track.time_base.num,
+                 track.time_base.den, now);
   }
 
   void ObserveSource(Track& track, bool video, const char* source,
@@ -506,10 +484,9 @@ class SyncerTiming::Impl final {
     if (track.output_source && std::string_view(track.output_source) == source)
       return;
     MW_LOG_INFO("streamer",
-                "Syncer[{}] 输出来源切换 track={} has_generation={} "
-                "generation={} old_source={} source={} now_us={}",
-                log_context_, TrackName(video), track.generation.has_value(),
-                track.generation.value_or(0),
+                "Syncer[{}] 输出来源切换 track={} "
+                "old_source={} source={} now_us={}",
+                log_context_, TrackName(video),
                 track.output_source ? track.output_source : "none", source,
                 now);
     track.output_source = source;
@@ -562,21 +539,19 @@ class SyncerTiming::Impl final {
     track.next = Add(pts, duration);
     track.has_output = true;
     if (track.timed_out) {
-      MW_LOG_INFO("streamer",
-                  "Syncer[{}] 输入超时恢复 track={} generation={} now_us={}",
-                  log_context_, TrackName(video), input.generation, now);
+      MW_LOG_INFO("streamer", "Syncer[{}] 输入超时恢复 track={} now_us={}",
+                  log_context_, TrackName(video), now);
       track.timed_out = false;
     }
     ObserveSource(track, video, "input", now);
     MW_LOG_TRACE("streamer",
-                 "Syncer[{}] 输出帧 track={} generation={} reason=input "
+                 "Syncer[{}] 输出帧 track={} reason=input "
                  "source=input input_pts={} input_tb={}/{} output_pts={} "
                  "output_tb={}/{} next_pts={} duration={} samples={} now_us={}",
-                 log_context_, TrackName(video), input.generation,
-                 input.frame->get()->pts, input.time_base.num,
-                 input.time_base.den, pts, track.time_base.num,
-                 track.time_base.den, *track.next, duration,
-                 video ? 0 : frame->nb_samples, now);
+                 log_context_, TrackName(video), input.frame->get()->pts,
+                 input.time_base.num, input.time_base.den, pts,
+                 track.time_base.num, track.time_base.den, *track.next,
+                 duration, video ? 0 : frame->nb_samples, now);
     clock_.Update(ToUs(pts, track), now);
     if (video) track.last_real = frame.Ref();
     track.last_real_pts = pts;
@@ -602,12 +577,11 @@ class SyncerTiming::Impl final {
     ObserveSource(track, video, source, now);
     MW_LOG_TRACE(
         "streamer",
-        "Syncer[{}] 输出填充帧 track={} has_generation={} "
-        "generation={} reason={} source={} has_input={} input_pts={} "
+        "Syncer[{}] 输出填充帧 track={} "
+        "reason={} source={} has_input={} input_pts={} "
         "input_tb={}/{} output_pts={} output_tb={}/{} next_pts={} "
         "duration={} samples={} now_us={}",
-        log_context_, TrackName(video), track.generation.has_value(),
-        track.generation.value_or(0),
+        log_context_, TrackName(video),
         track.forward_fill ? "forward_jump" : "timeout", source,
         input != nullptr,
         input && input->frame ? input->frame->get()->pts : AV_NOPTS_VALUE,
@@ -635,17 +609,15 @@ class SyncerTiming::Impl final {
       } else {
         wake = track.wait_until;
       }
-      MW_LOG_DEBUG("streamer",
-                   "Syncer[{}] 结束填充批次 reason={} track={} "
-                   "has_generation={} generation={} count={} duration_us={} "
-                   "target_pts={} next_pts={} output_tb={}/{} now_us={} "
-                   "resume_us={}",
-                   log_context_,
-                   track.forward_fill ? "forward_jump" : "timeout",
-                   TrackName(video), track.generation.has_value(),
-                   track.generation.value_or(0), track.filled, track.filled_us,
-                   *track.fill_until, *track.next, track.time_base.num,
-                   track.time_base.den, now, wake);
+      MW_LOG_DEBUG(
+          "streamer",
+          "Syncer[{}] 结束填充批次 reason={} track={} "
+          "count={} duration_us={} "
+          "target_pts={} next_pts={} output_tb={}/{} now_us={} "
+          "resume_us={}",
+          log_context_, track.forward_fill ? "forward_jump" : "timeout",
+          TrackName(video), track.filled, track.filled_us, *track.fill_until,
+          *track.next, track.time_base.num, track.time_base.den, now, wake);
       track.fill_until.reset();
     }
     return {false, std::move(frame), wake};

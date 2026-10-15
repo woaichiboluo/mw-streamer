@@ -19,7 +19,7 @@ using mw::streamer::AvDecoderReadStatus;
 using mw::streamer::AvInputReadStatus;
 
 TEST_CASE("Proxy selected packets feed separate decoders across looping EOF",
-          "[av-decoder][integration][generation][eof]") {
+          "[av-decoder][integration][reset][eof]") {
   mw::streamer::AvInputProxyConfig input_config;
   input_config.loop = true;
   input_config.input.packet_capacity = 1;
@@ -48,6 +48,7 @@ TEST_CASE("Proxy selected packets feed separate decoders across looping EOF",
   mw::streamer::AvDecoderConfig config;
   config.thread_count = 1;
   config.frame_capacity = 1;
+  config.packet_capacity = 1;
   std::unique_ptr<AvDecoder> video;
   std::unique_ptr<AvDecoder> audio;
   for (const auto& stream : info->streams) {
@@ -61,29 +62,32 @@ TEST_CASE("Proxy selected packets feed separate decoders across looping EOF",
   REQUIRE(video != nullptr);
   REQUIRE(audio != nullptr);
   std::array<std::array<std::size_t, 2>, 2> frame_counts{};
-  std::array<std::array<bool, 2>, 2> ended{};
+  std::array<std::size_t, 2> eof_counts{};
+  std::size_t source_eof_count = 0;
+  auto current_info = info;
   bool source_ended = false;
+  std::array<bool, 2> reset_submitted{};
+  std::array<bool, 2> eof_submitted{};
+  const std::array<AvDecoder*, 2> decoders{video.get(), audio.get()};
   const auto consume = [&](AvDecoder& decoder, std::size_t track,
                            int stream_index) {
     bool progress = false;
-    for (;;) {
+    {
       const auto result = decoder.TryReadFrame();
-      if (result.status == AvDecoderReadStatus::kNull) break;
+      if (result.status == AvDecoderReadStatus::kNull) return false;
       progress = true;
-      REQUIRE(result.generation < 2);
-      const auto generation = static_cast<std::size_t>(result.generation);
+      const auto replay = eof_counts[track];
+      REQUIRE(replay < 2);
       CHECK(result.stream_index == stream_index);
-      CHECK_FALSE(ended[track][generation]);
-      if (generation == 1) CHECK(ended[track][0]);
       if (result.status == AvDecoderReadStatus::kEof) {
         CHECK_FALSE(result.frame.has_value());
         CHECK(result.end_pts != AV_NOPTS_VALUE);
-        ended[track][generation] = true;
+        ++eof_counts[track];
       } else {
         REQUIRE(result.frame.has_value());
         CHECK(result.frame->get()->pts ==
               result.frame->get()->best_effort_timestamp);
-        ++frame_counts[track][generation];
+        ++frame_counts[track][replay];
       }
     }
     REQUIRE(decoder.error() == nullptr);
@@ -95,32 +99,54 @@ TEST_CASE("Proxy selected packets feed separate decoders across looping EOF",
     REQUIRE(now < progress_deadline);
     bool progress = consume(*video, 0, info->video_stream_index);
     progress |= consume(*audio, 1, info->audio_stream_index);
-    if (ended[0][1] && ended[1][1]) break;
-    if (!source_ended && (video->wants_packet() || audio->wants_packet())) {
-      if (input.status == AvInputReadStatus::kPacket) {
-        REQUIRE(input.packet.has_value());
-        if (input.packet->get()->stream_index == info->video_stream_index) {
-          REQUIRE(
-              video->PushPacket(std::move(*input.packet), input.generation));
-        } else {
-          REQUIRE(input.packet->get()->stream_index ==
-                  info->audio_stream_index);
-          REQUIRE(
-              audio->PushPacket(std::move(*input.packet), input.generation));
-        }
-        progress = true;
-      } else if (input.status == AvInputReadStatus::kEof) {
-        REQUIRE(video->PushEof(input.generation));
-        REQUIRE(audio->PushEof(input.generation));
-        source_ended = input.generation == 1;
-        progress = true;
-      }
-      input = {};
-      if (!source_ended) {
+    if (eof_counts[0] == 2 && eof_counts[1] == 2) break;
+    if (!source_ended) {
+      if (input.status == AvInputReadStatus::kNull) {
         input = proxy.TryReadPacket();
         progress |= input.status != AvInputReadStatus::kNull;
       }
+      bool ready = input.status != AvInputReadStatus::kNull;
+      if (ready && input.info != current_info) {
+        REQUIRE(input.info != nullptr);
+        for (std::size_t track = 0; track < decoders.size(); ++track) {
+          if (!reset_submitted[track] && decoders[track]->TryReset()) {
+            reset_submitted[track] = true;
+            progress = true;
+          }
+        }
+        ready = reset_submitted[0] && reset_submitted[1];
+        if (ready) {
+          current_info = input.info;
+          reset_submitted = {};
+        }
+      }
+      if (ready && input.status == AvInputReadStatus::kPacket) {
+        REQUIRE(input.packet.has_value());
+        const auto stream_index = input.packet->get()->stream_index;
+        REQUIRE((stream_index == info->video_stream_index ||
+                 stream_index == info->audio_stream_index));
+        auto& target =
+            stream_index == info->video_stream_index ? *video : *audio;
+        if (target.TryPushPacket(*input.packet)) {
+          input = {};
+          progress = true;
+        }
+      } else if (ready && input.status == AvInputReadStatus::kEof) {
+        for (std::size_t track = 0; track < decoders.size(); ++track) {
+          if (!eof_submitted[track] && decoders[track]->TryPushEof()) {
+            eof_submitted[track] = true;
+            progress = true;
+          }
+        }
+        if (eof_submitted[0] && eof_submitted[1]) {
+          source_ended = ++source_eof_count == 2;
+          eof_submitted = {};
+          input = {};
+        }
+      }
     }
+    CHECK(video->buffered_packets() <= config.packet_capacity);
+    CHECK(audio->buffered_packets() <= config.packet_capacity);
     // Only packets, frames and EOF reset the stall deadline, not empty polls.
     if (progress) {
       progress_deadline = std::chrono::steady_clock::now() + 3s;

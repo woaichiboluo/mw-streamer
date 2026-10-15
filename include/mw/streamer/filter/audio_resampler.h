@@ -42,13 +42,13 @@ class MW_STREAMER_API AudioResampler final {
   // Returns false when full, stopped or failed, without consuming input or
   // changing admission state. Retain rejected input and retry after reading.
   // Requires CPU audio, valid source PTS/time_base and a valid actual sample
-  // format/rate/layout. Invalid input, decreasing generation or input after
-  // same-generation EOF throws. Media buffers must remain read-only.
+  // format/rate/layout. Invalid input throws. Input after EOF is accepted.
+  // Media buffers must remain read-only.
   bool TryPushFrame(const AvDecoderReadResult& input);
   // Returns at most one frame or EOF, or kNull when no output is available.
   // Output uses 1/target_sample_rate, duration=nb_samples and delay-compensated
   // source PTS. Input PTS jumps remain visible; this is not a synchronizer.
-  // Format/stream/generation changes drain the old converter before processing
+  // Format/stream changes drain the old converter before processing
   // the new input. EOF drains all delayed samples first, then forwards the
   // source end_pts in the target time base. No encoder frame-size reblocking.
   // Conversion failures throw and are retained until Reset; later reads rethrow

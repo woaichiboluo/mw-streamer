@@ -35,7 +35,6 @@ enum class AvMediaSourceState {
 
 struct AvMediaSourceStatus {
   AvMediaSourceState state = AvMediaSourceState::kStopped;
-  std::uint64_t generation = 0;
   std::uint64_t retry_count = 0;
   std::chrono::seconds retry_delay{0};
   // Recoverable connection failure in WaitingRetry, terminal failure in Failed.
@@ -45,6 +44,9 @@ struct AvMediaSourceStatus {
 
 // Owns an input proxy and one decoder per selected track. Decoders own the
 // frame queues; this class adds no frame queue, filtering or clock mapping.
+// Dispatch retains at most one input item. A full decoder input queue pauses
+// further proxy reads until that item is accepted, including ordered EOF/reset
+// submission to all present tracks. One stalled track may delay the other.
 // Lifecycle/configuration calls must be serialized externally. One reader per
 // track may run concurrently with the other track and Stop. Consume every
 // present track to relieve backpressure. Stop and finish readers before restart
@@ -75,21 +77,21 @@ class MW_STREAMER_API AvMediaSource final {
   void SetOnStateChanged(OnStateChanged callback);
   // Starts asynchronously. Invalid URL/restart/thread creation failure returns
   // false and logs; connection/decode failures are reported through status.
-  // Call Stop before another Start. Generations restart at zero on Start.
+  // Call Stop before another Start.
   [[nodiscard]] bool Start(std::string_view url) noexcept;
   // Independent nonblocking FIFO reads. Preserve decoded pixels/samples and
   // best-effort source PTS/time base, including jumps and inter-track offsets.
   // Absent tracks, underflow, opening/retry, Stop or failure may return kNull;
   // cached frames remain readable during retries. info() identifies absent
-  // tracks. Normal EOF follows each track's delayed frames once per generation;
-  // looping continues with newer generations. Reconnect discontinuities change
-  // generation without synthesizing an EOF. EOF never stops an external Live
+  // tracks. Normal EOF follows each track's delayed frames once per input;
+  // looping reopens the input. Reconnects reset decoder state in packet order
+  // without synthesizing an EOF. EOF never stops an external Live
   // output. Final Ended requires reading EOF from all present tracks.
   AvDecoderReadResult TryReadVideo();
   AvDecoderReadResult TryReadAudio();
   AvMediaSourceStatus status() const;
-  // Latest connection description; read results carry their own generation,
-  // stream index and time base. Returned snapshots outlive the source.
+  // Latest connection description; read results carry their own stream index
+  // and time base. Returned snapshots outlive the source.
   std::shared_ptr<const AvInputInfo> info() const;
 
   // Cooperative cancellation, safe from callbacks; does not join.

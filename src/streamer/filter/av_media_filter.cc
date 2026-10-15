@@ -1,9 +1,9 @@
 #include "mw/streamer/filter/av_media_filter.h"
 
-#include <cstdint>
+#include <condition_variable>
+#include <cstddef>
 #include <exception>
 #include <mutex>
-#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -38,32 +38,39 @@ class AvMediaFilter::Impl final {
       throw std::logic_error("AvMediaFilter 重新启动前需要 Stop");
     }
     if (on_start_) on_start_();
-    generation_.reset();
     failed_ = false;
     started_ = true;
   }
 
   void Stop() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
     if (!started_) return;
+    if (stopping_) {
+      idle_.wait(lock, [this] { return !stopping_; });
+      return;
+    }
+    stopping_ = true;
+    idle_.wait(lock, [this] { return active_calls_ == 0; });
     started_ = false;
-    generation_.reset();
+    stopping_ = false;
+    idle_.notify_all();
     if (on_stop_) on_stop_();
   }
 
   AvDecoderReadResult Process(AvDecoderReadResult input, bool video) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_ || failed_) {
-      throw std::logic_error("AvMediaFilter 处理帧前需要成功 Start");
+    const auto& callback = video ? on_video_ : on_audio_;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!started_ || stopping_ || failed_) {
+        throw std::logic_error("AvMediaFilter 处理帧前需要成功 Start");
+      }
+      if (input.status != AvDecoderReadStatus::kFrame) return input;
+      if (!input.frame || !input.frame->get()) {
+        throw std::invalid_argument("AvMediaFilter 缺少输入帧");
+      }
+      if (!callback) return input;
+      ++active_calls_;
     }
-    if (input.status != AvDecoderReadStatus::kFrame) return input;
-    if (!input.frame || !input.frame->get()) {
-      throw std::invalid_argument("AvMediaFilter 缺少输入帧");
-    }
-    if (generation_ && input.generation < *generation_) {
-      throw std::invalid_argument("AvMediaFilter 不接受旧代帧");
-    }
-
     // Save timing before invoking business code. A callback may return fresh
     // storage without copying properties; execution time must not become PTS.
     const auto* source = input.frame->get();
@@ -73,43 +80,44 @@ class AvMediaFilter::Impl final {
     const auto time_base = source->time_base;
     const auto duration = source->duration;
     try {
-      if (generation_ && input.generation != *generation_ && on_reset_) {
-        on_reset_();
+      auto output = callback(*input.frame);
+      if (!output.get()) {
+        throw std::invalid_argument("AvMediaFilter 回调返回了无效帧");
       }
-      generation_ = input.generation;
-      const auto& callback = video ? on_video_ : on_audio_;
-      if (callback) {
-        auto output = callback(*input.frame);
-        if (!output.get()) {
-          throw std::invalid_argument("AvMediaFilter 回调返回了无效帧");
-        }
-        output->pts = pts;
-        output->pkt_dts = dts;
-        output->best_effort_timestamp = best_effort;
-        output->time_base = time_base;
-        output->duration = duration;
-        input.frame = std::move(output);
-      }
+      output->pts = pts;
+      output->pkt_dts = dts;
+      output->best_effort_timestamp = best_effort;
+      output->time_base = time_base;
+      output->duration = duration;
+      input.frame = std::move(output);
     } catch (...) {
-      // Do not resume using partially-reset or partially-updated business
+      // Do not resume using partially-updated business
       // history. Stop still releases the successfully-started session.
-      failed_ = true;
+      FinishProcessing(true);
       throw;
     }
+    FinishProcessing(false);
     return input;
   }
 
   OnStart on_start_;
   OnStop on_stop_;
-  OnReset on_reset_;
   OnAudio on_audio_;
   OnVideo on_video_;
 
  private:
+  void FinishProcessing(bool failed) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    failed_ = failed_ || failed;
+    if (--active_calls_ == 0) idle_.notify_all();
+  }
+
   std::mutex mutex_;
+  std::condition_variable idle_;
+  std::size_t active_calls_ = 0;
   bool started_ = false;
+  bool stopping_ = false;
   bool failed_ = false;
-  std::optional<std::uint64_t> generation_;
 };
 
 AvMediaFilter::AvMediaFilter() : impl_(std::make_unique<Impl>()) {}
@@ -119,9 +127,6 @@ void AvMediaFilter::SetOnStart(OnStart callback) {
 }
 void AvMediaFilter::SetOnStop(OnStop callback) {
   impl_->Configure(impl_->on_stop_, std::move(callback));
-}
-void AvMediaFilter::SetOnReset(OnReset callback) {
-  impl_->Configure(impl_->on_reset_, std::move(callback));
 }
 void AvMediaFilter::SetOnAudio(OnAudio callback) {
   impl_->Configure(impl_->on_audio_, std::move(callback));

@@ -21,9 +21,9 @@ struct AvDecoderConfig {
   // Empty selects by codec id. A specified decoder must exist and match the
   // track/device; no other decoder is tried on failure.
   std::string decoder_name;
-  // A dispatch watermark, not a hard queue limit. A shared distributor can keep
-  // feeding this track while another track needs packets.
-  std::size_t packet_watermark = 2;
+  // Maximum queued input items, including Packet, EOF and Reset. The worker
+  // can additionally hold one input item. Must be positive.
+  std::size_t packet_capacity = 12;
   // Maximum queued output items, including EOF. The worker can additionally
   // hold one decoded frame while waiting for room. Must be positive.
   std::size_t frame_capacity = 8;
@@ -37,7 +37,6 @@ enum class AvDecoderReadStatus { kFrame, kEof, kNull };
 struct AvDecoderReadResult {
   AvDecoderReadStatus status = AvDecoderReadStatus::kNull;
   std::optional<ffmpeg::Frame> frame;
-  std::uint64_t generation = 0;
   int stream_index = -1;
   AVRational time_base{0, 1};
   // Source-time endpoint of the final frame, only for EOF; unknown when timing
@@ -77,23 +76,27 @@ class MW_STREAMER_API AvDecoder final {
   // failures that have already occurred are not replayed.
   void SetOnError(OnError callback);
 
-  // Transfers a nonempty media packet reference to the input queue.
-  // Returns false after Stop
-  // or worker failure. Wrong track, decreasing generation or input after this
-  // generation's EOF throws. A new generation flushes the same codec on the
-  // worker before its first packet; queued older output remains valid/FIFO.
-  bool PushPacket(ffmpeg::Packet packet, std::uint64_t generation);
-  // Enqueue once after this generation's packets. Drains delayed frames before
-  // publishing its EOF. Later input must belong to a newer generation.
-  bool PushEof(std::uint64_t generation);
+  // Never waits for queue space. Copies a packet reference only on acceptance;
+  // false preserves the caller's packet and means full, stopped or failed.
+  // An empty/wrong-track packet throws. After accepted EOF, packets and
+  // repeated EOF throw until TryReset succeeds. All input items share
+  // packet_capacity.
+  bool TryPushPacket(const ffmpeg::Packet& packet);
+  // Queues a drain behind accepted packets, publishing delayed frames then EOF.
+  // A rejected EOF changes no state and can be retried. The worker remains
+  // available; queue Reset before submitting more media.
+  bool TryPushEof();
+  // Queues an ordered codec flush for an input reopen. Discards codec delay
+  // and clears drain/timing state, while already decoded output remains FIFO.
+  // Does not publish an output item. False means full, stopped or failed and
+  // leaves the accepted EOF state unchanged; retry before submitting more
+  // media.
+  bool TryReset();
   // Never waits for media. Returns queued frames/EOF in order, then kNull.
   // Frames own their storage independently of codec lifetime. PTS uses
   // best_effort_timestamp in the original stream time base.
   // Failure is observed through error()/OnError, not disguised as normal EOF.
   AvDecoderReadResult TryReadFrame();
-  // Only a queue watermark: EOF does not prevent requesting the next
-  // generation. Already-ended generations still reject further input.
-  bool wants_packet() const;
   std::size_t buffered_packets() const;
   std::size_t buffered_frames() const;
   std::exception_ptr error() const;

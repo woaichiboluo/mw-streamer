@@ -16,8 +16,6 @@
 #include <unistd.h>
 #endif
 
-#include "mw/streamer/input/ffmpeg_input.h"
-
 #ifdef MW_STREAMER_STATIC_LIBRARY
 #include "Common/MediaSource.h"
 #include "Common/Runtime.h"
@@ -26,7 +24,6 @@
 
 namespace {
 
-using mw::streamer::FfmpegInput;
 using mw::streamer::Init;
 using mw::streamer::InitConfig;
 using mw::streamer::MwStreamerContext;
@@ -116,7 +113,7 @@ TEST_CASE("streamer configures only an attached console for UTF-8") {
 TEST_CASE("streamer ignores SIGPIPE across shutdown and reinitialization") {
   const pid_t child = fork();
   if (child == 0) {
-    struct sigaction action {};
+    struct sigaction action{};
     action.sa_handler = SIG_DFL;
     sigemptyset(&action.sa_mask);
     sigset_t signals;
@@ -169,10 +166,6 @@ TEST_CASE("streamer initializes and shuts down with async logging") {
   config.log.async.queue_size = 64;
   ContextOwner context(Init(config), &Shutdown);
   REQUIRE(context.get() != nullptr);
-  {
-    FfmpegInput input;
-    CHECK_NOTHROW(input.Stop());
-  }
   MW_LOG_INFO_DEFAULT("Initialization lifecycle completed");
   CHECK_NOTHROW(Close(context));
 }
@@ -183,7 +176,6 @@ TEST_CASE(
   config.log.modules = {{"", mw::log::LogLevel::kInfo}};
   REQUIRE_THROWS_AS(Init(config), std::invalid_argument);
   ContextOwner context(Init(TestConfig()), &Shutdown);
-  CHECK_NOTHROW(FfmpegInput());
   Close(context);
 }
 

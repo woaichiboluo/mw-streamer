@@ -190,54 +190,30 @@ class Syncer::Impl final {
     return false;
   }
 
-  bool Push(const AvDecoderReadResult& input, bool video) {
+  bool TryPush(const AvDecoderReadResult& input, bool video) {
     auto& track = video ? video_ : audio_;
-    std::unique_lock lock(mutex_);
+    std::lock_guard lock(mutex_);
     if (!accepting_) {
-      MW_LOG_DEBUG("streamer",
-                   "Syncer[{}] 拒绝输入: track={} generation={} 已停止或失败",
-                   fmt::ptr(this), video ? "video" : "audio", input.generation);
+      MW_LOG_DEBUG("streamer", "Syncer[{}] 拒绝输入: track={} 已停止或失败",
+                   fmt::ptr(this), video ? "video" : "audio");
       return false;
     }
     ValidateInput(input, video, config_);
-    const bool blocked = track.inputs.size() == config_.input_capacity;
-    Clock::time_point wait_started;
-    if (blocked) {
-      wait_started = Clock::now();
+    if (track.inputs.size() >= config_.input_capacity) {
       MW_LOG_DEBUG("streamer",
-                   "Syncer[{}] 队列已满，等待空间: track={} generation={} "
+                   "Syncer[{}] 队列已满，拒绝输入: track={} "
                    "queue={}/{}",
-                   fmt::ptr(this), video ? "video" : "audio", input.generation,
+                   fmt::ptr(this), video ? "video" : "audio",
                    track.inputs.size(), config_.input_capacity);
-    }
-    track.space_available.wait(lock, [&] {
-      return !accepting_ || track.inputs.size() < config_.input_capacity;
-    });
-    if (blocked) {
-      MW_LOG_DEBUG(
-          "streamer",
-          "Syncer[{}] 队列等待结束: track={} generation={} "
-          "wait_us={} cancelled={} queue={}/{}",
-          fmt::ptr(this), video ? "video" : "audio", input.generation,
-          std::chrono::duration_cast<Microseconds>(Clock::now() - wait_started)
-              .count(),
-          !accepting_, track.inputs.size(), config_.input_capacity);
-    }
-    if (!accepting_) return false;
-    if ((submitted_generation_ && input.generation < *submitted_generation_) ||
-        (track.generation == input.generation && track.eof)) {
-      throw std::invalid_argument("Syncer 输入代次或 EOF 顺序无效");
+      return false;
     }
     track.inputs.push_back(input);
-    submitted_generation_ = input.generation;
-    track.generation = input.generation;
-    track.eof = input.status == AvDecoderReadStatus::kEof;
     MW_LOG_TRACE("streamer",
-                 "Syncer[{}] 接受输入: track={} kind={} generation={} "
+                 "Syncer[{}] 接受输入: track={} kind={} "
                  "stream={} pts={} time_base={}/{} end_pts={} samples={} "
                  "queue={}/{}",
                  fmt::ptr(this), video ? "video" : "audio",
-                 track.eof ? "eof" : "frame", input.generation,
+                 input.status == AvDecoderReadStatus::kEof ? "eof" : "frame",
                  input.stream_index,
                  input.frame ? (*input.frame)->pts : AV_NOPTS_VALUE,
                  input.time_base.num, input.time_base.den, input.end_pts,
@@ -262,8 +238,6 @@ class Syncer::Impl final {
     }
     accepting_ = false;
     changed_.notify_all();
-    video_.space_available.notify_all();
-    audio_.space_available.notify_all();
   }
 
   void Stop() noexcept {
@@ -282,9 +256,6 @@ class Syncer::Impl final {
  private:
   struct Track {
     std::deque<AvDecoderReadResult> inputs;
-    std::condition_variable space_available;
-    std::optional<std::uint64_t> generation;
-    bool eof = false;
   };
 
   void CheckStopped() const {
@@ -296,10 +267,7 @@ class Syncer::Impl final {
   void Clear() {
     for (auto* track : {&video_, &audio_}) {
       track->inputs.clear();
-      track->generation.reset();
-      track->eof = false;
     }
-    submitted_generation_.reset();
     ++revision_;
   }
 
@@ -315,15 +283,14 @@ class Syncer::Impl final {
     if (result.consumed) {
       const auto& input = track.inputs.front();
       MW_LOG_TRACE("streamer",
-                   "Syncer[{}] 消费输入: track={} generation={} kind={} "
+                   "Syncer[{}] 消费输入: track={} kind={} "
                    "pts={} time_base={}/{} produced_frame={} remaining={}",
-                   fmt::ptr(this), video ? "video" : "audio", input.generation,
+                   fmt::ptr(this), video ? "video" : "audio",
                    input.status == AvDecoderReadStatus::kEof ? "eof" : "frame",
                    input.frame ? (*input.frame)->pts : AV_NOPTS_VALUE,
                    input.time_base.num, input.time_base.den,
                    result.frame.has_value(), track.inputs.size() - 1);
       track.inputs.pop_front();
-      track.space_available.notify_one();
     }
     return result;
   }
@@ -428,7 +395,6 @@ class Syncer::Impl final {
   std::condition_variable changed_;
   Track video_;
   Track audio_;
-  std::optional<std::uint64_t> submitted_generation_;
   std::uint64_t revision_ = 0;
   bool accepting_ = false;
   bool started_ = false;
@@ -454,11 +420,11 @@ void Syncer::SetOnError(OnError callback) {
   impl_->SetOnError(std::move(callback));
 }
 bool Syncer::Start() { return impl_->Start(); }
-bool Syncer::PushVideo(const AvDecoderReadResult& input) {
-  return impl_->Push(input, true);
+bool Syncer::TryPushVideo(const AvDecoderReadResult& input) {
+  return impl_->TryPush(input, true);
 }
-bool Syncer::PushAudio(const AvDecoderReadResult& input) {
-  return impl_->Push(input, false);
+bool Syncer::TryPushAudio(const AvDecoderReadResult& input) {
+  return impl_->TryPush(input, false);
 }
 std::exception_ptr Syncer::error() const { return impl_->error(); }
 void Syncer::RequestStop() noexcept { impl_->RequestStop(); }

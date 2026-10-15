@@ -84,14 +84,7 @@ class AudioResampler::Impl final {
       return false;
     }
     Validate(input);
-    if (submitted_generation_ &&
-        (input.generation < *submitted_generation_ ||
-         (input.generation == *submitted_generation_ && submitted_eof_))) {
-      throw std::invalid_argument("AudioResampler 输入代次或 EOF 顺序无效");
-    }
     inputs_.push_back(input);
-    submitted_generation_ = input.generation;
-    submitted_eof_ = input.status == AvDecoderReadStatus::kEof;
     return true;
   }
 
@@ -116,10 +109,9 @@ class AudioResampler::Impl final {
                 Rescale(output.end_pts, input.time_base, time_base());
           }
           MW_LOG_TRACE("streamer",
-                       "AudioResampler 输出 EOF: generation={} stream={} "
+                       "AudioResampler 输出 EOF: stream={} "
                        "end_pts={} time_base=1/{}",
-                       output.generation, output.stream_index, output.end_pts,
-                       rate_);
+                       output.stream_index, output.end_pts, rate_);
           PopInput();
           return output;
         }
@@ -149,8 +141,6 @@ class AudioResampler::Impl final {
     MW_LOG_INFO("streamer", "AudioResampler 重置: queued={}", inputs_.size());
     inputs_.clear();
     ClearConverter();
-    submitted_generation_.reset();
-    submitted_eof_ = false;
     failure_ = nullptr;
     stopped_ = false;
   }
@@ -199,8 +189,7 @@ class AudioResampler::Impl final {
   bool Matches(const AvDecoderReadResult& input) const {
     const auto* previous = last_input_->frame->get();
     const auto* current = input.frame->get();
-    return input.generation == last_input_->generation &&
-           input.stream_index == last_input_->stream_index &&
+    return input.stream_index == last_input_->stream_index &&
            current->sample_rate == previous->sample_rate &&
            current->format == previous->format &&
            av_channel_layout_compare(&current->ch_layout,
@@ -218,10 +207,10 @@ class AudioResampler::Impl final {
     FfmpegException::throwIfError(swr_init(context_), "初始化音频重采样器");
     MW_LOG_INFO(
         "streamer",
-        "AudioResampler 建立格式和代次: generation={} stream={} "
+        "AudioResampler 建立格式: stream={} "
         "input_rate={} input_format={} input_channels={} "
         "output_rate={} output_format={} output_channels={}",
-        input.generation, input.stream_index, frame->sample_rate,
+        input.stream_index, frame->sample_rate,
         av_get_sample_fmt_name(static_cast<AVSampleFormat>(frame->format)),
         frame->ch_layout.nb_channels, rate_, av_get_sample_fmt_name(format_),
         layout_.value.nb_channels);
@@ -254,14 +243,12 @@ class AudioResampler::Impl final {
     frame->duration = samples;
     next_output_pts_ = AddSamples(pts, samples);
     MW_LOG_TRACE("streamer",
-                 "AudioResampler 输出帧: generation={} stream={} pts={} "
+                 "AudioResampler 输出帧: stream={} pts={} "
                  "samples={} time_base=1/{}",
-                 last_input_->generation, last_input_->stream_index, pts,
-                 samples, rate_);
+                 last_input_->stream_index, pts, samples, rate_);
     AvDecoderReadResult result;
     result.status = AvDecoderReadStatus::kFrame;
     result.frame = std::move(frame);
-    result.generation = last_input_->generation;
     result.stream_index = last_input_->stream_index;
     result.time_base = time_base();
     return result;
@@ -282,11 +269,10 @@ class AudioResampler::Impl final {
     FfmpegException::throwIfError(capacity, "计算重采样输出容量");
     auto frame = Allocate(capacity > 0 ? capacity : 1, *input.frame);
     MW_LOG_TRACE("streamer",
-                 "AudioResampler 转换输入: generation={} stream={} pts={} "
+                 "AudioResampler 转换输入: stream={} pts={} "
                  "time_base={}/{} samples={} output_pts={}",
-                 input.generation, input.stream_index, source->pts,
-                 input.time_base.num, input.time_base.den, source->nb_samples,
-                 target_pts);
+                 input.stream_index, source->pts, input.time_base.num,
+                 input.time_base.den, source->nb_samples, target_pts);
     const int samples =
         swr_convert(context_, frame->extended_data, frame->nb_samples,
                     const_cast<const std::uint8_t**>(source->extended_data),
@@ -304,9 +290,8 @@ class AudioResampler::Impl final {
     const int samples = swr_convert(context_, frame->extended_data,
                                     frame->nb_samples, nullptr, 0);
     FfmpegException::throwIfError(samples, "排空音频重采样缓存");
-    MW_LOG_TRACE("streamer",
-                 "AudioResampler 排空延迟: generation={} stream={} samples={}",
-                 last_input_->generation, last_input_->stream_index, samples);
+    MW_LOG_TRACE("streamer", "AudioResampler 排空延迟: stream={} samples={}",
+                 last_input_->stream_index, samples);
     return Output(std::move(frame), samples, *next_output_pts_);
   }
 
@@ -327,8 +312,6 @@ class AudioResampler::Impl final {
   std::deque<AvDecoderReadResult> inputs_;
   std::optional<AvDecoderReadResult> last_input_;
   std::optional<std::int64_t> next_output_pts_;
-  std::optional<std::uint64_t> submitted_generation_;
-  bool submitted_eof_ = false;
   bool stopped_ = false;
   std::exception_ptr failure_;
 };

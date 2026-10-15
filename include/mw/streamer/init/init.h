@@ -45,7 +45,7 @@ struct MW_STREAMER_API InitConfig {
 // and propagate the exception.
 MW_STREAMER_API MwStreamerContext* Init(const InitConfig& config = {});
 
-// Call after destroying all Inputs, Schedulers and other ZLM users, before
+// Call after destroying all media objects and other ZLM users, before
 // unloading the library, outside Input callbacks. The caller guarantees this
 // ordering and passes the context returned by Init() exactly once. The context
 // is destroyed; do not delete or reuse its pointer. A null context is a no-op.

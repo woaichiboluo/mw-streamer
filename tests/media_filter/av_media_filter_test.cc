@@ -55,8 +55,7 @@ ffmpeg::Frame Audio(std::int16_t sample = 34) {
   return frame;
 }
 
-AvDecoderReadResult Input(ffmpeg::Frame frame, std::uint64_t generation = 1,
-                          std::int64_t pts = 12000) {
+AvDecoderReadResult Input(ffmpeg::Frame frame, std::int64_t pts = 12000) {
   frame->pts = pts;
   frame->pkt_dts = pts - 2;
   frame->best_effort_timestamp = pts + 1;
@@ -65,17 +64,14 @@ AvDecoderReadResult Input(ffmpeg::Frame frame, std::uint64_t generation = 1,
   AvDecoderReadResult result;
   result.status = AvDecoderReadStatus::kFrame;
   result.frame = std::move(frame);
-  result.generation = generation;
   result.stream_index = 7;
   result.time_base = AVRational{1, 90000};
   result.end_pts = 98765;
   return result;
 }
 
-void CheckTiming(const AvDecoderReadResult& output,
-                 std::uint64_t generation = 1, std::int64_t pts = 12000) {
+void CheckTiming(const AvDecoderReadResult& output, std::int64_t pts = 12000) {
   REQUIRE(output.status == AvDecoderReadStatus::kFrame);
-  REQUIRE(output.generation == generation);
   REQUIRE(output.stream_index == 7);
   REQUIRE(output.time_base.num == 1);
   REQUIRE(output.time_base.den == 90000);
@@ -108,13 +104,28 @@ TEST_CASE("Business filters change content while preserving source timing",
           68);
 }
 
-TEST_CASE("Generation reset is shared across tracks and precedes new content",
+TEST_CASE("Missing business callbacks pass through the original frames",
+          "[media_filter]") {
+  AvMediaFilter filter;
+  filter.Start();
+  auto video = Input(Video());
+  auto audio = Input(Audio());
+  auto* video_frame = video.frame->get();
+  auto* audio_frame = audio.frame->get();
+  auto video_output = filter.ProcessVideo(std::move(video));
+  auto audio_output = filter.ProcessAudio(std::move(audio));
+  REQUIRE(video_output.frame->get() == video_frame);
+  REQUIRE(audio_output.frame->get() == audio_frame);
+  CheckTiming(video_output);
+  CheckTiming(audio_output);
+}
+
+TEST_CASE("Interleaved tracks retain business state until Stop and Start",
           "[media_filter]") {
   std::vector<std::string> calls;
   AvMediaFilter filter;
   filter.SetOnStart([&] { calls.emplace_back("start"); });
   filter.SetOnStop([&] { calls.emplace_back("stop"); });
-  filter.SetOnReset([&] { calls.emplace_back("reset"); });
   filter.SetOnVideo([&](const ffmpeg::Frame& frame) {
     calls.emplace_back("video");
     return frame.Ref();
@@ -124,62 +135,59 @@ TEST_CASE("Generation reset is shared across tracks and precedes new content",
     return frame.Ref();
   });
   filter.Start();
-  filter.ProcessVideo(Input(Video(), 4));
-  filter.ProcessAudio(Input(Audio(), 4));
-  filter.ProcessAudio(Input(Audio(), 5));
-  filter.ProcessVideo(Input(Video(), 5));
-  REQUIRE_THROWS_AS(filter.ProcessAudio(Input(Audio(), 4)),
-                    std::invalid_argument);
+  filter.ProcessVideo(Input(Video()));
+  filter.ProcessAudio(Input(Audio()));
+  filter.ProcessAudio(Input(Audio()));
+  filter.ProcessVideo(Input(Video()));
+  REQUIRE_NOTHROW(filter.ProcessAudio(Input(Audio())));
   filter.Stop();
   filter.Stop();
   filter.Start();
-  filter.ProcessVideo(Input(Video(), 1));
+  filter.ProcessVideo(Input(Video()));
   filter.Stop();
-  REQUIRE(calls == std::vector<std::string>{"start", "video", "audio", "reset",
-                                            "audio", "video", "stop", "start",
+  REQUIRE(calls == std::vector<std::string>{"start", "video", "audio", "audio",
+                                            "video", "audio", "stop", "start",
                                             "video", "stop"});
 }
 
 TEST_CASE("PTS jumps do not reset or repair business-filter timestamps",
           "[media_filter]") {
-  int resets = 0;
   AvMediaFilter filter;
-  filter.SetOnReset([&] { ++resets; });
+  int processed = 0;
+  filter.SetOnVideo([&](const ffmpeg::Frame&) {
+    return Video(static_cast<std::uint8_t>(++processed));
+  });
   filter.Start();
   for (const std::int64_t pts : {12000, 90000000, -300000, 100}) {
-    auto output = filter.ProcessVideo(Input(Video(), 1, pts));
-    CheckTiming(output, 1, pts);
+    auto output = filter.ProcessVideo(Input(Video(), pts));
+    CheckTiming(output, pts);
+    REQUIRE((*output.frame)->data[0][0] == processed);
   }
-  REQUIRE(resets == 0);
+  REQUIRE(processed == 4);
 }
 
 TEST_CASE("EOF and underflow pass through without resetting or stopping",
           "[media_filter]") {
-  int resets = 0;
   int stops = 0;
   AvMediaFilter filter;
-  filter.SetOnReset([&] { ++resets; });
   filter.SetOnStop([&] { ++stops; });
   filter.Start();
-  filter.ProcessVideo(Input(Video(), 1));
+  filter.ProcessVideo(Input(Video()));
   for (auto status : {AvDecoderReadStatus::kEof, AvDecoderReadStatus::kNull}) {
     AvDecoderReadResult input;
     input.status = status;
-    input.generation = 200;
     input.stream_index = 3;
     input.end_pts = 600;
     input.time_base = AVRational{1, 25};
     auto output = filter.ProcessAudio(std::move(input));
     REQUIRE(output.status == status);
-    REQUIRE(output.generation == 200);
     REQUIRE(output.stream_index == 3);
     REQUIRE(output.end_pts == 600);
     REQUIRE(output.time_base.den == 25);
     REQUIRE_FALSE(output.frame.has_value());
   }
-  auto output = filter.ProcessVideo(Input(Video(), 1));
+  auto output = filter.ProcessVideo(Input(Video()));
   CheckTiming(output);
-  REQUIRE(resets == 0);
   REQUIRE(stops == 0);
   filter.Stop();
   REQUIRE(stops == 1);
@@ -190,25 +198,15 @@ TEST_CASE("Callback failures require a fresh filter session",
   int stops = 0;
   AvMediaFilter filter;
   filter.SetOnStop([&] { ++stops; });
-  SECTION("Content callback fails") {
-    filter.SetOnVideo([](const ffmpeg::Frame&) -> ffmpeg::Frame {
-      throw std::runtime_error("Business processing failed");
-    });
-    filter.Start();
-    REQUIRE_THROWS_AS(filter.ProcessVideo(Input(Video())), std::runtime_error);
-  }
-  SECTION("Reset callback fails") {
-    filter.SetOnReset([] { throw std::runtime_error("Reset failed"); });
-    filter.Start();
-    filter.ProcessVideo(Input(Video(), 1));
-    REQUIRE_THROWS_AS(filter.ProcessAudio(Input(Audio(), 2)),
-                      std::runtime_error);
-  }
-  REQUIRE_THROWS_AS(filter.ProcessAudio(Input(Audio(), 2)), std::logic_error);
+  filter.SetOnVideo([](const ffmpeg::Frame&) -> ffmpeg::Frame {
+    throw std::runtime_error("Business processing failed");
+  });
+  filter.Start();
+  REQUIRE_THROWS_AS(filter.ProcessVideo(Input(Video())), std::runtime_error);
+  REQUIRE_THROWS_AS(filter.ProcessAudio(Input(Audio())), std::logic_error);
   filter.Stop();
   REQUIRE(stops == 1);
   filter.SetOnVideo({});
-  filter.SetOnReset({});
   filter.Start();
   auto output = filter.ProcessVideo(Input(Video()));
   CheckTiming(output);
@@ -251,75 +249,209 @@ TEST_CASE("Destruction stops an active session even when Stop throws",
   REQUIRE(stops == 1);
 }
 
-TEST_CASE("Slow business processing serializes Reset and Stop",
+TEST_CASE("Audio processing completes while the video callback is blocked",
           "[media_filter]") {
-  bool reset = false;
-  SECTION("Reset waits for the old generation") { reset = true; }
-  SECTION("Stop waits for processing") { reset = false; }
-
-  std::promise<void> entered;
-  std::atomic<bool> signaled = false;
-  std::promise<void> release;
-  auto released = release.get_future().share();
-  std::vector<std::string> calls;
+  std::promise<void> video_entered;
+  auto entered = video_entered.get_future();
+  std::promise<void> release_video;
+  auto released = release_video.get_future().share();
   AvMediaFilter filter;
   filter.SetOnVideo([&](const ffmpeg::Frame& frame) {
-    calls.emplace_back("video begin");
-    signaled = true;
-    entered.set_value();
+    video_entered.set_value();
     released.wait();
-    calls.emplace_back("video end");
+    return frame.Ref();
+  });
+  filter.SetOnAudio([](const ffmpeg::Frame& frame) { return frame.Ref(); });
+  filter.Start();
+  std::exception_ptr video_error;
+  std::thread video([&] {
+    try {
+      filter.ProcessVideo(Input(Video()));
+    } catch (...) {
+      video_error = std::current_exception();
+    }
+  });
+  const auto video_started = entered.wait_for(2s);
+  std::promise<void> audio_completed;
+  auto audio_completion = audio_completed.get_future();
+  std::exception_ptr audio_error;
+  std::thread audio([&] {
+    try {
+      filter.ProcessAudio(Input(Audio()));
+    } catch (...) {
+      audio_error = std::current_exception();
+    }
+    audio_completed.set_value();
+  });
+  const auto audio_while_video_blocked = audio_completion.wait_for(2s);
+  release_video.set_value();
+  video.join();
+  audio.join();
+  REQUIRE(video_started == std::future_status::ready);
+  REQUIRE(audio_while_video_blocked == std::future_status::ready);
+  REQUIRE_FALSE(video_error);
+  REQUIRE_FALSE(audio_error);
+}
+
+TEST_CASE("Stop waits for both concurrent callbacks before OnStop",
+          "[media_filter]") {
+  std::promise<void> video_entered;
+  std::promise<void> audio_entered;
+  auto video_entry = video_entered.get_future();
+  auto audio_entry = audio_entered.get_future();
+  std::promise<void> release_video;
+  std::promise<void> release_audio;
+  auto video_release = release_video.get_future().share();
+  auto audio_release = release_audio.get_future().share();
+  std::atomic<int> completed_callbacks = 0;
+  int callbacks_when_stopped = -1;
+  AvMediaFilter filter;
+  filter.SetOnVideo([&](const ffmpeg::Frame& frame) {
+    video_entered.set_value();
+    video_release.wait();
+    ++completed_callbacks;
     return frame.Ref();
   });
   filter.SetOnAudio([&](const ffmpeg::Frame& frame) {
-    calls.emplace_back("audio");
+    audio_entered.set_value();
+    audio_release.wait();
+    ++completed_callbacks;
     return frame.Ref();
   });
-  filter.SetOnReset([&] { calls.emplace_back("reset"); });
-  filter.SetOnStop([&] { calls.emplace_back("stop"); });
+  filter.SetOnStop(
+      [&] { callbacks_when_stopped = completed_callbacks.load(); });
   filter.Start();
-  std::exception_ptr processing_error;
-  std::thread processing([&] {
+  std::exception_ptr video_error;
+  std::exception_ptr audio_error;
+  std::exception_ptr stop_error;
+  std::thread video([&] {
     try {
-      filter.ProcessVideo(Input(Video(), 1));
+      filter.ProcessVideo(Input(Video()));
     } catch (...) {
-      processing_error = std::current_exception();
-      if (!signaled.exchange(true)) entered.set_value();
+      video_error = std::current_exception();
     }
   });
-  entered.get_future().wait();
-  std::promise<void> attempting;
-  std::promise<void> completed;
-  auto completion = completed.get_future();
-  std::exception_ptr control_error;
-  std::thread control([&] {
-    attempting.set_value();
+  const auto video_started = video_entry.wait_for(2s);
+  std::thread audio([&] {
     try {
-      if (reset) {
-        filter.ProcessAudio(Input(Audio(), 2));
-      } else {
-        filter.Stop();
-      }
+      filter.ProcessAudio(Input(Audio()));
     } catch (...) {
-      control_error = std::current_exception();
+      audio_error = std::current_exception();
     }
-    completed.set_value();
   });
-  attempting.get_future().wait();
-  const auto while_blocked = completion.wait_for(40ms);
-  release.set_value();
-  processing.join();
-  control.join();
-  REQUIRE(while_blocked == std::future_status::timeout);
-  REQUIRE_FALSE(processing_error);
-  REQUIRE_FALSE(control_error);
-  if (reset) {
-    REQUIRE(calls == std::vector<std::string>{"video begin", "video end",
-                                              "reset", "audio"});
-  } else {
-    REQUIRE(calls ==
-            std::vector<std::string>{"video begin", "video end", "stop"});
-  }
+  const auto audio_started = audio_entry.wait_for(2s);
+  std::promise<void> stop_attempted;
+  auto stop_attempt = stop_attempted.get_future();
+  std::promise<void> stop_completed;
+  auto stop_completion = stop_completed.get_future();
+  std::thread stop([&] {
+    stop_attempted.set_value();
+    try {
+      filter.Stop();
+    } catch (...) {
+      stop_error = std::current_exception();
+    }
+    stop_completed.set_value();
+  });
+  stop_attempt.wait();
+  const auto both_blocked = stop_completion.wait_for(40ms);
+  bool new_process_rejected = false;
+  std::exception_ptr new_process_error;
+  std::promise<void> new_process_completed;
+  auto new_process_completion = new_process_completed.get_future();
+  std::thread new_process([&] {
+    try {
+      filter.ProcessAudio(AvDecoderReadResult{});
+    } catch (const std::logic_error&) {
+      new_process_rejected = true;
+    } catch (...) {
+      new_process_error = std::current_exception();
+    }
+    new_process_completed.set_value();
+  });
+  const auto rejected_while_stopping = new_process_completion.wait_for(2s);
+  release_video.set_value();
+  video.join();
+  const auto audio_still_blocked = stop_completion.wait_for(40ms);
+  release_audio.set_value();
+  audio.join();
+  stop.join();
+  new_process.join();
+  REQUIRE(video_started == std::future_status::ready);
+  REQUIRE(audio_started == std::future_status::ready);
+  REQUIRE(both_blocked == std::future_status::timeout);
+  REQUIRE(audio_still_blocked == std::future_status::timeout);
+  REQUIRE(rejected_while_stopping == std::future_status::ready);
+  REQUIRE(new_process_rejected);
+  REQUIRE_FALSE(new_process_error);
+  REQUIRE_FALSE(video_error);
+  REQUIRE_FALSE(audio_error);
+  REQUIRE_FALSE(stop_error);
+  REQUIRE(callbacks_when_stopped == 2);
+}
+
+TEST_CASE("A failing callback leaves the concurrent callback able to finish",
+          "[media_filter]") {
+  std::promise<void> audio_entered;
+  auto audio_entry = audio_entered.get_future();
+  std::promise<void> release_audio;
+  auto audio_release = release_audio.get_future().share();
+  AvMediaFilter filter;
+  filter.SetOnAudio([&](const ffmpeg::Frame& frame) {
+    audio_entered.set_value();
+    audio_release.wait();
+    return frame.Ref();
+  });
+  filter.SetOnVideo([](const ffmpeg::Frame&) -> ffmpeg::Frame {
+    throw std::runtime_error("Video callback failed");
+  });
+  filter.Start();
+  std::exception_ptr audio_error;
+  std::exception_ptr video_error;
+  std::exception_ptr stop_error;
+  std::thread audio([&] {
+    try {
+      filter.ProcessAudio(Input(Audio()));
+    } catch (...) {
+      audio_error = std::current_exception();
+    }
+  });
+  const auto audio_started = audio_entry.wait_for(2s);
+  std::promise<void> video_completed;
+  auto video_completion = video_completed.get_future();
+  std::thread video([&] {
+    try {
+      filter.ProcessVideo(Input(Video()));
+    } catch (...) {
+      video_error = std::current_exception();
+    }
+    video_completed.set_value();
+  });
+  const auto video_failed_while_audio_blocked = video_completion.wait_for(2s);
+  std::promise<void> stop_completed;
+  auto stop_completion = stop_completed.get_future();
+  std::thread stop([&] {
+    try {
+      filter.Stop();
+    } catch (...) {
+      stop_error = std::current_exception();
+    }
+    stop_completed.set_value();
+  });
+  const auto stop_while_audio_blocked = stop_completion.wait_for(40ms);
+  release_audio.set_value();
+  audio.join();
+  video.join();
+  stop.join();
+  REQUIRE(audio_started == std::future_status::ready);
+  REQUIRE(video_failed_while_audio_blocked == std::future_status::ready);
+  REQUIRE(stop_while_audio_blocked == std::future_status::timeout);
+  REQUIRE_FALSE(audio_error);
+  REQUIRE(video_error);
+  REQUIRE_FALSE(stop_error);
+  filter.SetOnAudio({});
+  REQUIRE_NOTHROW(filter.Start());
+  REQUIRE_NOTHROW(filter.ProcessAudio(Input(Audio())));
 }
 
 TEST_CASE("CUDA business filters retain hardware surfaces and input timing",
@@ -341,20 +473,16 @@ TEST_CASE("CUDA business filters retain hardware surfaces and input timing",
   const auto* frame_context = frame->hw_frames_ctx->data;
 
   AvMediaFilter filter;
-  int resets = 0;
   filter.SetOnVideo([](const ffmpeg::Frame& input) { return input.Ref(); });
-  filter.SetOnReset([&] { ++resets; });
   filter.Start();
   auto output = filter.ProcessVideo(Input(std::move(frame)));
   CheckTiming(output);
   REQUIRE((*output.frame)->format == AV_PIX_FMT_CUDA);
   REQUIRE((*output.frame)->data[0] == surface);
   REQUIRE((*output.frame)->hw_frames_ctx->data == frame_context);
-  output.generation = 2;
   output = filter.ProcessVideo(std::move(output));
-  REQUIRE(resets == 1);
   filter.Stop();
-  CheckTiming(output, 2);
+  CheckTiming(output);
   REQUIRE((*output.frame)->data[0] == surface);
   REQUIRE((*output.frame)->hw_frames_ctx->data == frame_context);
 }

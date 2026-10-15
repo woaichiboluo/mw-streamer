@@ -24,7 +24,6 @@ using mw::streamer::ForceFpsConfig;
 namespace ffmpeg = mw::streamer::ffmpeg;
 
 AvDecoderReadResult Video(std::int64_t pts, std::uint8_t pixel = 1,
-                          std::uint64_t generation = 1,
                           AVRational time_base = {1, 1000}) {
   ffmpeg::Frame frame;
   frame->format = AV_PIX_FMT_GRAY8;
@@ -43,17 +42,14 @@ AvDecoderReadResult Video(std::int64_t pts, std::uint8_t pixel = 1,
   result.status = AvDecoderReadStatus::kFrame;
   result.frame = std::move(frame);
   result.time_base = time_base;
-  result.generation = generation;
   result.stream_index = 3;
   return result;
 }
 
 void Check(const AvDecoderReadResult& result, std::int64_t pts,
-           std::uint8_t pixel, std::uint64_t generation = 1,
-           AVRational time_base = {1, 25}) {
+           std::uint8_t pixel, AVRational time_base = {1, 25}) {
   REQUIRE(result.status == AvDecoderReadStatus::kFrame);
   REQUIRE(result.frame.has_value());
-  REQUIRE(result.generation == generation);
   REQUIRE(result.stream_index == 3);
   REQUIRE(result.time_base.num == time_base.num);
   REQUIRE(result.time_base.den == time_base.den);
@@ -110,8 +106,8 @@ TEST_CASE("ForceFps rational frame rates preserve exact grid over long runs",
   REQUIRE(fps.time_base().num == 1001);
   REQUIRE(fps.time_base().den == 30000);
   for (std::int64_t i = 0; i < 10000; ++i) {
-    REQUIRE(fps.TryPushFrame(Video(i * 3003, 7, 1, AVRational{1, 90000})));
-    Check(fps.TryReadFrame(), i, 7, 1, AVRational{1001, 30000});
+    REQUIRE(fps.TryPushFrame(Video(i * 3003, 7, AVRational{1, 90000})));
+    Check(fps.TryReadFrame(), i, 7, AVRational{1001, 30000});
   }
   REQUIRE(fps.TryReadFrame().status == AvDecoderReadStatus::kNull);
 }
@@ -155,7 +151,6 @@ TEST_CASE("ForceFps rejects a full queue without consuming the retry frame",
   REQUIRE((*pending.frame)->pkt_dts == 118);
   REQUIRE((*pending.frame)->best_effort_timestamp == 122);
   REQUIRE((*pending.frame)->duration == 40);
-  REQUIRE(pending.generation == 1);
   Check(fps.TryReadFrame(), 0, 1);
   REQUIRE(PushWithoutWaiting(fps, pending));
   Check(fps.TryReadFrame(), 1, 1);
@@ -205,7 +200,6 @@ TEST_CASE("ForceFps rejected EOF does not close admission before it is retried",
   REQUIRE(fps.TryPushFrame(Video(0, 1)));
   AvDecoderReadResult eof;
   eof.status = AvDecoderReadStatus::kEof;
-  eof.generation = 1;
   eof.end_pts = 80;
   eof.time_base = AVRational{1, 1000};
   REQUIRE_FALSE(PushWithoutWaiting(fps, eof));
@@ -217,32 +211,30 @@ TEST_CASE("ForceFps rejected EOF does not close admission before it is retried",
   REQUIRE(PushWithoutWaiting(fps, eof));
   const auto output = fps.TryReadFrame();
   REQUIRE(output.status == AvDecoderReadStatus::kEof);
-  REQUIRE(output.generation == 1);
   REQUIRE(output.end_pts == 2);
   REQUIRE(fps.TryReadFrame().status == AvDecoderReadStatus::kNull);
 }
 
-TEST_CASE("ForceFps rejected new generations do not advance admission state",
+TEST_CASE("ForceFps rejected input does not change timestamp history",
           "[force-fps]") {
   ForceFps fps(ForceFpsConfig{AVRational{25, 1}, 1});
-  REQUIRE(fps.TryPushFrame(Video(0, 1, 7)));
-  auto pending = Video(400, 3, 8);
-  SECTION("A new generation frame is rejected") {}
-  SECTION("A new generation EOF is rejected") {
+  REQUIRE(fps.TryPushFrame(Video(0, 1)));
+  auto pending = Video(-400, 3);
+  SECTION("A frame after a PTS jump is rejected") {}
+  SECTION("An EOF is rejected") {
     pending.frame.reset();
     pending.status = AvDecoderReadStatus::kEof;
   }
   REQUIRE_FALSE(PushWithoutWaiting(fps, pending));
-  Check(fps.TryReadFrame(), 0, 1, 7);
-  REQUIRE(fps.TryPushFrame(Video(40, 2, 7)));
-  Check(fps.TryReadFrame(), 1, 2, 7);
+  Check(fps.TryReadFrame(), 0, 1);
+  REQUIRE(fps.TryPushFrame(Video(40, 2)));
+  Check(fps.TryReadFrame(), 1, 2);
   REQUIRE(PushWithoutWaiting(fps, pending));
   if (pending.status == AvDecoderReadStatus::kFrame) {
-    Check(fps.TryReadFrame(), 10, 3, 8);
+    Check(fps.TryReadFrame(), -10, 3);
   } else {
     const auto output = fps.TryReadFrame();
     REQUIRE(output.status == AvDecoderReadStatus::kEof);
-    REQUIRE(output.generation == 8);
   }
   REQUIRE(fps.TryReadFrame().status == AvDecoderReadStatus::kNull);
 }
@@ -254,12 +246,11 @@ TEST_CASE("ForceFps drains earlier frames before EOF and rescales its endpoint",
   REQUIRE(fps.TryPushFrame(Video(120, 2)));
   AvDecoderReadResult eof;
   eof.status = AvDecoderReadStatus::kEof;
-  eof.generation = 1;
   eof.stream_index = 3;
   eof.time_base = AVRational{1, 1000};
   eof.end_pts = 160;
   REQUIRE(fps.TryPushFrame(eof));
-  REQUIRE_THROWS_AS(fps.TryPushFrame(Video(160)), std::invalid_argument);
+  REQUIRE(fps.TryPushFrame(Video(160)));
   Check(fps.TryReadFrame(), 0, 1);
   Check(fps.TryReadFrame(), 1, 1);
   Check(fps.TryReadFrame(), 2, 1);
@@ -267,59 +258,59 @@ TEST_CASE("ForceFps drains earlier frames before EOF and rescales its endpoint",
   auto output = fps.TryReadFrame();
   REQUIRE(output.status == AvDecoderReadStatus::kEof);
   REQUIRE_FALSE(output.frame.has_value());
-  REQUIRE(output.generation == 1);
   REQUIRE(output.stream_index == 3);
   REQUIRE(output.time_base.num == 1);
   REQUIRE(output.time_base.den == 25);
   REQUIRE(output.end_pts == 4);
+  Check(fps.TryReadFrame(), 4, 1);
   REQUIRE(fps.TryReadFrame().status == AvDecoderReadStatus::kNull);
 }
 
-TEST_CASE("ForceFps changes generations only after queued old frames finish",
+TEST_CASE("ForceFps processes queued frames before a backward PTS jump",
           "[force-fps]") {
   ForceFps fps;
-  REQUIRE(fps.TryPushFrame(Video(0, 1, 7)));
-  REQUIRE(fps.TryPushFrame(Video(120, 2, 7)));
-  REQUIRE(fps.TryPushFrame(Video(400, 3, 8)));
-  REQUIRE_THROWS_AS(fps.TryPushFrame(Video(440, 4, 7)), std::invalid_argument);
-  Check(fps.TryReadFrame(), 0, 1, 7);
-  Check(fps.TryReadFrame(), 1, 1, 7);
-  Check(fps.TryReadFrame(), 2, 1, 7);
-  Check(fps.TryReadFrame(), 3, 2, 7);
-  // A new generation must not repeat old-generation pictures to fill the gap.
-  Check(fps.TryReadFrame(), 10, 3, 8);
+  REQUIRE(fps.TryPushFrame(Video(0, 1)));
+  REQUIRE(fps.TryPushFrame(Video(120, 2)));
+  REQUIRE(fps.TryPushFrame(Video(0, 3)));
+  REQUIRE(fps.TryPushFrame(Video(40, 4)));
+  Check(fps.TryReadFrame(), 0, 1);
+  Check(fps.TryReadFrame(), 1, 1);
+  Check(fps.TryReadFrame(), 2, 1);
+  Check(fps.TryReadFrame(), 3, 2);
+  // A backward PTS jump starts a fresh output grid in queued input order.
+  Check(fps.TryReadFrame(), 0, 3);
+  Check(fps.TryReadFrame(), 1, 4);
   REQUIRE(fps.TryReadFrame().status == AvDecoderReadStatus::kNull);
 }
 
-TEST_CASE("ForceFps accepts a queued new generation after old EOF",
+TEST_CASE("ForceFps accepts queued input after EOF and clears picture history",
           "[force-fps]") {
   ForceFps fps;
   AvDecoderReadResult eof;
   eof.status = AvDecoderReadStatus::kEof;
-  eof.generation = 1;
   REQUIRE(fps.TryPushFrame(Video(0, 1)));
   REQUIRE(fps.TryPushFrame(eof));
-  REQUIRE(fps.TryPushFrame(Video(80, 2, 2)));
+  REQUIRE(fps.TryPushFrame(Video(80, 2)));
   Check(fps.TryReadFrame(), 0, 1);
   const auto output = fps.TryReadFrame();
   REQUIRE(output.status == AvDecoderReadStatus::kEof);
   REQUIRE(output.end_pts == AV_NOPTS_VALUE);
-  Check(fps.TryReadFrame(), 2, 2, 2);
+  Check(fps.TryReadFrame(), 2, 2);
 }
 
 TEST_CASE("ForceFps Reset discards pending pictures and allows a new session",
           "[force-fps]") {
   ForceFps fps;
-  REQUIRE(fps.TryPushFrame(Video(0, 1, 9)));
-  Check(fps.TryReadFrame(), 0, 1, 9);
-  REQUIRE(fps.TryPushFrame(Video(120, 2, 9)));
-  Check(fps.TryReadFrame(), 1, 1, 9);
+  REQUIRE(fps.TryPushFrame(Video(0, 1)));
+  Check(fps.TryReadFrame(), 0, 1);
+  REQUIRE(fps.TryPushFrame(Video(120, 2)));
+  Check(fps.TryReadFrame(), 1, 1);
   fps.Stop();
-  REQUIRE_FALSE(fps.TryPushFrame(Video(160, 4, 9)));
+  REQUIRE_FALSE(fps.TryPushFrame(Video(160, 4)));
   fps.Reset();
   REQUIRE(fps.TryReadFrame().status == AvDecoderReadStatus::kNull);
-  REQUIRE(fps.TryPushFrame(Video(400, 3, 0)));
-  Check(fps.TryReadFrame(), 10, 3, 0);
+  REQUIRE(fps.TryPushFrame(Video(400, 3)));
+  Check(fps.TryReadFrame(), 10, 3);
 }
 
 TEST_CASE(

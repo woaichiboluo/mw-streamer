@@ -45,6 +45,7 @@ struct SyncerConfig {
 // and video output. Owns bounded per-track queues and one scheduling thread.
 // Upstream performs video FPS conversion, audio format conversion and business
 // filtering; downstream performs any frame-size reblocking for encoding.
+// PTS discontinuities drive resynchronization.
 // EOF is consumed, not delivered: missing input continues as frozen/backup
 // video and silence. Shared media clock holds for two seconds without real
 // frames, then extrapolates; backup delivery may be bursty.
@@ -71,27 +72,27 @@ class MW_STREAMER_API Syncer final {
   void SetOnAudioFrame(OnAudioFrame callback);
   void SetOnError(OnError callback);
   // False if already started or thread creation fails. Restart after Stop
-  // begins a fresh session, including timing, generations and queued frames.
+  // begins a fresh session, including timing and queued frames.
   bool Start();
-  // One producer per track may run concurrently. Feed tracks from independent
-  // producer paths: blocking on one queue must not prevent feeding the other.
-  // Blocks on a full queue; false means not started/stopped/failed.
-  // Invalid frames, disabled tracks,
-  // decreasing generations or same-generation input after EOF throw. Across
-  // both tracks, submitted generations must be nondecreasing, as in Filter.
-  bool PushVideo(const AvDecoderReadResult& input);
-  bool PushAudio(const AvDecoderReadResult& input);
+  // One producer per track may run concurrently. Never waits for queue space;
+  // false means full or not started/stopped/failed, without consuming input.
+  // Retain rejected input and retry after the scheduler consumes queued data.
+  // Invalid frames or disabled tracks throw. Inputs retain per-track FIFO
+  // order; EOF does not close admission or reset
+  // either clock. Subsequent frames may restart PTS without restarting Syncer.
+  bool TryPushVideo(const AvDecoderReadResult& input);
+  bool TryPushAudio(const AvDecoderReadResult& input);
 
   // Both frame callbacks run serially on the scheduling thread, outside queue
-  // locks. They must return promptly and must not call Push, Start, Stop or
+  // locks. They must return promptly and must not call TryPush, Start, Stop or
   // destroy Syncer. RequestStop and error() are safe in callbacks. Exceptions
   // from a frame callback terminate the session and notify OnError once;
   // exceptions from OnError are logged. OnError runs on the same worker and
-  // must also not call Push, Start, Stop or destroy Syncer. No callbacks occur
-  // after Stop returns.
+  // must also not call TryPush, Start, Stop or destroy Syncer. No callbacks
+  // occur after Stop returns.
   std::exception_ptr error() const;
   void RequestStop() noexcept;
-  // Wakes blocked producers and scheduler, joins, then discards queued frames.
+  // Wakes the scheduler, joins, then discards queued frames.
   // Does not cancel an executing callback. Serialize Start/Stop/destruction;
   // finish external producer calls before destruction or restart.
   void Stop() noexcept;

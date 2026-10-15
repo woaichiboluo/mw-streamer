@@ -158,7 +158,6 @@ TEST_CASE("AvInputProxy nonloop source preserves every packet and reports EOF",
   AvInputProxy proxy(config);
   CHECK(proxy.ReadPacket().status == AvInputReadStatus::kNull);
   REQUIRE(proxy.Start(SamplePath()));
-  std::uint64_t generation = 0;
   std::shared_ptr<const mw::streamer::AvInputInfo> info;
   for (std::size_t index = 0; index < expected.size(); ++index) {
     auto result = proxy.ReadPacket();
@@ -166,10 +165,8 @@ TEST_CASE("AvInputProxy nonloop source preserves every packet and reports EOF",
     REQUIRE(result.packet.has_value());
     REQUIRE(result.info != nullptr);
     if (index == 0) {
-      generation = result.generation;
       info = result.info;
     }
-    CHECK(result.generation == generation);
     CHECK(result.info == info);
     CheckPacket(*result.packet, expected[index]);
   }
@@ -198,7 +195,7 @@ TEST_CASE("AvInputProxy nonloop source preserves every packet and reports EOF",
   CHECK(proxy.ReadPacket().status == AvInputReadStatus::kNull);
 }
 
-TEST_CASE("AvInputProxy exposes EOF before reopening each complete generation",
+TEST_CASE("AvInputProxy exposes EOF before reopening each complete input",
           "[av-input-proxy][loop][ownership]") {
   bool nonblocking = false;
   SECTION("blocking reads") {}
@@ -221,9 +218,8 @@ TEST_CASE("AvInputProxy exposes EOF before reopening each complete generation",
     }));
     return result;
   };
-  std::uint64_t previous_generation = 0;
+  std::shared_ptr<const mw::streamer::AvInputInfo> previous_info;
   for (int cycle = 0; cycle < 3; ++cycle) {
-    std::uint64_t generation = 0;
     std::shared_ptr<const mw::streamer::AvInputInfo> info;
     for (std::size_t index = 0; index < expected.size(); ++index) {
       auto result = read();
@@ -231,30 +227,27 @@ TEST_CASE("AvInputProxy exposes EOF before reopening each complete generation",
       REQUIRE(result.packet.has_value());
       REQUIRE(result.info != nullptr);
       if (index == 0) {
-        generation = result.generation;
         info = result.info;
+        CHECK(info != previous_info);
         if (cycle == 0) {
           retained_packet = *result.packet;
           retained_info = info;
         } else {
-          CHECK(generation == previous_generation + 1);
           CHECK(info != retained_info);
         }
       }
-      CHECK(result.generation == generation);
       CHECK(result.info == info);
       CheckPacket(*result.packet, expected[index]);
     }
     // Draining packets alone must not retire the input or publish proxy EOF.
     std::this_thread::sleep_for(20ms);
-    CHECK(proxy.status().generation == generation);
+    CHECK(proxy.info() == info);
     CHECK(proxy.status().state == AvInputProxyState::kConnected);
     const auto eof = read();
     REQUIRE(eof.status == AvInputReadStatus::kEof);
     CHECK_FALSE(eof.packet.has_value());
-    CHECK(eof.generation == generation);
     CHECK(eof.info == info);
-    previous_generation = generation;
+    previous_info = info;
   }
   proxy.Stop();
   CHECK(proxy.status().state == AvInputProxyState::kStopped);
@@ -279,7 +272,6 @@ TEST_CASE(
   AvInputProxy proxy(config);
   REQUIRE(proxy.Start(SamplePath()));
   mw::streamer::AvInputProxyReadResult tail;
-  std::uint64_t generation = 0;
   std::shared_ptr<const mw::streamer::AvInputInfo> info;
   for (std::size_t index = 0; index < source.packets.size(); ++index) {
     auto result = proxy.ReadPacket();
@@ -287,30 +279,26 @@ TEST_CASE(
     REQUIRE(result.packet.has_value());
     REQUIRE(result.info != nullptr);
     if (index == 0) {
-      generation = result.generation;
       info = result.info;
     }
-    CHECK(result.generation == generation);
     CHECK(result.info == info);
     CheckPacket(*result.packet, source.packets[index]);
     tail = std::move(result);
   }
   const auto eof = proxy.ReadPacket();
   REQUIRE(eof.status == AvInputReadStatus::kEof);
-  CHECK(eof.generation == generation);
   CHECK(eof.info == info);
   if (loop) {
     REQUIRE(WaitFor([&] {
       const auto status = proxy.status();
       return status.state == AvInputProxyState::kConnected &&
-             status.generation == generation + 1;
+             status.info != nullptr && status.info != info;
     }));
   } else {
     REQUIRE(WaitFor(
         [&] { return proxy.status().state == AvInputProxyState::kEnded; }));
   }
   REQUIRE(tail.packet.has_value());
-  CHECK(tail.generation == generation);
   CHECK(tail.info == info);
   REQUIRE(tail.info != nullptr);
   CHECK(tail.info->metadata == source.info.metadata);
@@ -324,7 +312,6 @@ TEST_CASE(
     const auto next = proxy.ReadPacket();
     REQUIRE(next.status == AvInputReadStatus::kPacket);
     REQUIRE(next.packet.has_value());
-    CHECK(next.generation == generation + 1);
     CHECK(next.info != tail.info);
     CheckPacket(*next.packet, source.packets.front());
     CheckPacket(*tail.packet, source.packets.back());
@@ -340,27 +327,27 @@ TEST_CASE("AvInputProxy delivers EOF even when the next open fails",
   file.Restore();
   const auto source = ReadNativeSource();
   bool removed = false;
+  bool connected = false;
   std::error_code removal_error;
   AvInputProxyConfig config;
   config.loop = true;
   config.input.packet_capacity = 1;
   AvInputProxy proxy(config);
   proxy.SetOnStateChanged([&](const auto& status) {
-    if (status.state == AvInputProxyState::kConnecting &&
-        status.generation == 1) {
+    if (status.state == AvInputProxyState::kConnected) connected = true;
+    if (status.state == AvInputProxyState::kConnecting && connected &&
+        !removed) {
       // The previous input is closed, and the next input has not opened yet.
       removed = std::filesystem::remove(file.path(), removal_error);
     }
   });
   REQUIRE(proxy.Start(file.path()));
   std::shared_ptr<const mw::streamer::AvInputInfo> info;
-  std::uint64_t generation = 0;
   for (const auto& expected : source.packets) {
     auto result = proxy.ReadPacket();
     REQUIRE(result.status == AvInputReadStatus::kPacket);
     REQUIRE(result.packet.has_value());
     CheckPacket(*result.packet, expected);
-    generation = result.generation;
     info = result.info;
   }
   mw::streamer::AvInputProxyReadResult eof;
@@ -370,13 +357,12 @@ TEST_CASE("AvInputProxy delivers EOF even when the next open fails",
   }));
   REQUIRE(eof.status == AvInputReadStatus::kEof);
   CHECK_FALSE(eof.packet.has_value());
-  CHECK(eof.generation == generation);
   CHECK(eof.info == info);
   REQUIRE(WaitFor([&] {
     return proxy.status().state == AvInputProxyState::kWaitingRetry;
   }));
   const auto retry_status = proxy.status();
-  CHECK(retry_status.generation == generation + 1);
+  CHECK(retry_status.retry_count == 1);
   CHECK(ExceptionCode(retry_status.error) == AVERROR(ENOENT));
   CHECK(proxy.TryReadPacket().status == AvInputReadStatus::kNull);
   proxy.Stop();

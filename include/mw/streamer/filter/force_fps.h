@@ -39,10 +39,8 @@ class MW_STREAMER_API ForceFps final {
   // Returns false when full or stopped, without consuming input or changing
   // admission state. Retain rejected input and retry after reading.
   // Accepts video frames with a known source PTS and valid
-  // result time_base, or EOF. Invalid input, decreasing generation or
-  // submission after the same generation's EOF throws. A newer generation is
-  // accepted behind queued old input/EOF and resets conversion when actually
-  // consumed.
+  // result time_base, or EOF. Invalid input throws. Input after EOF is accepted
+  // in queue order; consuming EOF clears conversion history.
   bool TryPushFrame(const AvDecoderReadResult& input);
   // Produces at most one output per call, discarding surplus input as needed.
   // Gaps repeat the most recent picture lazily, leaving the current input at
@@ -56,7 +54,7 @@ class MW_STREAMER_API ForceFps final {
   // return kNull. Does not wait for producer or reader calls to finish.
   void Stop();
   // Discards queued inputs and conversion history, reopening admission.
-  // Generations may restart at zero. To reuse an active session, first Stop(),
+  // To reuse an active session, first Stop(),
   // finish all producer/reader calls, then Reset(); Reset must never overlap
   // producers from the previous session.
   void Reset();

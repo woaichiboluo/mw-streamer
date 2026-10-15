@@ -23,8 +23,6 @@ extern "C" {
 #include <libavutil/samplefmt.h>
 }
 
-#include <tbb/parallel_invoke.h>
-
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/av_dictionary.h"
 #include "mw/streamer/ffmpeg/codec_context.h"
@@ -39,6 +37,27 @@ namespace {
 constexpr std::size_t kFrameCapacity = 1;
 constexpr int kVideoIndex = 0;
 constexpr int kAudioIndex = 1;
+
+void ValidateTiming(const ffmpeg::Frame& frame) {
+  if (frame->pts == AV_NOPTS_VALUE || frame->time_base.num <= 0 ||
+      frame->time_base.den <= 0 || frame->duration < 0) {
+    throw std::invalid_argument("编码输入需要有效的 PTS、时间基和非负时长");
+  }
+}
+
+ffmpeg::Frame InTimeBase(const ffmpeg::Frame& frame, AVRational time_base) {
+  auto result = frame.Ref();
+  result->pts = av_rescale_q(frame->pts, frame->time_base, time_base);
+  result->duration = av_rescale_q(frame->duration, frame->time_base, time_base);
+  result->time_base = time_base;
+  if (result->pts == AV_NOPTS_VALUE ||
+      result->pts == std::numeric_limits<std::int64_t>::max() ||
+      result->duration < 0 ||
+      result->duration == std::numeric_limits<std::int64_t>::max()) {
+    throw std::overflow_error("编码输入时间基换算溢出");
+  }
+  return result;
+}
 
 bool ReservedOption(std::string_view key) {
   constexpr std::string_view reserved[] = {
@@ -348,7 +367,8 @@ std::unique_ptr<ffmpeg::CodecContext> OpenAudio(const AvEncoderConfig& config,
 class AudioFilter final {
  public:
   AudioFilter(AVSampleFormat input, AVSampleFormat output, int rate,
-              const AVChannelLayout& layout, int frame_size) {
+              const AVChannelLayout& layout, int frame_size)
+      : time_base_{1, rate} {
     latency_.Start("perf.filter.encoder.audio", this, "filter.encoder.audio",
                    kAudioIndex);
     source_ = avfilter_graph_alloc_filter(
@@ -366,7 +386,7 @@ class AudioFilter final {
         });
     parameters->format = input;
     parameters->sample_rate = rate;
-    parameters->time_base = {1, rate};
+    parameters->time_base = time_base_;
     Check(av_channel_layout_copy(&parameters->ch_layout, &layout),
           "设置编码音频源布局");
     Check(av_buffersrc_parameters_set(source_, parameters),
@@ -392,12 +412,12 @@ class AudioFilter final {
   }
 
   void Submit(const ffmpeg::Frame& frame) {
-    if (!latency_.enabled()) {
-      Check(av_buffersrc_write_frame(source_, frame.get()), "提交编码音频源帧");
-      return;
+    // abuffer interprets PTS in its configured input time base. Reblocking
+    // retains the caller's timeline; only the timestamp unit changes here.
+    auto submitted = InTimeBase(frame, time_base_);
+    if (latency_.enabled()) {
+      latency_.Attach(submitted->opaque_ref, latency_.Begin());
     }
-    auto submitted = frame.Ref();
-    latency_.Attach(submitted->opaque_ref, latency_.Begin());
     Check(av_buffersrc_write_frame(source_, submitted.get()),
           "提交编码音频源帧");
   }
@@ -418,6 +438,7 @@ class AudioFilter final {
     ffmpeg::FfmpegException::throwIfError(result, operation);
   }
   internal::StageLatency latency_;
+  const AVRational time_base_;
   ffmpeg::FilterGraph graph_;
   AVFilterContext* source_ = nullptr;
   AVFilterContext* sink_ = nullptr;
@@ -441,7 +462,7 @@ class AvEncoder::Impl final {
   }
 
   bool Start(const AvEncoderConfig& config) noexcept {
-    if (worker_.joinable()) {
+    if (HasWorkers()) {
       MW_LOG_ERROR("streamer", "AvEncoder 启动失败: 重新启动前需要 Stop");
       return false;
     }
@@ -491,15 +512,19 @@ class AvEncoder::Impl final {
         std::lock_guard lock(mutex_);
         streams_ = std::move(streams);
         session_ = std::move(session);
-        video_pts_ = audio_pts_ = 0;
+        // Workers cannot leave their initial queue wait until this lock is
+        // released. A partial startup failure marks the session aborted first.
+        try {
+          if (video && !video_.worker.Start([this] { Run(true); }))
+            throw std::runtime_error("启动 AvEncoder 视频线程失败");
+          if (audio && !audio_.worker.Start([this] { Run(false); }))
+            throw std::runtime_error("启动 AvEncoder 音频线程失败");
+        } catch (...) {
+          accepting_ = false;
+          error_ = std::current_exception();
+          throw;
+        }
         accepting_ = true;
-      }
-      if (!worker_.Start([this] { Run(); })) {
-        std::lock_guard lock(mutex_);
-        accepting_ = false;
-        session_.reset();
-        streams_.clear();
-        throw std::runtime_error("启动 AvEncoder 帧线程失败");
       }
       MW_LOG_INFO("streamer", "AvEncoder 已启动: video={} audio={}", video,
                   audio);
@@ -534,66 +559,57 @@ class AvEncoder::Impl final {
     return error_;
   }
 
-  bool SubmitFrame(const MediaFrame& frame) {
+  bool TryPush(const ffmpeg::Frame& frame, bool video) {
     std::lock_guard lock(mutex_);
     if (!accepting_) return false;
     const auto& config = session_->config;
-    if (static_cast<bool>(session_->video) != frame.video.has_value() ||
-        static_cast<bool>(session_->audio) != frame.audio.has_value())
-      throw std::invalid_argument("编码输入与配置的音视频轨道不匹配");
-    if (frame.video && (!frame.video->get() || !(*frame.video)->data[0]))
-      throw std::invalid_argument("编码视频内容为空");
-    const int samples =
-        frame.audio && frame.audio->get() ? (*frame.audio)->nb_samples : 0;
-    if (frame.audio &&
-        (!frame.audio->get() || !(*frame.audio)->data[0] || samples <= 0 ||
-         (*frame.audio)->format != config.audio_sample_format ||
-         (*frame.audio)->sample_rate != config.audio_sample_rate ||
-         av_channel_layout_compare(&(*frame.audio)->ch_layout,
-                                   &config.audio_channel_layout) != 0))
+    if (video ? !session_->video : !session_->audio)
+      throw std::invalid_argument("编码输入轨道未启用");
+    if (!frame.get() || !frame->data[0])
+      throw std::invalid_argument("编码输入内容为空");
+    if (!video && (frame->nb_samples <= 0 ||
+                   frame->format != config.audio_sample_format ||
+                   frame->sample_rate != config.audio_sample_rate ||
+                   av_channel_layout_compare(
+                       &frame->ch_layout, &config.audio_channel_layout) != 0))
       throw std::invalid_argument("编码音频内容或格式不匹配");
-    if ((frame.video &&
-         video_pts_ == std::numeric_limits<std::int64_t>::max()) ||
-        audio_pts_ > std::numeric_limits<std::int64_t>::max() - samples)
-      throw std::overflow_error("编码输入时间计数溢出");
-    MediaFrame retained = frame;
-    if (retained.video) {
-      (*retained.video)->pts = video_pts_++;
-      (*retained.video)->time_base = av_inv_q(config.fps);
-      (*retained.video)->duration = 1;
+    ValidateTiming(frame);
+    auto& track = video ? video_ : audio_;
+    if (track.frames.size() >= kFrameCapacity) {
+      MW_LOG_WARNING("streamer",
+                     "AvEncoder 输入队列满，丢弃新帧: track={} pts={} "
+                     "time_base={}/{} queue={}/{}",
+                     video ? "video" : "audio", frame->pts,
+                     frame->time_base.num, frame->time_base.den,
+                     track.frames.size(), kFrameCapacity);
+      return false;
     }
-    if (retained.audio) {
-      (*retained.audio)->pts = audio_pts_;
-      (*retained.audio)->time_base = {1, config.audio_sample_rate};
-      (*retained.audio)->duration = samples;
-      audio_pts_ += samples;
-    }
-    if (frames_.size() == kFrameCapacity) {
-      MW_LOG_TRACE("streamer", "AvEncoder 实时帧队列满，丢弃新帧");
-    } else {
-      frames_.push_back(std::move(retained));
-      wake_.notify_one();
-    }
+    track.frames.push_back(frame.Ref());
+    wake_.notify_all();
     return true;
   }
 
   void Stop() noexcept {
-    if (!worker_.joinable()) return;
+    if (!HasWorkers()) return;
     {
-      std::unique_lock lock(mutex_);
+      std::lock_guard lock(mutex_);
       accepting_ = false;
-      wake_.wait(lock,
-                 [this] { return error_ || frames_.size() < kFrameCapacity; });
-      if (!error_) frames_.push_back(std::nullopt);
     }
-    wake_.notify_one();
-    worker_.Join();
+    wake_.notify_all();
+    video_.worker.Join();
+    audio_.worker.Join();
     std::lock_guard lock(mutex_);
-    frames_.clear();
+    video_.frames.clear();
+    audio_.frames.clear();
     session_.reset();
   }
 
  private:
+  struct Track {
+    internal::Thread worker;
+    std::deque<ffmpeg::Frame> frames;
+  };
+
   struct Session {
     explicit Session(AvEncoderConfig value) : config(std::move(value)) {}
     AvEncoderConfig config;
@@ -605,8 +621,12 @@ class AvEncoder::Impl final {
     std::unique_ptr<AudioFilter> filter;
   };
 
+  bool HasWorkers() const {
+    return video_.worker.joinable() || audio_.worker.joinable();
+  }
+
   void CheckConfigurable() const {
-    if (worker_.joinable())
+    if (HasWorkers())
       throw std::logic_error("配置或重新启动 AvEncoder 前需要 Stop");
   }
   internal::StageLatency& Latency(int index) {
@@ -626,14 +646,7 @@ class AvEncoder::Impl final {
     }
   }
   void Encode(AVCodecContext& context, const ffmpeg::Frame& frame, int index) {
-    auto submitted = frame.Ref();
-    submitted->pts =
-        av_rescale_q(frame->pts, frame->time_base, context.time_base);
-    submitted->duration =
-        av_rescale_q(frame->duration, frame->time_base, context.time_base);
-    submitted->time_base = context.time_base;
-    if (submitted->pts == AV_NOPTS_VALUE || submitted->duration < 0)
-      throw std::invalid_argument("编码时间戳换算溢出");
+    auto submitted = InTimeBase(frame, context.time_base);
     if (context.codec_type == AVMEDIA_TYPE_VIDEO) {
       submitted->pict_type = AV_PICTURE_TYPE_NONE;
       submitted->pkt_dts = AV_NOPTS_VALUE;
@@ -668,20 +681,17 @@ class AvEncoder::Impl final {
     if (Receive(context, index) != AVERROR_EOF)
       throw std::runtime_error("编码器排空未到达 EOF");
   }
-  void Video(const std::optional<MediaFrame>& frame) {
-    if (!session_->video) return;
+  void Video(const ffmpeg::Frame* frame) {
     if (frame) {
-      const auto prepared =
-          PrepareVideoFrame(*session_->video->get(), *frame->video);
+      const auto prepared = PrepareVideoFrame(*session_->video->get(), *frame);
       Encode(*session_->video->get(), prepared, kVideoIndex);
     } else {
       DrainCodec(*session_->video->get(), kVideoIndex);
     }
   }
-  void Audio(const std::optional<MediaFrame>& frame) {
-    if (!session_->audio) return;
+  void Audio(const ffmpeg::Frame* frame) {
     if (frame)
-      session_->filter->Submit(*frame->audio);
+      session_->filter->Submit(*frame);
     else
       session_->filter->End();
     for (;;) {
@@ -691,30 +701,45 @@ class AvEncoder::Impl final {
     }
     if (!frame) DrainCodec(*session_->audio->get(), kAudioIndex);
   }
-  void Run() noexcept {
+  void Run(bool video) noexcept {
     try {
+      auto& track = video ? video_ : audio_;
       for (;;) {
-        std::optional<MediaFrame> frame;
+        std::optional<ffmpeg::Frame> frame;
         {
           std::unique_lock lock(mutex_);
-          wake_.wait(lock, [this] { return !frames_.empty(); });
-          frame = std::move(frames_.front());
-          frames_.pop_front();
+          wake_.wait(lock, [this, &track] {
+            return !accepting_ || error_ || !track.frames.empty();
+          });
+          if (error_) return;
+          if (!track.frames.empty()) {
+            frame = std::move(track.frames.front());
+            track.frames.pop_front();
+          }
         }
-        wake_.notify_all();
-        tbb::parallel_invoke([&] { Video(frame); }, [&] { Audio(frame); });
+        // Closing admission drains each track's accepted FIFO before codec
+        // EOF. Audio also drains its reblocking filter before codec EOF.
+        if (video)
+          Video(frame ? &*frame : nullptr);
+        else
+          Audio(frame ? &*frame : nullptr);
         if (!frame) break;
       }
     } catch (...) {
       const auto failure = std::current_exception();
+      bool first = false;
       {
         std::lock_guard lock(mutex_);
-        error_ = failure;
+        if (!error_) {
+          error_ = failure;
+          first = true;
+        }
         accepting_ = false;
-        frames_.clear();
+        video_.frames.clear();
+        audio_.frames.clear();
       }
       wake_.notify_all();
-      if (on_error_) {
+      if (first && on_error_) {
         try {
           on_error_(failure);
         } catch (...) {
@@ -725,7 +750,8 @@ class AvEncoder::Impl final {
   }
 
   ffmpeg::HwDeviceContext device_;
-  internal::Thread worker_;
+  Track video_;
+  Track audio_;
   OnPacket on_packet_;
   OnError on_error_;
   mutable std::mutex mutex_;
@@ -734,9 +760,6 @@ class AvEncoder::Impl final {
   std::exception_ptr error_;
   std::unique_ptr<Session> session_;
   std::vector<ffmpeg::StreamInfo> streams_;
-  std::deque<std::optional<MediaFrame>> frames_;
-  std::int64_t video_pts_ = 0;
-  std::int64_t audio_pts_ = 0;
 };
 
 AvEncoder::AvEncoder(const ffmpeg::HwDeviceContext& device)
@@ -754,8 +777,11 @@ bool AvEncoder::Start(const AvEncoderConfig& config) noexcept {
 std::vector<ffmpeg::StreamInfo> AvEncoder::streams() const {
   return impl_->streams();
 }
-bool AvEncoder::SubmitFrame(const MediaFrame& frame) {
-  return impl_->SubmitFrame(frame);
+bool AvEncoder::TryPushVideo(const ffmpeg::Frame& frame) {
+  return impl_->TryPush(frame, true);
+}
+bool AvEncoder::TryPushAudio(const ffmpeg::Frame& frame) {
+  return impl_->TryPush(frame, false);
 }
 std::exception_ptr AvEncoder::error() const { return impl_->error(); }
 void AvEncoder::Stop() noexcept { impl_->Stop(); }
