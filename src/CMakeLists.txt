@@ -45,7 +45,7 @@ set(MW_STREAMER_SOURCES
     streamer/platform/thread.cc
     streamer/scheduler/scheduler.cc
     streamer/encoder/av_encoder.cc
-    streamer/performance/remuxer_performance.cc
+    streamer/performance/latency.cc
     streamer/remuxer/packet_converter.cc
     streamer/remuxer/remux_output.cc
     streamer/remuxer/remuxer.cc

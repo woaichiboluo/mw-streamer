@@ -11,6 +11,7 @@
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/performance/latency.h"
 #include "mw/streamer/platform/thread.h"
 
 namespace mw::streamer {
@@ -88,6 +89,13 @@ class AvDecoder::Impl final {
     ffmpeg::FfmpegException::throwIfError(
         avcodec_parameters_to_context(context, stream_.codec_parameters.get()),
         "avcodec_parameters_to_context");
+    const bool video = context->codec_type == AVMEDIA_TYPE_VIDEO;
+    latency_.Start(video ? "perf.decoder.video" : "perf.decoder.audio", this,
+                   video ? "decode.video" : "decode.audio",
+                   stream_.stream_index);
+#ifdef AV_CODEC_FLAG_COPY_OPAQUE
+    if (latency_.enabled()) context->flags |= AV_CODEC_FLAG_COPY_OPAQUE;
+#endif
     context->pkt_timebase = stream_.time_base;
     context->thread_count = config_.thread_count;
     if (context->codec_type == AVMEDIA_TYPE_VIDEO) {
@@ -184,6 +192,7 @@ class AvDecoder::Impl final {
   void Stop() noexcept {
     RequestStop();
     worker_.Join();
+    latency_.Finish();
     std::lock_guard<std::mutex> lock(mutex_);
     packets_.clear();
     frames_.clear();
@@ -308,6 +317,7 @@ class AvDecoder::Impl final {
               throw ffmpeg::FfmpegException(AVERROR_INVALIDDATA,
                                             "AvDecoder 硬解未交付硬件帧");
             }
+            latency_.Complete(frame->opaque_ref);
             frame->pts = frame->best_effort_timestamp;
             frame->time_base = stream_.time_base;
             next_pts = FrameEndPts(frame);
@@ -336,6 +346,11 @@ class AvDecoder::Impl final {
         }
         // EOF is ordered behind all submitted packets. After a drain the codec
         // waits for a new generation, instead of closing its worker/context.
+#ifdef AV_CODEC_FLAG_COPY_OPAQUE
+        if (input.packet) {
+          latency_.Attach(input.packet->get()->opaque_ref, latency_.Begin());
+        }
+#endif
         ffmpeg::FfmpegException::throwIfError(
             avcodec_send_packet(context_.get(),
                                 input.packet ? input.packet->get() : nullptr),
@@ -377,6 +392,7 @@ class AvDecoder::Impl final {
   std::exception_ptr error_;
   std::deque<Input> packets_;
   std::deque<AvDecoderReadResult> frames_;
+  internal::StageLatency latency_;
   internal::Thread worker_;
 };
 

@@ -232,8 +232,9 @@ TEST_CASE("module levels preserve defaults and support complete replacement") {
     CHECK_FALSE(mw::log::ShouldLog("streamer", LogLevel::kDebug));
     for (const auto* module :
          {"perf.input", "perf.decoder.video", "perf.decoder.audio",
-          "perf.scheduler", "perf.encoder.video", "perf.encoder.audio",
-          "perf.remux"}) {
+          "perf.encoder.video", "perf.encoder.audio", "perf.filter.input.video",
+          "perf.filter.input.audio", "perf.filter.encoder.audio",
+          "perf.filter.video", "perf.filter.audio"}) {
       CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kTrace));
       CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kDebug));
       CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kInfo));
@@ -257,7 +258,7 @@ TEST_CASE("module levels preserve defaults and support complete replacement") {
     Logging logging(config);
     CHECK(mw::log::ShouldLog("perf.input", LogLevel::kInfo));
     CHECK_FALSE(mw::log::ShouldLog("perf.input", LogLevel::kDebug));
-    CHECK_FALSE(mw::log::ShouldLog("perf.remux", LogLevel::kCritical));
+    CHECK_FALSE(mw::log::ShouldLog("perf.encoder.video", LogLevel::kCritical));
   }
   config.modules.clear();
   {

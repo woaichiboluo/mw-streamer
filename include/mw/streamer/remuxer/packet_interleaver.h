@@ -2,7 +2,6 @@
 #define MW_STREAMER_REMUXER_PACKET_INTERLEAVER_H_
 
 #include <algorithm>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -20,7 +19,6 @@ class PacketInterleaver final {
  public:
   struct Item {
     ffmpeg::Packet packet;
-    std::chrono::steady_clock::time_point queued_at{};
   };
   explicit PacketInterleaver(const std::vector<ffmpeg::StreamInfo>& streams)
       : validation_(streams) {
@@ -36,8 +34,7 @@ class PacketInterleaver final {
   void Validate(const ffmpeg::Packet& packet) const {
     validation_.Validate(packet);
   }
-  void Push(const ffmpeg::Packet& packet,
-            std::chrono::steady_clock::time_point queued_at = {}) {
+  void Push(const ffmpeg::Packet& packet) {
     if (flushed_) throw std::logic_error("交织器已经排空");
     Validate(packet);
     auto track = std::find_if(
@@ -45,7 +42,7 @@ class PacketInterleaver final {
         [&](const auto& value) { return value.index == packet->stream_index; });
     if (track->highest && packet->dts < *track->highest)
       throw std::invalid_argument("编码包 DTS 回退");
-    Item item{packet.Ref(), queued_at};
+    Item item{packet.Ref()};
     const auto position = std::upper_bound(
         queue_.begin(), queue_.end(), item,
         [&](const auto& left, const auto& right) {
@@ -58,7 +55,6 @@ class PacketInterleaver final {
         });
     queue_.insert(position, std::move(item));
     track->highest = packet->dts;
-    queued_bytes_ += PayloadBytes(packet);
   }
   // After startup, FFmpeg's ten-second max_interleave_delta permits progress
   // when a track stalls. ZLM cannot retain an indefinitely absent startup
@@ -75,7 +71,6 @@ class PacketInterleaver final {
     if (!initialized_) return result;
     while (!queue_.empty() &&
            (flush || AllTracksBuffered() || ExceedsDelta())) {
-      queued_bytes_ -= PayloadBytes(queue_.front().packet);
       result.push_back(std::move(queue_.front()));
       queue_.erase(queue_.begin());
     }
@@ -94,9 +89,7 @@ class PacketInterleaver final {
     }
     return result;
   }
-  bool initialized() const noexcept { return initialized_; }
   std::size_t queued_packets() const noexcept { return queue_.size(); }
-  std::size_t queued_bytes() const noexcept { return queued_bytes_; }
 
  private:
   struct Track {
@@ -105,9 +98,6 @@ class PacketInterleaver final {
     AVRational time_base;
     std::optional<std::int64_t> highest;
   };
-  static std::size_t PayloadBytes(const ffmpeg::Packet& packet) noexcept {
-    return packet->size > 0 ? static_cast<std::size_t>(packet->size) : 0;
-  }
   bool ExceedsDelta() const {
     if (queue_.size() < 2) return false;
     const auto& first = queue_.front().packet;
@@ -139,7 +129,6 @@ class PacketInterleaver final {
   MediaTimestampConverter validation_;
   std::vector<Track> tracks_;
   std::vector<Item> queue_;
-  std::size_t queued_bytes_ = 0;
   bool initialized_ = false;
   bool flushed_ = false;
 };

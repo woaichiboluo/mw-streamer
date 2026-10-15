@@ -30,6 +30,7 @@ extern "C" {
 #include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/ffmpeg/filter_graph.h"
+#include "mw/streamer/performance/latency.h"
 #include "mw/streamer/platform/thread.h"
 
 namespace mw::streamer {
@@ -255,7 +256,17 @@ const AVCodec* FindEncoder(const std::string& name, AVMediaType type) {
   return codec;
 }
 
-void OpenCodec(AVCodecContext& context, ffmpeg::AvDictionary& options) {
+void OpenCodec(AVCodecContext& context, ffmpeg::AvDictionary& options,
+               bool measure_latency) {
+#if defined(AV_CODEC_FLAG_COPY_OPAQUE) && \
+    defined(AV_CODEC_CAP_ENCODER_REORDERED_OPAQUE)
+  if (measure_latency &&
+      (context.codec->capabilities & AV_CODEC_CAP_ENCODER_REORDERED_OPAQUE)) {
+    context.flags |= AV_CODEC_FLAG_COPY_OPAQUE;
+  }
+#else
+  (void)measure_latency;
+#endif
   // Preserve independent parameter sets for downstream track initialization.
   context.flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
   if (context.codec->capabilities & AV_CODEC_CAP_SLICE_THREADS)
@@ -272,7 +283,8 @@ void OpenCodec(AVCodecContext& context, ffmpeg::AvDictionary& options) {
 }
 
 std::unique_ptr<ffmpeg::CodecContext> OpenVideo(
-    const AvEncoderConfig& config, const ffmpeg::HwDeviceContext& device) {
+    const AvEncoderConfig& config, const ffmpeg::HwDeviceContext& device,
+    bool measure_latency) {
   const auto* pixel = av_pix_fmt_desc_get(config.video_pixel_format);
   if (config.width <= 0 || config.height <= 0 || !pixel ||
       (pixel->flags & AV_PIX_FMT_FLAG_HWACCEL) || config.gop_size < 0 ||
@@ -294,11 +306,12 @@ std::unique_ptr<ffmpeg::CodecContext> OpenVideo(
   ffmpeg::AvDictionary options;
   CopyOptions(config.video_options, options);
   ConfigureRateControl(config, options);
-  OpenCodec(*context, options);
+  OpenCodec(*context, options, measure_latency);
   return owned;
 }
 
-std::unique_ptr<ffmpeg::CodecContext> OpenAudio(const AvEncoderConfig& config) {
+std::unique_ptr<ffmpeg::CodecContext> OpenAudio(const AvEncoderConfig& config,
+                                                bool measure_latency) {
   if (config.audio_sample_rate <= 0 || config.audio_bit_rate < 0 ||
       av_get_bytes_per_sample(config.audio_sample_format) <= 0 ||
       !av_channel_layout_check(&config.audio_channel_layout))
@@ -328,7 +341,7 @@ std::unique_ptr<ffmpeg::CodecContext> OpenAudio(const AvEncoderConfig& config) {
       "复制编码声道布局");
   ffmpeg::AvDictionary options;
   CopyOptions(config.audio_options, options);
-  OpenCodec(*context, options);
+  OpenCodec(*context, options, measure_latency);
   return owned;
 }
 
@@ -336,6 +349,8 @@ class AudioFilter final {
  public:
   AudioFilter(AVSampleFormat input, AVSampleFormat output, int rate,
               const AVChannelLayout& layout, int frame_size) {
+    latency_.Start("perf.filter.encoder.audio", this, "filter.encoder.audio",
+                   kAudioIndex);
     source_ = avfilter_graph_alloc_filter(
         graph_.get(), avfilter_get_by_name("abuffer"), "in");
     sink_ = avfilter_graph_alloc_filter(
@@ -377,7 +392,14 @@ class AudioFilter final {
   }
 
   void Submit(const ffmpeg::Frame& frame) {
-    Check(av_buffersrc_write_frame(source_, frame.get()), "提交编码音频源帧");
+    if (!latency_.enabled()) {
+      Check(av_buffersrc_write_frame(source_, frame.get()), "提交编码音频源帧");
+      return;
+    }
+    auto submitted = frame.Ref();
+    latency_.Attach(submitted->opaque_ref, latency_.Begin());
+    Check(av_buffersrc_write_frame(source_, submitted.get()),
+          "提交编码音频源帧");
   }
   void End() {
     Check(av_buffersrc_close(source_, AV_NOPTS_VALUE, 0), "结束编码音频源");
@@ -386,6 +408,7 @@ class AudioFilter final {
     const int result = av_buffersink_get_frame(sink_, frame.get());
     if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) return false;
     Check(result, "获取编码音频滤镜帧");
+    latency_.Complete(frame->opaque_ref);
     frame->time_base = av_buffersink_get_time_base(sink_);
     return true;
   }
@@ -394,6 +417,7 @@ class AudioFilter final {
   static void Check(int result, const char* operation) {
     ffmpeg::FfmpegException::throwIfError(result, operation);
   }
+  internal::StageLatency latency_;
   ffmpeg::FilterGraph graph_;
   AVFilterContext* source_ = nullptr;
   AVFilterContext* sink_ = nullptr;
@@ -435,12 +459,17 @@ class AvEncoder::Impl final {
         throw std::invalid_argument("AvEncoder 需要至少一条轨道和有效帧率");
       }
       if (video) {
-        session->video = OpenVideo(config, device_);
+        session->video_latency.Start("perf.encoder.video", this, "encode.video",
+                                     kVideoIndex);
+        session->video =
+            OpenVideo(config, device_, session->video_latency.enabled());
         streams.push_back(ffmpeg::StreamInfo::FromCodecContext(
             *session->video->get(), kVideoIndex));
       }
       if (audio) {
-        session->audio = OpenAudio(config);
+        session->audio_latency.Start("perf.encoder.audio", this, "encode.audio",
+                                     kAudioIndex);
+        session->audio = OpenAudio(config, session->audio_latency.enabled());
         const auto* context = session->audio->get();
         streams.push_back(
             ffmpeg::StreamInfo::FromCodecContext(*context, kAudioIndex));
@@ -569,6 +598,8 @@ class AvEncoder::Impl final {
     explicit Session(AvEncoderConfig value) : config(std::move(value)) {}
     AvEncoderConfig config;
     ffmpeg::Frame audio_format;
+    internal::StageLatency video_latency;
+    internal::StageLatency audio_latency;
     std::unique_ptr<ffmpeg::CodecContext> video;
     std::unique_ptr<ffmpeg::CodecContext> audio;
     std::unique_ptr<AudioFilter> filter;
@@ -578,12 +609,17 @@ class AvEncoder::Impl final {
     if (worker_.joinable())
       throw std::logic_error("配置或重新启动 AvEncoder 前需要 Stop");
   }
+  internal::StageLatency& Latency(int index) {
+    return index == kVideoIndex ? session_->video_latency
+                                : session_->audio_latency;
+  }
   int Receive(AVCodecContext& context, int index) {
     for (;;) {
       ffmpeg::Packet packet;
       const int result = avcodec_receive_packet(&context, packet.get());
       if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) return result;
       ffmpeg::FfmpegException::throwIfError(result, "avcodec_receive_packet");
+      Latency(index).Complete(packet->opaque_ref);
       packet->stream_index = index;
       packet->time_base = context.time_base;
       if (on_packet_) on_packet_(packet);
@@ -602,6 +638,12 @@ class AvEncoder::Impl final {
       submitted->pict_type = AV_PICTURE_TYPE_NONE;
       submitted->pkt_dts = AV_NOPTS_VALUE;
     }
+#ifdef AV_CODEC_FLAG_COPY_OPAQUE
+    if (context.flags & AV_CODEC_FLAG_COPY_OPAQUE) {
+      auto& latency = Latency(index);
+      latency.Attach(submitted->opaque_ref, latency.Begin());
+    }
+#endif
     for (;;) {
       const int result = avcodec_send_frame(&context, submitted.get());
       if (result != AVERROR(EAGAIN)) {

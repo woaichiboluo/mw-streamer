@@ -23,6 +23,7 @@ extern "C" {
 
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/performance/latency.h"
 #include "mw/streamer/platform/thread.h"
 
 namespace mw::streamer {
@@ -225,6 +226,10 @@ class Scheduler::Impl final {
       MW_LOG_ERROR("streamer", "Scheduler 启动失败: Output 初始化失败");
       return false;
     }
+    if (on_video_ && config_.output.video_pixel_format != AV_PIX_FMT_NONE)
+      video_latency_.Start("perf.filter.video", this, "filter.video");
+    if (on_audio_ && config_.output.audio_sample_format != AV_SAMPLE_FMT_NONE)
+      audio_latency_.Start("perf.filter.audio", this, "filter.audio");
     std::unique_ptr<VideoExecutor> video;
     if (config_.output.video_pixel_format != AV_PIX_FMT_NONE) {
       video = std::make_unique<VideoExecutor>();
@@ -272,6 +277,8 @@ class Scheduler::Impl final {
     RequestStop();
     worker_.Join();
     video_.reset();
+    video_latency_.Finish();
+    audio_latency_.Finish();
     slots_.clear();
   }
 
@@ -531,14 +538,22 @@ class Scheduler::Impl final {
         if (all_failed) {
           return ffmpeg::Frame{};
         }
-        return on_video_ ? on_video_(*inputs, tick)
-                         : SelectTrack(*inputs, true);
+        if (!on_video_) return SelectTrack(*inputs, true);
+        const auto started = video_latency_.Begin();
+        auto frame = on_video_(*inputs, tick);
+        video_latency_.End(started);
+        return frame;
       });
-    auto audio =
-        config_.output.audio_sample_format == AV_SAMPLE_FMT_NONE || all_failed
-            ? ffmpeg::Frame{}
-        : on_audio_ ? on_audio_(*inputs, tick)
-                    : SelectTrack(*inputs, false);
+    auto audio = [&] {
+      if (config_.output.audio_sample_format == AV_SAMPLE_FMT_NONE ||
+          all_failed)
+        return ffmpeg::Frame{};
+      if (!on_audio_) return SelectTrack(*inputs, false);
+      const auto started = audio_latency_.Begin();
+      auto frame = on_audio_(*inputs, tick);
+      audio_latency_.End(started);
+      return frame;
+    }();
     return {tick, sample_index, std::move(video), std::move(audio)};
   }
 
@@ -564,6 +579,8 @@ class Scheduler::Impl final {
     }
     // Accepted tasks finish before Stop permits releasing filter resources.
     video_.reset();
+    video_latency_.Finish();
+    audio_latency_.Finish();
     SetStatus(SchedulerState::kStopped);
   }
 
@@ -577,6 +594,8 @@ class Scheduler::Impl final {
   bool variable_cadence_ = false;
   std::vector<InputSlot> slots_;
   std::unique_ptr<VideoExecutor> video_;
+  internal::StageLatency video_latency_;
+  internal::StageLatency audio_latency_;
   internal::Thread worker_;
   std::atomic<bool> stopping_{false};
   mutable std::mutex mutex_;

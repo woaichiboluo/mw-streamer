@@ -1,6 +1,5 @@
 #include "mw/streamer/remuxer/remuxer.h"
 
-#include <algorithm>
 #include <condition_variable>
 #include <exception>
 #include <mutex>
@@ -15,7 +14,6 @@ extern "C" {
 
 #include "Poller/EventPoller.h"
 #include "mw/log.h"
-#include "mw/streamer/performance/performance.h"
 #include "mw/streamer/remuxer/packet_converter.h"
 #include "mw/streamer/remuxer/packet_interleaver.h"
 #include "mw/streamer/remuxer/remux_output.h"
@@ -72,7 +70,6 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
         converter_ = std::move(converter);
         std::lock_guard<std::mutex> lock(mutex_);
         interleaver_ = std::move(interleaver);
-        performance_.Start(this, streams);
         timestamps_ = std::move(timestamps);
         handoff_.reset();
         running_ = accepting_ = true;
@@ -88,26 +85,13 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
 
   bool SubmitPacket(const ffmpeg::Packet& packet) {
     std::unique_lock<std::mutex> lock(mutex_);
-    if (!accepting_) {
-      performance_.Rejected();
-      return false;
-    }
+    if (!accepting_) return false;
     if (poller_->isCurrentThread())
       throw std::logic_error("Remuxer 不允许在输出 poller 上提交编码包");
-    try {
-      interleaver_->Validate(packet);
-    } catch (...) {
-      performance_.Error();
-      throw;
-    }
+    interleaver_->Validate(packet);
     writable_.wait(lock, [&] { return !accepting_ || !handoff_; });
-    if (!accepting_) {
-      performance_.Rejected();
-      return false;
-    }
-    handoff_ =
-        internal::PacketInterleaver::Item{packet.Ref(), performance_.Begin()};
-    performance_.Accepted(*packet.get());
+    if (!accepting_) return false;
+    handoff_ = internal::PacketInterleaver::Item{packet.Ref()};
     Schedule();
     return true;
   }
@@ -205,7 +189,6 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!running_) return;
-      performance_.Error();
       if (!error_reported_) {
         error_reported_ = true;
         accepting_ = false;
@@ -255,16 +238,14 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
           scheduled_ = false;
           return;
         }
-        const auto interleave_started = performance_.Begin();
         if (handoff_) {
-          interleaver_->Push(handoff_->packet, handoff_->queued_at);
+          interleaver_->Push(handoff_->packet);
           handoff_.reset();
           writable_.notify_all();
         }
         if (!timestamps_->initialized())
           first_packets = interleaver_->FirstPackets();
         packets = interleaver_->PopReady(draining_);
-        performance_.Interleaved(interleave_started, performance_.Begin());
         scheduled_ = false;
         finish = draining_;
       }
@@ -276,20 +257,11 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
           eof_tracks.insert(packet.packet->stream_index);
       }
       for (const auto& packet : packets) {
-        const auto convert_started = performance_.Begin();
         const auto timestamp = timestamps_->Convert(packet.packet);
         const auto dts_ms = timestamp.dts_ms;
         const auto pts_ms = timestamp.pts_ms;
         auto frame = converter_->Convert(packet.packet, dts_ms, pts_ms);
-        const auto mux_started = performance_.Begin();
         output_->InputFrame(frame);
-        const auto finished = performance_.Begin();
-        if (performance_.enabled()) {
-          std::lock_guard<std::mutex> lock(mutex_);
-          performance_.HandedOff(*packet.packet.get(), pts_ms, dts_ms,
-                                 packet.queued_at, convert_started, mux_started,
-                                 finished);
-        }
         if (!eof_tracks.empty()) {
           eof_tracks.erase(packet.packet->stream_index);
           // EOF identifies which declared tracks actually have packets.
@@ -297,15 +269,6 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
           // fills.
           if (eof_tracks.empty() && !output_->tracks_ready()) output_->Flush();
         }
-      }
-      {
-        std::lock_guard<std::mutex> lock(mutex_);
-        performance_.Report(interleaver_->queued_packets() + (handoff_ ? 1 : 0),
-                            interleaver_->queued_bytes() +
-                                (handoff_ ? static_cast<std::size_t>(std::max(
-                                                handoff_->packet->size, 0))
-                                          : 0),
-                            interleaver_->initialized(), draining_);
       }
     } catch (...) {
       Error(std::current_exception());
@@ -346,7 +309,6 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
             std::lock_guard<std::mutex> lock(self->mutex_);
             self->handoff_.reset();
             self->interleaver_.reset();
-            self->performance_.Report(0, 0, true, self->draining_, true);
             self->running_ = self->scheduled_ = false;
           }
           self->stopped_.notify_all();
@@ -372,7 +334,6 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
   toolkit::EventPoller::Ptr poller_;
   std::shared_ptr<internal::RemuxOutput> output_;
   std::unique_ptr<internal::PacketInterleaver> interleaver_;
-  internal::RemuxPerformance performance_;
   std::unique_ptr<internal::PacketConverter> converter_;
   std::unique_ptr<internal::MediaTimestampConverter> timestamps_;
 };

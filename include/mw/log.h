@@ -61,10 +61,13 @@ struct LogConfig {
       {"perf.input", LogLevel::kOff},
       {"perf.decoder.video", LogLevel::kOff},
       {"perf.decoder.audio", LogLevel::kOff},
-      {"perf.scheduler", LogLevel::kOff},
       {"perf.encoder.video", LogLevel::kOff},
       {"perf.encoder.audio", LogLevel::kOff},
-      {"perf.remux", LogLevel::kOff},
+      {"perf.filter.input.video", LogLevel::kOff},
+      {"perf.filter.input.audio", LogLevel::kOff},
+      {"perf.filter.encoder.audio", LogLevel::kOff},
+      {"perf.filter.video", LogLevel::kOff},
+      {"perf.filter.audio", LogLevel::kOff},
       {"default", LogLevel::kInfo}};
   ConsoleConfig console;
   RotatingFileConfig rotating_file;

@@ -2,6 +2,53 @@
 
 面向 Windows 和 Linux 的 C++ 音视频处理库，目前正在开发中。
 
+## 阶段延迟
+
+性能日志默认关闭，Remuxer 暂不采集性能统计。通过 `InitConfig::log.modules` 分别启用以下模块，
+`info` 输出阶段汇总，`trace` 额外输出逐个成功输出的延迟样本：
+
+| 日志模块 | 阶段 | 采集边界 |
+| --- | --- | --- |
+| `perf.input` | `read.packet` | 一次成功的 `av_read_frame` 调用，包含阻塞 I/O，不含包缓存等待。 |
+| `perf.decoder.video` / `perf.decoder.audio` | `decode.video` / `decode.audio` | 关联包提交解码器前，到成功取出解码帧，结束于输出缓存背压之前。 |
+| `perf.filter.input.video` / `perf.filter.input.audio` | `filter.input.video` / `filter.input.audio` | 关联帧提交输入滤镜前，到滤镜输出取出，不含组帧和最终输出缓存。 |
+| `perf.filter.video` / `perf.filter.audio` | `filter.video` / `filter.audio` | Scheduler 自定义音视频处理回调开始到返回；默认选择输入不生成用户滤镜样本。 |
+| `perf.filter.encoder.audio` | `filter.encoder.audio` | 编码音频滤镜输入到输出，包含格式转换和重新分块。 |
+| `perf.encoder.video` / `perf.encoder.audio` | `encode.video` / `encode.audio` | 关联帧首次提交编码器前，到成功取出编码包，结束于外部包回调之前。 |
+
+例如启用视频解码和编码延迟：
+
+```cpp
+mw::streamer::InitConfig config;
+config.log.modules["perf.decoder.video"] = mw::log::LogLevel::kInfo;
+config.log.modules["perf.encoder.video"] = mw::log::LogLevel::kInfo;
+auto* runtime = mw::streamer::Init(config);
+```
+
+`report=interval` 在成功输出触发采样、距上次报告至少两秒时产生，使用实际
+`window_s`；停滞期间不会自行定时报告。`report=summary` 是该阶段会话的累计值，
+正常结束时最多输出一次；输入滤镜重建时会结束旧滤镜的会话。
+`samples` 包括关联有效和不可用的输出，`unavailable` 是其中无法关联的数量。
+`samples` 同时表示阶段成功完成的次数，`throughput=…/s` 表示每秒完成次数，
+统一使用“次”作为单位，不区分包或帧。吞吐使用包含 `unavailable` 的全部次数
+除以实际窗口时长；`summary` 使用该阶段从启动到结束的全部时间，包含空闲等待。
+例如两秒内成功完成 60 次，输出 `samples=60 throughput=30.000/s`。
+`latency(mean:…ms,max:…ms)` 的均值和最大值只使用关联有效的样本；没有有效
+样本时显示 `N/A`。EOF、EAGAIN、错误调用和没有产生输出的丢弃不作为成功延迟样本。
+尚未完成或异常中止的数据也不进入均值，`samples` 不能等同于入队或提交成功次数。
+
+编解码和滤镜沿用 FFmpeg 的 `opaque_ref` 来源关联思路：只修改库内私有包/帧
+头，在取出输出时恢复原有 opaque 引用。同源重复输出共享不可变探针，不互相覆盖。
+不支持 `COPY_OPAQUE` 的 FFmpeg/编码器，或滤镜未保留来源属性时，报告不可用，
+不使用 PTS 或提交顺序推测。音频合并、重采样和分块后的探针只代表 FFmpeg
+实际继承的来源，不是输出中所有样本的逐样本延迟。
+
+这些数值是包含内部缓存、重排和等待的墙钟延迟，不是 CPU/GPU 纯计算时间。
+此前输出包回调或解码输出缓存的阻塞，也可能增加仍留在 codec 内的后续输出的驻留时间。
+各阶段独立统计，不能把它们的均值相加当作整条链路的 total；本版不生成跨阶段
+total 或逐阶段 fps/speed。统计开关在阶段启动时读取，关闭时不读采样时钟、
+不创建探针。所有媒体对象销毁后再调用 `Shutdown(runtime)`。
+
 ## AvEncoder
 
 独立编码组件使用 `AvEncoderConfig`，构造时传入共享的

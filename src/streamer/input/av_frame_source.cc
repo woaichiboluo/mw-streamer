@@ -26,6 +26,7 @@ extern "C" {
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/ffmpeg/filter_graph.h"
+#include "mw/streamer/performance/latency.h"
 #include "mw/streamer/platform/thread.h"
 
 namespace mw::streamer {
@@ -156,9 +157,22 @@ class TrackFilter final {
     }
     Check(avfilter_graph_config(graph_.get(), nullptr),
           "avfilter_graph_config");
+    latency_.Start(
+        video_ ? "perf.filter.input.video" : "perf.filter.input.audio", this,
+        video_ ? "filter.input.video" : "filter.input.audio",
+        stream.stream_index);
   }
 
   void PushFrame(const ffmpeg::Frame& frame) {
+    if (latency_.enabled()) {
+      // Instrument a private header so callers retain their original
+      // opaque_ref.
+      auto input = frame.Ref();
+      latency_.Attach(input->opaque_ref, latency_.Begin());
+      Check(av_buffersrc_write_frame(source_, input.get()),
+            "av_buffersrc_write_frame");
+      return;
+    }
     Check(av_buffersrc_write_frame(source_, frame.get()),
           "av_buffersrc_write_frame");
   }
@@ -173,7 +187,10 @@ class TrackFilter final {
         video_ ? av_buffersink_get_frame(sink_, frame.get())
                : av_buffersink_get_samples(sink_, frame.get(),
                                            samples == 0 ? 1024 : samples);
-    if (result >= 0) frame->time_base = time_base();
+    if (result >= 0) {
+      latency_.Complete(frame->opaque_ref);
+      frame->time_base = time_base();
+    }
     return result;
   }
 
@@ -187,6 +204,7 @@ class TrackFilter final {
   ffmpeg::FilterGraph graph_;
   AVFilterContext* source_ = nullptr;
   AVFilterContext* sink_ = nullptr;
+  internal::StageLatency latency_;
 };
 
 }  // namespace

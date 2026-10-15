@@ -17,6 +17,7 @@ extern "C" {
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/av_dictionary.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/performance/latency.h"
 #include "mw/streamer/platform/thread.h"
 
 namespace mw::streamer {
@@ -77,6 +78,7 @@ class AvInput::Impl final {
       throw std::logic_error("重新打开 AvInput 前需要 Close");
     }
     cancelled_.store(false);
+    latency_.Start("perf.input", this, "read.packet");
     MW_LOG_DEBUG("streamer",
                  "AvInput[{}] 打开配置: 包容量={} 打开超时={}ms 读取超时={}ms "
                  "格式={} 选项数={}",
@@ -212,6 +214,7 @@ class AvInput::Impl final {
     }
     RequestCancel();
     worker_.Join();
+    latency_.Finish();
     avformat_close_input(&format_);
     deadline_ns_.store(0);
     {
@@ -337,7 +340,9 @@ class AvInput::Impl final {
         }
         ffmpeg::Packet packet;
         if (deadline_ns_.load() == 0) BeginIo(config_.read_timeout);
+        const auto read_started = latency_.Begin();
         const int code = av_read_frame(format_, packet.get());
+        if (code >= 0) latency_.End(read_started);
         if (cancelled_.load()) break;
         CheckIo(code == AVERROR(EAGAIN) || code == AVERROR_EOF ? 0 : code,
                 "av_read_frame");
@@ -411,6 +416,7 @@ class AvInput::Impl final {
   AVFormatContext* format_ = nullptr;
   internal::Thread worker_;
   OnStateChanged on_state_changed_;
+  internal::StageLatency latency_;
 };
 
 AvInput::AvInput(AvInputConfig config)
