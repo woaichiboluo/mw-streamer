@@ -143,7 +143,7 @@ TEST_CASE(
     AvFrameSource source(&decoder, nullptr, output);
     for (const auto& packet : packets) REQUIRE(decoder.PushPacket(packet, 0));
     REQUIRE(decoder.PushEof(0));
-    REQUIRE(WaitFor([&] {
+    const bool reached_eof = WaitFor([&] {
       const auto result = source.TryReadFrame();
       if (result.status == AvFrameSourceReadStatus::kFrame) {
         REQUIRE(result.video.has_value());
@@ -154,7 +154,8 @@ TEST_CASE(
         ++frames;
       }
       return result.status == AvFrameSourceReadStatus::kEof;
-    }));
+    });
+    REQUIRE(reached_eof);
     CHECK(source.error() == nullptr);
   }
   REQUIRE(frames == packets.size() * 2);
@@ -199,7 +200,7 @@ TEST_CASE("Input resampling measures propagated representative provenance",
       REQUIRE(decoder.PushPacket(std::move(packet), 0));
     }
     REQUIRE(decoder.PushEof(0));
-    REQUIRE(WaitFor([&] {
+    const bool reached_eof = WaitFor([&] {
       const auto result = source.TryReadFrame();
       if (result.status == AvFrameSourceReadStatus::kFrame) {
         REQUIRE(result.audio.has_value());
@@ -210,7 +211,8 @@ TEST_CASE("Input resampling measures propagated representative provenance",
         ++frames;
       }
       return result.status == AvFrameSourceReadStatus::kEof;
-    }));
+    });
+    REQUIRE(reached_eof);
     CHECK(source.error() == nullptr);
   }
   REQUIRE(frames > 0);
@@ -223,8 +225,8 @@ TEST_CASE("Scheduler latency measures custom callbacks after workers join",
           "[performance][latency][filter]") {
   const bool custom = GENERATE(false, true);
   FilterLog logging;
-  std::atomic<int> video_calls{0};
-  std::atomic<int> audio_calls{0};
+  std::atomic<std::uint64_t> video_calls{0};
+  std::atomic<std::uint64_t> audio_calls{0};
   std::mutex mutex;
   std::condition_variable changed;
   bool entered = false;

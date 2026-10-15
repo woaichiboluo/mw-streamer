@@ -8,7 +8,7 @@
 namespace mw::streamer::internal {
 
 void IgnoreSigpipe() {
-  struct sigaction action{};
+  struct sigaction action {};
   action.sa_handler = SIG_IGN;
   sigemptyset(&action.sa_mask);
   if (sigaction(SIGPIPE, &action, nullptr) != 0) {
