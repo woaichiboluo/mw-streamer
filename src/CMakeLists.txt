@@ -38,8 +38,14 @@ set(MW_STREAMER_SOURCES
     streamer/input/av_input.cc
     streamer/input/av_input_proxy.cc
     streamer/decoder/av_decoder.cc
+    streamer/filter/av_media_filter.cc
+    streamer/filter/force_fps.cc
+    streamer/filter/audio_resampler.cc
+    streamer/timing/syncer.cc
+    streamer/timing/syncer_timing.cc
     streamer/input/av_frame_source.cc
     streamer/input/av_media_input.cc
+    streamer/input/av_media_source.cc
     streamer/input/timestamp_discontinuity.cc
     streamer/output/output.cc
     streamer/output/encode_push_sink.cc
@@ -76,7 +82,7 @@ target_include_directories(mw_streamer PUBLIC
 )
 target_link_libraries(mw_streamer
     PUBLIC mw::log FFmpeg::avformat FFmpeg::avcodec FFmpeg::avutil FFmpeg::avfilter
-    PRIVATE fmt::fmt Threads::Threads TBB::tbb FFmpeg::avdevice
+    PRIVATE fmt::fmt Threads::Threads TBB::tbb FFmpeg::avdevice FFmpeg::swresample
         ZLMediaKit::MediaKit ZLMediaKit::ext-codec
 )
 if(WIN32)
@@ -91,7 +97,7 @@ if(BUILD_TESTS AND BUILD_SHARED)
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>")
     target_link_libraries(mw_streamer_test_static PUBLIC
         mw::log FFmpeg::avformat FFmpeg::avcodec FFmpeg::avutil FFmpeg::avfilter
-        PRIVATE fmt::fmt Threads::Threads TBB::tbb FFmpeg::avdevice
+        PRIVATE fmt::fmt Threads::Threads TBB::tbb FFmpeg::avdevice FFmpeg::swresample
             ZLMediaKit::MediaKit ZLMediaKit::ext-codec)
     if(WIN32)
         target_link_libraries(mw_streamer_test_static PRIVATE winmm)
