@@ -138,6 +138,11 @@ class AvDecoder::Impl final {
     on_input_space_ = std::move(callback);
   }
 
+  void SetOnReadReady(OnReadReady callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    on_read_ready_ = std::move(callback);
+  }
+
   bool TryPushPacket(const ffmpeg::Packet& packet) {
     if (!packet.get() || !packet->data || packet->size <= 0 ||
         packet->stream_index != stream_.stream_index) {
@@ -282,6 +287,18 @@ class AvDecoder::Impl final {
     });
     if (stopping_) return false;
     frames_.push_back(std::move(result));
+    auto callback = on_read_ready_;
+    lock.unlock();
+    if (callback) {
+      try {
+        callback();
+      } catch (const std::exception& observer_error) {
+        MW_LOG_ERROR("streamer", "AvDecoder 读取就绪通知异常: {}",
+                     observer_error.what());
+      } catch (...) {
+        MW_LOG_ERROR("streamer", "AvDecoder 读取就绪通知发生未知异常");
+      }
+    }
     return true;
   }
 
@@ -400,6 +417,7 @@ class AvDecoder::Impl final {
   const AvDecoderConfig config_;
   OnError on_error_;
   OnInputSpace on_input_space_;
+  OnReadReady on_read_ready_;
   ffmpeg::CodecContext context_;
   mutable std::mutex mutex_;
   std::condition_variable changed_;
@@ -424,6 +442,9 @@ void AvDecoder::SetOnError(OnError callback) {
 }
 void AvDecoder::SetOnInputSpace(OnInputSpace callback) {
   impl_->SetOnInputSpace(std::move(callback));
+}
+void AvDecoder::SetOnReadReady(OnReadReady callback) {
+  impl_->SetOnReadReady(std::move(callback));
 }
 bool AvDecoder::TryPushPacket(const ffmpeg::Packet& packet) {
   return impl_->TryPushPacket(packet);

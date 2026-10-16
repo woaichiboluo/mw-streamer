@@ -195,19 +195,35 @@ TEST_CASE("EOF and underflow pass through without resetting or stopping",
 
 TEST_CASE("Callback failures require a fresh filter session",
           "[media_filter]") {
+  class BusinessError final : public std::runtime_error {
+   public:
+    using std::runtime_error::runtime_error;
+  };
+  const auto failure =
+      std::make_exception_ptr(BusinessError("Business processing failed"));
   int stops = 0;
   AvMediaFilter filter;
+  REQUIRE_FALSE(filter.error());
   filter.SetOnStop([&] { ++stops; });
-  filter.SetOnVideo([](const ffmpeg::Frame&) -> ffmpeg::Frame {
-    throw std::runtime_error("Business processing failed");
+  filter.SetOnVideo([&](const ffmpeg::Frame&) -> ffmpeg::Frame {
+    std::rethrow_exception(failure);
   });
   filter.Start();
-  REQUIRE_THROWS_AS(filter.ProcessVideo(Input(Video())), std::runtime_error);
+  REQUIRE_THROWS_AS(filter.ProcessVideo(Input(Video())), BusinessError);
+  REQUIRE(filter.error() == failure);
+  REQUIRE_THROWS_AS(std::rethrow_exception(filter.error()), BusinessError);
   REQUIRE_THROWS_AS(filter.ProcessAudio(Input(Audio())), std::logic_error);
+  REQUIRE(filter.error() == failure);
   filter.Stop();
   REQUIRE(stops == 1);
+  REQUIRE(filter.error() == failure);
+  filter.SetOnStart([] { throw std::runtime_error("Start failed"); });
+  REQUIRE_THROWS_AS(filter.Start(), std::runtime_error);
+  REQUIRE(filter.error() == failure);
+  filter.SetOnStart({});
   filter.SetOnVideo({});
   filter.Start();
+  REQUIRE_FALSE(filter.error());
   auto output = filter.ProcessVideo(Input(Video()));
   CheckTiming(output);
 }
@@ -218,6 +234,7 @@ TEST_CASE("Session callbacks have explicit lifecycle semantics",
   REQUIRE_THROWS_AS(filter.ProcessVideo(Input(Video())), std::logic_error);
   filter.SetOnStart([] { throw std::runtime_error("Start failed"); });
   REQUIRE_THROWS_AS(filter.Start(), std::runtime_error);
+  REQUIRE_FALSE(filter.error());
   filter.SetOnStart({});
   filter.Start();
   REQUIRE_THROWS_AS(filter.Start(), std::logic_error);
@@ -231,6 +248,7 @@ TEST_CASE("Session callbacks have explicit lifecycle semantics",
   });
   filter.Start();
   REQUIRE_THROWS_AS(filter.Stop(), std::runtime_error);
+  REQUIRE_FALSE(filter.error());
   REQUIRE_NOTHROW(filter.Stop());
   REQUIRE(stops == 1);
 }
@@ -448,9 +466,11 @@ TEST_CASE("A failing callback leaves the concurrent callback able to finish",
   REQUIRE(stop_while_audio_blocked == std::future_status::timeout);
   REQUIRE_FALSE(audio_error);
   REQUIRE(video_error);
+  REQUIRE(filter.error() == video_error);
   REQUIRE_FALSE(stop_error);
   filter.SetOnAudio({});
   REQUIRE_NOTHROW(filter.Start());
+  REQUIRE_FALSE(filter.error());
   REQUIRE_NOTHROW(filter.ProcessAudio(Input(Audio())));
 }
 

@@ -1,6 +1,7 @@
 #ifndef MW_STREAMER_FILTER_AV_MEDIA_FILTER_H_
 #define MW_STREAMER_FILTER_AV_MEDIA_FILTER_H_
 
+#include <exception>
 #include <functional>
 #include <memory>
 
@@ -52,6 +53,10 @@ class MW_STREAMER_API AvMediaFilter final {
   // Waits for active processing and calls OnStop once. Idempotent, including
   // after an OnStop exception. Does not stop any upstream or downstream object.
   void Stop();
+
+  // Thread-safe snapshot of the first processing callback failure. Stop keeps
+  // it; a successful Start clears it. Start/Stop callback errors are excluded.
+  std::exception_ptr error() const;
 
   // Require a started session. Consume the result's frame reference and return
   // the processed frame with its stream/time-base/EOF data intact.

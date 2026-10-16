@@ -1,13 +1,17 @@
 #include "mw/streamer/filter/av_media_filter.h"
 
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
 #include "mw/log.h"
+#include "mw/streamer/performance/latency.h"
 
 namespace mw::streamer {
 
@@ -38,8 +42,12 @@ class AvMediaFilter::Impl final {
       throw std::logic_error("AvMediaFilter 重新启动前需要 Stop");
     }
     if (on_start_) on_start_();
-    failed_ = false;
+    video_latency_.Start("perf.filter.video", this, "filter.video");
+    audio_latency_.Start("perf.filter.audio", this, "filter.audio");
+    error_ = {};
     started_ = true;
+    MW_LOG_INFO("streamer", "AvMediaFilter 已启动: video={}, audio={}",
+                static_cast<bool>(on_video_), static_cast<bool>(on_audio_));
   }
 
   void Stop() {
@@ -51,17 +59,25 @@ class AvMediaFilter::Impl final {
     }
     stopping_ = true;
     idle_.wait(lock, [this] { return active_calls_ == 0; });
+    video_latency_.Finish();
+    audio_latency_.Finish();
     started_ = false;
     stopping_ = false;
     idle_.notify_all();
+    MW_LOG_INFO("streamer", "AvMediaFilter 已停止");
     if (on_stop_) on_stop_();
+  }
+
+  std::exception_ptr error() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return error_;
   }
 
   AvDecoderReadResult Process(AvDecoderReadResult input, bool video) {
     const auto& callback = video ? on_video_ : on_audio_;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!started_ || stopping_ || failed_) {
+      if (!started_ || stopping_ || error_) {
         throw std::logic_error("AvMediaFilter 处理帧前需要成功 Start");
       }
       if (input.status != AvDecoderReadStatus::kFrame) return input;
@@ -79,8 +95,16 @@ class AvMediaFilter::Impl final {
     const auto best_effort = source->best_effort_timestamp;
     const auto time_base = source->time_base;
     const auto duration = source->duration;
+    auto& latency = video ? video_latency_ : audio_latency_;
+    const auto started = latency.Begin();
+    std::optional<std::int64_t> elapsed;
     try {
       auto output = callback(*input.frame);
+      if (latency.enabled()) {
+        elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      internal::StageLatency::Clock::now() - started)
+                      .count();
+      }
       if (!output.get()) {
         throw std::invalid_argument("AvMediaFilter 回调返回了无效帧");
       }
@@ -93,10 +117,10 @@ class AvMediaFilter::Impl final {
     } catch (...) {
       // Do not resume using partially-updated business
       // history. Stop still releases the successfully-started session.
-      FinishProcessing(true);
+      FinishProcessing(std::current_exception());
       throw;
     }
-    FinishProcessing(false);
+    FinishProcessing({}, &latency, elapsed);
     return input;
   }
 
@@ -106,18 +130,25 @@ class AvMediaFilter::Impl final {
   OnVideo on_video_;
 
  private:
-  void FinishProcessing(bool failed) {
+  void FinishProcessing(std::exception_ptr error = {},
+                        internal::StageLatency* latency = nullptr,
+                        std::optional<std::int64_t> elapsed = {}) {
     std::lock_guard<std::mutex> lock(mutex_);
-    failed_ = failed_ || failed;
+    // Callbacks, even on the same track, may overlap. Serialize accounting
+    // only; the measured interval excludes this lock and metadata restoration.
+    if (latency && elapsed) latency->Observe(elapsed);
+    if (!error_) error_ = std::move(error);
     if (--active_calls_ == 0) idle_.notify_all();
   }
 
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   std::condition_variable idle_;
   std::size_t active_calls_ = 0;
   bool started_ = false;
   bool stopping_ = false;
-  bool failed_ = false;
+  std::exception_ptr error_;
+  internal::StageLatency video_latency_;
+  internal::StageLatency audio_latency_;
 };
 
 AvMediaFilter::AvMediaFilter() : impl_(std::make_unique<Impl>()) {}
@@ -136,6 +167,7 @@ void AvMediaFilter::SetOnVideo(OnVideo callback) {
 }
 void AvMediaFilter::Start() { impl_->Start(); }
 void AvMediaFilter::Stop() { impl_->Stop(); }
+std::exception_ptr AvMediaFilter::error() const { return impl_->error(); }
 AvDecoderReadResult AvMediaFilter::ProcessVideo(AvDecoderReadResult input) {
   return impl_->Process(std::move(input), true);
 }

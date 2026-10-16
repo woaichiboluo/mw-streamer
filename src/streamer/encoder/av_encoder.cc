@@ -34,7 +34,7 @@ extern "C" {
 namespace mw::streamer {
 namespace {
 
-constexpr std::size_t kFrameCapacity = 1;
+constexpr std::size_t kFrameCapacity = 3;
 constexpr int kVideoIndex = 0;
 constexpr int kAudioIndex = 1;
 
@@ -460,6 +460,10 @@ class AvEncoder::Impl final {
     CheckConfigurable();
     on_error_ = std::move(callback);
   }
+  void SetOnInputSpace(OnInputSpace callback) {
+    CheckConfigurable();
+    on_input_space_ = std::move(callback);
+  }
 
   bool Start(const AvEncoderConfig& config) noexcept {
     if (HasWorkers()) {
@@ -576,12 +580,11 @@ class AvEncoder::Impl final {
     ValidateTiming(frame);
     auto& track = video ? video_ : audio_;
     if (track.frames.size() >= kFrameCapacity) {
-      MW_LOG_WARNING("streamer",
-                     "AvEncoder 输入队列满，丢弃新帧: track={} pts={} "
-                     "time_base={}/{} queue={}/{}",
-                     video ? "video" : "audio", frame->pts,
-                     frame->time_base.num, frame->time_base.den,
-                     track.frames.size(), kFrameCapacity);
+      MW_LOG_DEBUG("streamer",
+                   "AvEncoder 输入队列满，未受理新帧: track={} pts={} "
+                   "time_base={}/{} queue={}/{}",
+                   video ? "video" : "audio", frame->pts, frame->time_base.num,
+                   frame->time_base.den, track.frames.size(), kFrameCapacity);
       return false;
     }
     track.frames.push_back(frame.Ref());
@@ -602,6 +605,7 @@ class AvEncoder::Impl final {
     video_.frames.clear();
     audio_.frames.clear();
     session_.reset();
+    MW_LOG_INFO("streamer", "AvEncoder 已停止");
   }
 
  private:
@@ -717,6 +721,13 @@ class AvEncoder::Impl final {
             track.frames.pop_front();
           }
         }
+        if (frame && on_input_space_) {
+          try {
+            on_input_space_(video);
+          } catch (...) {
+            MW_LOG_ERROR("streamer", "AvEncoder OnInputSpace 回调抛出异常");
+          }
+        }
         // Closing admission drains each track's accepted FIFO before codec
         // EOF. Audio also drains its reblocking filter before codec EOF.
         if (video)
@@ -754,6 +765,7 @@ class AvEncoder::Impl final {
   Track audio_;
   OnPacket on_packet_;
   OnError on_error_;
+  OnInputSpace on_input_space_;
   mutable std::mutex mutex_;
   std::condition_variable wake_;
   bool accepting_ = false;
@@ -770,6 +782,9 @@ void AvEncoder::SetOnPacket(OnPacket callback) {
 }
 void AvEncoder::SetOnError(OnError callback) {
   impl_->SetOnError(std::move(callback));
+}
+void AvEncoder::SetOnInputSpace(OnInputSpace callback) {
+  impl_->SetOnInputSpace(std::move(callback));
 }
 bool AvEncoder::Start(const AvEncoderConfig& config) noexcept {
   return impl_->Start(config);

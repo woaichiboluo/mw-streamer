@@ -46,12 +46,14 @@ set(MW_STREAMER_SOURCES
     streamer/scheduler/scheduler.cc
     streamer/scheduler/realtime_timing.cc
     streamer/input/av_media_source.cc
+    streamer/pipeline/live_pipeline.cc
     streamer/platform/thread.cc
     streamer/encoder/av_encoder.cc
     streamer/performance/latency.cc
     streamer/remuxer/packet_converter.cc
     streamer/remuxer/remux_output.cc
     streamer/remuxer/remuxer.cc
+    streamer/recorder/recorder.cc
 )
 
 if(WIN32)

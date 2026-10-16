@@ -12,8 +12,9 @@ extern "C" {
 namespace mw::streamer::internal {
 
 // One serial owner per stage. Audio/video workers use separate instances.
-// Measurements describe data residence, including codec/filter buffering,
-// rather than CPU time. Missing opaque propagation is an unavailable sample.
+// Begin/End measure elapsed time within the caller's stage boundaries, not CPU
+// time. Attach/Complete also include codec/filter buffering between those
+// boundaries. Missing opaque propagation is an unavailable sample.
 class StageLatency final {
  public:
   using Clock = std::chrono::steady_clock;

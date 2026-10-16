@@ -11,6 +11,7 @@
 #include "mw/export.h"
 #include "mw/streamer/decoder/av_decoder.h"
 #include "mw/streamer/ffmpeg/hw_device_context.h"
+#include "mw/streamer/ffmpeg/packet.h"
 #include "mw/streamer/input/av_input_proxy.h"
 
 namespace mw::streamer {
@@ -64,6 +65,18 @@ class MW_STREAMER_API AvMediaSource final {
   // source. Callback exceptions are logged. Decoder errors are terminal source
   // failures.
   using OnStateChanged = std::function<void(const AvMediaSourceStatus&)>;
+  // Observes each input packet once before decoder submission, on the
+  // controller worker outside locks. Packet timestamps, time base and stream
+  // index are unchanged; Ref() to retain storage. Must return promptly. May
+  // query status/info or RequestStop, but must not change configuration,
+  // Start/Stop or destroy the source. Exceptions fail the source.
+  using OnPacket = std::function<void(const ffmpeg::Packet&)>;
+  // Wakeup slot for the sole frame consumer. Invoked outside locks when a
+  // decoded frame/EOF is queued or source status changes, potentially
+  // concurrently from both decoder workers and the controller. A notification
+  // does not guarantee a readable frame. Observers may query/read/RequestStop,
+  // but must not Start/Stop/destroy the source. Exceptions are logged.
+  using OnReadReady = std::function<void()>;
 
   // Invalid input/retry/decoder configuration throws synchronously.
   explicit AvMediaSource(AvMediaSourceConfig config = {});
@@ -80,6 +93,12 @@ class MW_STREAMER_API AvMediaSource final {
 
   // Register only before Start or after Stop.
   void SetOnStateChanged(OnStateChanged callback);
+  // Register only before Start or after Stop.
+  void SetOnPacket(OnPacket callback);
+  // Thread-safe registration/replacement, including while running. Existing
+  // frames/status are not replayed. Does not wait for in-flight callbacks:
+  // capture weak references or independently owned state to protect lifetime.
+  void SetOnReadReady(OnReadReady callback);
   // Starts asynchronously. Invalid URL/restart/thread creation failure returns
   // false and logs; connection/decode failures are reported through status.
   // Call Stop before another Start.

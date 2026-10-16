@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -11,6 +12,18 @@
 #include "mw/streamer/encoder/av_encoder_config.h"
 
 namespace mw::streamer {
+
+// Continuity policy, independent of encoder formats and standby storage.
+struct SyncerOptions {
+  std::chrono::microseconds timeout{1000000};
+  std::chrono::microseconds freeze{5000000};
+  std::chrono::microseconds max_streams_diff{1000};
+  std::chrono::microseconds start_ts{10000000};
+  // False seeds each track's expected PTS with start_ts, filling positive
+  // initial gaps and correcting negative offsets.
+  // True leaves it unset until the first frame or input timeout.
+  bool forward_start_shift = false;
+};
 
 struct SyncerConfig {
   // Formats determine enabled tracks and the default backup/silence formats;
@@ -24,14 +37,7 @@ struct SyncerConfig {
   // and a software pixel format to generate a CPU black frame. Ignored when
   // encoder.video_pixel_format is NONE.
   std::optional<ffmpeg::Frame> backup_video;
-  std::chrono::microseconds timeout{1000000};
-  std::chrono::microseconds freeze{5000000};
-  std::chrono::microseconds max_streams_diff{1000};
-  std::chrono::microseconds start_ts{10000000};
-  // False seeds each track's expected PTS with start_ts, filling positive
-  // initial gaps and correcting negative offsets.
-  // True leaves it unset until the first frame or input timeout.
-  bool forward_start_shift = false;
+  SyncerOptions options;
 };
 
 // One externally serialized sentinel step. The caller retains head unchanged
@@ -39,9 +45,12 @@ struct SyncerConfig {
 struct SyncerStep {
   bool consumed = false;
   std::optional<ffmpeg::Frame> frame;
-  // Earliest useful retry in the caller's elapsed monotonic microseconds.
-  // When a frame is returned, its duration determines the next output slot.
+  // Earliest useful retry in the caller's elapsed monotonic microseconds,
+  // including after a returned frame ends a bounded fill batch.
   std::int64_t wake_us = 0;
+  // The output was not accepted. Wait for downstream space before retrying;
+  // no frame was committed and the input head remains unconsumed.
+  bool blocked = false;
 };
 
 // Maintains a shared continuous media timeline without owning threads, queues
@@ -52,6 +61,11 @@ struct SyncerStep {
 // read-only, preserving CPU/GPU storage and layout.
 class MW_STREAMER_API Syncer final {
  public:
+  // Synchronous, nonblocking admission of a read-only output frame. False
+  // leaves the track's next PTS unchanged. Must not reenter Syncer; exceptions
+  // propagate to the caller. Empty means the caller accepts the returned frame.
+  using OnOutput = std::function<bool(const ffmpeg::Frame&)>;
+
   // Requires at least one enabled track. Invalid config throws synchronously.
   // Audio layout and backup frame references are independently retained.
   explicit Syncer(SyncerConfig config);
@@ -65,7 +79,7 @@ class MW_STREAMER_API Syncer final {
   // Produces at most one frame. Disabled tracks, invalid input and arithmetic
   // errors throw to the caller. now_us is elapsed monotonic time since Reset.
   SyncerStep Step(bool video, const AvDecoderReadResult* head,
-                  std::int64_t now_us);
+                  std::int64_t now_us, const OnOutput& on_output = {});
   // Starts a fresh shared timeline; the caller also resets its clock epoch.
   void Reset();
 

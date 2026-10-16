@@ -674,20 +674,26 @@ TEST_CASE("AvEncoder 视频队列满拒绝新帧并保留调用方时间轴间�
   source->pts = 90000;
   REQUIRE(encoder.TryPushVideo(source));
   REQUIRE(gate.Wait());
-  source->pts = 93000;
-  REQUIRE(encoder.TryPushVideo(source));
-  source->pts = 96000;
+  for (int index = 1; index <= 3; ++index) {
+    source->pts = 90000 + 3000 * index;
+    REQUIRE(encoder.TryPushVideo(source));
+  }
+  source->pts = 102000;
   REQUIRE_FALSE(encoder.TryPushVideo(source));
-  CHECK(source->pts == 96000);
+  CHECK(source->pts == 102000);
   gate.Release();
-  REQUIRE(capture.WaitPackets(2));
-  source->pts = 99000;
+  REQUIRE(capture.WaitPackets(4));
+  source->pts = 105000;
   REQUIRE(encoder.TryPushVideo(source));
   encoder.Stop();
-  REQUIRE(capture.packets.size() == 3);
-  CHECK(capture.packets[0]->pts == 30);
-  CHECK(capture.packets[1]->pts == 31);
-  CHECK(capture.packets[2]->pts == 33);
+  REQUIRE(capture.packets.size() == 5);
+  const std::array<std::int64_t, 5> expected_pts{30, 31, 32, 33, 35};
+  const auto decoded = Decode(encoder.streams().front(), capture.packets);
+  REQUIRE(decoded.size() == expected_pts.size());
+  for (std::size_t index = 0; index < expected_pts.size(); ++index) {
+    CHECK(capture.packets[index]->pts == expected_pts[index]);
+    CHECK(decoded[index]->pts == expected_pts[index]);
+  }
 }
 
 TEST_CASE("AvEncoder Stop 等待回调并排空已经接收的帧",
@@ -711,19 +717,24 @@ TEST_CASE("AvEncoder Stop 等待回调并排空已经接收的帧",
   auto source = VideoFrame();
   REQUIRE(encoder.TryPushVideo(source));
   REQUIRE(gate.Wait());
+  for (int index = 0; index < 3; ++index) {
+    source->pts += 3000;
+    REQUIRE(encoder.TryPushVideo(source));
+  }
   source->pts += 3000;
-  REQUIRE(encoder.TryPushVideo(source));
+  CHECK_FALSE(encoder.TryPushVideo(source));
   auto stopping = std::async(std::launch::async, [&] { encoder.Stop(); });
   ReleaseGate release_before_future{gate};
   CHECK(stopping.wait_for(50ms) == std::future_status::timeout);
   gate.Release();
   REQUIRE(stopping.wait_for(10s) == std::future_status::ready);
   stopping.get();
-  REQUIRE(capture.packets.size() == 2);
+  REQUIRE(capture.packets.size() == 4);
+  CHECK(Decode(encoder.streams().front(), capture.packets).size() == 4);
   CHECK_FALSE(encoder.error());
 }
 
-TEST_CASE("AvEncoder 每轨队列独立拒绝满队列并告警且另一轨继续编码",
+TEST_CASE("AvEncoder 每轨队列独立拒绝满队列且另一轨继续编码",
           "[av-encoder][queue][parallel][thread]") {
   bool block_audio = false;
   SECTION("视频回调阻塞不影响音频") {}
@@ -756,8 +767,10 @@ TEST_CASE("AvEncoder 每轨队列独立拒绝满队列并告警且另一轨继�
   };
   REQUIRE(push_blocked());
   REQUIRE(gate.Wait());
-  pending->pts += block_audio ? 3008 : 3000;
-  REQUIRE(push_blocked());
+  for (int index = 0; index < 3; ++index) {
+    pending->pts += block_audio ? 3008 : 3000;
+    REQUIRE(push_blocked());
+  }
   pending->pts += block_audio ? 3008 : 3000;
   const auto rejected_pts = pending->pts;
   const auto before_rejection = std::chrono::steady_clock::now();
@@ -785,12 +798,99 @@ TEST_CASE("AvEncoder 每轨队列独立拒绝满队列并告警且另一轨继�
                       [&](auto id) { return id == threads.front(); }));
   }
   CHECK(callback_threads[0].front() != callback_threads[1].front());
-  CHECK(callback_threads[0].size() == 2);
-  CHECK(callback_threads[1].size() == 7);
+  CHECK(callback_threads[0].size() == (block_audio ? 2 : 4));
+  CHECK(callback_threads[1].size() == (block_audio ? 13 : 7));
+  const auto streams = encoder.streams();
+  CHECK(Decode(streams[0], capture.packets).size() == (block_audio ? 2 : 4));
+  const auto audio_frames = Decode(streams[1], capture.packets);
+  int decoded_samples = 0;
+  for (const auto& frame : audio_frames) decoded_samples += frame->nb_samples;
+  CHECK(decoded_samples == (block_audio ? 12288 : 6144));
   const auto warnings = log.Read();
-  CHECK(warnings.find("[warning]") != std::string::npos);
-  CHECK(warnings.find("AvEncoder") != std::string::npos);
-  CHECK(std::count(warnings.begin(), warnings.end(), '\n') == 1);
+  CHECK(warnings.empty());
+}
+
+TEST_CASE("AvEncoder 出队通知支持原帧重试且观察异常不影响编码",
+          "[av-encoder][queue][notification][lifecycle]") {
+  bool video = true;
+  bool throw_observer = false;
+  SECTION("视频空间通知") {}
+  SECTION("音频空间通知") { video = false; }
+  SECTION("通知观察者抛出异常") { throw_observer = true; }
+  ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
+  Gate gate;
+  Capture capture;
+  std::array<int, 2> notifications{};
+  int replacement_notifications = 0;
+  AvEncoder encoder(cpu);
+  capture.Bind(encoder);
+  encoder.SetOnPacket([&](const ffmpeg::Packet& packet) {
+    {
+      std::lock_guard lock(capture.mutex);
+      capture.packets.push_back(packet.Ref());
+      capture.wake.notify_all();
+    }
+    gate.Enter();
+  });
+  encoder.SetOnInputSpace([&](bool notified_video) {
+    const auto failure = encoder.error();
+    {
+      std::lock_guard lock(capture.mutex);
+      if (failure) capture.error = failure;
+      ++notifications[notified_video ? 0 : 1];
+      capture.wake.notify_all();
+    }
+    if (throw_observer) throw std::runtime_error("空间观察者测试异常");
+  });
+  auto config = Config();
+  if (video)
+    config.audio_sample_format = AV_SAMPLE_FMT_NONE;
+  else
+    config.video_pixel_format = AV_PIX_FMT_NONE;
+  REQUIRE(encoder.Start(config));
+  ReleaseGate release_before_encoder{gate};
+  CHECK_THROWS_AS(encoder.SetOnInputSpace({}), std::logic_error);
+  auto frame = video ? VideoFrame() : AudioFrame(3008);
+  const auto push = [&] {
+    return video ? encoder.TryPushVideo(frame) : encoder.TryPushAudio(frame);
+  };
+  REQUIRE(push());
+  REQUIRE(gate.Wait());
+  for (int index = 0; index < 3; ++index) {
+    frame->pts += frame->duration;
+    REQUIRE(push());
+  }
+  frame->pts += frame->duration;
+  const auto rejected_pts = frame->pts;
+  const auto* rejected_data = frame->data[0];
+  REQUIRE_FALSE(push());
+  CHECK(frame->pts == rejected_pts);
+  CHECK(frame->data[0] == rejected_data);
+  gate.Release();
+  {
+    std::unique_lock lock(capture.mutex);
+    REQUIRE(capture.wake.wait_for(
+        lock, 10s, [&] { return notifications[video ? 0 : 1] >= 2; }));
+  }
+  REQUIRE(push());
+  encoder.Stop();
+  CHECK_FALSE(encoder.error());
+  CHECK_FALSE(capture.error);
+  CHECK(capture.packets.size() == (video ? 5 : 16));
+  const auto decoded = Decode(encoder.streams().front(), capture.packets);
+  CHECK(decoded.size() == (video ? 5 : 15));
+  CHECK(notifications[video ? 0 : 1] == 5);
+  CHECK(notifications[video ? 1 : 0] == 0);
+  CHECK(frame->pts == rejected_pts);
+  CHECK_FALSE(push());
+  CHECK(notifications[video ? 0 : 1] == 5);
+  encoder.SetOnInputSpace([&](bool) { ++replacement_notifications; });
+  REQUIRE(encoder.Start(config));
+  REQUIRE(push());
+  encoder.Stop();
+  CHECK(replacement_notifications == 1);
+  CHECK(notifications[video ? 0 : 1] == 5);
+  CHECK_FALSE(encoder.error());
 }
 
 TEST_CASE("AvEncoder 双轨并发失败仅通知一次并关闭两轨准入",
@@ -847,10 +947,14 @@ TEST_CASE("AvEncoder Stop 排空两轨各自队列和音频短尾并支持重新
   REQUIRE(encoder.TryPushAudio(audio));
   REQUIRE(video_callback.Wait());
   REQUIRE(audio_callback.Wait());
-  video->pts += 3000;
-  audio->pts += 3008;
-  REQUIRE(encoder.TryPushVideo(video));
-  REQUIRE(encoder.TryPushAudio(audio));
+  for (int index = 0; index < 3; ++index) {
+    video->pts += 3000;
+    audio->pts += 3008;
+    REQUIRE(encoder.TryPushVideo(video));
+    REQUIRE(encoder.TryPushAudio(audio));
+  }
+  CHECK_FALSE(encoder.TryPushVideo(video));
+  CHECK_FALSE(encoder.TryPushAudio(audio));
   auto stopping = std::async(std::launch::async, [&] { encoder.Stop(); });
   ReleaseGate release_video_before_future{video_callback};
   ReleaseGate release_audio_before_future{audio_callback};
@@ -864,15 +968,15 @@ TEST_CASE("AvEncoder Stop 排空两轨各自队列和音频短尾并支持重新
   stopping.get();
   CHECK_FALSE(encoder.error());
   auto streams = encoder.streams();
-  CHECK(Decode(streams[0], capture.packets).size() == 2);
+  CHECK(Decode(streams[0], capture.packets).size() == 4);
   const auto audio_frames = Decode(streams[1], capture.packets);
   int decoded_samples = 0;
   for (const auto& frame : audio_frames) decoded_samples += frame->nb_samples;
-  CHECK(decoded_samples == 6144);
+  CHECK(decoded_samples == 12288);
   REQUIRE_FALSE(capture.packets.empty());
   for (auto it = capture.packets.rbegin(); it != capture.packets.rend(); ++it) {
     if ((*it)->stream_index != 1) continue;
-    CHECK((*it)->duration == 896);
+    CHECK((*it)->duration == 768);
     break;
   }
   capture.packets.clear();

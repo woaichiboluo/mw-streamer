@@ -19,7 +19,7 @@ class SyncerTiming final {
   // A head stays in the owner's queue until consumed. May emit one filler
   // without consuming the head. No input is represented by nullptr, not EOF.
   SyncerStep Step(bool video, const AvDecoderReadResult* head,
-                  std::int64_t now_us);
+                  std::int64_t now_us, const Syncer::OnOutput& on_output);
 
  private:
   class Impl;

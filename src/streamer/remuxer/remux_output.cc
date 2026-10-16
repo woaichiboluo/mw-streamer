@@ -10,7 +10,7 @@
 #include <utility>
 
 #include "Http/HttpSession.h"
-#include "Record/RemuxRecorder.h"
+#include "Record/Recorder.h"
 #include "Rtsp/RtspSession.h"
 #include "Util/SSLBox.h"
 #include "Util/mini.h"
@@ -32,7 +32,6 @@ std::atomic<std::uint64_t> next_source_id{0};
 std::mutex listeners_mutex;
 std::atomic<std::uint64_t> next_recording_id{0};
 std::set<std::pair<std::string, std::string>> published_paths;
-std::set<std::pair<std::string, std::string>> hls_published_paths;
 
 enum class ListenerProtocol { kRtsp, kRtsps, kHttp, kHttps };
 struct Listener {
@@ -92,10 +91,10 @@ std::string Schema(const std::string& url) {
   if (url.rfind("srt://", 0) == 0) return TS_SCHEMA;
   if (url.find("://") == std::string::npos) {
     const auto extension = std::filesystem::u8path(url).extension().u8string();
-    if (extension == ".mp4" || extension == ".m3u8") return {};
+    if (extension == ".mp4") return {};
   }
   throw std::invalid_argument(
-      "Remuxer 目标需要 RTSP(S)、RTMP(S)、SRT 或本地 MP4/M3U8 路径");
+      "Remuxer 目标需要 RTSP(S)、RTMP(S)、SRT 或本地 MP4 路径");
 }
 
 std::string RecordingPath(const std::string& path) {
@@ -111,6 +110,14 @@ std::string RecordingPath(const std::string& path) {
   return candidate.generic_u8string();
 }
 
+bool ValidSegment(const std::string& value) {
+  return !value.empty() && value != "." && value != ".." &&
+         std::all_of(value.begin(), value.end(), [](char c) {
+           return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+         });
+}
+
 void ValidatePublish(OutputRegistration::Kind kind, const std::string& app,
                      const std::string& stream, const std::string& ip,
                      std::uint16_t port) {
@@ -123,25 +130,28 @@ void ValidatePublish(OutputRegistration::Kind kind, const std::string& app,
     }
     return;
   }
-  const auto valid_segment = [](const std::string& value) {
-    return !value.empty() && value != "." && value != ".." &&
-           std::all_of(value.begin(), value.end(), [](char c) {
-             return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                    (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
-           });
-  };
-  if (!valid_segment(app) || !valid_segment(stream) || ip.empty() || port == 0)
+  if (!ValidSegment(app) || !ValidSegment(stream) || ip.empty() || port == 0)
     throw std::invalid_argument("HLS 发布需要有效 app、stream、监听地址和端口");
 }
 
 }  // namespace
 
+RemuxerConfig OutputRegistration::PrepareConfig(RemuxerConfig config) {
+  if (config.recording_queue_bytes == 0)
+    throw std::invalid_argument("Remuxer 录像队列上限必须大于零");
+  if (config.stream.empty())
+    config.stream = fmt::format("stream_{}", ++next_source_id);
+  if (!ValidSegment(config.app) || !ValidSegment(config.stream))
+    throw std::invalid_argument("Remuxer app/stream 必须是有效的 ASCII URI 段");
+  return config;
+}
+
 OutputRegistration::Entry OutputRegistration::PreparePush(
     const std::string& url) {
   Entry entry;
-  entry.kind = Kind::kPush;
+  entry.kind = Schema(url).empty() ? Kind::kRecording : Kind::kPush;
   entry.original = url;
-  entry.actual = Schema(url).empty() ? RecordingPath(url) : url;
+  entry.actual = entry.kind == Kind::kRecording ? RecordingPath(url) : url;
   return entry;
 }
 
@@ -168,13 +178,14 @@ const OutputRegistration::Entry* OutputRegistration::FindPush(
     const std::string& url) const {
   const auto found =
       std::find_if(entries_.begin(), entries_.end(), [&](const auto& entry) {
-        return entry.kind == Kind::kPush && entry.original == url;
+        return (entry.kind == Kind::kPush || entry.kind == Kind::kRecording) &&
+               entry.original == url;
       });
   return found == entries_.end() ? nullptr : &*found;
 }
 
 void OutputRegistration::Add(Entry entry) {
-  if (entry.kind != Kind::kPush &&
+  if (entry.kind != Kind::kPush && entry.kind != Kind::kRecording &&
       std::any_of(entries_.begin(), entries_.end(), [&](const auto& existing) {
         return existing.kind == entry.kind;
       })) {
@@ -190,6 +201,7 @@ Remuxer::OutputInfo OutputRegistration::info() const {
   for (const auto& entry : entries_) {
     switch (entry.kind) {
       case Kind::kPush:
+      case Kind::kRecording:
         result.output_urls.push_back(entry.actual);
         break;
       case Kind::kRtsp:
@@ -204,15 +216,20 @@ Remuxer::OutputInfo OutputRegistration::info() const {
 }
 
 RemuxOutput::RemuxOutput(toolkit::EventPoller::Ptr poller,
-                         ErrorCallback callback)
-    : poller_(std::move(poller)), on_error_(std::move(callback)) {}
+                         ErrorCallback callback, RemuxerConfig config)
+    : config_(std::move(config)),
+      poller_(std::move(poller)),
+      on_error_(std::move(callback)) {}
 
 void RemuxOutput::Start(const std::vector<mediakit::Track::Ptr>& tracks) {
+  ReservePath(config_.app, config_.stream);
+  published_path_ = {config_.app, config_.stream};
   mediakit::ProtocolOption option;
   option.enable_rtsp = option.enable_rtmp = option.enable_ts = true;
   option.rtsp_demand = option.rtmp_demand = option.ts_demand = true;
   option.enable_hls = option.enable_hls_fmp4 = option.enable_mp4 = false;
   option.enable_fmp4 = false;
+  option.hls_demand = false;
   option.enable_audio =
       std::any_of(tracks.begin(), tracks.end(), [](const auto& track) {
         return track->getTrackType() == mediakit::TrackAudio;
@@ -221,123 +238,79 @@ void RemuxOutput::Start(const std::vector<mediakit::Track::Ptr>& tracks) {
   option.auto_close = false;
   option.paced_sender_ms = 0;
   option.modify_stamp = mediakit::ProtocolOption::kModifyStampOff;
-  option.preserve_startup_packets = true;
   option.rtsp_ntp_from_source_stamp = true;
   option.max_track = tracks.size();
-  auto muxer = std::make_shared<mediakit::MultiMediaSourceMuxer>(
-      mediakit::MediaTuple(DEFAULT_VHOST, "mw_remux",
-                           std::to_string(++next_source_id)),
-      0.0f, option);
-  muxer->setMediaListener(shared_from_this());
-  muxer->setTrackReadyTimeoutMS(0);
-  for (const auto& track : tracks) {
-    if (!muxer->addTrack(track))
-      throw std::invalid_argument("ZLM 拒绝编码轨道");
+  try {
+    auto muxer = std::make_shared<mediakit::MultiMediaSourceMuxer>(
+        mediakit::MediaTuple(DEFAULT_VHOST, config_.app, config_.stream), 0.0f,
+        option);
+    muxer->setMediaListener(shared_from_this());
+    muxer->setTrackReadyTimeoutMS(0);
+    for (const auto& track : tracks) {
+      if (!muxer->addTrack(track))
+        throw std::invalid_argument("ZLM 拒绝编码轨道");
+    }
+    muxer->addTrackCompleted();
+    muxer_ = std::move(muxer);
+  } catch (...) {
+    ReleasePath(*published_path_);
+    published_path_.reset();
+    throw;
   }
-  muxer->addTrackCompleted();
-  muxer_ = std::move(muxer);
 }
 
-void RemuxOutput::AddPrepared(const OutputRegistration::Entry& entry,
-                              bool zero_origin) {
+void RemuxOutput::AddPrepared(const OutputRegistration::Entry& entry) {
   if (entry.kind == OutputRegistration::Kind::kRtsp) {
-    AddRtspPublish(entry.app, entry.stream, entry.ip, entry.port, entry.tls);
+    AddRtspPublish(entry.ip, entry.port, entry.tls);
     return;
   }
   if (entry.kind == OutputRegistration::Kind::kHls) {
-    AddHlsPublish(entry.app, entry.stream, entry.ip, entry.port, entry.tls);
+    AddHlsPublish(entry.ip, entry.port, entry.tls);
     return;
   }
-  const auto& url = entry.actual;
-  const auto schema = Schema(url);
-  if (!schema.empty()) {
-    const auto existing =
-        std::find_if(targets_.begin(), targets_.end(),
-                     [&](const auto& target) { return target.url == url; });
-    if (existing != targets_.end()) return;
-    targets_.push_back({url, schema, nullptr});
-    StartPushers();
-    return;
-  }
-  auto recorder = mediakit::createRemuxRecorder(
-      url, std::filesystem::u8path(url).extension() == ".m3u8");
-  if (zero_origin && !received_frame_) recorder->setTimestampOrigin(0);
-  muxer_->addRecorder(recorder);
-  MW_LOG_INFO("streamer", "Remuxer recording: {}", url);
+  const auto schema = Schema(entry.actual);
+  targets_.push_back({entry.actual, schema, nullptr});
+  StartPushers();
 }
 
-void RemuxOutput::AddRtspPublish(const std::string& app,
-                                 const std::string& stream,
-                                 const std::string& ip, std::uint16_t port,
+void RemuxOutput::AddRtspPublish(const std::string& ip, std::uint16_t port,
                                  bool tls) {
-  ValidatePublish(OutputRegistration::Kind::kRtsp, app, stream, ip, port);
+  ValidatePublish(OutputRegistration::Kind::kRtsp, config_.app, config_.stream,
+                  ip, port);
   if (server_) throw std::logic_error("Remuxer 只允许一个 RTSP 发布点");
   RequireServerCertificate(tls);
-  ReservePath(app, stream);
-  try {
-    auto server = tls ? Listen<mediakit::RtspSessionWithSSL>(
-                            ip, port, poller_, ListenerProtocol::kRtsps)
-                      : Listen<mediakit::RtspSession>(ip, port, poller_,
-                                                      ListenerProtocol::kRtsp);
-    auto source = muxer_->getMediaSource(RTSP_SCHEMA);
-    source->setMediaTuple(mediakit::MediaTuple(DEFAULT_VHOST, app, stream));
-    server_ = std::move(server);
-    published_path_ = {app, stream};
-  } catch (...) {
-    ReleasePath({app, stream});
-    throw;
-  }
+  server_ = tls ? Listen<mediakit::RtspSessionWithSSL>(ip, port, poller_,
+                                                       ListenerProtocol::kRtsps)
+                : Listen<mediakit::RtspSession>(ip, port, poller_,
+                                                ListenerProtocol::kRtsp);
   MW_LOG_INFO("streamer", "Remuxer RTSP publish: {}://{}:{}/{}/{}",
-              tls ? "rtsps" : "rtsp", ip, port, app, stream);
+              tls ? "rtsps" : "rtsp", ip, port, config_.app, config_.stream);
 }
 
-std::string RemuxOutput::AddHlsPublish(const std::string& app,
-                                       const std::string& stream,
-                                       const std::string& ip,
+std::string RemuxOutput::AddHlsPublish(const std::string& ip,
                                        std::uint16_t port, bool tls) {
-  ValidatePublish(OutputRegistration::Kind::kHls, app, stream, ip, port);
+  ValidatePublish(OutputRegistration::Kind::kHls, config_.app, config_.stream,
+                  ip, port);
   if (hls_server_) throw std::logic_error("Remuxer 只允许一个 HLS 发布点");
   RequireServerCertificate(tls);
-  {
-    std::lock_guard<std::mutex> lock(listeners_mutex);
-    if (!hls_published_paths.emplace(app, stream).second)
-      throw std::invalid_argument("HLS 发布路径已经被占用");
-  }
-  try {
-    auto server = tls ? Listen<mediakit::HttpsSession>(ip, port, poller_,
-                                                       ListenerProtocol::kHttps)
-                      : Listen<mediakit::HttpSession>(ip, port, poller_,
-                                                      ListenerProtocol::kHttp);
-    auto option = muxer_->getOption();
-    option.enable_rtsp = option.enable_rtmp = option.enable_ts = false;
-    option.enable_hls = true;
-    option.hls_demand = false;
-    option.hls_save_path =
-        toolkit::mINI::Instance()[mediakit::Http::kRootPath].as<std::string>();
-    // A separate native muxer keeps HLS's public tuple and recorder root
-    // independent of RTSP. ZLM owns registration, slices and HTTP playback.
-    auto hls_muxer = std::make_shared<mediakit::MultiMediaSourceMuxer>(
-        mediakit::MediaTuple(DEFAULT_VHOST, app, stream), 0.0f, option);
-    hls_muxer->setMediaListener(shared_from_this());
-    hls_muxer->setTrackReadyTimeoutMS(0);
-    muxer_->addRecorder(hls_muxer);
-    hls_muxer_ = std::move(hls_muxer);
-    hls_server_ = std::move(server);
-    hls_published_path_ = {app, stream};
-  } catch (...) {
-    std::lock_guard<std::mutex> lock(listeners_mutex);
-    hls_published_paths.erase({app, stream});
-    throw;
-  }
+  auto server = tls ? Listen<mediakit::HttpsSession>(ip, port, poller_,
+                                                     ListenerProtocol::kHttps)
+                    : Listen<mediakit::HttpSession>(ip, port, poller_,
+                                                    ListenerProtocol::kHttp);
+  const auto root =
+      toolkit::mINI::Instance()[mediakit::Http::kRootPath].as<std::string>();
+  if (!muxer_->setupRecord(mediakit::MediaSource::NullMediaSource(),
+                           mediakit::Recorder::type_hls, true, root, 0))
+    throw std::runtime_error("ZLM 启用 HLS 失败");
+  hls_server_ = std::move(server);
   const auto host = ip.find(':') == std::string::npos ? ip : "[" + ip + "]";
   auto url = fmt::format("{}://{}:{}/{}/{}/hls.m3u8", tls ? "https" : "http",
-                         host, port, app, stream);
+                         host, port, config_.app, config_.stream);
   MW_LOG_INFO("streamer", "Remuxer HLS publish: {}", url);
   return url;
 }
 
 void RemuxOutput::InputFrame(const mediakit::Frame::Ptr& frame) {
-  received_frame_ = true;
   muxer_->inputFrame(frame);
 }
 
@@ -356,28 +329,15 @@ void RemuxOutput::Flush() { muxer_->flush(); }
 
 void RemuxOutput::Close() {
   closed_ = true;
-  std::exception_ptr error;
-  try {
-    muxer_->closeRecorders();
-  } catch (...) {
-    error = std::current_exception();
-  }
   targets_.clear();
   registered_.clear();
   muxer_.reset();
-  hls_muxer_.reset();
   hls_server_.reset();
-  if (hls_published_path_) {
-    std::lock_guard<std::mutex> lock(listeners_mutex);
-    hls_published_paths.erase(*hls_published_path_);
-    hls_published_path_.reset();
-  }
   server_.reset();
   if (published_path_) {
     ReleasePath(*published_path_);
     published_path_.reset();
   }
-  if (error) std::rethrow_exception(error);
 }
 
 void RemuxOutput::Error(std::exception_ptr error) {
@@ -400,7 +360,9 @@ void RemuxOutput::StartPushers() {
     if (target.pusher || !registered_[target.schema]) continue;
     try {
       auto pusher = std::make_shared<mediakit::PusherProxy>(
-          muxer_->getMediaSource(target.schema), -1, poller_);
+          mediakit::MediaSource::find(target.schema, DEFAULT_VHOST, config_.app,
+                                      config_.stream, false),
+          -1, poller_);
       std::weak_ptr<RemuxOutput> weak = shared_from_this();
       const auto url = target.url;
       pusher->setPushCallbackOnce(

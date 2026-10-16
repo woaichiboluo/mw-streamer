@@ -40,6 +40,13 @@ std::int64_t InputPts(const AvDecoderReadResult& input) {
 }  // namespace
 
 class Scheduler::Impl final {
+  struct WakeState {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::uint64_t revision = 0;
+    std::array<std::uint64_t, 2> output_space{};
+  };
+
  public:
   Impl(std::shared_ptr<AvMediaSource> source, SchedulerConfig config)
       : source_(std::move(source)),
@@ -53,8 +60,6 @@ class Scheduler::Impl final {
       ForceFpsConfig fps;
       fps.fps = target.fps;
       force_fps_ = std::make_unique<ForceFps>(fps);
-      tracks_[0].time_base = av_inv_q(target.fps);
-      tracks_[0].period = 1;
       tracks_[0].enabled = true;
     }
     if (target.audio_sample_format != AV_SAMPLE_FMT_NONE) {
@@ -63,17 +68,7 @@ class Scheduler::Impl final {
       audio.sample_format = target.audio_sample_format;
       audio.channel_layout = target.audio_channel_layout;
       resampler_ = std::make_unique<AudioResampler>(audio);
-      tracks_[1].time_base = {1, target.audio_sample_rate};
-      tracks_[1].period = 1024;
       tracks_[1].enabled = true;
-    }
-    // Drain independently of output FPS so a disabled decoder cannot block
-    // MediaSource's shared dispatcher when the enabled video FPS is low.
-    for (std::size_t index = 0; index < tracks_.size(); ++index) {
-      if (!tracks_[index].enabled) {
-        tracks_[index].time_base = kMicroseconds;
-        tracks_[index].period = 22000;
-      }
     }
   }
 
@@ -95,7 +90,7 @@ class Scheduler::Impl final {
   bool Start() {
     if (started_) return false;
     {
-      std::lock_guard lock(mutex_);
+      std::lock_guard lock(wake_->mutex);
       error_ = {};
       stopping_ = false;
       for (auto& track : tracks_) track.Clear();
@@ -106,6 +101,17 @@ class Scheduler::Impl final {
       realtime_.Reset();
       if (force_fps_) force_fps_->Reset();
       if (resampler_) resampler_->Reset();
+      std::weak_ptr<WakeState> weak = wake_;
+      source_->SetOnReadReady([weak] {
+        if (const auto wake = weak.lock()) {
+          {
+            std::lock_guard lock(wake->mutex);
+            ++wake->revision;
+          }
+          wake->changed.notify_one();
+        }
+      });
+      read_ready_installed_ = true;
       filter_.Start();
       epoch_ = Clock::now();
       if (!video_worker_.Start([this] { RunWorker(0); }) ||
@@ -124,18 +130,30 @@ class Scheduler::Impl final {
   }
 
   std::exception_ptr error() const {
-    std::lock_guard lock(mutex_);
+    std::lock_guard lock(wake_->mutex);
     return error_;
+  }
+  void NotifyOutputSpace(bool video) noexcept {
+    {
+      std::lock_guard lock(wake_->mutex);
+      ++wake_->output_space[video ? 0 : 1];
+      ++wake_->revision;
+    }
+    wake_->changed.notify_one();
   }
   void RequestStop() noexcept {
     {
-      std::lock_guard lock(mutex_);
+      std::lock_guard lock(wake_->mutex);
       stopping_ = true;
     }
     WakeAll();
   }
   void Stop() noexcept {
     RequestStop();
+    if (read_ready_installed_) {
+      source_->SetOnReadReady({});
+      read_ready_installed_ = false;
+    }
     driver_.Join();
     video_worker_.Join();
     audio_worker_.Join();
@@ -154,10 +172,8 @@ class Scheduler::Impl final {
  private:
   struct Track {
     bool enabled = false;
-    AVRational time_base{0, 1};
-    std::int64_t period = 0;
-    // Shared jobs/completions are protected by mutex_. Only the driver owns
-    // the lookahead, sentinel head and deadline state.
+    // Shared jobs/completions are protected by wake_->mutex. Only the driver
+    // owns the lookahead, sentinel head and deadline state.
     bool busy = false;
     bool requested = false;
     bool completed = false;
@@ -166,17 +182,16 @@ class Scheduler::Impl final {
     bool needs_input = true;
     AvDecoderReadResult source_head;
     AvDecoderReadResult head;
-    std::int64_t next_output_us = 0;
-    std::int64_t output_units = 0;
-    std::int64_t output_epoch_us = 0;
-    bool has_output = false;
+    std::int64_t syncer_wake_us = 0;
+    bool output_blocked = false;
+    std::uint64_t blocked_revision = 0;
     void Clear() {
       busy = requested = completed = false;
       task = result = source_head = head = {};
       needs_input = true;
-      next_output_us = output_units = 0;
-      output_epoch_us = 0;
-      has_output = false;
+      syncer_wake_us = 0;
+      output_blocked = false;
+      blocked_revision = 0;
     }
   };
 
@@ -186,11 +201,11 @@ class Scheduler::Impl final {
     }
   }
   bool stopping() const {
-    std::lock_guard lock(mutex_);
+    std::lock_guard lock(wake_->mutex);
     return stopping_;
   }
   void WakeAll() {
-    changed_.notify_all();
+    wake_->changed.notify_all();
     for (auto& ready : work_ready_) ready.notify_all();
   }
   std::int64_t Now() const {
@@ -207,39 +222,21 @@ class Scheduler::Impl final {
     return index == 0 ? source_->TryReadVideo() : source_->TryReadAudio();
   }
 
-  // Absolute rational positions prevent fractional FPS/sample rounding drift.
-  // Skip missed wall-clock slots after a stall instead of bursting callbacks.
-  void Advance(Track& track, std::int64_t duration) {
-    track.output_units += duration;
-    track.next_output_us =
-        track.output_epoch_us +
-        av_rescale_q(track.output_units, track.time_base, kMicroseconds);
-    const auto now = Now();
-    if (track.next_output_us <= now) {
-      const auto overdue_units =
-          av_rescale_q_rnd(now - track.next_output_us, kMicroseconds,
-                           track.time_base, AV_ROUND_DOWN);
-      track.output_units += (overdue_units / duration + 1) * duration;
-      track.next_output_us =
-          track.output_epoch_us +
-          av_rescale_q(track.output_units, track.time_base, kMicroseconds);
-    }
-  }
-
   void Complete(std::size_t index) {
     auto& track = tracks_[index];
-    std::lock_guard lock(mutex_);
+    std::lock_guard lock(wake_->mutex);
     if (!track.completed) return;
     track.head = std::move(track.result);
     track.result = {};
     track.completed = false;
-    if (!track.has_output && track.head.status != AvDecoderReadStatus::kNull) {
-      track.next_output_us = Now();
-    }
+    // A fresh head ends the source wait. Syncer retains its own hard pause
+    // after a forward-fill batch, including when another track woke us.
+    if (track.head.status != AvDecoderReadStatus::kNull)
+      track.syncer_wake_us = Now();
   }
   void Dispatch(std::size_t index, AvDecoderReadResult input = {}) {
     {
-      std::lock_guard lock(mutex_);
+      std::lock_guard lock(wake_->mutex);
       auto& track = tracks_[index];
       if (stopping_) return;
       track.task = std::move(input);
@@ -252,7 +249,7 @@ class Scheduler::Impl final {
   std::int64_t Prepare(std::size_t index, std::int64_t now) {
     auto& track = tracks_[index];
     {
-      std::lock_guard lock(mutex_);
+      std::lock_guard lock(wake_->mutex);
       if (track.busy || track.completed) return kNoWake;
     }
     if (track.head.status != AvDecoderReadStatus::kNull) return kNoWake;
@@ -263,8 +260,7 @@ class Scheduler::Impl final {
     if (track.source_head.status == AvDecoderReadStatus::kNull) {
       track.source_head = Read(index);
       if (track.source_head.status == AvDecoderReadStatus::kNull) {
-        // No retry timer for an empty source: the next real output deadline
-        // or worker completion will drive another nonblocking read.
+        // Frame readiness wakes the driver; no periodic empty-source reads.
         return kNoWake;
       }
     }
@@ -282,49 +278,41 @@ class Scheduler::Impl final {
     return kNoWake;
   }
 
+  bool DrainDisabled(std::size_t index) {
+    for (int count = 0; count < kDiscardBatch; ++count) {
+      if (Read(index).status == AvDecoderReadStatus::kNull) return false;
+    }
+    return true;
+  }
+
   void Deliver(std::size_t index, std::int64_t now) {
     auto& track = tracks_[index];
-    if (now < track.next_output_us) return;
-    if (!track.enabled) {
-      for (int count = 0; count < kDiscardBatch; ++count) {
-        if (Read(index).status == AvDecoderReadStatus::kNull) {
-          Advance(track, track.period);
-          return;
-        }
-      }
-      // Yield between full batches without limiting drain throughput to FPS.
-      track.next_output_us = now;
-      return;
+    if (now < track.syncer_wake_us) return;
+    std::uint64_t observed_space;
+    {
+      std::lock_guard lock(wake_->mutex);
+      observed_space = wake_->output_space[index];
+      if (track.output_blocked && observed_space == track.blocked_revision)
+        return;
     }
+    const bool retrying = track.output_blocked;
+    track.output_blocked = false;
     const auto* head =
         track.head.status == AvDecoderReadStatus::kNull ? nullptr : &track.head;
-    auto step = syncer_.Step(index == 0, head, now);
+    const auto& output = index == 0 ? on_video_frame_ : on_audio_frame_;
+    auto step = syncer_.Step(index == 0, head, now, output);
     if (step.consumed) track.head = {};
-    if (!step.frame) {
-      // EOF is a control event rather than an output slot. Its successor may
-      // be processed by the next driver iteration without delaying media.
-      if (!step.consumed) {
-        if (head) {
-          track.next_output_us = step.wake_us;
-        } else {
-          Advance(track, track.period);
-        }
-      }
-      return;
+    track.syncer_wake_us = step.wake_us;
+    if (step.blocked) {
+      if (!retrying)
+        MW_LOG_DEBUG("streamer", "Scheduler 下游背压，暂停交付: track={}",
+                     index == 0 ? "video" : "audio");
+      track.output_blocked = true;
+      track.blocked_revision = observed_space;
+    } else if (retrying && step.frame) {
+      MW_LOG_DEBUG("streamer", "Scheduler 下游恢复接收: track={}",
+                   index == 0 ? "video" : "audio");
     }
-    const auto duration =
-        index == 0 ? std::int64_t{1} : (*step.frame)->nb_samples;
-    if (!track.has_output) {
-      track.output_epoch_us = now;
-      track.output_units = 0;
-      track.has_output = true;
-    }
-    if (index == 0) {
-      if (on_video_frame_) on_video_frame_(std::move(*step.frame));
-    } else {
-      if (on_audio_frame_) on_audio_frame_(std::move(*step.frame));
-    }
-    Advance(track, duration);
   }
 
   void RunDriver() noexcept {
@@ -332,25 +320,41 @@ class Scheduler::Impl final {
       while (!stopping()) {
         std::uint64_t observed;
         {
-          std::lock_guard lock(mutex_);
-          observed = revision_;
+          std::lock_guard lock(wake_->mutex);
+          observed = wake_->revision;
         }
         CheckSource();
-        for (std::size_t index = 0; index < tracks_.size(); ++index) {
-          Complete(index);
-          Deliver(index, Now());
-          if (stopping()) return;
-        }
         auto wake = kNoWake;
         for (std::size_t index = 0; index < tracks_.size(); ++index) {
           if (tracks_[index].enabled) {
-            wake = std::min(wake, Prepare(index, Now()));
+            Complete(index);
+            Deliver(index, Now());
+          } else if (DrainDisabled(index)) {
+            wake = Now();
           }
-          wake = std::min(wake, tracks_[index].next_output_us);
+          if (stopping()) return;
         }
-        std::unique_lock lock(mutex_);
-        changed_.wait_until(lock, epoch_ + Microseconds(wake),
-                            [&] { return stopping_ || revision_ != observed; });
+        for (std::size_t index = 0; index < tracks_.size(); ++index) {
+          if (!tracks_[index].enabled) continue;
+          wake = std::min(wake, Prepare(index, Now()));
+          bool blocked;
+          {
+            std::lock_guard lock(wake_->mutex);
+            const auto& track = tracks_[index];
+            blocked = track.output_blocked &&
+                      track.blocked_revision == wake_->output_space[index];
+          }
+          if (!blocked) wake = std::min(wake, tracks_[index].syncer_wake_us);
+        }
+        std::unique_lock lock(wake_->mutex);
+        const auto changed = [&] {
+          return stopping_ || wake_->revision != observed;
+        };
+        if (wake == kNoWake) {
+          wake_->changed.wait(lock, changed);
+        } else {
+          wake_->changed.wait_until(lock, epoch_ + Microseconds(wake), changed);
+        }
       }
     } catch (...) {
       Fail(std::current_exception());
@@ -363,7 +367,7 @@ class Scheduler::Impl final {
     while (true) {
       AvDecoderReadResult input;
       {
-        std::unique_lock lock(mutex_);
+        std::unique_lock lock(wake_->mutex);
         auto& track = tracks_[index];
         work_ready_[index].wait(lock,
                                 [&] { return stopping_ || track.requested; });
@@ -382,16 +386,16 @@ class Scheduler::Impl final {
       }
       auto output = converter.TryReadFrame();
       {
-        std::lock_guard lock(mutex_);
+        std::lock_guard lock(wake_->mutex);
         auto& track = tracks_[index];
         track.needs_input = pending.status == AvDecoderReadStatus::kNull &&
                             output.status == AvDecoderReadStatus::kNull;
         track.result = std::move(output);
         track.busy = false;
         track.completed = true;
-        ++revision_;
+        ++wake_->revision;
       }
-      changed_.notify_one();
+      wake_->changed.notify_one();
     }
   }
   void RunWorker(std::size_t index) noexcept {
@@ -401,16 +405,19 @@ class Scheduler::Impl final {
       } else if (index == 1 && resampler_) {
         Process(index, *resampler_);
       } else {
-        std::unique_lock lock(mutex_);
+        std::unique_lock lock(wake_->mutex);
         work_ready_[index].wait(lock, [this] { return stopping_; });
       }
     } catch (...) {
-      Fail(std::current_exception());
+      // Another track may observe the filter's rejected session before the
+      // throwing track reaches this handler. Keep the original business error.
+      const auto filter_failure = filter_.error();
+      Fail(filter_failure ? filter_failure : std::current_exception());
     }
   }
   void Fail(std::exception_ptr failure) noexcept {
     {
-      std::lock_guard lock(mutex_);
+      std::lock_guard lock(wake_->mutex);
       if (error_) return;
       error_ = failure;
       stopping_ = true;
@@ -442,12 +449,11 @@ class Scheduler::Impl final {
   std::unique_ptr<ForceFps> force_fps_;
   std::unique_ptr<AudioResampler> resampler_;
   std::array<Track, 2> tracks_;
-  mutable std::mutex mutex_;
-  std::condition_variable changed_;
+  std::shared_ptr<WakeState> wake_ = std::make_shared<WakeState>();
   std::array<std::condition_variable, 2> work_ready_;
   bool stopping_ = true;
   bool started_ = false;
-  std::uint64_t revision_ = 0;
+  bool read_ready_installed_ = false;
   std::exception_ptr error_;
   Clock::time_point epoch_;
   OnVideoFrame on_video_frame_;
@@ -474,6 +480,9 @@ void Scheduler::SetOnError(OnError callback) {
 }
 bool Scheduler::Start() { return impl_->Start(); }
 std::exception_ptr Scheduler::error() const { return impl_->error(); }
+void Scheduler::NotifyOutputSpace(bool video) noexcept {
+  impl_->NotifyOutputSpace(video);
+}
 void Scheduler::RequestStop() noexcept { impl_->RequestStop(); }
 void Scheduler::Stop() noexcept { impl_->Stop(); }
 

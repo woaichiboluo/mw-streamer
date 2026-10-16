@@ -20,21 +20,25 @@ struct SchedulerConfig {
 
 // One realtime driver releases source frames to independent video/audio
 // processing workers using a shared PTS-to-steady-clock mapping. The driver
-// owns the passive Syncer and serializes output on absolute video FPS/audio
-// sample deadlines. Late deadlines are skipped instead of emitted in a burst.
-// Each track has at most one processing task, one converted result and one
-// lookahead source item. Conversion is drained before requesting more input.
-// Missing input and normal EOF leave the live output running. Disabled input
-// tracks are drained in bounded batches on scheduling ticks, without filtering.
+// owns the passive Syncer and serializes its output without a second FPS/sample
+// clock. Real input follows the realtime mapping; sentinel fillers follow its
+// bounded-batch deadlines. Input/worker/downstream notifications wake the
+// driver. Each track has at most one processing task, one converted result and
+// one lookahead source item. Conversion is drained before requesting more
+// input. Missing input and normal EOF leave the live output running. Disabled
+// input tracks are drained in bounded batches on input notifications, without
+// filtering.
 //
 // Retains the externally managed source, without starting, stopping or changing
-// its callbacks. This Scheduler must be its only frame consumer while started.
-// Stop Scheduler before restarting the source. Serialize configuration,
-// Start/Stop and destruction; RequestStop/error are safe from any thread.
+// its business callbacks. The single-consumer read-ready slot is installed on
+// Start and cleared on Stop. This must be its only frame consumer while
+// started. Stop Scheduler before restarting the source. Serialize
+// configuration, Start/Stop and destruction; RequestStop/error are safe from
+// any thread.
 class MW_STREAMER_API Scheduler final {
  public:
-  using OnVideoFrame = std::function<void(ffmpeg::Frame)>;
-  using OnAudioFrame = std::function<void(ffmpeg::Frame)>;
+  using OnVideoFrame = std::function<bool(const ffmpeg::Frame&)>;
+  using OnAudioFrame = std::function<bool(const ffmpeg::Frame&)>;
   using OnError = std::function<void(std::exception_ptr)>;
 
   // Null source or invalid target configuration throws synchronously.
@@ -51,7 +55,10 @@ class MW_STREAMER_API Scheduler final {
   // Audio and video business callbacks may run concurrently.
   AvMediaFilter& media_filter();
   // Configure only while stopped. Output callbacks run serially on the driver's
-  // thread and must return promptly. Unrecoverable failures notify OnError
+  // thread and must return promptly. True accepts the read-only frame; false
+  // retains the input and next output PTS, suspending only that track until
+  // NotifyOutputSpace. Ref() retains accepted storage. Missing callbacks accept
+  // and discard output. Unrecoverable failures notify OnError
   // once, on the failing worker (or the lifecycle caller for Start/Stop
   // errors). All callbacks may query error() or RequestStop(), but must not
   // Start/Stop, reconfigure or destroy Scheduler. OnError exceptions are
@@ -65,6 +72,9 @@ class MW_STREAMER_API Scheduler final {
   // Call Stop before restart, including after a worker failure.
   bool Start();
   std::exception_ptr error() const;
+  // Thread-safe downstream wakeup after capacity becomes available. May be
+  // called before an admission callback returns false; the wake is retained.
+  void NotifyOutputSpace(bool video) noexcept;
   // Cancels internal work without joining or stopping the external source.
   void RequestStop() noexcept;
   // Joins internal workers and releases pending frames. Waits for executing

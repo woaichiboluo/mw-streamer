@@ -88,6 +88,18 @@ class AvMediaSource::Impl final {
     on_state_changed_ = std::move(callback);
   }
 
+  void SetOnPacket(OnPacket callback) {
+    if (worker_.joinable()) {
+      throw std::logic_error("配置 AvMediaSource 回调前需要 Stop");
+    }
+    on_packet_ = std::move(callback);
+  }
+
+  void SetOnReadReady(OnReadReady callback) {
+    std::lock_guard lock(mutex_);
+    on_read_ready_ = std::move(callback);
+  }
+
   bool Start(std::string_view url) noexcept {
     if (url.empty() || url.find('\0') != std::string_view::npos ||
         url.find_first_not_of(" \t\r\n\f\v") == std::string_view::npos) {
@@ -190,6 +202,23 @@ class AvMediaSource::Impl final {
   }
 
  private:
+  void NotifyReadReady() {
+    OnReadReady callback;
+    {
+      std::lock_guard lock(mutex_);
+      callback = on_read_ready_;
+    }
+    if (!callback) return;
+    try {
+      callback();
+    } catch (const std::exception& observer_error) {
+      MW_LOG_ERROR("streamer", "AvMediaSource 读取就绪通知异常: {}",
+                   observer_error.what());
+    } catch (...) {
+      MW_LOG_ERROR("streamer", "AvMediaSource 读取就绪通知发生未知异常");
+    }
+  }
+
   struct Session {
     ~Session() { Stop(); }
     void RequestStop() noexcept {
@@ -315,6 +344,7 @@ class AvMediaSource::Impl final {
                    static_cast<const void*>(this), StateName(state),
                    snapshot.retry_count, snapshot.retry_delay.count());
     }
+    NotifyReadReady();
     if (!on_state_changed_) return;
     try {
       on_state_changed_(snapshot);
@@ -375,12 +405,14 @@ class AvMediaSource::Impl final {
                   : std::make_unique<AvDecoder>(*stream, config_.video_decoder);
       created->video->SetOnError(on_error);
       created->video->SetOnInputSpace([this] { InputSpaceAvailable(); });
+      created->video->SetOnReadReady([this] { NotifyReadReady(); });
     }
     if (const auto* stream = FindStream(*info, info->audio_stream_index)) {
       created->audio =
           std::make_unique<AvDecoder>(*stream, config_.audio_decoder);
       created->audio->SetOnError(on_error);
       created->audio->SetOnInputSpace([this] { InputSpaceAvailable(); });
+      created->audio->SetOnReadReady([this] { NotifyReadReady(); });
     }
     if (!created->video && !created->audio) {
       throw std::invalid_argument("AvMediaSource 输入没有所选音视频轨道");
@@ -458,6 +490,8 @@ class AvMediaSource::Impl final {
       auto input = proxy_.ReadPacketFor(config_.packet_read_timeout);
       if (input.status == AvInputReadStatus::kNull) return false;
       Initialize(input.info, session);
+      if (input.status == AvInputReadStatus::kPacket && on_packet_)
+        on_packet_(*input.packet);
       pending.emplace();
       pending->input = std::move(input);
       progress = true;
@@ -598,6 +632,8 @@ class AvMediaSource::Impl final {
   // Written only by the dispatcher after successfully submitting packet EOF.
   bool final_eof_submitted_ = false;
   OnStateChanged on_state_changed_;
+  OnPacket on_packet_;
+  OnReadReady on_read_ready_;
   std::string url_;
   internal::Thread worker_;
 };
@@ -610,6 +646,12 @@ AvMediaSource::AvMediaSource(const ffmpeg::HwDeviceContext& device,
 AvMediaSource::~AvMediaSource() = default;
 void AvMediaSource::SetOnStateChanged(OnStateChanged callback) {
   impl_->SetOnStateChanged(std::move(callback));
+}
+void AvMediaSource::SetOnPacket(OnPacket callback) {
+  impl_->SetOnPacket(std::move(callback));
+}
+void AvMediaSource::SetOnReadReady(OnReadReady callback) {
+  impl_->SetOnReadReady(std::move(callback));
 }
 bool AvMediaSource::Start(std::string_view url) noexcept {
   return impl_->Start(url);

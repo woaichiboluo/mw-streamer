@@ -18,6 +18,7 @@
 #include <vector>
 
 extern "C" {
+#include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/samplefmt.h>
@@ -69,9 +70,9 @@ SchedulerConfig Config() {
   config.syncer.encoder.audio_sample_format = AV_SAMPLE_FMT_S16;
   config.syncer.encoder.audio_sample_rate = 32000;
   config.syncer.encoder.audio_channel_layout = AV_CHANNEL_LAYOUT_MONO;
-  config.syncer.timeout = 20ms;
-  config.syncer.freeze = 20ms;
-  config.syncer.start_ts = 0us;
+  config.syncer.options.timeout = 20ms;
+  config.syncer.options.freeze = 20ms;
+  config.syncer.options.start_ts = 0us;
   return config;
 }
 
@@ -110,6 +111,86 @@ class TemporaryAudio final {
   std::filesystem::path path_;
 };
 
+class TemporaryVideoJump final {
+ public:
+  TemporaryVideoJump()
+      : path_(
+            std::filesystem::temp_directory_path() /
+            ("mw-scheduler-jump-" +
+             std::to_string(
+                 std::chrono::steady_clock::now().time_since_epoch().count()) +
+             ".mp4")) {
+    AVFormatContext* raw_input = nullptr;
+    REQUIRE(avformat_open_input(&raw_input, SamplePath().c_str(), nullptr,
+                                nullptr) >= 0);
+    const auto close_input = [](AVFormatContext* context) {
+      avformat_close_input(&context);
+    };
+    std::unique_ptr<AVFormatContext, decltype(close_input)> input(raw_input,
+                                                                  close_input);
+    REQUIRE(avformat_find_stream_info(input.get(), nullptr) >= 0);
+    const int video = av_find_best_stream(input.get(), AVMEDIA_TYPE_VIDEO, -1,
+                                          -1, nullptr, 0);
+    REQUIRE(video >= 0);
+    AVFormatContext* raw_output = nullptr;
+    REQUIRE(avformat_alloc_output_context2(&raw_output, nullptr, nullptr,
+                                           path().c_str()) >= 0);
+    const auto close_output = [](AVFormatContext* context) {
+      if (context->pb) avio_closep(&context->pb);
+      avformat_free_context(context);
+    };
+    std::unique_ptr<AVFormatContext, decltype(close_output)> output(
+        raw_output, close_output);
+    auto* stream = avformat_new_stream(output.get(), nullptr);
+    REQUIRE(stream != nullptr);
+    const auto* original = input->streams[video];
+    REQUIRE(avcodec_parameters_copy(stream->codecpar, original->codecpar) >= 0);
+    stream->codecpar->codec_tag = 0;
+    stream->time_base = original->time_base;
+    stream->avg_frame_rate = original->avg_frame_rate;
+    REQUIRE(avio_open(&output->pb, path().c_str(), AVIO_FLAG_WRITE) >= 0);
+    REQUIRE(avformat_write_header(output.get(), nullptr) >= 0);
+    const auto release_packet = [](AVPacket* packet) {
+      av_packet_free(&packet);
+    };
+    std::unique_ptr<AVPacket, decltype(release_packet)> packet(
+        av_packet_alloc(), release_packet);
+    REQUIRE(packet != nullptr);
+    bool first = true;
+    int result;
+    while ((result = av_read_frame(input.get(), packet.get())) >= 0) {
+      if (packet->stream_index == video) {
+        if (!first) {
+          const auto jump =
+              av_rescale_q(1, AVRational{1, 1}, original->time_base);
+          if (packet->pts != AV_NOPTS_VALUE) packet->pts += jump;
+          if (packet->dts != AV_NOPTS_VALUE) packet->dts += jump;
+        }
+        first = false;
+        packet->stream_index = stream->index;
+        packet->pos = -1;
+        av_packet_rescale_ts(packet.get(), original->time_base,
+                             stream->time_base);
+        REQUIRE(av_interleaved_write_frame(output.get(), packet.get()) >= 0);
+      }
+      av_packet_unref(packet.get());
+    }
+    REQUIRE(result == AVERROR_EOF);
+    REQUIRE_FALSE(first);
+    REQUIRE(av_write_trailer(output.get()) >= 0);
+  }
+
+  ~TemporaryVideoJump() {
+    std::error_code error;
+    std::filesystem::remove(path_, error);
+  }
+
+  std::string path() const { return path_.generic_u8string(); }
+
+ private:
+  std::filesystem::path path_;
+};
+
 TEST_CASE("Scheduler processes audio while the video filter is blocked",
           "[scheduler]") {
   auto source = Source();
@@ -133,8 +214,14 @@ TEST_CASE("Scheduler processes audio while the video filter is blocked",
     if (video_entered && !release_video) audio_during_video.store(true);
     return frame.Ref();
   });
-  scheduler.SetOnVideoFrame([&](ffmpeg::Frame) { ++delivered_video; });
-  scheduler.SetOnAudioFrame([&](ffmpeg::Frame) { ++delivered_audio; });
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
+    ++delivered_video;
+    return true;
+  });
+  scheduler.SetOnAudioFrame([&](const ffmpeg::Frame&) {
+    ++delivered_audio;
+    return true;
+  });
   REQUIRE(source->Start(SamplePath()));
   REQUIRE(scheduler.Start());
   bool video_started;
@@ -194,7 +281,7 @@ TEST_CASE("Scheduler paces file processing before business filtering",
   CHECK_FALSE(scheduler.error());
 }
 
-TEST_CASE("Scheduler delivers standby video at the configured realtime FPS",
+TEST_CASE("Scheduler standby output follows the Syncer shared clock",
           "[scheduler][realtime]") {
   const int fps = GENERATE(25, 30);
   CAPTURE(fps);
@@ -205,13 +292,17 @@ TEST_CASE("Scheduler delivers standby video at the configured realtime FPS",
   std::mutex mutex;
   std::condition_variable changed;
   std::vector<std::chrono::steady_clock::time_point> delivered;
+  std::vector<std::int64_t> pts;
   const auto wanted = static_cast<std::size_t>(fps * 4 / 5 + 1);
   Scheduler scheduler(source, config);
-  scheduler.SetOnVideoFrame([&](ffmpeg::Frame) {
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame& frame) {
     std::lock_guard lock(mutex);
     delivered.push_back(std::chrono::steady_clock::now());
+    pts.push_back(frame->pts);
     changed.notify_all();
+    return true;
   });
+  const auto started = std::chrono::steady_clock::now();
   REQUIRE(scheduler.Start());
   bool enough_frames;
   {
@@ -221,17 +312,15 @@ TEST_CASE("Scheduler delivers standby video at the configured realtime FPS",
   }
   scheduler.Stop();
   REQUIRE(enough_frames);
-  const auto expected = std::chrono::duration<double>(1.0 / fps);
-  const auto elapsed = delivered[wanted - 1] - delivered.front();
-  CHECK(elapsed >= expected * (wanted - 1) * 0.8);
-  CHECK(elapsed <= expected * (wanted - 1) * 1.4);
-  // Permit occasional OS scheduling jitter, but reject repeated catch-up
-  // bursts whose timestamps alone would otherwise appear to have correct FPS.
-  std::size_t short_intervals = 0;
-  for (std::size_t i = 1; i < wanted; ++i) {
-    if (delivered[i] - delivered[i - 1] < expected / 3) ++short_intervals;
+  // Sentinel holds its shared clock for two seconds, then fills in batches
+  // of at most five per retry. The FPS specifies media PTS, not a second cap.
+  CHECK(delivered.front() - started >= 2s);
+  for (std::size_t index = 1; index < wanted; ++index) {
+    CHECK(pts[index] - pts[index - 1] == 1);
   }
-  CHECK(short_intervals <= 2);
+  for (std::size_t index = 5; index < wanted; ++index) {
+    CHECK(delivered[index] - delivered[index - 5] >= 10ms);
+  }
   CHECK_FALSE(scheduler.error());
 }
 
@@ -243,13 +332,17 @@ TEST_CASE("Scheduler continues producing both tracks after normal source EOF",
   std::atomic<bool> bad_audio_format{false};
   std::atomic<int> errors{0};
   Scheduler scheduler(source, Config());
-  scheduler.SetOnVideoFrame([&](ffmpeg::Frame) { ++video_frames; });
-  scheduler.SetOnAudioFrame([&](ffmpeg::Frame frame) {
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
+    ++video_frames;
+    return true;
+  });
+  scheduler.SetOnAudioFrame([&](const ffmpeg::Frame& frame) {
     if (frame->sample_rate != 32000 || frame->format != AV_SAMPLE_FMT_S16 ||
         frame->ch_layout.nb_channels != 1) {
       bad_audio_format.store(true);
     }
     ++audio_frames;
+    return true;
   });
   scheduler.SetOnError([&](std::exception_ptr) { ++errors; });
   REQUIRE(source->Start(SamplePath()));
@@ -312,7 +405,10 @@ TEST_CASE("Scheduler reports a filter failure once and can start a new session",
   source->Stop();
   REQUIRE(source->Start(SamplePath()));
   scheduler.media_filter().SetOnVideo({});
-  scheduler.SetOnVideoFrame([&](ffmpeg::Frame) { ++frames; });
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
+    ++frames;
+    return true;
+  });
   REQUIRE(scheduler.Start());
   CHECK_FALSE(scheduler.error());
   CHECK(WaitFor([&] { return frames.load() >= 3; }));
@@ -337,10 +433,14 @@ TEST_CASE(
   std::atomic<int> frames{0};
   std::atomic<int> disabled_frames{0};
   Scheduler scheduler(source, config);
-  scheduler.SetOnVideoFrame(
-      [&](ffmpeg::Frame) { ++(video_only ? frames : disabled_frames); });
-  scheduler.SetOnAudioFrame(
-      [&](ffmpeg::Frame) { ++(video_only ? disabled_frames : frames); });
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
+    ++(video_only ? frames : disabled_frames);
+    return true;
+  });
+  scheduler.SetOnAudioFrame([&](const ffmpeg::Frame&) {
+    ++(video_only ? disabled_frames : frames);
+    return true;
+  });
   REQUIRE(source->Start(SamplePath()));
   REQUIRE(scheduler.Start());
   CHECK(WaitFor(
@@ -366,8 +466,14 @@ TEST_CASE("Scheduler drains disabled audio independently of low video FPS",
     ++audio_filtered;
     return frame.Ref();
   });
-  scheduler.SetOnVideoFrame([&](ffmpeg::Frame) { ++video_frames; });
-  scheduler.SetOnAudioFrame([&](ffmpeg::Frame) { ++audio_frames; });
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
+    ++video_frames;
+    return true;
+  });
+  scheduler.SetOnAudioFrame([&](const ffmpeg::Frame&) {
+    ++audio_frames;
+    return true;
+  });
   REQUIRE(source->Start(SamplePath()));
   REQUIRE(scheduler.Start());
   // This two-second fixture contains 95 audio packets. Draining a small batch
@@ -383,21 +489,22 @@ TEST_CASE("Scheduler drains disabled audio independently of low video FPS",
   CHECK_FALSE(scheduler.error());
 }
 
-TEST_CASE("Scheduler paces converted live frames on output deadlines",
+TEST_CASE("Scheduler releases converted frames in input-paced batches",
           "[scheduler][realtime]") {
   auto source = Source();
   auto config = Config();
   config.syncer.encoder.audio_sample_format = AV_SAMPLE_FMT_NONE;
-  config.syncer.timeout = 200ms;
+  config.syncer.options.timeout = 200ms;
   std::mutex mutex;
   std::condition_variable changed;
   std::vector<std::chrono::steady_clock::time_point> delivered;
   constexpr std::size_t kWanted = 21;
   Scheduler scheduler(source, config);
-  scheduler.SetOnVideoFrame([&](ffmpeg::Frame) {
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
     std::lock_guard lock(mutex);
     delivered.push_back(std::chrono::steady_clock::now());
     changed.notify_all();
+    return true;
   });
   REQUIRE(source->Start(SamplePath()));
   const auto started_at = std::chrono::steady_clock::now();
@@ -411,16 +518,16 @@ TEST_CASE("Scheduler paces converted live frames on output deadlines",
   scheduler.Stop();
   REQUIRE(enough_frames);
   CHECK(delivered.front() - started_at < 1s);
-  // The fixture is 10 FPS: ForceFps must prepare repeated frames while the
-  // driver still delivers them individually at the configured 25 FPS.
+  // Realtime paces this 10 FPS input; ForceFps produces 25 FPS timestamps.
+  // Converted repeats may be delivered together, without another output cap.
   const auto elapsed = delivered[kWanted - 1] - delivered.front();
-  CHECK(elapsed >= 640ms);
-  CHECK(elapsed <= 1120ms);
+  CHECK(elapsed >= 500ms);
+  CHECK(elapsed <= 1400ms);
   std::size_t short_intervals = 0;
   for (std::size_t i = 1; i < kWanted; ++i) {
     if (delivered[i] - delivered[i - 1] < 13ms) ++short_intervals;
   }
-  CHECK(short_intervals <= 2);
+  CHECK(short_intervals > 0);
   CHECK_FALSE(scheduler.error());
 }
 
@@ -444,8 +551,14 @@ TEST_CASE("Scheduler fills missing tracks and drains opposite-only input",
   std::atomic<int> video_filtered{0};
   std::atomic<int> audio_filtered{0};
   Scheduler scheduler(source, config);
-  scheduler.SetOnVideoFrame([&](ffmpeg::Frame) { ++video_frames; });
-  scheduler.SetOnAudioFrame([&](ffmpeg::Frame) { ++audio_frames; });
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
+    ++video_frames;
+    return true;
+  });
+  scheduler.SetOnAudioFrame([&](const ffmpeg::Frame&) {
+    ++audio_frames;
+    return true;
+  });
   scheduler.media_filter().SetOnVideo([&](const ffmpeg::Frame& frame) {
     ++video_filtered;
     return frame.Ref();
@@ -500,7 +613,10 @@ TEST_CASE("Scheduler owns a source reference without controlling its lifecycle",
     Scheduler scheduler(source, Config());
     source.reset();
     REQUIRE_FALSE(retained.expired());
-    scheduler.SetOnVideoFrame([&](ffmpeg::Frame) { ++frames; });
+    scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
+      ++frames;
+      return true;
+    });
     REQUIRE(scheduler.Start());
     CHECK_FALSE(scheduler.Start());
     CHECK(WaitFor([&] { return frames.load() > 0; }));
@@ -518,7 +634,7 @@ TEST_CASE("Scheduler forwards an output callback failure once", "[scheduler]") {
   auto source = Source();
   std::atomic<int> errors{0};
   Scheduler scheduler(source, Config());
-  scheduler.SetOnVideoFrame([](ffmpeg::Frame) {
+  scheduler.SetOnVideoFrame([](const ffmpeg::Frame&) -> bool {
     throw std::runtime_error("scheduler output failure");
   });
   scheduler.SetOnError([&](std::exception_ptr) { ++errors; });
@@ -538,7 +654,10 @@ TEST_CASE("Scheduler reports filter startup failure once and permits restart",
   scheduler.media_filter().SetOnStart(
       [] { throw std::runtime_error("scheduler filter startup failure"); });
   scheduler.SetOnError([&](std::exception_ptr) { ++errors; });
-  scheduler.SetOnVideoFrame([&](ffmpeg::Frame) { ++frames; });
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
+    ++frames;
+    return true;
+  });
   CHECK_FALSE(scheduler.Start());
   CHECK(errors.load() == 1);
   REQUIRE(scheduler.error());
@@ -566,8 +685,14 @@ TEST_CASE("Scheduler preserves cancellation requested during filter startup",
   std::atomic<int> errors{0};
   Scheduler scheduler(source, Config());
   scheduler.media_filter().SetOnStart([&] { scheduler.RequestStop(); });
-  scheduler.SetOnVideoFrame([&](ffmpeg::Frame) { ++video_frames; });
-  scheduler.SetOnAudioFrame([&](ffmpeg::Frame) { ++audio_frames; });
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
+    ++video_frames;
+    return true;
+  });
+  scheduler.SetOnAudioFrame([&](const ffmpeg::Frame&) {
+    ++audio_frames;
+    return true;
+  });
   scheduler.SetOnError([&](std::exception_ptr) { ++errors; });
   REQUIRE(scheduler.Start());
   // An accidentally restarted Syncer starts filling absent input after its
@@ -599,37 +724,159 @@ TEST_CASE("Scheduler rejects a null source or configurations without tracks",
   CHECK_THROWS_AS(Scheduler(source, config), std::invalid_argument);
 }
 
-TEST_CASE(
-    "Scheduler skips expired video deadlines after a slow output callback",
-    "[scheduler]") {
+TEST_CASE("Scheduler preserves sentinel forward-jump batches and their pause",
+          "[scheduler][realtime]") {
   using Clock = std::chrono::steady_clock;
+  TemporaryVideoJump video;
   auto source = Source();
   auto config = Config();
   config.syncer.encoder.audio_sample_format = AV_SAMPLE_FMT_NONE;
+  config.syncer.options.timeout = 5s;
+  config.realtime.discontinuity_threshold = 2s;
   Scheduler scheduler(source, config);
+  std::mutex mutex;
   std::vector<Clock::time_point> arrivals;
+  std::vector<std::int64_t> pts;
   std::atomic<int> delivered{0};
-  scheduler.SetOnVideoFrame([&](ffmpeg::Frame) {
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame& frame) {
+    std::lock_guard lock(mutex);
     arrivals.push_back(Clock::now());
-    if (arrivals.size() == 3) std::this_thread::sleep_for(120ms);
+    pts.push_back(frame->pts);
     delivered.store(static_cast<int>(arrivals.size()));
-    if (arrivals.size() == 10) scheduler.RequestStop();
+    return true;
   });
+  REQUIRE(source->Start(video.path()));
   REQUIRE(scheduler.Start());
-  const bool finished = WaitFor([&] { return delivered.load() >= 10; });
+  const bool finished = WaitFor([&] { return delivered.load() >= 7; });
   scheduler.Stop();
   REQUIRE(finished);
   REQUIRE_FALSE(scheduler.error());
-  REQUIRE(arrivals.size() == 10);
-  CHECK(arrivals[3] - arrivals[2] >= 120ms);
-  // The first callback after the stall may land near a clock boundary.
-  // Subsequent callbacks must not burst through the missed 40 ms slots.
-  for (std::size_t index = 4; index < arrivals.size(); ++index) {
-    CHECK(arrivals[index] - arrivals[index - 1] >= 10ms);
+  REQUIRE(arrivals.size() >= 7);
+  // A one-second jump after the first real frame produces five 40 ms
+  // replacements immediately, then waits half their duration before real input.
+  CHECK(arrivals[5] - arrivals[1] < 80ms);
+  CHECK(arrivals[6] - arrivals[5] >= 80ms);
+  for (std::size_t index = 1; index < 7; ++index) {
+    CHECK(pts[index] > pts[index - 1]);
   }
-  const auto recovered_span = arrivals.back() - arrivals[3];
-  CHECK(recovered_span >= 180ms);
-  CHECK(recovered_span <= 480ms);
+}
+
+TEST_CASE("Scheduler waits for video output space while audio continues",
+          "[scheduler][backpressure]") {
+  auto source = Source();
+  Scheduler scheduler(source, Config());
+  std::atomic<int> video_calls{0};
+  std::atomic<int> audio_calls{0};
+  std::atomic<bool> accept_video{false};
+  std::mutex mutex;
+  std::vector<std::int64_t> video_pts;
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame& frame) {
+    {
+      std::lock_guard lock(mutex);
+      video_pts.push_back(frame->pts);
+    }
+    ++video_calls;
+    return accept_video.load();
+  });
+  scheduler.SetOnAudioFrame([&](const ffmpeg::Frame&) {
+    ++audio_calls;
+    return true;
+  });
+  REQUIRE(source->Start(SamplePath()));
+  REQUIRE(scheduler.Start());
+  const bool blocked = WaitFor([&] { return video_calls.load() == 1; });
+  const int audio_before = audio_calls.load();
+  const bool audio_continued =
+      WaitFor([&] { return audio_calls.load() >= audio_before + 4; });
+  scheduler.NotifyOutputSpace(false);
+  std::this_thread::sleep_for(100ms);
+  const int calls_while_full = video_calls.load();
+  accept_video.store(true);
+  scheduler.NotifyOutputSpace(true);
+  const bool resumed = WaitFor([&] { return video_calls.load() >= 2; });
+  scheduler.Stop();
+  CHECK(blocked);
+  CHECK(audio_continued);
+  CHECK(calls_while_full == 1);
+  REQUIRE(resumed);
+  REQUIRE(video_pts.size() >= 2);
+  CHECK(video_pts[1] == video_pts[0]);
+  CHECK_FALSE(scheduler.error());
+}
+
+TEST_CASE("Scheduler preserves output space notification before rejection",
+          "[scheduler][backpressure]") {
+  auto source = Source();
+  Scheduler scheduler(source, Config());
+  std::atomic<int> attempts{0};
+  std::atomic<std::int64_t> first_pts{AV_NOPTS_VALUE};
+  std::atomic<std::int64_t> retried_pts{AV_NOPTS_VALUE};
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame& frame) {
+    const int attempt = attempts.fetch_add(1);
+    if (attempt == 0) {
+      first_pts.store(frame->pts);
+      scheduler.NotifyOutputSpace(true);
+      return false;
+    }
+    if (attempt == 1) retried_pts.store(frame->pts);
+    return true;
+  });
+  REQUIRE(source->Start(SamplePath()));
+  REQUIRE(scheduler.Start());
+  const bool retried = WaitFor([&] { return attempts.load() >= 2; }, 1s);
+  scheduler.Stop();
+  CHECK(retried);
+  CHECK(first_pts.load() == retried_pts.load());
+  CHECK_FALSE(scheduler.error());
+}
+
+TEST_CASE("Scheduler stops promptly while both outputs await space",
+          "[scheduler][backpressure]") {
+  auto source = Source();
+  Scheduler scheduler(source, Config());
+  std::atomic<int> video_attempts{0};
+  std::atomic<int> audio_attempts{0};
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
+    ++video_attempts;
+    return false;
+  });
+  scheduler.SetOnAudioFrame([&](const ffmpeg::Frame&) {
+    ++audio_attempts;
+    return false;
+  });
+  REQUIRE(source->Start(SamplePath()));
+  REQUIRE(scheduler.Start());
+  const bool blocked = WaitFor(
+      [&] { return video_attempts.load() == 1 && audio_attempts.load() == 1; });
+  const auto before_stop = std::chrono::steady_clock::now();
+  scheduler.Stop();
+  CHECK(std::chrono::steady_clock::now() - before_stop < 500ms);
+  CHECK(blocked);
+  CHECK(video_attempts.load() == 1);
+  CHECK(audio_attempts.load() == 1);
+  CHECK_FALSE(scheduler.error());
+}
+
+TEST_CASE("Scheduler wakes for source frames before a long Syncer timeout",
+          "[scheduler][realtime]") {
+  auto source = Source();
+  auto config = Config();
+  config.syncer.options.timeout = 30s;
+  Scheduler scheduler(source, config);
+  std::atomic<int> frames{0};
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
+    ++frames;
+    return true;
+  });
+  REQUIRE(scheduler.Start());
+  // Let the driver observe empty queues and enter its event wait first.
+  std::this_thread::sleep_for(100ms);
+  CHECK(frames.load() == 0);
+  REQUIRE(source->Start(SamplePath()));
+  const bool awakened = WaitFor([&] { return frames.load() > 0; }, 1s);
+  scheduler.Stop();
+  CHECK(awakened);
+  CHECK_FALSE(scheduler.error());
 }
 
 }  // namespace

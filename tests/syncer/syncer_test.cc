@@ -281,7 +281,7 @@ TEST_CASE("Syncer audio backups contain actual silence including unsigned PCM",
 TEST_CASE("Syncer preserves a common initial video audio offset when enabled",
           "[syncer][timing]") {
   auto config = MixedConfig();
-  config.forward_start_shift = true;
+  config.options.forward_start_shift = true;
   Syncer timing(config);
   auto video = VideoInput(50000000);
   auto audio = AudioInput(2403840);
@@ -373,7 +373,7 @@ TEST_CASE("Syncer shared correction converges after interleaved PTS resets",
   const bool video_leads = GENERATE(true, false);
   const bool forward_start_shift = GENERATE(false, true);
   auto config = MixedConfig();
-  config.forward_start_shift = forward_start_shift;
+  config.options.forward_start_shift = forward_start_shift;
   Syncer timing(config);
   std::vector<AvDecoderReadResult> video{FpsVideoInput(1250),
                                          FpsVideoInput(1251)};
@@ -589,7 +589,7 @@ TEST_CASE("Syncer validates timing and enabled track configuration",
       static_cast<AVSampleFormat>(AV_SAMPLE_FMT_NB);
   REQUIRE_THROWS_AS(Syncer{config}, std::invalid_argument);
   config = VideoConfig();
-  config.freeze = -1us;
+  config.options.freeze = -1us;
   REQUIRE_THROWS_AS(Syncer{config}, std::invalid_argument);
 }
 
@@ -604,6 +604,152 @@ TEST_CASE("Syncer consumes input without owning realtime pacing", "[syncer]") {
   REQUIRE(PtsUs(*output.frame) == kStart + 40000);
   REQUIRE((*second.frame)->pts == 50040000);
   REQUIRE((*output.frame)->data[0] == (*second.frame)->data[0]);
+}
+
+TEST_CASE("Syncer retries rejected real input without advancing its track",
+          "[syncer][backpressure]") {
+  Syncer syncer(VideoConfig());
+  auto first = VideoInput(50000000);
+  REQUIRE(syncer.Step(true, &first, 0).consumed);
+  auto next = VideoInput(50040000);
+  std::int64_t rejected_pts = AV_NOPTS_VALUE;
+  const auto rejected =
+      syncer.Step(true, &next, 40000, [&](const ffmpeg::Frame& frame) {
+        rejected_pts = PtsUs(frame);
+        return false;
+      });
+  CHECK(rejected.blocked);
+  CHECK_FALSE(rejected.consumed);
+  CHECK_FALSE(rejected.frame);
+  CHECK(rejected_pts == kStart + 40000);
+  CHECK((*next.frame)->pts == 50040000);
+  int accepted_calls = 0;
+  const auto retried =
+      syncer.Step(true, &next, 80000, [&](const ffmpeg::Frame& frame) {
+        ++accepted_calls;
+        CHECK(PtsUs(frame) == rejected_pts);
+        return true;
+      });
+  REQUIRE(retried.frame);
+  CHECK(retried.consumed);
+  CHECK_FALSE(retried.blocked);
+  CHECK(accepted_calls == 1);
+  auto following = VideoInput(50080000);
+  const auto continuous = syncer.Step(true, &following, 80000);
+  REQUIRE(continuous.frame);
+  CHECK(continuous.consumed);
+  CHECK(PtsUs(*continuous.frame) == kStart + 80000);
+}
+
+TEST_CASE("Syncer finishes a rejected forward-fill batch without a PTS hole",
+          "[syncer][backpressure]") {
+  Syncer syncer(VideoConfig());
+  auto first = VideoInput(50000000);
+  REQUIRE(syncer.Step(true, &first, 0).consumed);
+  auto jump = VideoInput(300000000);
+  for (int index = 1; index <= 2; ++index) {
+    const auto accepted = syncer.Step(true, &jump, 40000);
+    REQUIRE(accepted.frame);
+    CHECK_FALSE(accepted.consumed);
+    CHECK(PtsUs(*accepted.frame) == kStart + index * 40000);
+  }
+  std::int64_t rejected_pts = AV_NOPTS_VALUE;
+  const auto rejected =
+      syncer.Step(true, &jump, 40000, [&](const ffmpeg::Frame& frame) {
+        rejected_pts = PtsUs(frame);
+        return false;
+      });
+  CHECK(rejected.blocked);
+  CHECK_FALSE(rejected.consumed);
+  CHECK_FALSE(rejected.frame);
+  CHECK(rejected_pts == kStart + 120000);
+  REQUIRE(rejected.wake_us > 40000);
+  const auto waiting = syncer.Step(true, &jump, rejected.wake_us - 1);
+  CHECK_FALSE(waiting.consumed);
+  CHECK_FALSE(waiting.frame);
+  const auto real = syncer.Step(true, &jump, rejected.wake_us);
+  REQUIRE(real.frame);
+  CHECK(real.consumed);
+  CHECK(PtsUs(*real.frame) == rejected_pts);
+  CHECK((*real.frame)->data[0][0] == 99);
+  auto following = VideoInput(300040000);
+  const auto continuous = syncer.Step(true, &following, rejected.wake_us);
+  REQUIRE(continuous.frame);
+  CHECK(continuous.consumed);
+  CHECK(PtsUs(*continuous.frame) == rejected_pts + 40000);
+}
+
+TEST_CASE("Syncer retries a rejected timeout backup after its source wait",
+          "[syncer][backpressure]") {
+  Syncer syncer(VideoConfig());
+  REQUIRE_FALSE(syncer.Step(true, nullptr, 1000000).frame);
+  std::int64_t rejected_pts = AV_NOPTS_VALUE;
+  const auto rejected =
+      syncer.Step(true, nullptr, 3000000, [&](const ffmpeg::Frame& frame) {
+        rejected_pts = PtsUs(frame);
+        return false;
+      });
+  CHECK(rejected.blocked);
+  CHECK_FALSE(rejected.consumed);
+  CHECK_FALSE(rejected.frame);
+  CHECK(rejected_pts == kStart);
+  REQUIRE(rejected.wake_us == 3150000);
+  int calls = 0;
+  const auto accept = [&](const ffmpeg::Frame&) {
+    ++calls;
+    return true;
+  };
+  const auto early = syncer.Step(true, nullptr, rejected.wake_us - 1, accept);
+  CHECK_FALSE(early.frame);
+  CHECK(calls == 0);
+  const auto retried = syncer.Step(true, nullptr, rejected.wake_us, accept);
+  REQUIRE(retried.frame);
+  CHECK(calls == 1);
+  CHECK_FALSE(retried.blocked);
+  CHECK(PtsUs(*retried.frame) == rejected_pts);
+}
+
+TEST_CASE("Syncer preserves the peer timeline across rejected discontinuities",
+          "[syncer][backpressure]") {
+  Syncer syncer(MixedConfig());
+  auto video = VideoInput(50000000);
+  auto audio = AudioInput(2400000, 48000, 1920);
+  REQUIRE(syncer.Step(true, &video, 0).consumed);
+  REQUIRE(syncer.Step(false, &audio, 0).consumed);
+  auto restarted_video = VideoInput(0);
+  const auto rejected = syncer.Step(true, &restarted_video, 40000,
+                                    [](const ffmpeg::Frame&) { return false; });
+  REQUIRE(rejected.blocked);
+  auto restarted_audio = AudioInput(0);
+  const auto peer = syncer.Step(false, &restarted_audio, 40000);
+  REQUIRE(peer.frame);
+  REQUIRE(peer.consumed);
+  const auto video_retry = syncer.Step(true, &restarted_video, 40000);
+  REQUIRE(video_retry.frame);
+  REQUIRE(video_retry.consumed);
+  CHECK(PtsUs(*video_retry.frame) == PtsUs(*peer.frame));
+  auto next_audio = AudioInput(960);
+  const auto continuous = syncer.Step(false, &next_audio, 60000);
+  REQUIRE(continuous.frame);
+  CHECK(continuous.consumed);
+  CHECK(PtsUs(*continuous.frame) == PtsUs(*peer.frame) + 20000);
+}
+
+TEST_CASE("Syncer does not advance real input when output throws",
+          "[syncer][backpressure]") {
+  Syncer syncer(VideoConfig());
+  auto first = VideoInput(50000000);
+  REQUIRE(syncer.Step(true, &first, 0).consumed);
+  auto next = VideoInput(50040000);
+  REQUIRE_THROWS_AS(syncer.Step(true, &next, 40000,
+                                [](const ffmpeg::Frame&) -> bool {
+                                  throw std::runtime_error("output failure");
+                                }),
+                    std::runtime_error);
+  const auto retried = syncer.Step(true, &next, 80000);
+  REQUIRE(retried.frame);
+  CHECK(retried.consumed);
+  CHECK(PtsUs(*retried.frame) == kStart + 40000);
 }
 
 TEST_CASE("Syncer reset discards both shared timeline and frozen picture",
@@ -644,7 +790,7 @@ TEST_CASE(
   config.encoder.video_pixel_format = AV_PIX_FMT_NV12;
   config.encoder.width = 16;
   config.encoder.height = 16;
-  config.freeze = 0us;
+  config.options.freeze = 0us;
   const auto* backup_data = (*config.backup_video)->data[0];
   Syncer syncer(config);
   auto input = VideoInput(0);
@@ -684,7 +830,7 @@ TEST_CASE("Syncer retains CUDA surfaces without download for real and backup",
   REQUIRE(av_hwframe_get_buffer(frames.get(), backup.get(), 0) >= 0);
   auto config = VideoConfig();
   config.backup_video = backup.Ref();
-  config.freeze = 0us;
+  config.options.freeze = 0us;
   const auto* backup_surface = backup->data[0];
   Syncer syncer(config);
   auto input = VideoInput(0);

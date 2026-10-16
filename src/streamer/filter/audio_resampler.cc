@@ -14,6 +14,7 @@ extern "C" {
 
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/performance/latency.h"
 
 namespace mw::streamer {
 namespace {
@@ -71,6 +72,8 @@ class AudioResampler::Impl final {
                 "channels={} capacity={}",
                 fmt::ptr(this), rate_, av_get_sample_fmt_name(format_),
                 layout_.value.nb_channels, capacity_);
+    latency_.Start("perf.filter.audio_resampler", this,
+                   "filter.audio_resampler");
   }
 
   ~Impl() { swr_free(&context_); }
@@ -92,13 +95,18 @@ class AudioResampler::Impl final {
     std::lock_guard<std::mutex> lock(mutex_);
     if (failure_) std::rethrow_exception(failure_);
     if (stopped_) return {};
+    // Measure this read's processing only, excluding queue and lock waits.
+    const auto started = latency_.Begin();
     try {
       while (!inputs_.empty()) {
         const auto& input = inputs_.front();
         const bool eof = input.status == AvDecoderReadStatus::kEof;
         if (context_ && (eof || !Matches(input))) {
           auto output = Drain();
-          if (output.status == AvDecoderReadStatus::kFrame) return output;
+          if (output.status == AvDecoderReadStatus::kFrame) {
+            latency_.End(started);
+            return output;
+          }
           ClearConverter();
         }
         if (eof) {
@@ -118,7 +126,10 @@ class AudioResampler::Impl final {
         if (!context_) Initialize(input);
         auto output = Convert(input);
         PopInput();
-        if (output.status == AvDecoderReadStatus::kFrame) return output;
+        if (output.status == AvDecoderReadStatus::kFrame) {
+          latency_.End(started);
+          return output;
+        }
       }
       return {};
     } catch (...) {
@@ -129,6 +140,8 @@ class AudioResampler::Impl final {
 
   void Stop() {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (stopped_) return;
+    latency_.Finish();
     MW_LOG_INFO("streamer", "AudioResampler 停止清理: queued={}",
                 inputs_.size());
     stopped_ = true;
@@ -142,6 +155,8 @@ class AudioResampler::Impl final {
     inputs_.clear();
     ClearConverter();
     failure_ = nullptr;
+    latency_.Start("perf.filter.audio_resampler", this,
+                   "filter.audio_resampler");
     stopped_ = false;
   }
 
@@ -309,6 +324,7 @@ class AudioResampler::Impl final {
   ChannelLayout layout_;
   SwrContext* context_ = nullptr;
   std::mutex mutex_;
+  internal::StageLatency latency_;
   std::deque<AvDecoderReadResult> inputs_;
   std::optional<AvDecoderReadResult> last_input_;
   std::optional<std::int64_t> next_output_pts_;

@@ -22,7 +22,7 @@ namespace mw::streamer::internal {
 // owning Remuxer's control mutex. Preparation needs no initialized runtime.
 class OutputRegistration final {
  public:
-  enum class Kind { kPush, kRtsp, kHls };
+  enum class Kind { kPush, kRtsp, kHls, kRecording };
   struct Entry {
     Kind kind;
     std::string original;
@@ -34,6 +34,7 @@ class OutputRegistration final {
     bool tls = false;
   };
 
+  static RemuxerConfig PrepareConfig(RemuxerConfig config);
   static Entry PreparePush(const std::string& url);
   static Entry PreparePublish(Kind kind, const std::string& app,
                               const std::string& stream, const std::string& ip,
@@ -48,8 +49,9 @@ class OutputRegistration final {
 };
 
 // One shared output session. Own through shared_ptr and serialize every call on
-// poller; Flush before Close, allowing queued Ring dispatches to run in
-// between. Terminal pusher errors run on that same poller; recoverable network
+// poller. Flush completes native track discovery before Close. Protocol
+// buffering and shutdown follow ZLM's native behavior. Terminal pusher errors
+// run on that same poller; recoverable network
 // failures are logged while the SDK retries them internally.
 class RemuxOutput final : public mediakit::MediaSourceEvent,
                           public std::enable_shared_from_this<RemuxOutput> {
@@ -58,23 +60,19 @@ class RemuxOutput final : public mediakit::MediaSourceEvent,
   // terminal SDK error results are wrapped at entry.
   using ErrorCallback = Remuxer::OnError;
 
-  RemuxOutput(toolkit::EventPoller::Ptr poller, ErrorCallback callback);
+  RemuxOutput(toolkit::EventPoller::Ptr poller, ErrorCallback callback,
+              RemuxerConfig config);
   void Start(const std::vector<mediakit::Track::Ptr>& tracks);
-  // zero_origin applies only before the session has received any frames;
-  // later recordings retain the SDK's common origin for cached GOP history.
-  // Activates the prepared exact path/URL without adding a recording suffix.
-  void AddPrepared(const OutputRegistration::Entry& entry,
-                   bool zero_origin = false);
-  void AddRtspPublish(const std::string& app, const std::string& stream,
-                      const std::string& ip, std::uint16_t port, bool tls);
-  std::string AddHlsPublish(const std::string& app, const std::string& stream,
-                            const std::string& ip, std::uint16_t port,
+  // Protocol entries only; local file targets are owned by Remuxer itself.
+  void AddPrepared(const OutputRegistration::Entry& entry);
+  void AddRtspPublish(const std::string& ip, std::uint16_t port, bool tls);
+  std::string AddHlsPublish(const std::string& ip, std::uint16_t port,
                             bool tls);
   void InputFrame(const mediakit::Frame::Ptr& frame);
   bool tracks_ready() const;
   std::vector<Remuxer::PushStatus> push_statuses() const;
   void Flush();
-  // Releases every output even if recording finalization throws. Call once.
+  // Releases protocol outputs and listeners. Call once.
   void Close();
 
  private:
@@ -90,16 +88,14 @@ class RemuxOutput final : public mediakit::MediaSourceEvent,
   void StartPushers();
   void Error(std::exception_ptr error);
 
+  RemuxerConfig config_;
   toolkit::EventPoller::Ptr poller_;
   ErrorCallback on_error_;
   mediakit::MultiMediaSourceMuxer::Ptr muxer_;
-  bool received_frame_ = false;
   bool closed_ = false;
   std::vector<Target> targets_;
   std::map<std::string, bool> registered_;
-  mediakit::MultiMediaSourceMuxer::Ptr hls_muxer_;
   toolkit::TcpServer::Ptr hls_server_;
-  std::optional<std::pair<std::string, std::string>> hls_published_path_;
   toolkit::TcpServer::Ptr server_;
   std::optional<std::pair<std::string, std::string>> published_path_;
 };

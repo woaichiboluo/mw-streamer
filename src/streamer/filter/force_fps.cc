@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "mw/log.h"
+#include "mw/streamer/performance/latency.h"
 
 namespace mw::streamer {
 namespace {
@@ -40,6 +41,7 @@ class ForceFps::Impl final {
         "ForceFps 配置: instance={} fps={}/{} time_base={}/{} capacity={}",
         fmt::ptr(this), config.fps.num, config.fps.den, time_base_.num,
         time_base_.den, capacity_);
+    latency_.Start("perf.filter.force_fps", this, "filter.force_fps");
   }
 
   bool TryPushFrame(const AvDecoderReadResult& input) {
@@ -91,6 +93,8 @@ class ForceFps::Impl final {
   AvDecoderReadResult TryReadFrame() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (stopped_) return {};
+    // Measure this read's processing only, excluding queue and lock waits.
+    const auto started = latency_.Begin();
     while (!inputs_.empty()) {
       const auto& input = inputs_.front();
       if (input.status == AvDecoderReadStatus::kEof) {
@@ -116,7 +120,7 @@ class ForceFps::Impl final {
           Rescale(input.frame->get()->pts, input.time_base, time_base_);
       const bool discontinuity = IsDiscontinuity(pts);
       if (discontinuity) {
-        MW_LOG_INFO(
+        MW_LOG_DEBUG(
             "streamer",
             "ForceFps PTS 跳变重新锚定: instance={} stream={} "
             "previous_input_pts={} next_pts={} current_pts={} time_base={}/{} "
@@ -150,6 +154,7 @@ class ForceFps::Impl final {
           auto output = Output(*last_, *next_pts_, last_used_);
           last_used_ = true;
           ++*next_pts_;
+          latency_.End(started);
           return output;
         }
       }
@@ -158,6 +163,7 @@ class ForceFps::Impl final {
       last_input_pts_ = pts;
       next_pts_ = pts + 1;
       PopInput();
+      latency_.End(started);
       return output;
     }
     return {};
@@ -165,6 +171,8 @@ class ForceFps::Impl final {
 
   void Stop() {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (stopped_) return;
+    latency_.Finish();
     stopped_ = true;
     MW_LOG_INFO("streamer", "ForceFps 停止: instance={} discarded_queue={}",
                 fmt::ptr(this), inputs_.size());
@@ -179,6 +187,7 @@ class ForceFps::Impl final {
                 fmt::ptr(this), inputs_.size());
     inputs_.clear();
     ClearHistory();
+    latency_.Start("perf.filter.force_fps", this, "filter.force_fps");
     stopped_ = false;
   }
 
@@ -271,6 +280,7 @@ class ForceFps::Impl final {
   const std::size_t capacity_;
   AVRational time_base_{0, 1};
   std::mutex mutex_;
+  internal::StageLatency latency_;
   bool stopped_ = false;
   std::deque<AvDecoderReadResult> inputs_;
   std::optional<AvDecoderReadResult> last_;

@@ -768,4 +768,48 @@ TEST_CASE(
   CHECK(callbacks.load() == 2);
 }
 
+TEST_CASE("AvDecoder notifies after queuing every decoded frame and EOF",
+          "[av-decoder][notification]") {
+  const auto source = ReadSource("h264_aac.mp4", AVMEDIA_TYPE_VIDEO);
+  const auto reference = ReferenceDecode(source.stream, source.packets);
+  std::atomic<std::size_t> notifications{0};
+  AvDecoder decoder(source.stream);
+  decoder.SetOnReadReady([&] {
+    static_cast<void>(decoder.buffered_frames());
+    static_cast<void>(decoder.error());
+    ++notifications;
+    throw std::runtime_error("read observer failure");
+  });
+  SourceFeeder feeder(decoder, source);
+  CheckSource(decoder, source, reference);
+  feeder.Join();
+  decoder.Stop();
+  CHECK(notifications.load() == reference.frames.size() + 1);
+  CHECK(decoder.error() == nullptr);
+}
+
+TEST_CASE("AvDecoder read notifications permit reading replacement and stop",
+          "[av-decoder][notification]") {
+  const auto source = ReadSource("h264_aac.mp4", AVMEDIA_TYPE_VIDEO);
+  std::atomic<bool> first_eof{false};
+  std::atomic<bool> second_eof{false};
+  AvDecoder decoder(source.stream);
+  decoder.SetOnReadReady([&] {
+    const auto result = decoder.TryReadFrame();
+    decoder.SetOnReadReady([&] {
+      const auto next = decoder.TryReadFrame();
+      decoder.RequestStop();
+      second_eof = next.status == AvDecoderReadStatus::kEof;
+    });
+    first_eof = result.status == AvDecoderReadStatus::kEof;
+  });
+  REQUIRE(decoder.TryPushEof());
+  REQUIRE(WaitFor([&] { return first_eof.load(); }));
+  REQUIRE(decoder.TryReset());
+  REQUIRE(decoder.TryPushEof());
+  REQUIRE(WaitFor([&] { return second_eof.load(); }));
+  decoder.Stop();
+  CHECK(decoder.error() == nullptr);
+}
+
 }  // namespace

@@ -78,6 +78,7 @@ struct Track {
 struct NativeSource {
   std::optional<Track> video;
   std::optional<Track> audio;
+  std::vector<ffmpeg::Packet> packets;
 };
 
 NativeSource ReadNative(const std::string& path) {
@@ -108,6 +109,7 @@ NativeSource ReadNative(const std::string& path) {
     const int code = av_read_frame(context, packet.get());
     if (code == AVERROR_EOF) break;
     REQUIRE((code >= 0));
+    result.packets.push_back(packet.Ref());
     if (result.video &&
         packet->stream_index == result.video->stream.stream_index) {
       result.video->packets.push_back(std::move(packet));
@@ -907,6 +909,153 @@ TEST_CASE("AvMediaSource supports independent concurrent readers during Stop",
     }
     CHECK((eof_count >= 1));
   }
+}
+
+TEST_CASE(
+    "AvMediaSource observes native packets once under decoder backpressure",
+    "[av-media-source][packet]") {
+  const auto native = ReadNative(SamplePath());
+  auto config = SourceConfig();
+  config.video_decoder.packet_capacity = 1;
+  config.audio_decoder.packet_capacity = 1;
+  config.video_decoder.frame_capacity = 1;
+  config.audio_decoder.frame_capacity = 1;
+  AvMediaSource input(config);
+  std::vector<ffmpeg::Packet> packets;
+  std::atomic<std::size_t> observed{0};
+  input.SetOnPacket([&](const ffmpeg::Packet& packet) {
+    static_cast<void>(input.status());
+    static_cast<void>(input.info());
+    packets.push_back(packet.Ref());
+    ++observed;
+  });
+  REQUIRE(input.Start(SamplePath()));
+  REQUIRE(WaitFor([&] { return observed.load() >= 3; }));
+  REQUIRE_THROWS_AS(input.SetOnPacket({}), std::logic_error);
+  // With no frame consumer, both bounded decoder queues eventually stall.
+  std::this_thread::sleep_for(30ms);
+  CHECK((observed.load() < native.packets.size()));
+  CheckSource(input, native);
+  input.Stop();
+  REQUIRE((packets.size() == native.packets.size()));
+  for (std::size_t index = 0; index < packets.size(); ++index) {
+    CAPTURE(index);
+    const auto& packet = packets[index];
+    const auto& expected = native.packets[index];
+    CHECK((packet->stream_index == expected->stream_index));
+    CHECK((packet->pts == expected->pts));
+    CHECK((packet->dts == expected->dts));
+    CHECK((packet->duration == expected->duration));
+    CHECK((packet->flags == expected->flags));
+    CHECK((packet->time_base.num == expected->time_base.num));
+    CHECK((packet->time_base.den == expected->time_base.den));
+    REQUIRE((packet->size == expected->size));
+    REQUIRE((packet->size >= 0));
+    CHECK((std::memcmp(packet->data, expected->data,
+                       static_cast<std::size_t>(packet->size)) == 0));
+  }
+  const auto previous_count = observed.load();
+  std::atomic<std::size_t> replacement_count{0};
+  input.SetOnPacket([&](const ffmpeg::Packet&) { ++replacement_count; });
+  REQUIRE(input.Start(SamplePath()));
+  CheckSource(input, native);
+  input.Stop();
+  CHECK((observed.load() == previous_count));
+  CHECK((replacement_count.load() == native.packets.size()));
+}
+
+TEST_CASE("AvMediaSource packet observer exceptions fail the source",
+          "[av-media-source][packet]") {
+  AvMediaSource input(SourceConfig());
+  std::atomic<int> calls{0};
+  std::atomic<bool> failed_wakeup{false};
+  input.SetOnReadReady([&] {
+    if (input.status().state == AvMediaSourceState::kFailed) {
+      failed_wakeup = true;
+    }
+  });
+  input.SetOnPacket([&](const ffmpeg::Packet&) {
+    ++calls;
+    throw std::logic_error("packet observer failed");
+  });
+  REQUIRE(input.Start(SamplePath()));
+  REQUIRE(WaitFor([&] { return failed_wakeup.load(); }));
+  const auto failure = input.status().error;
+  REQUIRE(failure);
+  CHECK_THROWS_AS(std::rethrow_exception(failure), std::logic_error);
+  input.Stop();
+  CHECK((calls.load() == 1));
+  CHECK((input.status().state == AvMediaSourceState::kFailed));
+}
+
+TEST_CASE("AvMediaSource packet observers may request stop without joining",
+          "[av-media-source][packet]") {
+  AvMediaSource input(SourceConfig());
+  std::atomic<int> calls{0};
+  input.SetOnPacket([&](const ffmpeg::Packet&) {
+    ++calls;
+    input.RequestStop();
+  });
+  REQUIRE(input.Start(SamplePath()));
+  REQUIRE(WaitFor([&] { return calls.load() != 0; }));
+  input.Stop();
+  CHECK((calls.load() == 1));
+  CHECK((input.status().state == AvMediaSourceState::kStopped));
+}
+
+TEST_CASE("AvMediaSource read wakeups support live replacement and exceptions",
+          "[av-media-source][notification]") {
+  std::atomic<int> old_calls{0};
+  std::atomic<int> replacement_calls{0};
+  std::atomic<int> state_calls{0};
+  AvMediaSource input(SourceConfig());
+  input.SetOnStateChanged([&](const auto&) { ++state_calls; });
+  input.SetOnReadReady([&] { ++old_calls; });
+  REQUIRE(input.Start(SamplePath()));
+  REQUIRE(WaitFor([&] { return old_calls.load() != 0; }));
+  input.SetOnReadReady([&] {
+    static_cast<void>(input.status());
+    static_cast<void>(input.info());
+    ++replacement_calls;
+    throw std::runtime_error("read observer failure");
+  });
+  CheckSource(input, ReadNative(SamplePath()));
+  REQUIRE(WaitFor(
+      [&] { return input.status().state == AvMediaSourceState::kEnded; }));
+  input.Stop();
+  CHECK(input.status().error == nullptr);
+  CHECK(replacement_calls.load() > 0);
+  // Status notifications alone cannot satisfy this: both decoders must wake
+  // the frame consumer after queuing decoded output and final EOF.
+  CHECK(old_calls.load() + replacement_calls.load() > state_calls.load() + 2);
+  input.SetOnReadReady({});
+  const auto previous = replacement_calls.load();
+  REQUIRE(input.Start(SamplePath()));
+  CheckSource(input, ReadNative(SamplePath()));
+  input.Stop();
+  CHECK(replacement_calls.load() == previous);
+}
+
+TEST_CASE("AvMediaSource read observers may consume frames and request stop",
+          "[av-media-source][notification]") {
+  std::mutex reader_mutex;
+  std::atomic<bool> received{false};
+  AvMediaSource input(SourceConfig());
+  input.SetOnReadReady([&] {
+    std::lock_guard lock(reader_mutex);
+    const auto video = input.TryReadVideo();
+    const auto audio = input.TryReadAudio();
+    if (video.status == AvDecoderReadStatus::kFrame ||
+        audio.status == AvDecoderReadStatus::kFrame) {
+      input.RequestStop();
+      received = true;
+    }
+  });
+  REQUIRE(input.Start(SamplePath()));
+  REQUIRE(WaitFor([&] { return received.load(); }));
+  input.Stop();
+  CHECK(input.status().state == AvMediaSourceState::kStopped);
+  CHECK(input.status().error == nullptr);
 }
 
 TEST_CASE("AvMediaSource CUDA frames share and retain the supplied device",

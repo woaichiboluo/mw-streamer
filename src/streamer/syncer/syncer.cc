@@ -1,5 +1,6 @@
 #include "mw/streamer/syncer/syncer.h"
 
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -10,6 +11,7 @@ extern "C" {
 }
 
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/performance/latency.h"
 #include "mw/streamer/syncer/syncer_timing.h"
 
 namespace mw::streamer {
@@ -26,8 +28,9 @@ bool ValidVideoFrame(const AVFrame& frame) {
 void ValidateConfig(const SyncerConfig& config) {
   const bool video = config.encoder.video_pixel_format != AV_PIX_FMT_NONE;
   const bool audio = config.encoder.audio_sample_format != AV_SAMPLE_FMT_NONE;
-  if ((!video && !audio) || config.timeout.count() <= 0 ||
-      config.freeze.count() < 0 || config.max_streams_diff.count() <= 0) {
+  if ((!video && !audio) || config.options.timeout.count() <= 0 ||
+      config.options.freeze.count() < 0 ||
+      config.options.max_streams_diff.count() <= 0) {
     throw std::invalid_argument("Syncer 轨道或时间阈值无效");
   }
   if (video) {
@@ -109,35 +112,66 @@ class Syncer::Impl final {
       config_.encoder.audio_channel_layout = audio_format_->ch_layout;
     }
     timing_ = std::make_unique<internal::SyncerTiming>(config_, this);
+    StartLatency();
   }
 
   SyncerStep Step(bool video, const AvDecoderReadResult* head,
-                  std::int64_t now_us) {
+                  std::int64_t now_us, const OnOutput& on_output) {
     if (video ? config_.encoder.video_pixel_format == AV_PIX_FMT_NONE
               : config_.encoder.audio_sample_format == AV_SAMPLE_FMT_NONE) {
       throw std::invalid_argument("Syncer 输入轨道未启用");
     }
     if (now_us < 0) throw std::invalid_argument("Syncer 时间不得为负数");
     if (head) ValidateInput(*head, video, config_);
-    return timing_->Step(video, head, now_us);
+    auto& latency = video ? video_latency_ : audio_latency_;
+    if (!latency.enabled())
+      return timing_->Step(video, head, now_us, on_output);
+    const auto started = latency.Begin();
+    std::chrono::nanoseconds callback_time{};
+    // Measure this component's work, excluding synchronous downstream code.
+    auto step =
+        timing_->Step(video, head, now_us, [&](const ffmpeg::Frame& frame) {
+          if (!on_output) return true;
+          const auto before = internal::StageLatency::Clock::now();
+          const bool accepted = on_output(frame);
+          callback_time += internal::StageLatency::Clock::now() - before;
+          return accepted;
+        });
+    if (step.frame) {
+      latency.Observe(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              internal::StageLatency::Clock::now() - started - callback_time)
+              .count());
+    }
+    return step;
   }
 
   void Reset() {
     timing_ = std::make_unique<internal::SyncerTiming>(config_, this);
+    StartLatency();
   }
 
  private:
+  void StartLatency() {
+    if (config_.encoder.video_pixel_format != AV_PIX_FMT_NONE)
+      video_latency_.Start("perf.syncer.video", this, "syncer.video");
+    if (config_.encoder.audio_sample_format != AV_SAMPLE_FMT_NONE)
+      audio_latency_.Start("perf.syncer.audio", this, "syncer.audio");
+  }
+
   SyncerConfig config_;
   ffmpeg::Frame audio_format_;
   std::unique_ptr<internal::SyncerTiming> timing_;
+  internal::StageLatency video_latency_;
+  internal::StageLatency audio_latency_;
 };
 
 Syncer::Syncer(SyncerConfig config)
     : impl_(std::make_unique<Impl>(std::move(config))) {}
 Syncer::~Syncer() = default;
 SyncerStep Syncer::Step(bool video, const AvDecoderReadResult* head,
-                        std::int64_t now_us) {
-  return impl_->Step(video, head, now_us);
+                        std::int64_t now_us, const OnOutput& on_output) {
+  return impl_->Step(video, head, now_us, on_output);
 }
 void Syncer::Reset() { impl_->Reset(); }
 

@@ -34,6 +34,12 @@ class MW_STREAMER_API AvEncoder final {
   // are logged; the original exception remains in error(). Initialization
   // failures return false from Start and do not invoke this callback.
   using OnError = std::function<void(std::exception_ptr)>;
+  // Called after a worker removes an accepted input, outside locks; true is
+  // video and false is audio. The two tracks may notify concurrently. Callbacks
+  // may query or TryPush, but must not Start/Stop/destroy this encoder.
+  // Observer exceptions are logged and do not fail encoding. No calls after
+  // Stop returns.
+  using OnInputSpace = std::function<void(bool video)>;
 
   explicit AvEncoder(const ffmpeg::HwDeviceContext& device);
   ~AvEncoder();
@@ -44,6 +50,8 @@ class MW_STREAMER_API AvEncoder final {
 
   void SetOnPacket(OnPacket callback);
   void SetOnError(OnError callback);
+  // Configure before Start or after Stop. Earlier removals are not replayed.
+  void SetOnInputSpace(OnInputSpace callback);
   // Copies the config/layout, opens enabled codecs/filters synchronously, then
   // starts one worker per enabled track. NONE disables that track; both
   // disabled is invalid. Video dimensions/layout must be explicit. Hardware
@@ -62,11 +70,11 @@ class MW_STREAMER_API AvEncoder final {
   // supplies timing; no timestamp generation, normalization or discontinuity
   // correction occurs here. Only converts time-base units for codecs/audio
   // reblocking, retaining encoder-native
-  // delay/reordering in output packets. Each track queues one frame besides
-  // its active work. Never waits for queue space. Full queues reject/drop the
-  // incoming frame, log a warning and return false; not started/stopped/failed
-  // also returns false. Rejection leaves the caller's frame unchanged.
-  // Disabled tracks, invalid payload, audio format or timing throw
+  // delay/reordering in output packets. Each track queues three frames besides
+  // its active work. Never waits for queue space. Full queues return false;
+  // not started/stopped/failed also returns false. Rejection leaves the
+  // caller's frame unchanged; the caller decides whether to retry or discard
+  // it. Disabled tracks, invalid payload, audio format or timing throw
   // synchronously. Video layout/device validation and transfers run on the
   // worker; their failures reach OnError. Allocation errors may throw.
   bool TryPushVideo(const ffmpeg::Frame& frame);

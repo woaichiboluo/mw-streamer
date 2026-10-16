@@ -98,10 +98,10 @@ class ContinuityClock final {
     if (!pts_) Update(start_, now);
     const auto elapsed = Subtract(now, wall_);
     if (elapsed >= 2000000 && !extrapolating_) {
-      MW_LOG_INFO("streamer",
-                  "Syncer[{}] 共享媒体时钟转为墙钟外推: anchor_pts_us={} "
-                  "anchor_wall_us={} now_us={} elapsed_us={}",
-                  log_context_, *pts_, wall_, now, elapsed);
+      MW_LOG_DEBUG("streamer",
+                   "Syncer[{}] 共享媒体时钟转为墙钟外推: anchor_pts_us={} "
+                   "anchor_wall_us={} now_us={} elapsed_us={}",
+                   log_context_, *pts_, wall_, now, elapsed);
       extrapolating_ = true;
     }
     return elapsed < 2000000 ? *pts_ : Add(*pts_, elapsed);
@@ -109,9 +109,9 @@ class ContinuityClock final {
   void Update(std::int64_t pts, std::int64_t now) {
     if (!pts_ || pts > *pts_) {
       if (extrapolating_) {
-        MW_LOG_INFO("streamer",
-                    "Syncer[{}] 共享媒体时钟恢复媒体锚定: pts_us={} now_us={}",
-                    log_context_, pts, now);
+        MW_LOG_DEBUG("streamer",
+                     "Syncer[{}] 共享媒体时钟恢复媒体锚定: pts_us={} now_us={}",
+                     log_context_, pts, now);
         extrapolating_ = false;
       }
       pts_ = pts;
@@ -157,23 +157,23 @@ class SyncerTiming::Impl final {
   Impl(const SyncerConfig& config, const void* log_context)
       : config_(config),
         log_context_(log_context),
-        clock_(config_.start_ts.count(), log_context) {
+        clock_(config_.options.start_ts.count(), log_context) {
     const bool video = config_.encoder.video_pixel_format != AV_PIX_FMT_NONE;
     video_.time_base = video ? av_inv_q(config_.encoder.fps) : kMicroseconds;
     if (video && !config_.backup_video) {
       config_.backup_video = BlackFrame(config_.encoder);
-      MW_LOG_INFO("streamer",
-                  "Syncer[{}] 创建默认 CPU 黑帧: width={} height={} format={}",
-                  log_context_, config_.encoder.width, config_.encoder.height,
-                  static_cast<int>(config_.encoder.video_pixel_format));
+      MW_LOG_DEBUG("streamer",
+                   "Syncer[{}] 创建默认 CPU 黑帧: width={} height={} format={}",
+                   log_context_, config_.encoder.width, config_.encoder.height,
+                   static_cast<int>(config_.encoder.video_pixel_format));
     }
     audio_.time_base = config_.encoder.audio_sample_format != AV_SAMPLE_FMT_NONE
                            ? AVRational{1, config_.encoder.audio_sample_rate}
                            : kMicroseconds;
     for (auto* track : {&video_, &audio_}) {
-      track->wait_until = config_.timeout.count();
-      if (!config_.forward_start_shift) {
-        track->next = FromUs(config_.start_ts.count(), *track);
+      track->wait_until = config_.options.timeout.count();
+      if (!config_.options.forward_start_shift) {
+        track->next = FromUs(config_.options.start_ts.count(), *track);
       }
     }
     if (config_.encoder.audio_sample_format != AV_SAMPLE_FMT_NONE) {
@@ -185,17 +185,17 @@ class SyncerTiming::Impl final {
     }
   }
 
-  SyncerStep Step(bool video, const AvDecoderReadResult* head,
-                  std::int64_t now) {
+  SyncerStep Step(bool video, const AvDecoderReadResult* head, std::int64_t now,
+                  const Syncer::OnOutput& on_output) {
     auto& track = video ? video_ : audio_;
-    if (track.fill_until) return Fill(track, video, head, now);
+    if (track.fill_until) return Fill(track, video, head, now, on_output);
     if (track.pending_real_pts) {
       if (now < track.suspended_until) {
         return {false, {}, track.suspended_until};
       }
       track.pending_real_pts.reset();
       // The peer may have corrected the shared shift during this suspension.
-      return Correct(track, video, *head, now);
+      return Correct(track, video, *head, now, on_output);
     }
     if (head) {
       if (head->status == AvDecoderReadStatus::kEof) {
@@ -207,7 +207,7 @@ class SyncerTiming::Impl final {
                     head->time_base.num, head->time_base.den, now);
         return {true, {}, now};
       }
-      return Correct(track, video, *head, now);
+      return Correct(track, video, *head, now, on_output);
     }
     if (now < track.wait_until) {
       return {false, {}, track.wait_until};
@@ -221,16 +221,17 @@ class SyncerTiming::Impl final {
                   head != nullptr);
     }
     const auto rtc = clock_.Now(now);
-    if (!track.next) track.next = FromUs(config_.start_ts.count(), track);
+    if (!track.next)
+      track.next = FromUs(config_.options.start_ts.count(), track);
     const bool fill =
-        !track.last_success ||
-        Subtract(rtc, ToUs(*track.next, track)) > config_.timeout.count();
+        !track.last_success || Subtract(rtc, ToUs(*track.next, track)) >
+                                   config_.options.timeout.count();
     track.last_success = false;
     track.wait_until = Add(now, kPollUs);
     const auto target = FromUs(rtc, track);
     if (fill && *track.next < target) {
       BeginFill(track, video, target, false, now);
-      return Fill(track, video, head, now);
+      return Fill(track, video, head, now, on_output);
     }
     return {false, {}, track.wait_until};
   }
@@ -244,14 +245,14 @@ class SyncerTiming::Impl final {
   }
 
   SyncerStep Correct(Track& track, bool video, const AvDecoderReadResult& input,
-                     std::int64_t now) {
+                     std::int64_t now, const Syncer::OnOutput& on_output) {
     if (video && av_cmp_q(track.time_base, input.time_base) != 0) {
-      MW_LOG_INFO("streamer",
-                  "Syncer[{}] 视频时间基变更: old_tb={}/{} "
-                  "new_tb={}/{} input_pts={} now_us={}",
-                  log_context_, track.time_base.num, track.time_base.den,
-                  input.time_base.num, input.time_base.den,
-                  input.frame->get()->pts, now);
+      MW_LOG_DEBUG("streamer",
+                   "Syncer[{}] 视频时间基变更: old_tb={}/{} "
+                   "new_tb={}/{} input_pts={} now_us={}",
+                   log_context_, track.time_base.num, track.time_base.den,
+                   input.time_base.num, input.time_base.den,
+                   input.frame->get()->pts, now);
       ChangeTimeBase(track, input.time_base);
     }
     const auto original =
@@ -264,44 +265,45 @@ class SyncerTiming::Impl final {
       if (track.has_output) pts = std::max(pts, *track.next);
       track.shift = Subtract(pts, original);
       clock_.shift = ToUs(*track.shift, track);
-      MW_LOG_INFO("streamer",
-                  "Syncer[{}] 输出时间轴首次锚定 track={} "
-                  "input_pts={} input_tb={}/{} mapped_pts={} output_tb={}/{} "
-                  "local_shift={} shared_shift_us={} now_us={}",
-                  log_context_, TrackName(video), input.frame->get()->pts,
-                  input.time_base.num, input.time_base.den, pts,
-                  track.time_base.num, track.time_base.den, *track.shift,
-                  *clock_.shift, now);
+      MW_LOG_DEBUG("streamer",
+                   "Syncer[{}] 输出时间轴首次锚定 track={} "
+                   "input_pts={} input_tb={}/{} mapped_pts={} output_tb={}/{} "
+                   "local_shift={} shared_shift_us={} now_us={}",
+                   log_context_, TrackName(video), input.frame->get()->pts,
+                   input.time_base.num, input.time_base.den, pts,
+                   track.time_base.num, track.time_base.den, *track.shift,
+                   *clock_.shift, now);
     } else {
       const bool desync =
-          track.shift && Apart(ToUs(*track.shift, track), *clock_.shift,
-                               Add(config_.max_streams_diff.count(), 1));
+          track.shift &&
+          Apart(ToUs(*track.shift, track), *clock_.shift,
+                Add(config_.options.max_streams_diff.count(), 1));
       if (!track.shift || desync) {
         // Adopt the shared shift only when the difference exceeds the
         // configured tolerance; timestamp discontinuity includes equality.
         const bool had_shift = track.shift.has_value();
         const auto old_shift = track.shift.value_or(0);
         track.shift = FromUs(*clock_.shift, track);
-        MW_LOG_INFO("streamer",
-                    "Syncer[{}] 采纳共享时间偏移 track={} "
-                    "input_pts={} input_tb={}/{} output_tb={}/{} had_shift={} "
-                    "old_local_shift={} new_local_shift={} shared_shift_us={} "
-                    "mapped_pts={:.0f} has_next={} next_pts={} now_us={}",
-                    log_context_, TrackName(video), input.frame->get()->pts,
-                    input.time_base.num, input.time_base.den,
-                    track.time_base.num, track.time_base.den, had_shift,
-                    old_shift, *track.shift, *clock_.shift,
-                    static_cast<long double>(original) + *track.shift,
-                    track.next.has_value(), track.next.value_or(0), now);
+        MW_LOG_DEBUG("streamer",
+                     "Syncer[{}] 采纳共享时间偏移 track={} "
+                     "input_pts={} input_tb={}/{} output_tb={}/{} had_shift={} "
+                     "old_local_shift={} new_local_shift={} shared_shift_us={} "
+                     "mapped_pts={:.0f} has_next={} next_pts={} now_us={}",
+                     log_context_, TrackName(video), input.frame->get()->pts,
+                     input.time_base.num, input.time_base.den,
+                     track.time_base.num, track.time_base.den, had_shift,
+                     old_shift, *track.shift, *clock_.shift,
+                     static_cast<long double>(original) + *track.shift,
+                     track.next.has_value(), track.next.value_or(0), now);
       }
       pts = Add(original, *track.shift);
       if (track.next && (pts != *track.next &&
                          Apart(ToUs(pts, track), ToUs(*track.next, track),
-                               config_.max_streams_diff.count()))) {
+                               config_.options.max_streams_diff.count()))) {
         if (pts > *track.next) {
           if (!track.try_without_filling) {
             BeginFill(track, video, pts, true, now);
-            return Fill(track, video, &input, now);
+            return Fill(track, video, &input, now, on_output);
           }
           track.try_without_filling = false;
           Adjust(track, video, input, original, pts, "forward_jump", now);
@@ -318,7 +320,7 @@ class SyncerTiming::Impl final {
         clock_.shift = ToUs(*track.shift, track);
       }
     }
-    return Real(track, video, input, pts, now);
+    return Real(track, video, input, pts, now, on_output);
   }
 
   static void ChangeTimeBase(Track& track, AVRational time_base) {
@@ -354,7 +356,7 @@ class SyncerTiming::Impl final {
     clock_.shift = ToUs(*track.shift, track);
     // Diagnostic differences use floating point so logging cannot introduce
     // additional checked timestamp arithmetic or overflow failures.
-    MW_LOG_INFO(
+    MW_LOG_DEBUG(
         "streamer",
         "Syncer[{}] 修正输出时间偏移 reason={} track={} "
         "input_pts={} input_tb={}/{} mapped_pts={} next_pts={} "
@@ -400,7 +402,7 @@ class SyncerTiming::Impl final {
     if (video) {
       if (track.last_real &&
           Subtract(ToUs(*track.next, track), ToUs(track.last_real_pts, track)) <
-              config_.freeze.count()) {
+              config_.options.freeze.count()) {
         source = "freeze";
         return track.last_real->Ref();
       }
@@ -435,10 +437,15 @@ class SyncerTiming::Impl final {
   }
 
   SyncerStep Real(Track& track, bool video, const AvDecoderReadResult& input,
-                  std::int64_t pts, std::int64_t now) {
+                  std::int64_t pts, std::int64_t now,
+                  const Syncer::OnOutput& on_output) {
     auto frame = input.frame->Ref();
     const auto duration = video ? VideoDuration(track) : frame->nb_samples;
     Stamp(frame, track, pts, duration);
+    // Sentinel anchors its shared clock before submitting the real frame.
+    // Admission failure must not consume the head or advance this track.
+    clock_.Update(ToUs(pts, track), now);
+    if (on_output && !on_output(frame)) return {false, {}, now, true};
     track.next = Add(pts, duration);
     track.has_output = true;
     if (track.timed_out) {
@@ -455,23 +462,25 @@ class SyncerTiming::Impl final {
                  input.time_base.num, input.time_base.den, pts,
                  track.time_base.num, track.time_base.den, *track.next,
                  duration, video ? 0 : frame->nb_samples, now);
-    clock_.Update(ToUs(pts, track), now);
     if (video) track.last_real = frame.Ref();
     track.last_real_pts = pts;
     track.last_success = true;
-    track.wait_until = Add(now, config_.timeout.count());
+    track.wait_until = Add(now, config_.options.timeout.count());
     track.pending_real_pts.reset();
     return {true, std::move(frame), now};
   }
 
   SyncerStep Fill(Track& track, bool video, const AvDecoderReadResult* input,
-                  std::int64_t now) {
+                  std::int64_t now, const Syncer::OnOutput& on_output) {
     const auto pts = *track.next;
     const char* source = nullptr;
     auto frame = Backup(track, video, Subtract(*track.fill_until, pts), source);
     const std::int64_t duration =
         video ? VideoDuration(track) : frame->nb_samples;
     Stamp(frame, track, pts, duration);
+    if (on_output && !on_output(frame)) {
+      return {false, {}, FinishFill(track, video, input, pts, now, true), true};
+    }
     track.next = Add(pts, duration);
     track.has_output = true;
     ++track.filled;
@@ -492,37 +501,50 @@ class SyncerTiming::Impl final {
         video ? 0 : frame->nb_samples, now);
     std::int64_t wake = now;
     if (*track.next >= *track.fill_until || track.filled == 5) {
-      if (track.forward_fill) {
-        // Limit forward-jump fill to five frames and move the pending real
-        // frame to the next output PTS. A full batch waits half its duration
-        // before retrying to avoid emitting all replacement frames at once.
-        if (track.filled == 5) clock_.Update(ToUs(pts, track), now);
-        const auto original = Rescale(input->frame->get()->pts,
-                                      input->time_base, track.time_base);
-        Adjust(track, video, *input, original, *track.fill_until,
-               "forward_jump", now);
-        track.try_without_filling = true;
-        track.pending_real_pts = *track.next;
-        track.suspended_until =
-            track.filled == 5
-                ? Add(now, std::max<std::int64_t>(1000, track.filled_us / 2))
-                : now;
-        wake = track.suspended_until;
-      } else {
-        wake = track.wait_until;
-      }
-      MW_LOG_DEBUG(
-          "streamer",
-          "Syncer[{}] 结束填充批次 reason={} track={} "
-          "count={} duration_us={} "
-          "target_pts={} next_pts={} output_tb={}/{} now_us={} "
-          "resume_us={}",
-          log_context_, track.forward_fill ? "forward_jump" : "timeout",
-          TrackName(video), track.filled, track.filled_us, *track.fill_until,
-          *track.next, track.time_base.num, track.time_base.den, now, wake);
-      track.fill_until.reset();
+      wake = FinishFill(track, video, input, pts, now, false);
     }
     return {false, std::move(frame), wake};
+  }
+
+  std::int64_t FinishFill(Track& track, bool video,
+                          const AvDecoderReadResult* input,
+                          std::int64_t last_pts, std::int64_t now,
+                          bool blocked) {
+    std::int64_t wake;
+    if (track.forward_fill) {
+      // Limit forward-jump fill to five frames and move the pending real
+      // frame to the next output PTS. A full batch waits half its duration
+      // before retrying to avoid emitting all replacement frames at once.
+      if (track.filled == 5 || blocked)
+        clock_.Update(ToUs(last_pts, track), now);
+      const auto original =
+          Rescale(input->frame->get()->pts, input->time_base, track.time_base);
+      Adjust(track, video, *input, original, *track.fill_until, "forward_jump",
+             now);
+      track.try_without_filling = true;
+      track.pending_real_pts = *track.next;
+      track.suspended_until =
+          track.filled == 5 || blocked
+              ? Add(now, std::max<std::int64_t>(1000, track.filled_us / 2))
+              : now;
+      wake = track.suspended_until;
+    } else {
+      // Match sentinel's longer source wait after a full backup sink.
+      if (blocked) track.wait_until = Add(now, 150000);
+      // An input that arrived during filling makes the source wait ready.
+      wake = input ? now : track.wait_until;
+    }
+    MW_LOG_DEBUG("streamer",
+                 "Syncer[{}] 结束填充批次 reason={} track={} "
+                 "count={} duration_us={} "
+                 "target_pts={} next_pts={} output_tb={}/{} now_us={} "
+                 "resume_us={}",
+                 log_context_, track.forward_fill ? "forward_jump" : "timeout",
+                 TrackName(video), track.filled, track.filled_us,
+                 *track.fill_until, *track.next, track.time_base.num,
+                 track.time_base.den, now, wake);
+    track.fill_until.reset();
+    return wake;
   }
 
   SyncerConfig config_;
@@ -537,8 +559,9 @@ SyncerTiming::SyncerTiming(const SyncerConfig& config, const void* log_context)
     : impl_(std::make_unique<Impl>(config, log_context ? log_context : this)) {}
 SyncerTiming::~SyncerTiming() = default;
 SyncerStep SyncerTiming::Step(bool video, const AvDecoderReadResult* head,
-                              std::int64_t now_us) {
-  return impl_->Step(video, head, now_us);
+                              std::int64_t now_us,
+                              const Syncer::OnOutput& on_output) {
+  return impl_->Step(video, head, now_us, on_output);
 }
 
 }  // namespace mw::streamer::internal
