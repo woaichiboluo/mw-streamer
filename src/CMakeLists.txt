@@ -41,8 +41,10 @@ set(MW_STREAMER_SOURCES
     streamer/filter/av_media_filter.cc
     streamer/filter/force_fps.cc
     streamer/filter/audio_resampler.cc
-    streamer/timing/syncer.cc
-    streamer/timing/syncer_timing.cc
+    streamer/syncer/syncer.cc
+    streamer/syncer/syncer_timing.cc
+    streamer/scheduler/scheduler.cc
+    streamer/scheduler/realtime_timing.cc
     streamer/input/av_media_source.cc
     streamer/platform/thread.cc
     streamer/encoder/av_encoder.cc

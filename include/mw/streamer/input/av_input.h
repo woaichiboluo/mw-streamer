@@ -108,6 +108,11 @@ class MW_STREAMER_API AvInput final {
   AvInputReadResult ReadPacket();
   // Also returns kNull immediately when an active source has no queued packet.
   AvInputReadResult TryReadPacket();
+  // Same result semantics as ReadPacket. Timeout returns kNull without
+  // cancelling I/O or changing connection state; cancellation wakes promptly.
+  // Zero is equivalent to TryReadPacket; negative values throw
+  // invalid_argument.
+  AvInputReadResult ReadPacketFor(std::chrono::milliseconds timeout);
   // Cooperative cancellation of I/O and queue waits, without joining.
   void RequestCancel() noexcept;
   // Cancels, joins and discards queued packets. No callbacks after returning.
@@ -119,6 +124,10 @@ class MW_STREAMER_API AvInput final {
   std::size_t buffered_packets() const;
 
  private:
+  friend class AvInputProxy;
+  AvInputReadResult ReadPacketUntil(
+      std::optional<std::chrono::steady_clock::time_point> deadline);
+
   class Impl;
   std::unique_ptr<Impl> impl_;
 };

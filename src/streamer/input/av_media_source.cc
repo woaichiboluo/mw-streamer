@@ -62,6 +62,9 @@ class AvMediaSource::Impl final {
       : config_(std::move(config)), proxy_(config_.proxy) {
     ValidateDecoderConfig(config_.video_decoder);
     ValidateDecoderConfig(config_.audio_decoder);
+    if (config_.packet_read_timeout.count() <= 0) {
+      throw std::invalid_argument("AvMediaSource 读包等待时间必须为正");
+    }
     if (device) device_ = device->Ref();
     proxy_.SetOnStateChanged([this](const AvInputProxyStatus& status) {
       {
@@ -70,6 +73,7 @@ class AvMediaSource::Impl final {
           failure_ = status.error;
         }
         proxy_events_.push_back(status);
+        ++revision_;
       }
       changed_.notify_all();
     });
@@ -137,6 +141,7 @@ class AvMediaSource::Impl final {
       {
         std::lock_guard<std::mutex> lock(mutex_);
         (video ? video_eof_ : audio_eof_) = true;
+        ++revision_;
       }
       changed_.notify_all();
       MW_LOG_DEBUG("streamer", "AvMediaSource [{}] 消费 EOF: stream={}",
@@ -221,6 +226,17 @@ class AvMediaSource::Impl final {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!failure_) failure_ = std::move(error);
+    }
+    changed_.notify_all();
+    // A decoder failure must also interrupt a controller blocked in
+    // ReadPacketFor.
+    proxy_.RequestStop();
+  }
+
+  void InputSpaceAvailable() {
+    {
+      std::lock_guard lock(mutex_);
+      ++revision_;
     }
     changed_.notify_all();
   }
@@ -358,11 +374,13 @@ class AvMediaSource::Impl final {
                                                 config_.video_decoder)
                   : std::make_unique<AvDecoder>(*stream, config_.video_decoder);
       created->video->SetOnError(on_error);
+      created->video->SetOnInputSpace([this] { InputSpaceAvailable(); });
     }
     if (const auto* stream = FindStream(*info, info->audio_stream_index)) {
       created->audio =
           std::make_unique<AvDecoder>(*stream, config_.audio_decoder);
       created->audio->SetOnError(on_error);
+      created->audio->SetOnInputSpace([this] { InputSpaceAvailable(); });
     }
     if (!created->video && !created->audio) {
       throw std::invalid_argument("AvMediaSource 输入没有所选音视频轨道");
@@ -437,7 +455,7 @@ class AvMediaSource::Impl final {
                 std::optional<PendingInput>& pending) {
     bool progress = false;
     if (!pending) {
-      auto input = proxy_.TryReadPacket();
+      auto input = proxy_.ReadPacketFor(config_.packet_read_timeout);
       if (input.status == AvInputReadStatus::kNull) return false;
       Initialize(input.info, session);
       pending.emplace();
@@ -521,6 +539,11 @@ class AvMediaSource::Impl final {
         throw std::runtime_error("AvMediaSource 无法启动输入代理");
       }
       while (!Stopping()) {
+        std::uint64_t observed;
+        {
+          std::lock_guard lock(mutex_);
+          observed = revision_;
+        }
         CheckFailure();
         bool progress = ProcessEvents(session);
         CheckFailure();
@@ -530,10 +553,11 @@ class AvMediaSource::Impl final {
           break;
         }
         if (!final_eof_submitted_) progress |= Dispatch(session, pending);
-        if (!progress) {
+        if (!progress && (pending || final_eof_submitted_)) {
           std::unique_lock<std::mutex> lock(mutex_);
-          changed_.wait_for(lock, std::chrono::milliseconds(1), [this] {
-            return stopping_ || failure_ || !proxy_events_.empty();
+          changed_.wait(lock, [this, observed] {
+            return stopping_ || failure_ || revision_ != observed ||
+                   !proxy_events_.empty();
           });
         }
       }
@@ -563,6 +587,7 @@ class AvMediaSource::Impl final {
   AvInputProxy proxy_;
   mutable std::mutex mutex_;
   std::condition_variable changed_;
+  std::uint64_t revision_ = 0;
   bool stopping_ = false;
   std::exception_ptr failure_;
   AvMediaSourceStatus status_;

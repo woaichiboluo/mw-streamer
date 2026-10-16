@@ -195,11 +195,57 @@ TEST_CASE("AvInputProxy nonloop source preserves every packet and reports EOF",
   CHECK(proxy.ReadPacket().status == AvInputReadStatus::kNull);
 }
 
+TEST_CASE("AvInputProxy timed reads preserve packets and nonloop EOF",
+          "[av-input-proxy][packet][timeout]") {
+  const auto source = ReadNativeSource();
+  AvInputProxyConfig config;
+  config.input.packet_capacity = 2;
+  AvInputProxy proxy(config);
+  CHECK_THROWS_AS(proxy.ReadPacketFor(-1ms), std::invalid_argument);
+  CHECK(proxy.ReadPacketFor(0ms).status == AvInputReadStatus::kNull);
+  REQUIRE(proxy.Start(SamplePath()));
+  for (const auto& expected : source.packets) {
+    const auto result = proxy.ReadPacketFor(1s);
+    REQUIRE(result.status == AvInputReadStatus::kPacket);
+    REQUIRE(result.packet.has_value());
+    REQUIRE(result.info != nullptr);
+    CheckPacket(*result.packet, expected);
+  }
+  CHECK(proxy.ReadPacketFor(1s).status == AvInputReadStatus::kEof);
+  CHECK(proxy.ReadPacketFor(0ms).status == AvInputReadStatus::kEof);
+  REQUIRE(WaitFor(
+      [&] { return proxy.status().state == AvInputProxyState::kEnded; }));
+}
+
+TEST_CASE("AvInputProxy timed reads use one deadline across retries",
+          "[av-input-proxy][retry][timeout]") {
+  TemporarySource source;
+  AvInputProxy proxy;
+  REQUIRE(proxy.Start(source.path()));
+  REQUIRE(WaitFor([&] {
+    return proxy.status().state == AvInputProxyState::kWaitingRetry;
+  }));
+  const auto started = std::chrono::steady_clock::now();
+  CHECK(proxy.ReadPacketFor(1200ms).status == AvInputReadStatus::kNull);
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  CHECK(elapsed >= 1100ms);
+  CHECK(elapsed < 1800ms);
+  CHECK(proxy.status().state == AvInputProxyState::kWaitingRetry);
+  CHECK(proxy.status().retry_count == 2);
+  source.Restore();
+  CHECK(proxy.ReadPacketFor(2500ms).status == AvInputReadStatus::kPacket);
+  REQUIRE(WaitFor(
+      [&] { return proxy.status().state == AvInputProxyState::kConnected; }));
+  CHECK(proxy.status().retry_count == 0);
+}
+
 TEST_CASE("AvInputProxy exposes EOF before reopening each complete input",
           "[av-input-proxy][loop][ownership]") {
   bool nonblocking = false;
+  bool timed = false;
   SECTION("blocking reads") {}
   SECTION("nonblocking reads") { nonblocking = true; }
+  SECTION("timed reads") { timed = true; }
   const auto source = ReadNativeSource();
   const auto& expected = source.packets;
   AvInputProxyConfig config;
@@ -210,6 +256,7 @@ TEST_CASE("AvInputProxy exposes EOF before reopening each complete input",
   std::optional<ffmpeg::Packet> retained_packet;
   std::shared_ptr<const mw::streamer::AvInputInfo> retained_info;
   auto read = [&] {
+    if (timed) return proxy.ReadPacketFor(1s);
     if (!nonblocking) return proxy.ReadPacket();
     mw::streamer::AvInputProxyReadResult result;
     REQUIRE(WaitFor([&] {
@@ -615,8 +662,14 @@ TEST_CASE("AvInputProxy Stop cancels opening I/O and empty consumers",
   REQUIRE(server.WaitAccepted());
   CHECK(proxy.status().state == AvInputProxyState::kConnecting);
   CHECK(proxy.TryReadPacket().status == AvInputReadStatus::kNull);
+  const auto timeout_started = std::chrono::steady_clock::now();
+  CHECK(proxy.ReadPacketFor(40ms).status == AvInputReadStatus::kNull);
+  CHECK(std::chrono::steady_clock::now() - timeout_started >= 30ms);
+  CHECK(std::chrono::steady_clock::now() - timeout_started < 500ms);
+  CHECK(proxy.status().state == AvInputProxyState::kConnecting);
+  CHECK(proxy.status().retry_count == 0);
   auto received =
-      std::async(std::launch::async, [&] { return proxy.ReadPacket(); });
+      std::async(std::launch::async, [&] { return proxy.ReadPacketFor(5s); });
   CHECK(received.wait_for(20ms) == std::future_status::timeout);
   const auto started = std::chrono::steady_clock::now();
   proxy.Stop();

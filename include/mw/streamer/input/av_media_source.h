@@ -19,6 +19,9 @@ struct AvMediaSourceConfig {
   AvInputProxyConfig proxy;
   AvDecoderConfig video_decoder;
   AvDecoderConfig audio_decoder;
+  // Maximum packet-queue wait before servicing connection/control events.
+  // This does not change FFmpeg's network read timeout. Must be positive.
+  std::chrono::milliseconds packet_read_timeout{100};
 };
 
 enum class AvMediaSourceState {
@@ -47,6 +50,8 @@ struct AvMediaSourceStatus {
 // Dispatch retains at most one input item. A full decoder input queue pauses
 // further proxy reads until that item is accepted, including ordered EOF/reset
 // submission to all present tracks. One stalled track may delay the other.
+// Empty packet reads wait up to packet_read_timeout; decoder backpressure and
+// final EOF acknowledgements wait for notifications instead of polling.
 // Lifecycle/configuration calls must be serialized externally. One reader per
 // track may run concurrently with the other track and Stop. Consume every
 // present track to relieve backpressure. Stop and finish readers before restart

@@ -1,4 +1,4 @@
-#include "syncer_timing.h"
+#include "mw/streamer/syncer/syncer_timing.h"
 
 #include <algorithm>
 #include <limits>
@@ -88,90 +88,6 @@ bool Apart(std::int64_t a, std::int64_t b, std::int64_t tolerance) {
   return difference >= tolerance || difference <= -tolerance;
 }
 
-// Like realtime's team, audio and video share one pacing offset. Source
-// timestamp jumps reanchor it; connection metadata never changes the clock.
-class PacingClock final {
- public:
-  PacingClock(const SyncerConfig& config, const void* log_context)
-      : config_(config), log_context_(log_context) {}
-
-  struct Decision {
-    bool ready = false;
-    bool discard = false;
-    std::int64_t wake_us = kNoWake;
-  };
-
-  Decision Schedule(bool video, std::int64_t pts, std::int64_t now) {
-    auto& offset = offset_;
-    bool reset = !offset;
-    bool forward = false;
-    const char* reset_reason = "initial";
-    std::int64_t previous_due = now;
-    std::int64_t previous_difference = 0;
-    if (offset) {
-      const auto due = Subtract(pts, *offset);
-      const auto difference = Subtract(due, now);
-      previous_due = due;
-      previous_difference = difference;
-      if (difference < -config_.negative_time_tolerance.count()) {
-        reset = true;
-        reset_reason = "late";
-      } else if (difference >= config_.discontinuity_threshold.count()) {
-        reset = true;
-        forward = true;
-        reset_reason = "forward_jump";
-      } else if (config_.negative_time_discard &&
-                 difference < -config_.negative_time_discard->count()) {
-        MW_LOG_DEBUG("streamer",
-                     "Syncer[{}] 丢弃迟到输入 reason=late_discard track={} "
-                     "input_pts_us={} now_us={} due_us={} "
-                     "diff_us={} offset_us={}",
-                     log_context_, TrackName(video), pts, now, due, difference,
-                     *offset);
-        return {false, true, now};
-      } else if (difference > 0) {
-        auto& wait = video ? video_wait_ : audio_wait_;
-        if (!wait || wait->pts != pts || wait->due != due) {
-          MW_LOG_TRACE("streamer",
-                       "Syncer[{}] 等待交付时刻 track={} "
-                       "input_pts_us={} now_us={} due_us={} diff_us={} "
-                       "offset_us={}",
-                       log_context_, TrackName(video), pts, now, due,
-                       difference, *offset);
-          wait = Wait{pts, due};
-        }
-        return {false, false, due};
-      }
-    }
-    if (reset) {
-      const auto candidate =
-          Subtract(Subtract(pts, now), config_.jitter_margin.count());
-      const bool had_offset = offset.has_value();
-      const auto old_offset = offset.value_or(0);
-      offset = !offset || forward ? candidate : std::min(*offset, candidate);
-      MW_LOG_INFO("streamer",
-                  "Syncer[{}] 建立或重同步实时映射 reason={} track={} "
-                  "input_pts_us={} now_us={} due_us={} diff_us={} "
-                  "had_offset={} old_offset_us={} new_offset_us={}",
-                  log_context_, reset_reason, TrackName(video), pts, now,
-                  previous_due, previous_difference, had_offset, old_offset,
-                  *offset);
-    }
-    return {true, false, now};
-  }
-
- private:
-  const SyncerConfig& config_;
-  const void* log_context_;
-  struct Wait {
-    std::int64_t pts;
-    std::int64_t due;
-  };
-  std::optional<Wait> video_wait_;
-  std::optional<Wait> audio_wait_;
-  std::optional<std::int64_t> offset_;
-};
-
 // Hold the last advancing real timestamp for two seconds, then extrapolate
 // from elapsed steady-clock time. Backup output does not refresh the anchor.
 class ContinuityClock final {
@@ -221,7 +137,6 @@ struct Track {
   bool last_success = true;
   bool has_output = false;
   std::int64_t wait_until = 0;
-  bool released = false;
   bool try_without_filling = false;
   // A forward jump or timeout can produce at most five fillers per iteration.
   std::optional<std::int64_t> fill_until;
@@ -242,7 +157,6 @@ class SyncerTiming::Impl final {
   Impl(const SyncerConfig& config, const void* log_context)
       : config_(config),
         log_context_(log_context),
-        pacing_(config_, log_context),
         clock_(config_.start_ts.count(), log_context) {
     const bool video = config_.encoder.video_pixel_format != AV_PIX_FMT_NONE;
     video_.time_base = video ? av_inv_q(config_.encoder.fps) : kMicroseconds;
@@ -283,7 +197,6 @@ class SyncerTiming::Impl final {
       // The peer may have corrected the shared shift during this suspension.
       return Correct(track, video, *head, now);
     }
-    std::int64_t due = kNoWake;
     if (head) {
       if (head->status == AvDecoderReadStatus::kEof) {
         // Like a live sentinel, consume EOF and keep both clocks running.
@@ -292,22 +205,12 @@ class SyncerTiming::Impl final {
                     "end_pts={} time_base={}/{} now_us={}",
                     log_context_, TrackName(video), head->end_pts,
                     head->time_base.num, head->time_base.den, now);
-        track.released = false;
         return {true, {}, now};
       }
-      if (!track.released) {
-        const auto decision = pacing_.Schedule(
-            video,
-            Rescale(head->frame->get()->pts, head->time_base, kMicroseconds),
-            now);
-        if (decision.discard) return {true, {}, now};
-        track.released = decision.ready;
-        due = decision.wake_us;
-      }
-      if (track.released) return Correct(track, video, *head, now);
+      return Correct(track, video, *head, now);
     }
     if (now < track.wait_until) {
-      return {false, {}, std::min(due, track.wait_until)};
+      return {false, {}, track.wait_until};
     }
     if (!track.timed_out) {
       track.timed_out = true;
@@ -329,7 +232,7 @@ class SyncerTiming::Impl final {
       BeginFill(track, video, target, false, now);
       return Fill(track, video, head, now);
     }
-    return {false, {}, std::min(due, track.wait_until)};
+    return {false, {}, track.wait_until};
   }
 
  private:
@@ -557,7 +460,6 @@ class SyncerTiming::Impl final {
     track.last_real_pts = pts;
     track.last_success = true;
     track.wait_until = Add(now, config_.timeout.count());
-    track.released = false;
     track.pending_real_pts.reset();
     return {true, std::move(frame), now};
   }
@@ -626,7 +528,6 @@ class SyncerTiming::Impl final {
   SyncerConfig config_;
   const void* log_context_;
   ffmpeg::Frame audio_layout_;
-  PacingClock pacing_;
   ContinuityClock clock_;
   Track video_;
   Track audio_;

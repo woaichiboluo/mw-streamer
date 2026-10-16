@@ -1,19 +1,14 @@
-#include "mw/streamer/timing/syncer.h"
+#include "mw/streamer/syncer/syncer.h"
 
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
-#include <catch2/matchers/catch_matchers.hpp>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <cstring>
-#include <future>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <stdexcept>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -25,7 +20,6 @@ extern "C" {
 }
 
 #include "mw/streamer/ffmpeg/hw_device_context.h"
-#include "streamer/timing/syncer_timing.h"
 
 namespace {
 
@@ -34,7 +28,6 @@ using mw::streamer::AvDecoderReadResult;
 using mw::streamer::AvDecoderReadStatus;
 using mw::streamer::Syncer;
 using mw::streamer::SyncerConfig;
-using mw::streamer::internal::SyncerTiming;
 namespace ffmpeg = mw::streamer::ffmpeg;
 
 constexpr std::int64_t kStart = 10000000;
@@ -50,20 +43,6 @@ ffmpeg::Frame Video(std::uint8_t value) {
   for (int row = 0; row < frame->height; ++row) {
     std::memset(frame->data[0] + row * frame->linesize[0], value,
                 static_cast<std::size_t>(frame->width));
-  }
-  return frame;
-}
-
-ffmpeg::Frame RgbBackup() {
-  ffmpeg::Frame frame;
-  frame->format = AV_PIX_FMT_RGB24;
-  frame->width = 4;
-  frame->height = 4;
-  if (av_frame_get_buffer(frame.get(), 0) < 0) {
-    throw std::runtime_error("Cannot allocate test RGB backup");
-  }
-  for (int row = 0; row < frame->height; ++row) {
-    std::memset(frame->data[0] + row * frame->linesize[0], 23, 12);
   }
   return frame;
 }
@@ -150,7 +129,7 @@ std::int64_t PtsUs(const ffmpeg::Frame& frame) {
   return av_rescale_q(frame->pts, frame->time_base, AVRational{1, 1000000});
 }
 
-std::vector<ffmpeg::Frame> DrainAt(SyncerTiming& timing, bool video,
+std::vector<ffmpeg::Frame> DrainAt(Syncer& timing, bool video,
                                    std::int64_t now) {
   std::vector<ffmpeg::Frame> output;
   for (int i = 0; i < 1024; ++i) {
@@ -171,7 +150,7 @@ TEST_CASE("Syncer generates a black CPU backup from the video target",
   auto config = VideoConfig();
   config.backup_video.reset();
   config.encoder.video_pixel_format = format;
-  SyncerTiming timing(config);
+  Syncer timing(config);
   REQUIRE_FALSE(timing.Step(true, nullptr, 0).frame);
   REQUIRE_FALSE(timing.Step(true, nullptr, 1000000).frame);
   auto first = timing.Step(true, nullptr, 3000000);
@@ -205,7 +184,7 @@ TEST_CASE("Syncer retains a custom audio layout independently of its caller",
   REQUIRE(av_channel_layout_custom_init(&layout, 2) == 0);
   layout.u.map[0].id = AV_CHAN_FRONT_LEFT;
   layout.u.map[1].id = AV_CHAN_FRONT_RIGHT;
-  SyncerTiming timing(config);
+  Syncer timing(config);
   av_channel_layout_uninit(&layout);
   REQUIRE_FALSE(timing.Step(false, nullptr, 0).frame);
   REQUIRE_FALSE(timing.Step(false, nullptr, 1000000).frame);
@@ -224,11 +203,11 @@ TEST_CASE("Syncer starts backup after input timeout and media clock hold",
   // With no input, the first timeout initializes the shared media clock.
   // Use independent clocks so a pre-boundary poll does not postpone the next
   // poll by 22 ms and hide the exact two-second clock boundary being tested.
-  SyncerTiming before(VideoConfig());
+  Syncer before(VideoConfig());
   REQUIRE_FALSE(before.Step(true, nullptr, 0).frame);
   REQUIRE_FALSE(before.Step(true, nullptr, 1000000).frame);
   REQUIRE_FALSE(before.Step(true, nullptr, 2999999).frame);
-  SyncerTiming timing(VideoConfig());
+  Syncer timing(VideoConfig());
   REQUIRE_FALSE(timing.Step(true, nullptr, 0).frame);
   REQUIRE_FALSE(timing.Step(true, nullptr, 1000000).frame);
   const auto output = timing.Step(true, nullptr, 3000000);
@@ -241,7 +220,7 @@ TEST_CASE("Syncer starts backup after input timeout and media clock hold",
 TEST_CASE(
     "Syncer holds the real media clock then freezes and switches to backup",
     "[syncer][timing]") {
-  SyncerTiming timing(VideoConfig());
+  Syncer timing(VideoConfig());
   auto first = VideoInput(50000000);
   auto anchor = timing.Step(true, &first, 0);
   REQUIRE(anchor.consumed);
@@ -278,7 +257,7 @@ TEST_CASE("Syncer audio backups contain actual silence including unsigned PCM",
           "[syncer][timing]") {
   const auto format =
       GENERATE(AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_U8, AV_SAMPLE_FMT_FLTP);
-  SyncerTiming timing(AudioConfig(48000, format));
+  Syncer timing(AudioConfig(48000, format));
   REQUIRE_FALSE(timing.Step(false, nullptr, 0).frame);
   REQUIRE_FALSE(timing.Step(false, nullptr, 1000000).frame);
   auto output = timing.Step(false, nullptr, 3000000);
@@ -303,13 +282,12 @@ TEST_CASE("Syncer preserves a common initial video audio offset when enabled",
           "[syncer][timing]") {
   auto config = MixedConfig();
   config.forward_start_shift = true;
-  SyncerTiming timing(config);
+  Syncer timing(config);
   auto video = VideoInput(50000000);
   auto audio = AudioInput(2403840);
   auto first = timing.Step(true, &video, 0);
   REQUIRE(first.frame);
   REQUIRE(PtsUs(*first.frame) == kStart);
-  REQUIRE_FALSE(timing.Step(false, &audio, 79999).frame);
   auto second = timing.Step(false, &audio, 80000);
   REQUIRE(second.consumed);
   REQUIRE(second.frame);
@@ -319,7 +297,7 @@ TEST_CASE("Syncer preserves a common initial video audio offset when enabled",
 TEST_CASE("Syncer default fills an initial audio offset before its real frame",
           "[syncer][timing]") {
   auto config = MixedConfig();
-  SyncerTiming timing(config);
+  Syncer timing(config);
   auto video = VideoInput(50000000);
   auto audio = AudioInput(2403840);
   REQUIRE(timing.Step(true, &video, 0).frame);
@@ -345,125 +323,21 @@ TEST_CASE("Syncer default fills an initial audio offset before its real frame",
 TEST_CASE(
     "Syncer retains sub-threshold PTS jitter rather than recounting frames",
     "[syncer][timing]") {
-  SyncerTiming timing(VideoConfig());
+  Syncer timing(VideoConfig());
   auto first = VideoInput(50000000);
   REQUIRE(timing.Step(true, &first, 0).frame);
   auto next = VideoInput(50040500);
-  REQUIRE_FALSE(timing.Step(true, &next, 40499).frame);
   auto output = timing.Step(true, &next, 40500);
   REQUIRE(output.consumed);
   REQUIRE(output.frame);
   REQUIRE(PtsUs(*output.frame) == kStart + 40500);
 }
 
-TEST_CASE(
-    "Syncer paces burst input and retains queue heads until their deadline",
-    "[syncer][timing]") {
-  SyncerTiming timing(VideoConfig());
-  auto first = VideoInput(50000000);
-  REQUIRE(timing.Step(true, &first, 0).consumed);
-  auto next = VideoInput(50040000);
-  auto early = timing.Step(true, &next, 1000);
-  REQUIRE_FALSE(early.consumed);
-  REQUIRE_FALSE(early.frame);
-  REQUIRE(early.wake_us == 40000);
-  auto due = timing.Step(true, &next, 40000);
-  REQUIRE(due.consumed);
-  REQUIRE(due.frame);
-  REQUIRE(PtsUs(*due.frame) == kStart + 40000);
-}
-
-TEST_CASE("Syncer excessive lateness delays the other track's common deadline",
-          "[syncer][timing]") {
-  auto config = MixedConfig();
-  config.forward_start_shift = true;
-  SyncerTiming timing(config);
-  auto video = VideoInput(50000000);
-  auto audio = AudioInput(2400000, 48000, 3840);
-  REQUIRE(timing.Step(true, &video, 0).consumed);
-  REQUIRE(timing.Step(false, &audio, 0).consumed);
-  video = VideoInput(50040000);
-  auto late = timing.Step(true, &video, 1000000);
-  REQUIRE(late.consumed);
-  REQUIRE(late.frame);
-  REQUIRE(PtsUs(*late.frame) == kStart + 40000);
-  audio = AudioInput(2403840);
-  auto early = timing.Step(false, &audio, 1039999);
-  REQUIRE_FALSE(early.consumed);
-  REQUIRE_FALSE(early.frame);
-  auto due = timing.Step(false, &audio, 1040000);
-  REQUIRE(due.consumed);
-  REQUIRE(due.frame);
-  REQUIRE(PtsUs(*due.frame) == kStart + 80000);
-}
-
-TEST_CASE("Syncer small lateness releases immediately without moving the clock",
-          "[syncer][timing]") {
-  auto config = MixedConfig();
-  config.forward_start_shift = true;
-  SyncerTiming timing(config);
-  auto video = VideoInput(0);
-  auto audio = AudioInput(0, 48000, 4800);
-  REQUIRE(timing.Step(true, &video, 0).consumed);
-  REQUIRE(timing.Step(false, &audio, 0).consumed);
-  video = VideoInput(40000);
-  auto late = timing.Step(true, &video, 80000);
-  REQUIRE(late.consumed);
-  REQUIRE(late.frame);
-  REQUIRE(PtsUs(*late.frame) == kStart + 40000);
-  audio = AudioInput(4800);
-  REQUIRE_FALSE(timing.Step(false, &audio, 99999).frame);
-  auto due = timing.Step(false, &audio, 100000);
-  REQUIRE(due.consumed);
-  REQUIRE(due.frame);
-  REQUIRE(PtsUs(*due.frame) == kStart + 100000);
-}
-
-TEST_CASE(
-    "Syncer optionally discards moderate lateness before continuity repair",
-    "[syncer][timing]") {
-  auto config = VideoConfig();
-  config.negative_time_discard = 30ms;
-  SyncerTiming timing(config);
-  auto first = VideoInput(0);
-  REQUIRE(timing.Step(true, &first, 0).consumed);
-  auto late = VideoInput(40000);
-  auto discarded = timing.Step(true, &late, 80000);
-  REQUIRE(discarded.consumed);
-  REQUIRE_FALSE(discarded.frame);
-  auto next = VideoInput(80000);
-  auto filler = timing.Step(true, &next, 80000);
-  REQUIRE_FALSE(filler.consumed);
-  REQUIRE(filler.frame);
-  REQUIRE(PtsUs(*filler.frame) == kStart + 40000);
-  REQUIRE((*filler.frame)->data[0][0] == 99);
-}
-
-TEST_CASE(
-    "Syncer jitter margin delays subsequent input but not the first anchor",
-    "[syncer][timing]") {
-  auto config = VideoConfig();
-  config.jitter_margin = 50ms;
-  SyncerTiming timing(config);
-  auto first = VideoInput(0);
-  auto anchor = timing.Step(true, &first, 0);
-  REQUIRE(anchor.consumed);
-  REQUIRE(anchor.frame);
-  auto next = VideoInput(40000);
-  auto early = timing.Step(true, &next, 89999);
-  REQUIRE_FALSE(early.consumed);
-  REQUIRE_FALSE(early.frame);
-  auto due = timing.Step(true, &next, 90000);
-  REQUIRE(due.consumed);
-  REQUIRE(due.frame);
-  REQUIRE(PtsUs(*due.frame) == kStart + 40000);
-}
-
 TEST_CASE("Syncer fractional frame rate stays exact across a long paced stream",
           "[syncer][timing]") {
   auto config = VideoConfig();
   config.encoder.fps = AVRational{30000, 1001};
-  SyncerTiming timing(config);
+  Syncer timing(config);
   const AVRational time_base{1001, 30000};
   const auto start = av_rescale_q(kStart, AVRational{1, 1000000}, time_base);
   for (std::int64_t i = 0; i < 10000; ++i) {
@@ -484,7 +358,7 @@ TEST_CASE("Syncer fractional frame rate stays exact across a long paced stream",
 
 TEST_CASE("Syncer backward PTS jumps preserve output continuity",
           "[syncer][timing]") {
-  SyncerTiming timing(VideoConfig());
+  Syncer timing(VideoConfig());
   auto first = VideoInput(50000000);
   REQUIRE(timing.Step(true, &first, 0).frame);
   auto restart = VideoInput(0);
@@ -500,7 +374,7 @@ TEST_CASE("Syncer shared correction converges after interleaved PTS resets",
   const bool forward_start_shift = GENERATE(false, true);
   auto config = MixedConfig();
   config.forward_start_shift = forward_start_shift;
-  SyncerTiming timing(config);
+  Syncer timing(config);
   std::vector<AvDecoderReadResult> video{FpsVideoInput(1250),
                                          FpsVideoInput(1251)};
   std::vector<AvDecoderReadResult> audio;
@@ -524,6 +398,8 @@ TEST_CASE("Syncer shared correction converges after interleaved PTS resets",
   std::size_t video_index = 0;
   std::size_t audio_index = 0;
   std::int64_t now = 0;
+  std::int64_t video_due = 0;
+  std::int64_t audio_due = 0;
   for (int iteration = 0; iteration < 10000; ++iteration) {
     auto wake = std::numeric_limits<std::int64_t>::max();
     for (bool is_video : {true, false}) {
@@ -532,8 +408,20 @@ TEST_CASE("Syncer shared correction converges after interleaved PTS resets",
       auto& outputs = is_video ? video_pts : audio_pts;
       const auto old_count = is_video ? old_video_count : old_audio_count;
       if (index == inputs.size()) continue;
+      auto& due = is_video ? video_due : audio_due;
+      if (now < due) {
+        wake = std::min(wake, due);
+        continue;
+      }
       const auto step = timing.Step(is_video, &inputs[index], now);
-      wake = std::min(wake, step.wake_us);
+      if (step.frame) {
+        const auto& frame = *step.frame;
+        due = now + av_rescale_q(frame->duration, frame->time_base,
+                                 AVRational{1, 1000000});
+      } else {
+        due = step.wake_us;
+      }
+      wake = std::min(wake, due);
       if (step.consumed) {
         REQUIRE(step.frame);
         if (index >= old_count) outputs.push_back(PtsUs(*step.frame));
@@ -558,7 +446,7 @@ TEST_CASE("Syncer shared correction converges after interleaved PTS resets",
 
 TEST_CASE("Syncer large forward jumps do not leak the source discontinuity",
           "[syncer][timing]") {
-  SyncerTiming timing(VideoConfig());
+  Syncer timing(VideoConfig());
   auto first = VideoInput(50000000);
   REQUIRE(timing.Step(true, &first, 0).frame);
   auto jump = VideoInput(300000000);
@@ -585,7 +473,7 @@ TEST_CASE("Syncer large forward jumps do not leak the source discontinuity",
 TEST_CASE("Syncer audio continuity advances by exact sample counts",
           "[syncer][timing]") {
   const int rate = GENERATE(44100, 48000);
-  SyncerTiming timing(AudioConfig(rate));
+  Syncer timing(AudioConfig(rate));
   auto first = AudioInput(50LL * rate, rate, 1024);
   auto result = timing.Step(false, &first, 0);
   REQUIRE(result.frame);
@@ -604,7 +492,7 @@ TEST_CASE("Syncer audio continuity advances by exact sample counts",
 
 TEST_CASE("Syncer consumes EOF and continues the live media timeline",
           "[syncer][timing]") {
-  SyncerTiming timing(VideoConfig());
+  Syncer timing(VideoConfig());
   auto first = VideoInput(50000000);
   REQUIRE(timing.Step(true, &first, 0).frame);
   auto eof = Eof();
@@ -623,7 +511,7 @@ TEST_CASE("Syncer consumes EOF and continues the live media timeline",
 
 TEST_CASE("Syncer first real frame starts after the last emitted backup ends",
           "[syncer][timing]") {
-  SyncerTiming timing(VideoConfig());
+  Syncer timing(VideoConfig());
   REQUIRE_FALSE(timing.Step(true, nullptr, 1000000).frame);
   std::vector<ffmpeg::Frame> backups;
   std::int64_t now = 3000000;
@@ -646,421 +534,6 @@ TEST_CASE("Syncer first real frame starts after the last emitted backup ends",
   REQUIRE(PtsUs(*first.frame) >= previous_end);
 }
 
-// The first callback can be parked without relying on the scheduler's speed.
-// Always release this gate before Stop joins the callback thread.
-class CallbackGate {
- public:
-  void Enter() {
-    std::unique_lock lock(mutex_);
-    entered_ = true;
-    changed_.notify_all();
-    changed_.wait(lock, [&] { return open_; });
-  }
-  bool WaitEntered() {
-    std::unique_lock lock(mutex_);
-    return changed_.wait_for(lock, 2s, [&] { return entered_; });
-  }
-  void Open() {
-    std::lock_guard lock(mutex_);
-    open_ = true;
-    changed_.notify_all();
-  }
-
- private:
-  std::mutex mutex_;
-  std::condition_variable changed_;
-  bool entered_ = false;
-  bool open_ = false;
-};
-
-TEST_CASE(
-    "Syncer full queues reject input without waiting and allow FIFO retry",
-    "[syncer][thread]") {
-  const bool video = GENERATE(true, false);
-  auto config = MixedConfig();
-  config.input_capacity = 1;
-  CallbackGate gate;
-  std::mutex mutex;
-  std::condition_variable changed;
-  std::vector<std::int64_t> timestamps;
-  Syncer syncer(config);
-  const auto record = [&](ffmpeg::Frame frame) {
-    {
-      std::lock_guard lock(mutex);
-      timestamps.push_back(PtsUs(frame));
-      changed.notify_all();
-    }
-    gate.Enter();
-  };
-  if (video) {
-    syncer.SetOnVideoFrame(record);
-  } else {
-    syncer.SetOnAudioFrame(record);
-  }
-  const auto push = [&](const AvDecoderReadResult& input) {
-    return video ? syncer.TryPushVideo(input) : syncer.TryPushAudio(input);
-  };
-  const auto input = [&](int index) {
-    return video ? VideoInput(index * 40000) : AudioInput(index * 960);
-  };
-  REQUIRE_FALSE(push(input(0)));
-  REQUIRE(syncer.Start());
-  REQUIRE(push(input(0)));
-  const bool entered = gate.WaitEntered();
-  if (!entered) {
-    gate.Open();
-    syncer.Stop();
-    FAIL("Syncer did not deliver the first frame");
-  }
-  const bool queued = push(input(1));
-  const auto rejected = input(2);
-  const auto* storage = (*rejected.frame)->data[0];
-  auto producer = std::async(std::launch::async, [&] {
-    const bool frame = push(rejected);
-    const bool eof = push(Eof());
-    const bool peer = video ? syncer.TryPushAudio(AudioInput(0))
-                            : syncer.TryPushVideo(VideoInput(0));
-    return std::vector<bool>{frame, eof, peer};
-  });
-  const auto ready = producer.wait_for(1s);
-  // Always release a regressed blocking implementation before asserting.
-  if (ready != std::future_status::ready) syncer.RequestStop();
-  gate.Open();
-  const auto accepted = producer.get();
-  bool consumed = false;
-  bool retried = false;
-  bool delivered = false;
-  if (ready == std::future_status::ready) {
-    {
-      std::unique_lock lock(mutex);
-      consumed =
-          changed.wait_for(lock, 1s, [&] { return timestamps.size() >= 2; });
-    }
-    retried = push(rejected);
-    {
-      std::unique_lock lock(mutex);
-      delivered =
-          changed.wait_for(lock, 1s, [&] { return timestamps.size() >= 3; });
-    }
-  }
-  syncer.Stop();
-  REQUIRE(queued);
-  REQUIRE(ready == std::future_status::ready);
-  REQUIRE(accepted == std::vector<bool>{false, false, true});
-  REQUIRE((*rejected.frame)->data[0] == storage);
-  REQUIRE((*rejected.frame)->pts == (video ? 80000 : 1920));
-  REQUIRE(consumed);
-  REQUIRE(retried);
-  REQUIRE(delivered);
-  const auto step = video ? 40000 : 20000;
-  REQUIRE(timestamps ==
-          std::vector<std::int64_t>{kStart, kStart + step, kStart + 2 * step});
-  REQUIRE_FALSE(push(rejected));
-  REQUIRE_FALSE(syncer.error());
-}
-
-TEST_CASE("Syncer delivers paced audio and video serially on its own thread",
-          "[syncer][thread]") {
-  auto config = MixedConfig();
-  config.forward_start_shift = true;
-  Syncer syncer(config);
-  std::mutex mutex;
-  std::condition_variable changed;
-  std::vector<std::thread::id> threads;
-  std::vector<std::chrono::steady_clock::time_point> video_times;
-  int audio_count = 0;
-  syncer.SetOnVideoFrame([&](ffmpeg::Frame) {
-    std::lock_guard lock(mutex);
-    threads.push_back(std::this_thread::get_id());
-    video_times.push_back(std::chrono::steady_clock::now());
-    changed.notify_all();
-  });
-  syncer.SetOnAudioFrame([&](ffmpeg::Frame) {
-    std::lock_guard lock(mutex);
-    threads.push_back(std::this_thread::get_id());
-    ++audio_count;
-    changed.notify_all();
-  });
-  REQUIRE(syncer.Start());
-  for (int i = 0; i < 3; ++i) {
-    REQUIRE(syncer.TryPushVideo(VideoInput(i * 40000)));
-    REQUIRE(syncer.TryPushAudio(AudioInput(i * 960)));
-  }
-  bool delivered;
-  {
-    std::unique_lock lock(mutex);
-    delivered = changed.wait_for(
-        lock, 2s, [&] { return video_times.size() >= 3 && audio_count >= 3; });
-  }
-  syncer.Stop();
-  const auto count_after_stop = threads.size();
-  REQUIRE(delivered);
-  REQUIRE(video_times.size() == 3);
-  REQUIRE(audio_count == 3);
-  REQUIRE(video_times.back() - video_times.front() >= 65ms);
-  REQUIRE(count_after_stop == 6);
-  for (const auto thread : threads) {
-    REQUIRE(thread == threads.front());
-    REQUIRE(thread != std::this_thread::get_id());
-  }
-  REQUIRE_FALSE(syncer.TryPushVideo(VideoInput(120000)));
-  REQUIRE(threads.size() == count_after_stop);
-}
-
-TEST_CASE(
-    "Syncer Stop waits for an executing callback and cancels queued output",
-    "[syncer][thread]") {
-  CallbackGate gate;
-  Syncer syncer(VideoConfig());
-  int count = 0;
-  syncer.SetOnVideoFrame([&](ffmpeg::Frame) {
-    ++count;
-    gate.Enter();
-  });
-  REQUIRE(syncer.Start());
-  REQUIRE(syncer.TryPushVideo(VideoInput(0)));
-  const bool entered = gate.WaitEntered();
-  if (!entered) {
-    gate.Open();
-    syncer.Stop();
-    FAIL("Syncer did not enter callback");
-  }
-  const bool queued = syncer.TryPushVideo(VideoInput(40000));
-  auto stopped = std::async(std::launch::async, [&] { syncer.Stop(); });
-  const auto waiting = stopped.wait_for(20ms);
-  gate.Open();
-  const auto finished = stopped.wait_for(2s);
-  stopped.get();
-  REQUIRE(queued);
-  REQUIRE(waiting == std::future_status::timeout);
-  REQUIRE(finished == std::future_status::ready);
-  REQUIRE(count == 1);
-  REQUIRE_FALSE(syncer.TryPushVideo(VideoInput(80000)));
-  REQUIRE(count == 1);
-}
-
-TEST_CASE("Syncer worker stays live across EOF and subsequent PTS resets",
-          "[syncer][thread]") {
-  Syncer syncer(VideoConfig());
-  std::promise<void> resumed;
-  std::vector<std::int64_t> timestamps;
-  syncer.SetOnVideoFrame([&](ffmpeg::Frame frame) {
-    timestamps.push_back(PtsUs(frame));
-    if (timestamps.size() == 2) {
-      syncer.RequestStop();
-      resumed.set_value();
-    }
-  });
-  REQUIRE(syncer.Start());
-  REQUIRE(syncer.TryPushVideo(VideoInput(50000000)));
-  REQUIRE(syncer.TryPushVideo(Eof()));
-  REQUIRE(syncer.TryPushVideo(VideoInput(0)));
-  auto ready = resumed.get_future();
-  const auto status = ready.wait_for(2s);
-  syncer.Stop();
-  REQUIRE(status == std::future_status::ready);
-  REQUIRE(timestamps.size() == 2);
-  REQUIRE(timestamps[0] == kStart);
-  REQUIRE(timestamps[1] == kStart + 40000);
-  REQUIRE_FALSE(syncer.error());
-}
-
-TEST_CASE("Syncer worker realigns later media after staggered PTS resets",
-          "[syncer][thread]") {
-  const bool video_leads = GENERATE(true, false);
-  const bool reversed_admission = GENERATE(false, true);
-  constexpr std::size_t kFrames = 16;
-  auto config = MixedConfig();
-  config.input_capacity = 64;
-  std::vector<std::int64_t> video_pts(kFrames, AV_NOPTS_VALUE);
-  std::vector<std::int64_t> audio_pts(kFrames, AV_NOPTS_VALUE);
-  std::promise<void> entered;
-  std::promise<void> release;
-  auto released = release.get_future().share();
-  std::mutex mutex;
-  std::condition_variable changed;
-  std::size_t delivered = 0;
-  bool first_video = true;
-  const auto record = [&](bool video, const ffmpeg::Frame& frame) {
-    const int index = frame->data[0][0] - 32;
-    if (index < 0 || index >= static_cast<int>(kFrames)) return;
-    std::lock_guard lock(mutex);
-    auto& pts =
-        (video ? video_pts : audio_pts)[static_cast<std::size_t>(index)];
-    if (pts == AV_NOPTS_VALUE) {
-      pts = PtsUs(frame);
-      ++delivered;
-      changed.notify_all();
-    }
-  };
-  Syncer syncer(config);
-  syncer.SetOnVideoFrame([&](ffmpeg::Frame frame) {
-    if (first_video) {
-      first_video = false;
-      entered.set_value();
-      released.wait_for(2s);
-    }
-    record(true, frame);
-  });
-  syncer.SetOnAudioFrame([&](ffmpeg::Frame frame) { record(false, frame); });
-  const auto push_new = [&](bool video, std::size_t index) {
-    auto input = video ? FpsVideoInput(static_cast<std::int64_t>(index))
-                       : AudioInput(static_cast<std::int64_t>(index) * 1920,
-                                    48000, 1920);
-    const auto marker = static_cast<std::uint8_t>(32 + index);
-    if (video) {
-      (*input.frame)->data[0][0] = marker;
-    } else {
-      std::memset((*input.frame)->data[0], marker, 3840);
-    }
-    return video ? syncer.TryPushVideo(input) : syncer.TryPushAudio(input);
-  };
-  REQUIRE(syncer.Start());
-  REQUIRE(syncer.TryPushVideo(FpsVideoInput(1250)));
-  REQUIRE(entered.get_future().wait_for(2s) == std::future_status::ready);
-  REQUIRE(syncer.TryPushAudio(
-      AudioInput(2400000, 48000, video_leads ? 960 : 3840)));
-  if (video_leads) {
-    REQUIRE(syncer.TryPushVideo(FpsVideoInput(1251)));
-    if (reversed_admission) REQUIRE(push_new(true, 0));
-    for (int index = 1; index < 4; ++index) {
-      REQUIRE(syncer.TryPushAudio(AudioInput(2400000 + index * 960)));
-    }
-  } else {
-    if (reversed_admission) REQUIRE(push_new(false, 0));
-    REQUIRE(syncer.TryPushVideo(FpsVideoInput(1251)));
-  }
-  // Cover both queued old data and an old input submitted after the peer's
-  // PTS reset. Per-track FIFO order stays unchanged in either admission order.
-  for (std::size_t index = 0; index < kFrames; ++index) {
-    if (index != 0 || !reversed_admission || !video_leads) {
-      REQUIRE(push_new(true, index));
-    }
-    if (index != 0 || !reversed_admission || video_leads) {
-      REQUIRE(push_new(false, index));
-    }
-  }
-  release.set_value();
-  bool complete;
-  {
-    std::unique_lock lock(mutex);
-    complete =
-        changed.wait_for(lock, 3s, [&] { return delivered == 2 * kFrames; });
-  }
-  syncer.Stop();
-  REQUIRE(complete);
-  REQUIRE_FALSE(syncer.error());
-  for (std::size_t index = 10; index < kFrames; ++index) {
-    CAPTURE(video_leads, reversed_admission, index);
-    REQUIRE(video_pts[index] == audio_pts[index]);
-    REQUIRE(video_pts[index] - video_pts[index - 1] == 40000);
-    REQUIRE(audio_pts[index] - audio_pts[index - 1] == 40000);
-  }
-}
-
-TEST_CASE("Syncer RequestStop is safe in callbacks and restart begins fresh",
-          "[syncer][thread]") {
-  Syncer syncer(VideoConfig());
-  std::promise<std::int64_t> first;
-  syncer.SetOnVideoFrame([&](ffmpeg::Frame frame) {
-    syncer.RequestStop();
-    first.set_value(PtsUs(frame));
-  });
-  REQUIRE(syncer.Start());
-  REQUIRE_FALSE(syncer.Start());
-  REQUIRE(syncer.TryPushVideo(VideoInput(50000000)));
-  auto first_future = first.get_future();
-  const auto first_status = first_future.wait_for(2s);
-  syncer.Stop();
-  REQUIRE(first_status == std::future_status::ready);
-  REQUIRE(first_future.get() == kStart);
-  std::promise<std::int64_t> second;
-  syncer.SetOnVideoFrame([&](ffmpeg::Frame frame) {
-    syncer.RequestStop();
-    second.set_value(PtsUs(frame));
-  });
-  REQUIRE(syncer.Start());
-  REQUIRE(syncer.TryPushVideo(VideoInput(0)));
-  auto second_future = second.get_future();
-  const auto second_status = second_future.wait_for(2s);
-  syncer.Stop();
-  REQUIRE(second_status == std::future_status::ready);
-  REQUIRE(second_future.get() == kStart);
-  REQUIRE_FALSE(syncer.error());
-}
-
-TEST_CASE(
-    "Syncer reports callback failure once and contains error callback throws",
-    "[syncer][thread]") {
-  Syncer syncer(VideoConfig());
-  std::promise<std::exception_ptr> error;
-  int error_count = 0;
-  syncer.SetOnVideoFrame([](ffmpeg::Frame) {
-    throw std::runtime_error("Business callback failed");
-  });
-  syncer.SetOnError([&](std::exception_ptr failure) {
-    ++error_count;
-    error.set_value(failure);
-    throw std::logic_error("Error observer failed");
-  });
-  REQUIRE(syncer.Start());
-  REQUIRE(syncer.TryPushVideo(VideoInput(0)));
-  auto error_future = error.get_future();
-  const auto status = error_future.wait_for(2s);
-  syncer.Stop();
-  REQUIRE(status == std::future_status::ready);
-  REQUIRE(error_count == 1);
-  REQUIRE(syncer.error());
-  REQUIRE_THROWS_WITH(std::rethrow_exception(error_future.get()),
-                      "Business callback failed");
-  REQUIRE_FALSE(syncer.TryPushVideo(VideoInput(40000)));
-}
-
-TEST_CASE("Syncer validates disabled tracks and accepts input after EOF",
-          "[syncer][thread]") {
-  REQUIRE_THROWS_AS(Syncer{SyncerConfig{}}, std::invalid_argument);
-  auto config = VideoConfig();
-  config.input_capacity = 0;
-  REQUIRE_THROWS_AS(Syncer{config}, std::invalid_argument);
-  Syncer syncer(VideoConfig());
-  REQUIRE(syncer.Start());
-  REQUIRE_THROWS_AS(syncer.TryPushAudio(AudioInput(0)), std::invalid_argument);
-  REQUIRE_THROWS_AS(syncer.TryPushVideo({}), std::invalid_argument);
-  REQUIRE(syncer.TryPushVideo(VideoInput(0)));
-  REQUIRE(syncer.TryPushVideo(VideoInput(40000)));
-  REQUIRE(syncer.TryPushVideo(Eof()));
-  REQUIRE(syncer.TryPushVideo(VideoInput(80000)));
-  syncer.Stop();
-  REQUIRE_FALSE(syncer.error());
-}
-
-TEST_CASE("Syncer disables video by format even with a supplied backup",
-          "[syncer][thread]") {
-  auto config = AudioConfig();
-  config.backup_video = Video(7);
-  config.encoder.width = -1;
-  config.encoder.height = -1;
-  config.encoder.fps = AVRational{0, 0};
-  Syncer syncer(config);
-  int video_count = 0;
-  std::promise<ffmpeg::Frame> delivered;
-  syncer.SetOnVideoFrame([&](ffmpeg::Frame) { ++video_count; });
-  syncer.SetOnAudioFrame([&](ffmpeg::Frame frame) {
-    syncer.RequestStop();
-    delivered.set_value(std::move(frame));
-  });
-  REQUIRE(syncer.Start());
-  REQUIRE_THROWS_AS(syncer.TryPushVideo(VideoInput(0)), std::invalid_argument);
-  REQUIRE(syncer.TryPushAudio(AudioInput(0)));
-  auto ready = delivered.get_future();
-  const auto status = ready.wait_for(2s);
-  syncer.Stop();
-  REQUIRE(status == std::future_status::ready);
-  REQUIRE(ready.get()->sample_rate == 48000);
-  REQUIRE(video_count == 0);
-  REQUIRE_FALSE(syncer.error());
-}
-
 TEST_CASE("Syncer ignores disabled audio fields and rejects no enabled tracks",
           "[syncer]") {
   auto config = VideoConfig();
@@ -1069,52 +542,6 @@ TEST_CASE("Syncer ignores disabled audio fields and rejects no enabled tracks",
   REQUIRE_NOTHROW(Syncer{config});
   config.encoder.video_pixel_format = AV_PIX_FMT_NONE;
   REQUIRE_THROWS_AS(Syncer{config}, std::invalid_argument);
-}
-
-TEST_CASE(
-    "Syncer preserves video contents independently of the target and backup",
-    "[syncer][thread]") {
-  auto config = VideoConfig();
-  config.encoder.video_pixel_format = AV_PIX_FMT_NV12;
-  config.encoder.width = 16;
-  config.encoder.height = 16;
-  config.backup_video = RgbBackup();
-  config.freeze = 0us;
-  const auto* backup_data = (*config.backup_video)->data[0];
-  auto input = VideoInput(0);
-  const auto* input_data = (*input.frame)->data[0];
-  Syncer syncer(config);
-  std::promise<ffmpeg::Frame> delivered;
-  syncer.SetOnVideoFrame([&](ffmpeg::Frame frame) {
-    syncer.RequestStop();
-    delivered.set_value(std::move(frame));
-  });
-  REQUIRE(syncer.Start());
-  REQUIRE(syncer.TryPushVideo(input));
-  auto ready = delivered.get_future();
-  const auto status = ready.wait_for(2s);
-  syncer.Stop();
-  REQUIRE(status == std::future_status::ready);
-  auto actual = ready.get();
-  REQUIRE(actual->format == AV_PIX_FMT_GRAY8);
-  REQUIRE(actual->width == 8);
-  REQUIRE(actual->height == 8);
-  REQUIRE(actual->data[0] == input_data);
-  REQUIRE(actual->data[0][0] == 99);
-  REQUIRE(PtsUs(actual) == kStart);
-  REQUIRE_FALSE(syncer.error());
-
-  SyncerTiming timing(config);
-  REQUIRE(timing.Step(true, &input, 0).frame);
-  auto output = timing.Step(true, nullptr, 2000000);
-  REQUIRE(output.frame);
-  const auto& backup = *output.frame;
-  REQUIRE(backup->format == AV_PIX_FMT_RGB24);
-  REQUIRE(backup->width == 4);
-  REQUIRE(backup->height == 4);
-  REQUIRE(backup->data[0] == backup_data);
-  REQUIRE(backup->data[0][0] == 23);
-  REQUIRE(PtsUs(backup) == kStart + 40000);
 }
 
 TEST_CASE("Syncer needs target dimensions only to create the default backup",
@@ -1162,20 +589,85 @@ TEST_CASE("Syncer validates timing and enabled track configuration",
       static_cast<AVSampleFormat>(AV_SAMPLE_FMT_NB);
   REQUIRE_THROWS_AS(Syncer{config}, std::invalid_argument);
   config = VideoConfig();
-  config.negative_time_tolerance = -1us;
-  REQUIRE_THROWS_AS(Syncer{config}, std::invalid_argument);
-  config = VideoConfig();
-  config.negative_time_discard = config.negative_time_tolerance;
-  REQUIRE_THROWS_AS(Syncer{config}, std::invalid_argument);
-  config = VideoConfig();
-  config.jitter_margin = config.discontinuity_threshold;
-  REQUIRE_THROWS_AS(Syncer{config}, std::invalid_argument);
-  config = VideoConfig();
   config.freeze = -1us;
   REQUIRE_THROWS_AS(Syncer{config}, std::invalid_argument);
 }
 
-TEST_CASE("Syncer retains CUDA surfaces for both real frames and backup output",
+TEST_CASE("Syncer consumes input without owning realtime pacing", "[syncer]") {
+  Syncer syncer(VideoConfig());
+  auto first = VideoInput(50000000);
+  auto second = VideoInput(50040000);
+  REQUIRE(syncer.Step(true, &first, 0).consumed);
+  auto output = syncer.Step(true, &second, 0);
+  REQUIRE(output.consumed);
+  REQUIRE(output.frame);
+  REQUIRE(PtsUs(*output.frame) == kStart + 40000);
+  REQUIRE((*second.frame)->pts == 50040000);
+  REQUIRE((*output.frame)->data[0] == (*second.frame)->data[0]);
+}
+
+TEST_CASE("Syncer reset discards both shared timeline and frozen picture",
+          "[syncer]") {
+  Syncer syncer(VideoConfig());
+  auto input = VideoInput(50000000);
+  REQUIRE(syncer.Step(true, &input, 0).frame);
+  syncer.Reset();
+  input = VideoInput(0);
+  const auto reset = syncer.Step(true, &input, 0);
+  REQUIRE(reset.consumed);
+  REQUIRE(reset.frame);
+  REQUIRE(PtsUs(*reset.frame) == kStart);
+  syncer.Reset();
+  REQUIRE_FALSE(syncer.Step(true, nullptr, 1000000).frame);
+  const auto backup = syncer.Step(true, nullptr, 3000000);
+  REQUIRE(backup.frame);
+  REQUIRE((*backup.frame)->data[0][0] == 7);
+}
+
+TEST_CASE("Syncer rejects disabled tracks and malformed inputs", "[syncer]") {
+  Syncer syncer(VideoConfig());
+  REQUIRE_THROWS_AS(syncer.Step(false, nullptr, 0), std::invalid_argument);
+  AvDecoderReadResult input;
+  REQUIRE_THROWS_AS(syncer.Step(true, &input, 0), std::invalid_argument);
+  REQUIRE_THROWS_AS(syncer.Step(true, nullptr, -1), std::invalid_argument);
+  input = VideoInput(AV_NOPTS_VALUE);
+  REQUIRE_THROWS_AS(syncer.Step(true, &input, 0), std::invalid_argument);
+  input = Eof();
+  input.frame = Video(1);
+  REQUIRE_THROWS_AS(syncer.Step(true, &input, 0), std::invalid_argument);
+}
+
+TEST_CASE(
+    "Syncer preserves real and backup video storage independently of targets",
+    "[syncer]") {
+  auto config = VideoConfig();
+  config.encoder.video_pixel_format = AV_PIX_FMT_NV12;
+  config.encoder.width = 16;
+  config.encoder.height = 16;
+  config.freeze = 0us;
+  const auto* backup_data = (*config.backup_video)->data[0];
+  Syncer syncer(config);
+  auto input = VideoInput(0);
+  const auto* input_data = (*input.frame)->data[0];
+  auto real = syncer.Step(true, &input, 0);
+  REQUIRE(real.frame);
+  REQUIRE((*real.frame)->format == AV_PIX_FMT_GRAY8);
+  REQUIRE((*real.frame)->width == 8);
+  REQUIRE((*real.frame)->height == 8);
+  REQUIRE((*real.frame)->data[0] == input_data);
+  REQUIRE((*input.frame)->pts == 0);
+  input.frame.reset();
+  config.backup_video.reset();
+  auto backup = syncer.Step(true, nullptr, 2000000);
+  REQUIRE(backup.frame);
+  REQUIRE((*backup.frame)->format == AV_PIX_FMT_GRAY8);
+  REQUIRE((*backup.frame)->width == 8);
+  REQUIRE((*backup.frame)->data[0] == backup_data);
+  REQUIRE((*backup.frame)->data[0][0] == 7);
+  REQUIRE((*real.frame)->data[0] == input_data);
+}
+
+TEST_CASE("Syncer retains CUDA surfaces without download for real and backup",
           "[.][syncer][cuda]") {
   ffmpeg::HwDeviceContext device(ffmpeg::HwDeviceType::kCuda);
   std::unique_ptr<AVBufferRef, void (*)(AVBufferRef*)> frames(
@@ -1190,124 +682,29 @@ TEST_CASE("Syncer retains CUDA surfaces for both real frames and backup output",
   REQUIRE(av_hwframe_ctx_init(frames.get()) >= 0);
   ffmpeg::Frame backup;
   REQUIRE(av_hwframe_get_buffer(frames.get(), backup.get(), 0) >= 0);
-  const auto* backup_surface = backup->data[0];
-  SyncerConfig config;
-  config.encoder.video_pixel_format = AV_PIX_FMT_NV12;
-  config.encoder.width = 128;
-  config.encoder.height = 128;
-  config.encoder.fps = AVRational{25, 1};
-  config.encoder.audio_sample_format = AV_SAMPLE_FMT_NONE;
+  auto config = VideoConfig();
+  config.backup_video = backup.Ref();
   config.freeze = 0us;
+  const auto* backup_surface = backup->data[0];
+  Syncer syncer(config);
   auto input = VideoInput(0);
   input.frame.emplace();
   REQUIRE(av_hwframe_get_buffer(frames.get(), input.frame->get(), 0) >= 0);
   (*input.frame)->pts = 0;
-  (*input.frame)->time_base = input.time_base;
   const auto* real_surface = (*input.frame)->data[0];
-  const auto* device_context = (*input.frame)->hw_frames_ctx->data;
-
-  SECTION("A supplied CUDA backup retains its original surface") {
-    config.backup_video = backup.Ref();
-    SyncerTiming timing(config);
-    auto real = timing.Step(true, &input, 0);
-    REQUIRE(real.frame);
-    REQUIRE((*real.frame)->format == AV_PIX_FMT_CUDA);
-    REQUIRE((*real.frame)->data[0] == real_surface);
-    REQUIRE((*real.frame)->hw_frames_ctx->data == device_context);
-    input.frame.reset();
-    backup.Unref();
-    auto filler = timing.Step(true, nullptr, 2000000);
-    REQUIRE(filler.frame);
-    REQUIRE((*filler.frame)->format == AV_PIX_FMT_CUDA);
-    REQUIRE((*filler.frame)->data[0] == backup_surface);
-    REQUIRE((*filler.frame)->hw_frames_ctx->data == device_context);
-    REQUIRE(PtsUs(*filler.frame) == kStart + 40000);
-    REQUIRE((*real.frame)->data[0] == real_surface);
-  }
-
-  SECTION("A differently sized CPU backup does not restrict CUDA input") {
-    config.encoder.width = 16;
-    config.encoder.height = 16;
-    config.backup_video = RgbBackup();
-    const auto* cpu_backup_data = (*config.backup_video)->data[0];
-    Syncer syncer(config);
-    std::promise<ffmpeg::Frame> delivered;
-    syncer.SetOnVideoFrame([&](ffmpeg::Frame frame) {
-      syncer.RequestStop();
-      delivered.set_value(std::move(frame));
-    });
-    REQUIRE(syncer.Start());
-    REQUIRE(syncer.TryPushVideo(input));
-    auto ready = delivered.get_future();
-    const auto status = ready.wait_for(2s);
-    syncer.Stop();
-    REQUIRE(status == std::future_status::ready);
-    auto actual = ready.get();
-    REQUIRE(actual->format == AV_PIX_FMT_CUDA);
-    REQUIRE(actual->width == 128);
-    REQUIRE(actual->height == 128);
-    REQUIRE(actual->data[0] == real_surface);
-    REQUIRE(actual->hw_frames_ctx->data == device_context);
-    REQUIRE_FALSE(syncer.error());
-
-    SyncerTiming timing(config);
-    REQUIRE(timing.Step(true, &input, 0).frame);
-    auto filler = timing.Step(true, nullptr, 2000000);
-    REQUIRE(filler.frame);
-    REQUIRE((*filler.frame)->format == AV_PIX_FMT_RGB24);
-    REQUIRE((*filler.frame)->width == 4);
-    REQUIRE((*filler.frame)->height == 4);
-    REQUIRE((*filler.frame)->hw_frames_ctx == nullptr);
-    REQUIRE((*filler.frame)->data[0] == cpu_backup_data);
-    REQUIRE((*filler.frame)->data[0][0] == 23);
-    REQUIRE(PtsUs(*filler.frame) == kStart + 40000);
-  }
-
-  SECTION(
-      "The default CPU backup permits real CUDA input with the same layout") {
-    Syncer syncer(config);
-    std::promise<ffmpeg::Frame> delivered;
-    syncer.SetOnVideoFrame([&](ffmpeg::Frame frame) {
-      syncer.RequestStop();
-      delivered.set_value(std::move(frame));
-    });
-    REQUIRE(syncer.Start());
-    REQUIRE(syncer.TryPushVideo(input));
-    auto ready = delivered.get_future();
-    const auto status = ready.wait_for(2s);
-    syncer.Stop();
-    REQUIRE(status == std::future_status::ready);
-    auto actual = ready.get();
-    REQUIRE(actual->format == AV_PIX_FMT_CUDA);
-    REQUIRE(actual->data[0] == real_surface);
-    REQUIRE(actual->hw_frames_ctx->data == device_context);
-    REQUIRE(PtsUs(actual) == kStart);
-    REQUIRE_FALSE(syncer.error());
-
-    SyncerTiming timing(config);
-    auto real = timing.Step(true, &input, 0);
-    REQUIRE(real.frame);
-    REQUIRE((*real.frame)->format == AV_PIX_FMT_CUDA);
-    REQUIRE((*real.frame)->data[0] == real_surface);
-    auto filler = timing.Step(true, nullptr, 2000000);
-    REQUIRE(filler.frame);
-    const auto& frame = *filler.frame;
-    REQUIRE(frame->format == AV_PIX_FMT_NV12);
-    REQUIRE(frame->width == 128);
-    REQUIRE(frame->height == 128);
-    REQUIRE(frame->hw_frames_ctx == nullptr);
-    REQUIRE(PtsUs(frame) == kStart + 40000);
-    for (int plane = 0; plane < 2; ++plane) {
-      const int rows = plane == 0 ? 128 : 64;
-      const int black = plane == 0 ? 16 : 128;
-      for (int row = 0; row < rows; ++row) {
-        for (int column = 0; column < 128; ++column) {
-          REQUIRE(frame->data[plane][row * frame->linesize[plane] + column] ==
-                  black);
-        }
-      }
-    }
-  }
+  auto real = syncer.Step(true, &input, 0);
+  REQUIRE(real.frame);
+  REQUIRE((*real.frame)->format == AV_PIX_FMT_CUDA);
+  REQUIRE((*real.frame)->data[0] == real_surface);
+  REQUIRE((*real.frame)->hw_frames_ctx->data == frames->data);
+  input.frame.reset();
+  backup.Unref();
+  auto filler = syncer.Step(true, nullptr, 2000000);
+  REQUIRE(filler.frame);
+  REQUIRE((*filler.frame)->format == AV_PIX_FMT_CUDA);
+  REQUIRE((*filler.frame)->data[0] == backup_surface);
+  REQUIRE((*filler.frame)->hw_frames_ctx->data == frames->data);
+  REQUIRE((*real.frame)->data[0] == real_surface);
 }
 
 }  // namespace

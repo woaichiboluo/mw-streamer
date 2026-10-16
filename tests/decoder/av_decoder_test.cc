@@ -508,7 +508,7 @@ TEST_CASE("AvDecoder retries bounded EOF and Reset without losing FIFO order",
                   std::logic_error);
   CHECK_THROWS_AS(decoder.TryPushEof(), std::logic_error);
   const auto submit = [&](auto push) {
-    REQUIRE(WaitFor([&] {
+    const bool accepted = WaitFor([&] {
       REQUIRE(decoder.error() == nullptr);
       if (push()) return true;
       auto result = decoder.TryReadFrame();
@@ -517,7 +517,8 @@ TEST_CASE("AvDecoder retries bounded EOF and Reset without losing FIFO order",
       }
       CHECK(decoder.buffered_packets() <= config.packet_capacity);
       return false;
-    }));
+    });
+    REQUIRE(accepted);
   };
   submit([&] { return decoder.TryReset(); });
   for (const auto& packet : source.packets) {
@@ -715,6 +716,56 @@ TEST_CASE(
   } catch (const ffmpeg::FfmpegException& error) {
     CHECK(error.error_code() == native_error);
   }
+}
+
+TEST_CASE("AvDecoder notifies input consumption for packets EOF and reset",
+          "[av-decoder][notification]") {
+  const auto source = ReadSource("h264_aac.mp4", AVMEDIA_TYPE_VIDEO);
+  auto native = OpenReferenceCodec(source.stream);
+  const auto reference =
+      ReferenceDecode(native.get(), source.stream, source.packets);
+  std::atomic<std::size_t> callbacks{0};
+  AvDecoderConfig config;
+  config.thread_count = 1;
+  AvDecoder decoder(source.stream, config);
+  decoder.SetOnInputSpace([&] { ++callbacks; });
+  SourceFeeder feeder(decoder, source);
+  CheckSource(decoder, source, reference);
+  feeder.Join();
+  CHECK(callbacks.load() == source.packets.size() + 1);
+  REQUIRE(decoder.TryReset());
+  REQUIRE(decoder.TryPushEof());
+  REQUIRE(ReadAvailable(decoder).status == AvDecoderReadStatus::kEof);
+  CHECK(callbacks.load() == source.packets.size() + 3);
+}
+
+TEST_CASE(
+    "AvDecoder input notification permits reentry and isolates exceptions",
+    "[av-decoder][notification]") {
+  const auto source = ReadSource("h264_aac.mp4", AVMEDIA_TYPE_VIDEO);
+  std::atomic<std::size_t> old_callbacks{0};
+  std::atomic<std::size_t> callbacks{0};
+  std::atomic<bool> queued_eof{false};
+  AvDecoder decoder(source.stream);
+  decoder.SetOnInputSpace([&] { ++old_callbacks; });
+  decoder.SetOnInputSpace([&] {
+    static_cast<void>(decoder.buffered_packets());
+    if (++callbacks == 1) {
+      queued_eof = decoder.TryPushEof();
+    }
+    throw std::runtime_error("observer failure");
+  });
+  REQUIRE(decoder.TryReset());
+  REQUIRE(ReadAvailable(decoder).status == AvDecoderReadStatus::kEof);
+  CHECK(queued_eof.load());
+  CHECK(old_callbacks.load() == 0);
+  CHECK(callbacks.load() == 2);
+  CHECK(decoder.error() == nullptr);
+  decoder.SetOnInputSpace({});
+  REQUIRE(decoder.TryReset());
+  REQUIRE(decoder.TryPushEof());
+  REQUIRE(ReadAvailable(decoder).status == AvDecoderReadStatus::kEof);
+  CHECK(callbacks.load() == 2);
 }
 
 }  // namespace

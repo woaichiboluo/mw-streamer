@@ -1,22 +1,14 @@
-#ifndef MW_STREAMER_TIMING_SYNCER_TIMING_H_
-#define MW_STREAMER_TIMING_SYNCER_TIMING_H_
+#ifndef MW_STREAMER_SYNCER_SYNCER_TIMING_H_
+#define MW_STREAMER_SYNCER_SYNCER_TIMING_H_
 
 #include <cstdint>
 #include <memory>
-#include <optional>
 
-#include "mw/streamer/timing/syncer.h"
+#include "mw/streamer/syncer/syncer.h"
 
 namespace mw::streamer::internal {
 
-// Pure scheduling state, driven only by Syncer's worker. Microsecond clock
-// values are elapsed steady-clock time since Start, not wall-clock epochs.
-struct SyncerStep {
-  bool consumed = false;
-  std::optional<ffmpeg::Frame> frame;
-  std::int64_t wake_us = 0;
-};
-
+// Internal passive continuity state, serialized by its owner.
 class SyncerTiming final {
  public:
   explicit SyncerTiming(const SyncerConfig& config,
@@ -36,4 +28,4 @@ class SyncerTiming final {
 
 }  // namespace mw::streamer::internal
 
-#endif  // MW_STREAMER_TIMING_SYNCER_TIMING_H_
+#endif  // MW_STREAMER_SYNCER_SYNCER_TIMING_H_

@@ -305,6 +305,32 @@ TEST_CASE(
   input.Close();
 }
 
+TEST_CASE("AvInput timed reads preserve packet order and EOF",
+          "[av-input][packet][timeout]") {
+  AvInput input;
+  CHECK_THROWS_AS(input.ReadPacketFor(-1ms), std::invalid_argument);
+  CHECK(input.ReadPacketFor(0ms).status == AvInputReadStatus::kNull);
+  AvInputConfig config;
+  config.packet_capacity = 2;
+  AvInput opened(config);
+  opened.Open(SamplePath());
+  REQUIRE(WaitFor([&] { return opened.buffered_packets() > 0; }));
+  auto native = OpenNative(SamplePath());
+  ffmpeg::Packet expected;
+  std::size_t count = 0;
+  while (av_read_frame(native.get(), expected.get()) >= 0) {
+    const auto result = opened.ReadPacketFor(count == 0 ? 0ms : 1s);
+    REQUIRE(result.status == AvInputReadStatus::kPacket);
+    REQUIRE(result.packet.has_value());
+    CheckPacket(*result.packet->get(), *expected.get());
+    expected.Unref();
+    ++count;
+  }
+  REQUIRE(count > 0);
+  CHECK(opened.ReadPacketFor(1s).status == AvInputReadStatus::kEof);
+  CHECK(opened.ReadPacketFor(0ms).status == AvInputReadStatus::kEof);
+}
+
 TEST_CASE("AvInput returned packets and descriptions survive Close",
           "[av-input][ownership]") {
   AvInput input;
@@ -598,6 +624,36 @@ class StallingHttpServer final {
   bool accepted_ = false;
   mw::streamer::internal::Thread worker_;
 };
+
+TEST_CASE("AvInput timed reads do not cancel producer underflow",
+          "[av-input][network][timeout][cancel]") {
+  StallingHttpServer server(true);
+  AvInputConfig config;
+  config.input_format_name = "flv";
+  config.packet_capacity = 2;
+  config.open_timeout = 5s;
+  config.read_timeout = 5s;
+  config.options["analyzeduration"] = "1";
+  config.options["probesize"] = "2048";
+  AvInput input(config);
+  input.Open(server.url());
+  std::size_t count = 0;
+  for (;;) {
+    auto result = input.ReadPacketFor(40ms);
+    if (result.status == AvInputReadStatus::kNull) break;
+    REQUIRE(result.status == AvInputReadStatus::kPacket);
+    ++count;
+  }
+  REQUIRE(count > 0);
+  CHECK(input.status().state == AvInputState::kOpened);
+  CHECK(input.status().error == nullptr);
+  auto received =
+      std::async(std::launch::async, [&] { return input.ReadPacketFor(5s); });
+  CHECK(received.wait_for(40ms) == std::future_status::timeout);
+  input.RequestCancel();
+  REQUIRE(received.wait_for(1s) == std::future_status::ready);
+  CHECK(received.get().status == AvInputReadStatus::kNull);
+}
 
 TEST_CASE("AvInput interrupts stalled opening on timeout and explicit cancel",
           "[av-input][network][cancel][timeout]") {

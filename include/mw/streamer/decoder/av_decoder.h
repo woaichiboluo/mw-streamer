@@ -55,6 +55,10 @@ class MW_STREAMER_API AvDecoder final {
   // locks, on the decoder worker. Observers may query, read or RequestStop, but
   // must not call Stop or destroy this object. Callback exceptions are logged.
   using OnError = std::function<void(std::exception_ptr)>;
+  // Invoked on the worker, outside locks, after consuming each input item,
+  // including EOF/Reset. Observers may query, TryPush or RequestStop, but must
+  // not call Stop or destroy this object. Callback exceptions are logged.
+  using OnInputSpace = std::function<void()>;
 
   // Copies stream parameters, opens the codec and starts its worker. Invalid
   // arguments/opening/thread creation failures throw synchronously.
@@ -75,6 +79,9 @@ class MW_STREAMER_API AvDecoder final {
   // Thread-safe registration/replacement. Register before submitting packets;
   // failures that have already occurred are not replayed.
   void SetOnError(OnError callback);
+  // Thread-safe registration/replacement. Register before submitting packets;
+  // earlier input consumption is not replayed.
+  void SetOnInputSpace(OnInputSpace callback);
 
   // Never waits for queue space. Copies a packet reference only on acceptance;
   // false preserves the caller's packet and means full, stopped or failed.

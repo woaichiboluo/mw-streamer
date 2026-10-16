@@ -470,7 +470,11 @@ TEST_CASE(
 TEST_CASE("AvMediaSource retries a missing source and recovers when it appears",
           "[av-media-source][retry][recovery]") {
   TemporaryMedia temporary;
+  std::atomic<bool> recovered{false};
   AvMediaSource input(SourceConfig());
+  input.SetOnStateChanged([&](const auto& status) {
+    if (status.state == AvMediaSourceState::kRunning) recovered = true;
+  });
   REQUIRE(input.Start(temporary.path()));
   REQUIRE(WaitFor([&] {
     return input.status().state == AvMediaSourceState::kWaitingRetry;
@@ -479,8 +483,8 @@ TEST_CASE("AvMediaSource retries a missing source and recovers when it appears",
   CHECK((input.status().retry_delay == 1s));
   REQUIRE((input.status().error != nullptr));
   temporary.RestoreVideo();
-  REQUIRE(WaitFor(
-      [&] { return input.status().state == AvMediaSourceState::kRunning; }));
+  // A short source may already be draining when the test thread wakes.
+  REQUIRE(WaitFor([&] { return recovered.load(); }));
   CHECK((input.status().retry_count == 0));
   CHECK((input.status().error == nullptr));
   CheckSource(input, ReadNative(temporary.path()));
@@ -806,12 +810,15 @@ TEST_CASE("AvMediaSource validates arguments without introducing output modes",
   SECTION("negative audio codec threads") {
     config.audio_decoder.thread_count = -1;
   }
+  SECTION("zero packet read timeout") { config.packet_read_timeout = 0ms; }
+  SECTION("negative packet read timeout") { config.packet_read_timeout = -1ms; }
   CHECK_THROWS_AS(AvMediaSource(config), std::invalid_argument);
 }
 
 TEST_CASE("AvMediaSource stops under unread-track backpressure and restarts",
           "[av-media-source][backpressure][restart]") {
   auto config = SourceConfig(true);
+  config.packet_read_timeout = 10s;
   config.video_decoder.packet_capacity = 1;
   config.audio_decoder.packet_capacity = 1;
   config.video_decoder.frame_capacity = 1;

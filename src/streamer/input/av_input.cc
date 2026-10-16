@@ -165,14 +165,17 @@ class AvInput::Impl final {
     }
   }
 
-  AvInputReadResult Read(bool wait) {
+  AvInputReadResult ReadUntil(std::optional<Clock::time_point> deadline) {
     std::unique_lock<std::mutex> lock(mutex_);
-    if (wait) {
-      changed_.wait(lock, [this] {
-        return cancelled_.load() || !packets_.empty() ||
-               (status_.state != AvInputState::kOpening &&
-                status_.state != AvInputState::kOpened);
-      });
+    const auto ready = [this] {
+      return cancelled_.load() || !packets_.empty() ||
+             (status_.state != AvInputState::kOpening &&
+              status_.state != AvInputState::kOpened);
+    };
+    if (deadline) {
+      changed_.wait_until(lock, *deadline, ready);
+    } else {
+      changed_.wait(lock, ready);
     }
     if (cancelled_.load() || status_.state == AvInputState::kClosed ||
         status_.state == AvInputState::kCancelled) {
@@ -428,8 +431,26 @@ void AvInput::SetOnStateChanged(OnStateChanged callback) {
   impl_->SetOnStateChanged(std::move(callback));
 }
 void AvInput::Open(std::string_view url) { impl_->Open(url); }
-AvInputReadResult AvInput::ReadPacket() { return impl_->Read(true); }
-AvInputReadResult AvInput::TryReadPacket() { return impl_->Read(false); }
+AvInputReadResult AvInput::ReadPacket() {
+  return ReadPacketUntil(std::nullopt);
+}
+AvInputReadResult AvInput::TryReadPacket() {
+  return ReadPacketUntil(Clock::time_point::min());
+}
+AvInputReadResult AvInput::ReadPacketFor(std::chrono::milliseconds timeout) {
+  if (timeout.count() < 0) {
+    throw std::invalid_argument("AvInput 读取等待超时不能为负数");
+  }
+  const auto now = Clock::now();
+  const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+      Clock::time_point::max() - now);
+  return ReadPacketUntil(timeout >= remaining ? Clock::time_point::max()
+                                              : now + timeout);
+}
+AvInputReadResult AvInput::ReadPacketUntil(
+    std::optional<Clock::time_point> deadline) {
+  return impl_->ReadUntil(deadline);
+}
 void AvInput::RequestCancel() noexcept { impl_->RequestCancel(); }
 void AvInput::Close() noexcept { impl_->Close(); }
 AvInputStatus AvInput::status() const { return impl_->status(); }

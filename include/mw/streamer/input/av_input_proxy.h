@@ -83,6 +83,11 @@ class MW_STREAMER_API AvInputProxy final {
   // Same EOF semantics as ReadPacket. Returns kNull immediately during
   // opening/retries, loop transitions or producer underflow.
   AvInputProxyReadResult TryReadPacket();
+  // One total timeout covers connecting, retries and packet waiting. Timeout
+  // returns kNull with the current description and leaves the source running.
+  // Stop wakes promptly. Zero is TryReadPacket; negative values throw
+  // std::invalid_argument. EOF and error semantics match ReadPacket.
+  AvInputProxyReadResult ReadPacketFor(std::chrono::milliseconds timeout);
   void RequestStop() noexcept;
   // Interrupts opening, reading and retry waits, joins the control worker and
   // closes all connections. No callbacks after returning. Final Ended/Failed

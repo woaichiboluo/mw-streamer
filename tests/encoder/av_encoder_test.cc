@@ -504,7 +504,7 @@ TEST_CASE("AvEncoder 多个音频小块重新分块后保留双轨相对起点",
   int submitted_samples = 0;
   for (std::size_t index = 0; index < std::size(chunks); ++index) {
     auto video = VideoFrame();
-    video->pts = 180000 + 3000 * index;
+    video->pts = 180000 + 3000 * static_cast<std::int64_t>(index);
     auto audio = AudioFrame(chunks[index]);
     audio->pts = 108000 + submitted_samples;
     REQUIRE(encoder.TryPushVideo(video));
@@ -583,7 +583,7 @@ TEST_CASE("AvEncoder 保留原生 B 帧重排的 PTS 和 DTS",
   const auto decoded = Decode(streams.front(), video);
   REQUIRE(decoded.size() == kFrames);
   for (int index = 0; index < kFrames; ++index) {
-    CHECK(decoded[index]->pts == 30 + index);
+    CHECK(decoded[static_cast<std::size_t>(index)]->pts == 30 + index);
   }
 }
 
@@ -741,8 +741,8 @@ TEST_CASE("AvEncoder 每轨队列独立拒绝满队列并告警且另一轨继�
     {
       std::lock_guard lock(capture.mutex);
       capture.packets.push_back(packet.Ref());
-      callback_threads[packet->stream_index].push_back(
-          std::this_thread::get_id());
+      callback_threads[static_cast<std::size_t>(packet->stream_index)]
+          .push_back(std::this_thread::get_id());
       capture.wake.notify_all();
     }
     if (packet->stream_index == blocked) gate.Enter();
