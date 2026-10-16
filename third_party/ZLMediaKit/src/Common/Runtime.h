@@ -19,8 +19,8 @@ namespace mediakit {
 class Runtime;
 
 struct RuntimeConfig {
-    std::size_t event_poller_threads = 0;
-    std::size_t work_threads = 0;
+    std::size_t event_poller_threads = 2;
+    std::size_t work_threads = 1;
     bool enable_cpu_affinity = true;
     std::string tls_certificate_file;
     std::string tls_certificate_password;

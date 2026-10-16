@@ -330,23 +330,9 @@ class AvDecoder::Impl final {
 
   bool Emit(AvDecoderReadResult result) {
     std::unique_lock<std::mutex> lock(mutex_);
-    const bool waiting = !stopping_ && frames_.size() >= config_.frame_capacity;
-    if (waiting) {
-      MW_LOG_DEBUG("streamer",
-                   "AvDecoder 输出背压等待: instance={} stream={} queue={}/{}",
-                   fmt::ptr(this), stream_.stream_index, frames_.size(),
-                   config_.frame_capacity);
-    }
     changed_.wait(lock, [this] {
       return stopping_ || frames_.size() < config_.frame_capacity;
     });
-    if (waiting) {
-      MW_LOG_DEBUG("streamer",
-                   "AvDecoder 输出背压结束: instance={} stream={} stopping={} "
-                   "queue={}/{}",
-                   fmt::ptr(this), stream_.stream_index, stopping_,
-                   frames_.size(), config_.frame_capacity);
-    }
     if (stopping_) return false;
     MW_LOG_TRACE("streamer",
                  "AvDecoder 输出就绪: instance={} stream={} kind={} pts={} "

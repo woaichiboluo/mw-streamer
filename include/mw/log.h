@@ -58,6 +58,7 @@ struct LogConfig {
   // which uses info. Logging copies the map; edits affect the next instance.
   std::map<std::string, LogLevel> modules = {
       {"streamer", LogLevel::kInfo},
+      {"ffmpeg", LogLevel::kWarning},
       {"perf.input", LogLevel::kOff},
       {"perf.decoder.video", LogLevel::kOff},
       {"perf.decoder.audio", LogLevel::kOff},

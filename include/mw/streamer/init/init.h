@@ -27,8 +27,8 @@ struct MW_STREAMER_API InitConfig {
 
   mw::log::LogConfig log;
   // Zero selects the hardware concurrency reported by ZLM.
-  std::size_t event_poller_threads = 0;
-  std::size_t work_threads = 0;
+  std::size_t event_poller_threads = 2;
+  std::size_t work_threads = 1;
   bool enable_cpu_affinity = true;
   TlsConfig tls;
 };
@@ -43,12 +43,15 @@ struct MW_STREAMER_API InitConfig {
 // runtimes; this remains in effect after Shutdown() or a later initialization
 // failure. Initialization failures release resources acquired by this call
 // and propagate the exception.
+// Owns FFmpeg's process-wide logging callback while active, forwarding to the
+// "ffmpeg" log module. Do not replace that callback during the runtime.
 MW_STREAMER_API MwStreamerContext* Init(const InitConfig& config = {});
 
 // Call after destroying all media objects and other ZLM users, before
 // unloading the library, outside Input callbacks. The caller guarantees this
 // ordering and passes the context returned by Init() exactly once. The context
 // is destroyed; do not delete or reuse its pointer. A null context is a no-op.
+// Restores FFmpeg's default log callback and its pre-Init log level.
 MW_STREAMER_API void Shutdown(MwStreamerContext* context);
 
 }  // namespace mw::streamer
