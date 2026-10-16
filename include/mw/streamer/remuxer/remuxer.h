@@ -130,6 +130,13 @@ class MW_STREAMER_API Remuxer final {
   // Asynchronously requests file finalization. Live network delivery is
   // managed by ZLM.
   void Drain() noexcept;
+  // Drains accepted packets and waits for network outputs/listeners to close,
+  // so another instance can reuse the same app/stream and publication ports.
+  // Requests asynchronous Recorder finalization without waiting for file IO.
+  // Clears configured outputs and preserves status/address snapshots, as Stop
+  // does. Keep this instance alive until Stop/destruction joins its Recorders.
+  // Serialize lifecycle calls externally; do not call from callbacks.
+  void StopProtocols() noexcept;
   // Drains synchronously and waits for completion, outside callbacks. Another
   // Start begins a new session with a fresh timeline. Stop clears configured
   // outputs, including any added before Start; add them again before

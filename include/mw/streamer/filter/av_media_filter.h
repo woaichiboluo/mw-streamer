@@ -11,7 +11,7 @@
 
 namespace mw::streamer {
 
-// Synchronous, one-frame-in/one-frame-out business processing. Owns no source,
+// Synchronous business processing or frame consumption. Owns no source,
 // queue, worker or media clock. The caller drives processing.
 // EOF/underflow are passed through without running business callbacks.
 //
@@ -25,6 +25,7 @@ class MW_STREAMER_API AvMediaFilter final {
  public:
   using OnStart = std::function<void()>;
   using OnStop = std::function<void()>;
+  using OnReset = std::function<void()>;
   // Input headers and shared media buffers are read-only. Return an owned
   // frame; use writable/private storage when modifying pixels or samples.
   // Missing callbacks pass the original frame through. Callbacks change media
@@ -43,6 +44,7 @@ class MW_STREAMER_API AvMediaFilter final {
   // Configure only while stopped. Empty callbacks restore no-op/pass-through.
   void SetOnStart(OnStart callback);
   void SetOnStop(OnStop callback);
+  void SetOnReset(OnReset callback);
   void SetOnAudio(OnAudio callback);
   void SetOnVideo(OnVideo callback);
 
@@ -54,8 +56,16 @@ class MW_STREAMER_API AvMediaFilter final {
   // after an OnStop exception. Does not stop any upstream or downstream object.
   void Stop();
 
-  // Thread-safe snapshot of the first processing callback failure. Stop keeps
-  // it; a successful Start clears it. Start/Stop callback errors are excluded.
+  // Waits for active processing, then calls OnReset without ending the session.
+  // The caller serializes Reset with Start/Stop/other Reset calls and pauses
+  // new processing until it returns. EOF never invokes this automatically.
+  // Requires a healthy started session. A callback exception is retained as
+  // error() and rejects further processing until Stop/Start.
+  void Reset();
+
+  // Thread-safe snapshot of the first processing/reset callback failure. Stop
+  // keeps it; a successful Start clears it. Start/Stop callback errors are
+  // excluded.
   std::exception_ptr error() const;
 
   // Require a started session. Consume the result's frame reference and return
@@ -66,6 +76,12 @@ class MW_STREAMER_API AvMediaFilter final {
   // after a callback failure requires Stop/Start; it throws std::logic_error.
   AvDecoderReadResult ProcessVideo(AvDecoderReadResult input);
   AvDecoderReadResult ProcessAudio(AvDecoderReadResult input);
+
+  // Execute the same business callbacks but discard their output. Empty or
+  // invalid returned frames are accepted; output timing is not restored.
+  // Session, input validation, EOF and failure semantics match Process calls.
+  void ConsumeVideo(AvDecoderReadResult input);
+  void ConsumeAudio(AvDecoderReadResult input);
 
  private:
   class Impl;

@@ -18,6 +18,7 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/mem.h>
 }
 
 #include "mw/streamer/ffmpeg/error.h"
@@ -220,6 +221,38 @@ bool WaitForState(Recorder& recorder, RecorderState state) {
   return recorder.status().state == state;
 }
 
+struct OutputFormatCloser {
+  void operator()(AVFormatContext* context) const {
+    if (context->pb) avio_closep(&context->pb);
+    avformat_free_context(context);
+  }
+};
+
+void WriteAdts(const std::string& path, const Media& source) {
+  REQUIRE(source.streams.size() == 1);
+  AVFormatContext* raw = nullptr;
+  REQUIRE(avformat_alloc_output_context2(&raw, nullptr, "adts", path.c_str()) >=
+          0);
+  std::unique_ptr<AVFormatContext, OutputFormatCloser> output(raw);
+  REQUIRE(output != nullptr);
+  auto* stream = avformat_new_stream(output.get(), nullptr);
+  REQUIRE(stream != nullptr);
+  REQUIRE(avcodec_parameters_copy(
+              stream->codecpar,
+              source.streams.front().codec_parameters.get()) >= 0);
+  stream->time_base = source.streams.front().time_base;
+  REQUIRE(avio_open(&output->pb, path.c_str(), AVIO_FLAG_WRITE) >= 0);
+  REQUIRE(avformat_write_header(output.get(), nullptr) >= 0);
+  for (const auto& original : source.packets) {
+    auto packet = original.Ref();
+    av_packet_rescale_ts(packet.get(), source.streams.front().time_base,
+                         stream->time_base);
+    packet->stream_index = stream->index;
+    REQUIRE(av_interleaved_write_frame(output.get(), packet.get()) >= 0);
+  }
+  REQUIRE(av_write_trailer(output.get()) >= 0);
+}
+
 }  // namespace
 
 TEST_CASE("Recorder writes independently decodable fragmented MP4",
@@ -264,6 +297,72 @@ TEST_CASE("Recorder writes independently decodable fragmented MP4",
   CHECK(std::equal(original->data, original->data + original->size,
                    media.packets.front()->data));
   CheckRecording(path, media);
+}
+
+TEST_CASE("Recorder converts ADTS AAC into decodable fragmented MP4",
+          "[recorder][integration][adts]") {
+  const Media original(false, true);
+  const OutputDirectory output;
+  const auto adts_path = output.File("source.aac");
+  WriteAdts(adts_path, original);
+  const auto input = OpenMedia(adts_path);
+  REQUIRE(input->nb_streams == 1);
+  auto stream = original.streams.front();
+  stream.time_base = input->streams[0]->time_base;
+  SECTION("source retains AudioSpecificConfig") {
+    REQUIRE(stream.codec_parameters.get()->extradata_size > 0);
+  }
+  SECTION("source has no AudioSpecificConfig") {
+    av_freep(&stream.codec_parameters.get()->extradata);
+    stream.codec_parameters.get()->extradata_size = 0;
+  }
+  std::vector<ffmpeg::Packet> packets;
+  ffmpeg::Packet packet;
+  int result = 0;
+  while ((result = av_read_frame(input.get(), packet.get())) >= 0) {
+    packet->stream_index = stream.stream_index;
+    packet->time_base = stream.time_base;
+    REQUIRE(packet->size > 7);
+    REQUIRE(packet->data[0] == 0xff);
+    REQUIRE((packet->data[1] & 0xf6) == 0xf0);
+    packets.push_back(packet.Clone());
+    packet.Unref();
+  }
+  REQUIRE(result == AVERROR_EOF);
+  REQUIRE(packets.size() == original.packets.size());
+  std::vector<ffmpeg::Packet> snapshots;
+  for (const auto& item : packets) snapshots.push_back(item.Clone());
+  const auto path = output.File("adts.mp4");
+  Recorder recorder;
+  REQUIRE(recorder.Start({stream}, RecorderConfig{path}));
+  for (const auto& item : packets) REQUIRE(recorder.TrySubmitPacket(item));
+  recorder.Stop();
+  const auto status = recorder.status();
+  INFO(status.error);
+  REQUIRE(status.state == RecorderState::kStopped);
+  CHECK(status.error.empty());
+  CHECK(status.written_packets == packets.size());
+  CHECK(status.dropped_packets == 0);
+  CHECK(status.queue_bytes == 0);
+  for (std::size_t index = 0; index < packets.size(); ++index) {
+    const auto& actual = packets[index];
+    const auto& snapshot = snapshots[index];
+    CHECK(actual->pts == snapshot->pts);
+    CHECK(actual->dts == snapshot->dts);
+    CHECK(actual->duration == snapshot->duration);
+    CHECK(actual->stream_index == snapshot->stream_index);
+    CHECK(av_cmp_q(actual->time_base, snapshot->time_base) == 0);
+    REQUIRE(actual->size == snapshot->size);
+    CHECK(std::equal(snapshot->data, snapshot->data + snapshot->size,
+                     actual->data));
+  }
+  // ADTS does not retain MP4's SKIP_SAMPLES packet metadata. Compare against
+  // the actual demuxed ADTS packets, using ASC for standalone decoding even
+  // when the Recorder was intentionally given no extradata.
+  auto adts_source = original;
+  adts_source.streams.front().time_base = stream.time_base;
+  adts_source.packets = std::move(snapshots);
+  CheckRecording(path, adts_source);
 }
 
 TEST_CASE("Recorder Drain finalizes asynchronously before Stop joins",

@@ -372,6 +372,53 @@ TEST_CASE("Remuxer 本地 MP4 异步录制排空后可以完整解码",
   remuxer.Stop();
 }
 
+TEST_CASE("Remuxer 关闭协议后释放流标识且旧录像可以后台收尾",
+          "[remuxer][recording][lifecycle][publish]") {
+  const auto runtime = InitRuntime();
+  const Media media;
+  OutputDirectory directory;
+  const auto port = ReservePort();
+  Remuxer previous({"live", "protocol_restart"});
+  const auto path = previous.AddPushUrl(directory.File("previous.mp4"));
+  previous.AddRtspPublish("127.0.0.1", port);
+  const auto planned = previous.output_info();
+  REQUIRE(previous.Start(media.streams));
+  for (const auto& packet : media.packets)
+    REQUIRE(previous.SubmitPacket(packet));
+  previous.StopProtocols();
+  CHECK_FALSE(previous.SubmitPacket(media.packets.front()));
+  CHECK(previous.output_info().rtsp_url == planned.rtsp_url);
+  CHECK(previous.output_info().output_urls == planned.output_urls);
+  CHECK(previous.push_statuses().empty());
+  const auto pending = previous.recording_statuses();
+  REQUIRE(pending.size() == 1);
+  CHECK((pending.front().status.state == RecorderState::kStopping ||
+         pending.front().status.state == RecorderState::kStopped));
+
+  // The previous instance and its file workers are still alive. Starting the
+  // replacement must not need previous.Stop() to release the source/listener.
+  Remuxer replacement({"live", "protocol_restart"});
+  replacement.AddRtspPublish("127.0.0.1", port);
+  REQUIRE(replacement.Start(media.streams));
+  for (const auto& packet : media.packets)
+    REQUIRE(replacement.SubmitPacket(packet));
+  previous.Stop();
+  const auto completed = previous.recording_statuses();
+  REQUIRE(completed.size() == 1);
+  CHECK(completed.front().status.state == RecorderState::kStopped);
+  CHECK(completed.front().status.written_packets == media.packets.size());
+  CHECK(completed.front().status.dropped_packets == 0);
+  CheckRecording(path, media.packets.size());
+  replacement.Stop();
+
+  // Protocol teardown also clears registration before a new session.
+  REQUIRE(previous.Start(media.streams));
+  CHECK(previous.output_info().output_urls.empty());
+  CHECK(previous.output_info().rtsp_url.empty());
+  CHECK(previous.recording_statuses().empty());
+  previous.Stop();
+}
+
 TEST_CASE("Remuxer 不接受本地 M3U8 录像", "[remuxer][recording][config]") {
   const auto runtime = InitRuntime();
   OutputDirectory directory;

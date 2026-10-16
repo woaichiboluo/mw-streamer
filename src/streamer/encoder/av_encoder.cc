@@ -514,6 +514,19 @@ class AvEncoder::Impl final {
       }
       {
         std::lock_guard lock(mutex_);
+        for (const auto& stream : streams) {
+          const auto* parameters = stream.codec_parameters.get();
+          MW_LOG_DEBUG(
+              "streamer",
+              "AvEncoder 轨道配置: instance={} stream={} codec={} "
+              "time_base={}/{} size={}x{} sample_rate={} channels={} "
+              "bit_rate={} frame_capacity={}",
+              fmt::ptr(this), stream.stream_index,
+              avcodec_get_name(parameters->codec_id), stream.time_base.num,
+              stream.time_base.den, parameters->width, parameters->height,
+              parameters->sample_rate, parameters->ch_layout.nb_channels,
+              parameters->bit_rate, kFrameCapacity);
+        }
         streams_ = std::move(streams);
         session_ = std::move(session);
         // Workers cannot leave their initial queue wait until this lock is
@@ -530,8 +543,8 @@ class AvEncoder::Impl final {
         }
         accepting_ = true;
       }
-      MW_LOG_INFO("streamer", "AvEncoder 已启动: video={} audio={}", video,
-                  audio);
+      MW_LOG_INFO("streamer", "AvEncoder 已启动: instance={} video={} audio={}",
+                  fmt::ptr(this), video, audio);
       return true;
     } catch (...) {
       const auto failure = std::current_exception();
@@ -580,14 +593,32 @@ class AvEncoder::Impl final {
     ValidateTiming(frame);
     auto& track = video ? video_ : audio_;
     if (track.frames.size() >= kFrameCapacity) {
-      MW_LOG_DEBUG("streamer",
-                   "AvEncoder 输入队列满，未受理新帧: track={} pts={} "
-                   "time_base={}/{} queue={}/{}",
-                   video ? "video" : "audio", frame->pts, frame->time_base.num,
-                   frame->time_base.den, track.frames.size(), kFrameCapacity);
+      if (!track.backpressured) {
+        track.backpressured = true;
+        MW_LOG_DEBUG("streamer",
+                     "AvEncoder 输入背压开始: instance={} track={} stream={} "
+                     "queue={}/{}",
+                     fmt::ptr(this), video ? "video" : "audio",
+                     video ? kVideoIndex : kAudioIndex, track.frames.size(),
+                     kFrameCapacity);
+      }
+      MW_LOG_TRACE(
+          "streamer",
+          "AvEncoder 输入队列满，未受理新帧: instance={} track={} pts={} "
+          "duration={} time_base={}/{} queue={}/{}",
+          fmt::ptr(this), video ? "video" : "audio", frame->pts,
+          frame->duration, frame->time_base.num, frame->time_base.den,
+          track.frames.size(), kFrameCapacity);
       return false;
     }
     track.frames.push_back(frame.Ref());
+    MW_LOG_TRACE("streamer",
+                 "AvEncoder 帧入队: instance={} track={} stream={} pts={} "
+                 "duration={} time_base={}/{} queue={}/{}",
+                 fmt::ptr(this), video ? "video" : "audio",
+                 video ? kVideoIndex : kAudioIndex, frame->pts, frame->duration,
+                 frame->time_base.num, frame->time_base.den,
+                 track.frames.size(), kFrameCapacity);
     wake_.notify_all();
     return true;
   }
@@ -597,6 +628,10 @@ class AvEncoder::Impl final {
     {
       std::lock_guard lock(mutex_);
       accepting_ = false;
+      MW_LOG_DEBUG(
+          "streamer",
+          "AvEncoder 停止接收并排空: instance={} video_queue={} audio_queue={}",
+          fmt::ptr(this), video_.frames.size(), audio_.frames.size());
     }
     wake_.notify_all();
     video_.worker.Join();
@@ -604,14 +639,17 @@ class AvEncoder::Impl final {
     std::lock_guard lock(mutex_);
     video_.frames.clear();
     audio_.frames.clear();
+    video_.backpressured = false;
+    audio_.backpressured = false;
     session_.reset();
-    MW_LOG_INFO("streamer", "AvEncoder 已停止");
+    MW_LOG_INFO("streamer", "AvEncoder 已停止: instance={}", fmt::ptr(this));
   }
 
  private:
   struct Track {
     internal::Thread worker;
     std::deque<ffmpeg::Frame> frames;
+    bool backpressured = false;
   };
 
   struct Session {
@@ -646,6 +684,13 @@ class AvEncoder::Impl final {
       Latency(index).Complete(packet->opaque_ref);
       packet->stream_index = index;
       packet->time_base = context.time_base;
+      MW_LOG_TRACE("streamer",
+                   "AvEncoder 输出包: instance={} stream={} pts={} dts={} "
+                   "duration={} time_base={}/{} bytes={} keyframe={}",
+                   fmt::ptr(this), index, packet->pts, packet->dts,
+                   packet->duration, packet->time_base.num,
+                   packet->time_base.den, packet->size,
+                   (packet->flags & AV_PKT_FLAG_KEY) != 0);
       if (on_packet_) on_packet_(packet);
     }
   }
@@ -661,6 +706,12 @@ class AvEncoder::Impl final {
       latency.Attach(submitted->opaque_ref, latency.Begin());
     }
 #endif
+    MW_LOG_TRACE(
+        "streamer",
+        "AvEncoder 提交 codec: instance={} stream={} pts={} duration={} "
+        "time_base={}/{} samples={}",
+        fmt::ptr(this), index, submitted->pts, submitted->duration,
+        context.time_base.num, context.time_base.den, submitted->nb_samples);
     for (;;) {
       const int result = avcodec_send_frame(&context, submitted.get());
       if (result != AVERROR(EAGAIN)) {
@@ -672,6 +723,8 @@ class AvEncoder::Impl final {
     Receive(context, index);
   }
   void DrainCodec(AVCodecContext& context, int index) {
+    MW_LOG_DEBUG("streamer", "AvEncoder 提交 EOF: instance={} stream={}",
+                 fmt::ptr(this), index);
     for (;;) {
       const int result = avcodec_send_frame(&context, nullptr);
       if (result != AVERROR(EAGAIN)) {
@@ -684,6 +737,8 @@ class AvEncoder::Impl final {
     }
     if (Receive(context, index) != AVERROR_EOF)
       throw std::runtime_error("编码器排空未到达 EOF");
+    MW_LOG_DEBUG("streamer", "AvEncoder 排空完成: instance={} stream={}",
+                 fmt::ptr(this), index);
   }
   void Video(const ffmpeg::Frame* frame) {
     if (frame) {
@@ -719,13 +774,39 @@ class AvEncoder::Impl final {
           if (!track.frames.empty()) {
             frame = std::move(track.frames.front());
             track.frames.pop_front();
+            MW_LOG_TRACE(
+                "streamer",
+                "AvEncoder 消费输入: instance={} track={} stream={} pts={} "
+                "duration={} time_base={}/{} queue={}/{}",
+                fmt::ptr(this), video ? "video" : "audio",
+                video ? kVideoIndex : kAudioIndex, (*frame)->pts,
+                (*frame)->duration, (*frame)->time_base.num,
+                (*frame)->time_base.den, track.frames.size(), kFrameCapacity);
+            if (track.backpressured) {
+              track.backpressured = false;
+              MW_LOG_DEBUG("streamer",
+                           "AvEncoder 输入背压恢复: instance={} track={} "
+                           "stream={} queue={}/{}",
+                           fmt::ptr(this), video ? "video" : "audio",
+                           video ? kVideoIndex : kAudioIndex,
+                           track.frames.size(), kFrameCapacity);
+            }
           }
         }
         if (frame && on_input_space_) {
           try {
             on_input_space_(video);
+          } catch (const std::exception& error) {
+            MW_LOG_ERROR("streamer",
+                         "AvEncoder OnInputSpace 回调异常: instance={} "
+                         "track={} error={}",
+                         fmt::ptr(this), video ? "video" : "audio",
+                         error.what());
           } catch (...) {
-            MW_LOG_ERROR("streamer", "AvEncoder OnInputSpace 回调抛出异常");
+            MW_LOG_ERROR(
+                "streamer",
+                "AvEncoder OnInputSpace 回调抛出未知异常: instance={} track={}",
+                fmt::ptr(this), video ? "video" : "audio");
           }
         }
         // Closing admission drains each track's accepted FIFO before codec
@@ -750,11 +831,34 @@ class AvEncoder::Impl final {
         audio_.frames.clear();
       }
       wake_.notify_all();
+      try {
+        std::rethrow_exception(failure);
+      } catch (const ffmpeg::FfmpegException& error) {
+        MW_LOG_ERROR(
+            "streamer",
+            "AvEncoder 编码失败: instance={} track={} code={} error={}",
+            fmt::ptr(this), video ? "video" : "audio", error.error_code(),
+            error.what());
+      } catch (const std::exception& error) {
+        MW_LOG_ERROR("streamer",
+                     "AvEncoder 编码失败: instance={} track={} error={}",
+                     fmt::ptr(this), video ? "video" : "audio", error.what());
+      } catch (...) {
+        MW_LOG_ERROR("streamer",
+                     "AvEncoder 编码失败: instance={} track={} 未知异常",
+                     fmt::ptr(this), video ? "video" : "audio");
+      }
       if (first && on_error_) {
         try {
           on_error_(failure);
+        } catch (const std::exception& error) {
+          MW_LOG_ERROR("streamer",
+                       "AvEncoder OnError 回调异常: instance={} error={}",
+                       fmt::ptr(this), error.what());
         } catch (...) {
-          MW_LOG_ERROR("streamer", "AvEncoder OnError 回调抛出异常");
+          MW_LOG_ERROR("streamer",
+                       "AvEncoder OnError 回调抛出未知异常: instance={}",
+                       fmt::ptr(this));
         }
       }
     }

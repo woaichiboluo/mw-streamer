@@ -109,8 +109,11 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
       Sync(poller, [] {});
       std::rethrow_exception(error);
     }
-    MW_LOG_INFO("streamer", "Remuxer 已启动: tracks={} outputs={}",
-                streams.size(), registration_.entries().size());
+    MW_LOG_INFO(
+        "streamer",
+        "Remuxer 已启动: instance={} app={} stream={} tracks={} outputs={}",
+        static_cast<const void*>(this), config_.app, config_.stream,
+        streams.size(), registration_.entries().size());
   }
 
   bool SubmitPacket(const ffmpeg::Packet& packet) {
@@ -119,9 +122,24 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
     if (poller_->isCurrentThread())
       throw std::logic_error("Remuxer 不允许在输出 poller 上提交编码包");
     interleaver_->Validate(packet);
+    const bool blocked = handoff_.has_value();
+    if (blocked)
+      MW_LOG_DEBUG("streamer", "Remuxer 等待交接槽: instance={} stream={}",
+                   static_cast<const void*>(this), packet->stream_index);
     writable_.wait(lock, [&] { return !accepting_ || !handoff_; });
+    if (blocked)
+      MW_LOG_DEBUG("streamer",
+                   "Remuxer 交接槽等待结束: instance={} accepting={}",
+                   static_cast<const void*>(this), accepting_);
     if (!accepting_) return false;
     handoff_ = internal::PacketInterleaver::Item{packet.Ref()};
+    MW_LOG_TRACE("streamer",
+                 "Remuxer 接收包: instance={} stream={} pts={} dts={} "
+                 "time_base={}/{} size={} interleaved_queue={}",
+                 static_cast<const void*>(this), packet->stream_index,
+                 packet->pts, packet->dts, packet->time_base.num,
+                 packet->time_base.den, packet->size,
+                 interleaver_->queued_packets());
     Schedule();
     return true;
   }
@@ -185,26 +203,46 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
   void Drain() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!running_ || closing_) return;
+    if (!draining_)
+      MW_LOG_DEBUG(
+          "streamer",
+          "Remuxer 开始排空: instance={} handoff={} interleaved_queue={}",
+          static_cast<const void*>(this), handoff_.has_value(),
+          interleaver_->queued_packets());
     accepting_ = false;
     draining_ = true;
     writable_.notify_all();
     Schedule();
   }
 
+  void StopProtocols() noexcept {
+    std::lock_guard<std::mutex> control(control_);
+    StopProtocolsLocked();
+  }
+
   void Stop() noexcept {
     std::lock_guard<std::mutex> control(control_);
-    Drain();
-    std::unique_lock<std::mutex> lock(mutex_);
-    stopped_.wait(lock, [&] { return !running_; });
-    registration_ = {};
-    draining_ = closing_ = false;
-    lock.unlock();
+    StopProtocolsLocked();
     // control_ prevents additions/restarts while status queries remain free
     // to inspect the Recorders. Never join file IO on a ZLM poller.
     for (const auto& recording : recordings_) recording.recorder->Stop();
   }
 
  private:
+  // The lifecycle caller holds control_; Recorder joins remain outside this
+  // helper so protocol teardown never waits for the file writer.
+  void StopProtocolsLocked() noexcept {
+    Drain();
+    std::unique_lock<std::mutex> lock(mutex_);
+    stopped_.wait(lock, [&] { return !running_; });
+    if (!registration_.entries().empty())
+      MW_LOG_DEBUG("streamer", "Remuxer 释放输出注册: instance={} outputs={}",
+                   static_cast<const void*>(this),
+                   registration_.entries().size());
+    registration_ = {};
+    draining_ = closing_ = false;
+  }
+
   struct Recording {
     std::string path;
     std::shared_ptr<Recorder> recorder;
@@ -264,6 +302,10 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
       std::lock_guard<std::mutex> lock(mutex_);
       output_info_ = std::move(info);
     }
+    MW_LOG_DEBUG("streamer",
+                 "Remuxer 添加输出: instance={} kind={} active={} outputs={}",
+                 static_cast<const void*>(this), static_cast<int>(entry.kind),
+                 active, registration_.entries().size());
     return entry.actual;
   }
   void RequireAccepting() {
@@ -327,12 +369,25 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
         }
         if (handoff_) {
           interleaver_->Push(handoff_->packet);
+          MW_LOG_TRACE("streamer",
+                       "Remuxer 交接到交织队列: instance={} stream={} pts={} "
+                       "dts={} time_base={}/{} interleaved_queue={}",
+                       static_cast<const void*>(this),
+                       handoff_->packet->stream_index, handoff_->packet->pts,
+                       handoff_->packet->dts, handoff_->packet->time_base.num,
+                       handoff_->packet->time_base.den,
+                       interleaver_->queued_packets());
           handoff_.reset();
           writable_.notify_all();
         }
         if (!timestamps_->initialized())
           first_packets = interleaver_->FirstPackets();
         packets = interleaver_->PopReady(draining_);
+        MW_LOG_TRACE(
+            "streamer",
+            "Remuxer 取出就绪包: instance={} ready={} remaining={} draining={}",
+            static_cast<const void*>(this), packets.size(),
+            interleaver_->queued_packets(), draining_);
         scheduled_ = false;
         finish = draining_;
         recordings = recordings_;
@@ -357,6 +412,14 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
         output_->InputFrame(frame);
         // This measures synchronous dispatch, not asynchronous network writes.
         output_latency_.End(output_started);
+        MW_LOG_TRACE("streamer",
+                     "Remuxer 完成输出: instance={} stream={} pts={} dts={} "
+                     "time_base={}/{} size={} pts_ms={} dts_ms={} recorders={}",
+                     static_cast<const void*>(this),
+                     packet.packet->stream_index, packet.packet->pts,
+                     packet.packet->dts, packet.packet->time_base.num,
+                     packet.packet->time_base.den, packet.packet->size, pts_ms,
+                     dts_ms, recordings.size());
         if (!eof_tracks.empty()) {
           eof_tracks.erase(packet.packet->stream_index);
           // EOF identifies which declared tracks actually have packets.
@@ -388,6 +451,8 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
   }
 
   void Finish() {
+    MW_LOG_DEBUG("streamer", "Remuxer 关闭协议输出: instance={}",
+                 static_cast<const void*>(this));
     try {
       output_->Close();
     } catch (...) {
@@ -411,7 +476,8 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
             self->interleaver_.reset();
             self->running_ = self->scheduled_ = false;
           }
-          MW_LOG_INFO("streamer", "Remuxer 已停止");
+          MW_LOG_INFO("streamer", "Remuxer 已停止: instance={}",
+                      static_cast<const void*>(self.get()));
           self->stopped_.notify_all();
           self->writable_.notify_all();
         },
@@ -483,6 +549,7 @@ std::string Remuxer::AddHlsPublish(const std::string& ip, std::uint16_t port,
   return impl_->AddHlsPublish(ip, port, tls);
 }
 void Remuxer::Drain() noexcept { impl_->Drain(); }
+void Remuxer::StopProtocols() noexcept { impl_->StopProtocols(); }
 void Remuxer::Stop() noexcept { impl_->Stop(); }
 Remuxer::OutputInfo Remuxer::output_info() const {
   return impl_->output_info();

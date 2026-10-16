@@ -11,6 +11,7 @@
 #include <utility>
 
 extern "C" {
+#include <libavcodec/bsf.h>
 #include <libavformat/avformat.h>
 #include <libavutil/intreadwrite.h>
 #include <libavutil/mathematics.h>
@@ -73,6 +74,12 @@ struct FormatDeleter {
   }
 };
 
+struct BitstreamFilterDeleter {
+  void operator()(AVBSFContext* context) const noexcept {
+    av_bsf_free(&context);
+  }
+};
+
 // Only the recorder worker touches the file context and its IO buffers.
 class FileWriter final {
  public:
@@ -96,6 +103,25 @@ class FileWriter final {
       stream->time_base = info.time_base;
       stream->avg_frame_rate = info.frame_rate;
       stream->sample_aspect_ratio = info.sample_aspect_ratio;
+      if (stream->codecpar->codec_id == AV_CODEC_ID_AAC) {
+        const auto* filter = av_bsf_get_by_name("aac_adtstoasc");
+        if (!filter)
+          throw FfmpegException(AVERROR_BSF_NOT_FOUND, "查找录像 AAC 过滤器");
+        AVBSFContext* raw_filter = nullptr;
+        FfmpegException::throwIfError(av_bsf_alloc(filter, &raw_filter),
+                                      "创建录像 AAC 过滤器");
+        audio_filter_.reset(raw_filter);
+        audio_index_ = static_cast<std::size_t>(stream->index);
+        FfmpegException::throwIfError(
+            avcodec_parameters_copy(audio_filter_->par_in, stream->codecpar),
+            "复制录像 AAC 过滤器参数");
+        audio_filter_->time_base_in = info.time_base;
+        FfmpegException::throwIfError(av_bsf_init(audio_filter_.get()),
+                                      "初始化录像 AAC 过滤器");
+        FfmpegException::throwIfError(
+            avcodec_parameters_copy(stream->codecpar, audio_filter_->par_out),
+            "复制录像 AAC 输出参数");
+      }
     }
     // Force the local file protocol: even a colon in a filesystem name must
     // never select another FFmpeg protocol.
@@ -122,13 +148,48 @@ class FileWriter final {
           return info.stream_index == packet->stream_index;
         });
     const auto index = static_cast<std::size_t>(found - streams_.begin());
-    const auto input_base = found->time_base;
+    if (audio_filter_ && index == audio_index_)
+      WriteAudio(packet.get());
+    else
+      WritePacket(std::move(packet), index);
+  }
+
+  void Finish() {
+    if (audio_filter_) WriteAudio(nullptr);
+    FfmpegException::throwIfError(av_write_trailer(context_.get()),
+                                  "写入录像文件尾");
+    avio_flush(context_->pb);
+    CheckIo();
+    FfmpegException::throwIfError(avio_closep(&context_->pb), "关闭录像文件");
+  }
+
+ private:
+  void WriteAudio(AVPacket* packet) {
+    // HLS/TS may retain ADTS even when probing already supplied ASC extradata,
+    // so MP4's automatic filter selection alone is insufficient. Raw AAC is
+    // passed through by this filter; timestamps and payload ownership stay
+    // local.
+    FfmpegException::throwIfError(
+        av_bsf_send_packet(audio_filter_.get(), packet), "提交录像 AAC 编码包");
+    for (;;) {
+      ffmpeg::Packet filtered;
+      const int result =
+          av_bsf_receive_packet(audio_filter_.get(), filtered.get());
+      if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) return;
+      FfmpegException::throwIfError(result, "读取录像 AAC 编码包");
+      WritePacket(std::move(filtered), audio_index_);
+    }
+  }
+
+  void WritePacket(ffmpeg::Packet packet, std::size_t index) {
+    const auto& info = streams_[index];
+    const auto input_base = info.time_base;
     if (!origin_) {
       origin_ = packet->pts != AV_NOPTS_VALUE ? packet->pts : packet->dts;
       origin_base_ = input_base;
       // Padding is decoded but not presented. Keep it before presentation
       // zero, including for audio-only recording, so MP4 can retain the trim.
-      const auto* codec = found->codec_parameters.get();
+      const auto* codec = info.codec_parameters.get();
       std::size_t size = 0;
       const auto* skip = av_packet_get_side_data(
           packet.get(), AV_PKT_DATA_SKIP_SAMPLES, &size);
@@ -150,21 +211,14 @@ class FileWriter final {
     CheckIo();
   }
 
-  void Finish() {
-    FfmpegException::throwIfError(av_write_trailer(context_.get()),
-                                  "写入录像文件尾");
-    avio_flush(context_->pb);
-    CheckIo();
-    FfmpegException::throwIfError(avio_closep(&context_->pb), "关闭录像文件");
-  }
-
- private:
   void CheckIo() const {
     FfmpegException::throwIfError(context_->pb->error, "录像文件 IO");
   }
 
   const std::vector<ffmpeg::StreamInfo>& streams_;
   std::unique_ptr<AVFormatContext, FormatDeleter> context_;
+  std::unique_ptr<AVBSFContext, BitstreamFilterDeleter> audio_filter_;
+  std::size_t audio_index_ = 0;
   std::optional<std::int64_t> origin_;
   AVRational origin_base_{0, 1};
 };
@@ -190,6 +244,11 @@ class Recorder::Impl final {
     status_ = {};
     status_.state = RecorderState::kRunning;
     last_warning_ = {};
+    MW_LOG_DEBUG(
+        "streamer",
+        "Recorder 启动配置: instance={} path={} tracks={} max_queue_bytes={}",
+        static_cast<const void*>(this), config_.path, streams_.size(),
+        config_.max_queue_bytes);
     if (!worker_.Start([this] { Run(); })) {
       status_.state = RecorderState::kFailed;
       status_.error = "Recorder 无法创建写入线程";
@@ -218,12 +277,19 @@ class Recorder::Impl final {
       if (warn) last_warning_ = now;
       lock.unlock();
       if (warn)
-        MW_LOG_WARNING("streamer", "Recorder 队列已满，丢弃当前包，累计丢包 {}",
-                       dropped);
+        MW_LOG_WARNING("streamer",
+                       "Recorder 队列已满，丢弃当前包: instance={} dropped={}",
+                       static_cast<const void*>(this), dropped);
       return false;
     }
     queue_.push_back(packet.Ref());
     status_.queue_bytes += bytes;
+    MW_LOG_TRACE("streamer",
+                 "Recorder 投递包: instance={} stream={} pts={} dts={} "
+                 "time_base={}/{} size={} queue={} queue_bytes={}",
+                 static_cast<const void*>(this), raw->stream_index, raw->pts,
+                 raw->dts, raw->time_base.num, raw->time_base.den, raw->size,
+                 queue_.size(), status_.queue_bytes);
     lock.unlock();
     ready_.notify_one();
     return true;
@@ -237,8 +303,13 @@ class Recorder::Impl final {
   void Drain() noexcept {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (status_.state == RecorderState::kRunning)
+      if (status_.state == RecorderState::kRunning) {
         status_.state = RecorderState::kStopping;
+        MW_LOG_DEBUG("streamer",
+                     "Recorder 开始排空: instance={} queue={} queue_bytes={}",
+                     static_cast<const void*>(this), queue_.size(),
+                     status_.queue_bytes);
+      }
     }
     ready_.notify_one();
   }
@@ -252,7 +323,8 @@ class Recorder::Impl final {
   void Run() noexcept {
     try {
       FileWriter writer(streams_, config_.path);
-      MW_LOG_INFO("streamer", "Recorder 开始录像: {}", config_.path);
+      MW_LOG_INFO("streamer", "Recorder 开始录像: instance={} path={}",
+                  static_cast<const void*>(this), config_.path);
       for (;;) {
         std::optional<ffmpeg::Packet> packet;
         {
@@ -264,19 +336,37 @@ class Recorder::Impl final {
           status_.queue_bytes -= PacketBytes(*queue_.front().get());
           packet.emplace(std::move(queue_.front()));
           queue_.pop_front();
+          MW_LOG_TRACE("streamer",
+                       "Recorder 开始写包: instance={} stream={} pts={} dts={} "
+                       "time_base={}/{} size={} queue={} queue_bytes={}",
+                       static_cast<const void*>(this), (*packet)->stream_index,
+                       (*packet)->pts, (*packet)->dts, (*packet)->time_base.num,
+                       (*packet)->time_base.den, (*packet)->size, queue_.size(),
+                       status_.queue_bytes);
         }
         writer.Write(std::move(*packet));
         {
           std::lock_guard<std::mutex> lock(mutex_);
           ++status_.written_packets;
+          MW_LOG_TRACE("streamer",
+                       "Recorder 完成写包: instance={} written={} queue={} "
+                       "queue_bytes={}",
+                       static_cast<const void*>(this), status_.written_packets,
+                       queue_.size(), status_.queue_bytes);
         }
       }
       writer.Finish();
       {
         std::lock_guard<std::mutex> lock(mutex_);
         status_.state = RecorderState::kStopped;
+        MW_LOG_DEBUG("streamer",
+                     "Recorder 排空完成: instance={} written={} dropped={} "
+                     "queue_bytes={}",
+                     static_cast<const void*>(this), status_.written_packets,
+                     status_.dropped_packets, status_.queue_bytes);
       }
-      MW_LOG_INFO("streamer", "Recorder 结束录像: {}", config_.path);
+      MW_LOG_INFO("streamer", "Recorder 结束录像: instance={} path={}",
+                  static_cast<const void*>(this), config_.path);
     } catch (const std::exception& error) {
       Fail(std::current_exception(), error.what());
     } catch (...) {
@@ -293,10 +383,16 @@ class Recorder::Impl final {
       status_.error = error;
       status_.queue_bytes = 0;
       queue_.swap(discarded);
+      MW_LOG_DEBUG(
+          "streamer",
+          "Recorder 失败清理: instance={} discarded={} written={} dropped={}",
+          static_cast<const void*>(this), discarded.size(),
+          status_.written_packets, status_.dropped_packets);
       callback = on_error_;
     }
     discarded.clear();
-    MW_LOG_ERROR("streamer", "Recorder 录像失败: {}: {}", config_.path, error);
+    MW_LOG_ERROR("streamer", "Recorder 录像失败: instance={} path={} error={}",
+                 static_cast<const void*>(this), config_.path, error);
     if (callback) {
       try {
         (*callback)(std::move(exception));

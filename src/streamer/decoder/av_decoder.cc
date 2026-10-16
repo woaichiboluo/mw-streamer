@@ -121,9 +121,20 @@ class AvDecoder::Impl final {
     }
     ffmpeg::FfmpegException::throwIfError(
         avcodec_open2(context, context->codec, nullptr), "avcodec_open2");
+    MW_LOG_DEBUG(
+        "streamer",
+        "AvDecoder 配置: instance={} stream={} codec={} type={} "
+        "time_base={}/{} threads={} packet_capacity={} frame_capacity={} "
+        "hardware={}",
+        fmt::ptr(this), stream_.stream_index, context->codec->name,
+        av_get_media_type_string(context->codec_type), stream_.time_base.num,
+        stream_.time_base.den, context->thread_count, config_.packet_capacity,
+        config_.frame_capacity, context->hw_device_ctx != nullptr);
     if (!worker_.Start([this]() noexcept { Run(); })) {
       throw std::runtime_error("启动 AvDecoder 解码线程失败");
     }
+    MW_LOG_INFO("streamer", "AvDecoder 已启动: instance={} stream={} codec={}",
+                fmt::ptr(this), stream_.stream_index, context->codec->name);
   }
 
   ~Impl() { Stop(); }
@@ -162,6 +173,16 @@ class AvDecoder::Impl final {
       if (!frames_.empty() && !stopping_) {
         result = std::move(frames_.front());
         frames_.pop_front();
+        MW_LOG_TRACE(
+            "streamer",
+            "AvDecoder 消费输出: instance={} stream={} kind={} pts={} "
+            "duration={} time_base={}/{} queue={}/{}",
+            fmt::ptr(this), stream_.stream_index,
+            result.status == AvDecoderReadStatus::kFrame ? "frame" : "eof",
+            result.frame ? result.frame->get()->pts : result.end_pts,
+            result.frame ? result.frame->get()->duration : 0,
+            stream_.time_base.num, stream_.time_base.den, frames_.size(),
+            config_.frame_capacity);
       } else {
         result.stream_index = stream_.stream_index;
         result.time_base = stream_.time_base;
@@ -197,12 +218,17 @@ class AvDecoder::Impl final {
   }
 
   void Stop() noexcept {
+    const bool had_worker = worker_.joinable();
     RequestStop();
     worker_.Join();
     latency_.Finish();
     std::lock_guard<std::mutex> lock(mutex_);
     packets_.clear();
     frames_.clear();
+    if (had_worker) {
+      MW_LOG_INFO("streamer", "AvDecoder 已停止: instance={} stream={}",
+                  fmt::ptr(this), stream_.stream_index);
+    }
   }
 
  private:
@@ -246,10 +272,32 @@ class AvDecoder::Impl final {
         throw std::logic_error(
             "AvDecoder 提交 EOF 后需要先 Reset 才能继续输入");
       }
-      if (packets_.size() >= config_.packet_capacity) return false;
+      if (packets_.size() >= config_.packet_capacity) {
+        MW_LOG_TRACE("streamer",
+                     "AvDecoder 输入队列满: instance={} stream={} queue={}/{}",
+                     fmt::ptr(this), stream_.stream_index, packets_.size(),
+                     config_.packet_capacity);
+        return false;
+      }
       packets_.push_back({kind, packet ? std::optional<ffmpeg::Packet>(*packet)
                                        : std::nullopt});
       submitted_eof_ = kind == InputKind::kEof;
+      if (packet) {
+        MW_LOG_TRACE("streamer",
+                     "AvDecoder 包入队: instance={} stream={} pts={} dts={} "
+                     "duration={} time_base={}/{} bytes={} queue={}/{}",
+                     fmt::ptr(this), stream_.stream_index, (*packet)->pts,
+                     (*packet)->dts, (*packet)->duration, stream_.time_base.num,
+                     stream_.time_base.den, (*packet)->size, packets_.size(),
+                     config_.packet_capacity);
+      } else {
+        MW_LOG_DEBUG(
+            "streamer",
+            "AvDecoder 控制入队: instance={} stream={} kind={} queue={}/{}",
+            fmt::ptr(this), stream_.stream_index,
+            kind == InputKind::kEof ? "eof" : "reset", packets_.size(),
+            config_.packet_capacity);
+      }
     }
     changed_.notify_all();
     return true;
@@ -282,10 +330,33 @@ class AvDecoder::Impl final {
 
   bool Emit(AvDecoderReadResult result) {
     std::unique_lock<std::mutex> lock(mutex_);
+    const bool waiting = !stopping_ && frames_.size() >= config_.frame_capacity;
+    if (waiting) {
+      MW_LOG_DEBUG("streamer",
+                   "AvDecoder 输出背压等待: instance={} stream={} queue={}/{}",
+                   fmt::ptr(this), stream_.stream_index, frames_.size(),
+                   config_.frame_capacity);
+    }
     changed_.wait(lock, [this] {
       return stopping_ || frames_.size() < config_.frame_capacity;
     });
+    if (waiting) {
+      MW_LOG_DEBUG("streamer",
+                   "AvDecoder 输出背压结束: instance={} stream={} stopping={} "
+                   "queue={}/{}",
+                   fmt::ptr(this), stream_.stream_index, stopping_,
+                   frames_.size(), config_.frame_capacity);
+    }
     if (stopping_) return false;
+    MW_LOG_TRACE("streamer",
+                 "AvDecoder 输出就绪: instance={} stream={} kind={} pts={} "
+                 "duration={} time_base={}/{} queue={}/{}",
+                 fmt::ptr(this), stream_.stream_index,
+                 result.status == AvDecoderReadStatus::kFrame ? "frame" : "eof",
+                 result.frame ? result.frame->get()->pts : result.end_pts,
+                 result.frame ? result.frame->get()->duration : 0,
+                 stream_.time_base.num, stream_.time_base.den,
+                 frames_.size() + 1, config_.frame_capacity);
     frames_.push_back(std::move(result));
     auto callback = on_read_ready_;
     lock.unlock();
@@ -318,6 +389,11 @@ class AvDecoder::Impl final {
           const int received =
               avcodec_receive_frame(context_.get(), frame.get());
           if (received == AVERROR_EOF) {
+            MW_LOG_DEBUG("streamer",
+                         "AvDecoder 排空完成: instance={} stream={} "
+                         "next_pts={} time_base={}/{}",
+                         fmt::ptr(this), stream_.stream_index, next_pts,
+                         stream_.time_base.num, stream_.time_base.den);
             if (!Emit({AvDecoderReadStatus::kEof,
                        {},
                        stream_.stream_index,
@@ -370,6 +446,9 @@ class AvDecoder::Impl final {
           }
         }
         if (input.kind == InputKind::kReset) {
+          MW_LOG_DEBUG("streamer",
+                       "AvDecoder 执行 Reset: instance={} stream={}",
+                       fmt::ptr(this), stream_.stream_index);
           context_.FlushBuffers();
           started = false;
           drained = false;
@@ -383,6 +462,19 @@ class AvDecoder::Impl final {
           latency_.Attach(input.packet->get()->opaque_ref, latency_.Begin());
         }
 #endif
+        if (input.packet) {
+          MW_LOG_TRACE(
+              "streamer",
+              "AvDecoder 提交 codec: instance={} stream={} pts={} dts={} "
+              "duration={} time_base={}/{} bytes={}",
+              fmt::ptr(this), stream_.stream_index, (*input.packet)->pts,
+              (*input.packet)->dts, (*input.packet)->duration,
+              stream_.time_base.num, stream_.time_base.den,
+              (*input.packet)->size);
+        } else {
+          MW_LOG_DEBUG("streamer", "AvDecoder 提交 EOF: instance={} stream={}",
+                       fmt::ptr(this), stream_.stream_index);
+        }
         ffmpeg::FfmpegException::throwIfError(
             avcodec_send_packet(context_.get(),
                                 input.packet ? input.packet->get() : nullptr),
@@ -398,8 +490,23 @@ class AvDecoder::Impl final {
         packets_.clear();
         callback = std::move(on_error_);
       }
-      MW_LOG_ERROR("streamer", "AvDecoder 轨道 {} 解码失败",
-                   stream_.stream_index);
+      try {
+        std::rethrow_exception(failure);
+      } catch (const ffmpeg::FfmpegException& error) {
+        MW_LOG_ERROR(
+            "streamer",
+            "AvDecoder 解码失败: instance={} stream={} code={} error={}",
+            fmt::ptr(this), stream_.stream_index, error.error_code(),
+            error.what());
+      } catch (const std::exception& error) {
+        MW_LOG_ERROR("streamer",
+                     "AvDecoder 解码失败: instance={} stream={} error={}",
+                     fmt::ptr(this), stream_.stream_index, error.what());
+      } catch (...) {
+        MW_LOG_ERROR("streamer",
+                     "AvDecoder 解码失败: instance={} stream={} 未知异常",
+                     fmt::ptr(this), stream_.stream_index);
+      }
       if (callback) {
         try {
           callback(failure);

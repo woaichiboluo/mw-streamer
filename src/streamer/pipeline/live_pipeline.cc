@@ -40,6 +40,9 @@ class LivePipeline::Impl final {
       target.audio_channel_layout = audio_format_->ch_layout;
     }
     source_->SetOnStateChanged([this](const AvMediaSourceStatus& status) {
+      MW_LOG_DEBUG(
+          "streamer", "LivePipeline 输入状态变化: instance={} state={}",
+          static_cast<const void*>(this), static_cast<int>(status.state));
       if (status.state == AvMediaSourceState::kFailed) Fail(status.error);
     });
     source_->SetOnPacket([this](const ffmpeg::Packet& packet) {
@@ -101,24 +104,34 @@ class LivePipeline::Impl final {
       state_ = LivePipelineState::kStarting;
       error_ = {};
     }
+    MW_LOG_INFO("streamer", "LivePipeline 开始启动: instance={}",
+                static_cast<const void*>(this));
     try {
       if (!encoder_.Start(config_.encoder)) {
         if (const auto failure = encoder_.error())
           std::rethrow_exception(failure);
         throw std::runtime_error("LivePipeline 编码器启动失败");
       }
+      MW_LOG_DEBUG("streamer", "LivePipeline 编码器启动完成: instance={}",
+                   static_cast<const void*>(this));
       CheckFailure();
       if (!remuxer_.Start(encoder_.streams()))
         throw std::runtime_error("LivePipeline Remuxer 启动失败");
+      MW_LOG_DEBUG("streamer", "LivePipeline Remuxer 启动完成: instance={}",
+                   static_cast<const void*>(this));
       CheckFailure();
       if (!source_->Start(url))
         throw std::runtime_error("LivePipeline MediaSource 启动失败");
+      MW_LOG_DEBUG("streamer", "LivePipeline MediaSource 启动完成: instance={}",
+                   static_cast<const void*>(this));
       CheckFailure();
       if (!scheduler_.Start()) {
         if (const auto failure = scheduler_.error())
           std::rethrow_exception(failure);
         throw std::runtime_error("LivePipeline Scheduler 启动失败");
       }
+      MW_LOG_DEBUG("streamer", "LivePipeline Scheduler 启动完成: instance={}",
+                   static_cast<const void*>(this));
       bool cancelled;
       {
         std::lock_guard lock(mutex_);
@@ -132,7 +145,8 @@ class LivePipeline::Impl final {
         Stop();
         return false;
       }
-      MW_LOG_INFO("streamer", "LivePipeline 已启动");
+      MW_LOG_INFO("streamer", "LivePipeline 已启动: instance={}",
+                  static_cast<const void*>(this));
       return true;
     } catch (...) {
       Fail(std::current_exception());
@@ -168,11 +182,17 @@ class LivePipeline::Impl final {
   }
 
   void RequestStop() noexcept {
+    bool requested = false;
     {
       std::lock_guard lock(mutex_);
+      requested = started_ && state_ != LivePipelineState::kStopping &&
+                  state_ != LivePipelineState::kFailed;
       if (started_ && state_ != LivePipelineState::kFailed)
         state_ = LivePipelineState::kStopping;
     }
+    if (requested)
+      MW_LOG_DEBUG("streamer", "LivePipeline 请求停止: instance={}",
+                   static_cast<const void*>(this));
     scheduler_.RequestStop();
     source_->RequestStop();
   }
@@ -183,9 +203,15 @@ class LivePipeline::Impl final {
       was_started = started_;
     }
     RequestStop();
+    if (was_started)
+      MW_LOG_DEBUG("streamer", "LivePipeline 等待调度与输入停止: instance={}",
+                   static_cast<const void*>(this));
     scheduler_.Stop();
     source_->Stop();
     // Keep Remuxer accepting until all delayed encoder packets are delivered.
+    if (was_started)
+      MW_LOG_DEBUG("streamer", "LivePipeline 排空编码器与输出: instance={}",
+                   static_cast<const void*>(this));
     encoder_.Stop();
     remuxer_.Stop();
     {
@@ -194,7 +220,9 @@ class LivePipeline::Impl final {
       state_ =
           error_ ? LivePipelineState::kFailed : LivePipelineState::kStopped;
     }
-    if (was_started) MW_LOG_INFO("streamer", "LivePipeline 已停止");
+    if (was_started)
+      MW_LOG_INFO("streamer", "LivePipeline 已停止: instance={} failed={}",
+                  static_cast<const void*>(this), static_cast<bool>(error()));
   }
 
  private:
@@ -217,18 +245,25 @@ class LivePipeline::Impl final {
     try {
       std::rethrow_exception(error);
     } catch (const std::exception& failure) {
-      MW_LOG_ERROR("streamer", "LivePipeline 不可恢复错误: {}", failure.what());
+      MW_LOG_ERROR("streamer",
+                   "LivePipeline 不可恢复错误: instance={} error={}",
+                   static_cast<const void*>(this), failure.what());
     } catch (...) {
-      MW_LOG_ERROR("streamer", "LivePipeline 不可恢复错误: 未知异常");
+      MW_LOG_ERROR("streamer",
+                   "LivePipeline 不可恢复错误: instance={} 未知异常",
+                   static_cast<const void*>(this));
     }
     if (on_error_) {
       try {
         on_error_(error);
       } catch (const std::exception& failure) {
-        MW_LOG_ERROR("streamer", "LivePipeline OnError 回调失败: {}",
-                     failure.what());
+        MW_LOG_ERROR("streamer",
+                     "LivePipeline OnError 回调失败: instance={} error={}",
+                     static_cast<const void*>(this), failure.what());
       } catch (...) {
-        MW_LOG_ERROR("streamer", "LivePipeline OnError 回调失败: 未知异常");
+        MW_LOG_ERROR("streamer",
+                     "LivePipeline OnError 回调失败: instance={} 未知异常",
+                     static_cast<const void*>(this));
       }
     }
   }

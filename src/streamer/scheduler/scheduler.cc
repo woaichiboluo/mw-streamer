@@ -229,6 +229,15 @@ class Scheduler::Impl final {
     track.head = std::move(track.result);
     track.result = {};
     track.completed = false;
+    if (track.head.status != AvDecoderReadStatus::kNull)
+      MW_LOG_TRACE(
+          "streamer",
+          "Scheduler[{}] 工作结果就绪: track={} status={} stream={} "
+          "pts={} time_base={}/{}",
+          fmt::ptr(this), index == 0 ? "video" : "audio",
+          static_cast<int>(track.head.status), track.head.stream_index,
+          track.head.frame ? track.head.frame->get()->pts : AV_NOPTS_VALUE,
+          track.head.time_base.num, track.head.time_base.den);
     // A fresh head ends the source wait. Syncer retains its own hard pause
     // after a forward-fill batch, including when another track woke us.
     if (track.head.status != AvDecoderReadStatus::kNull)
@@ -242,6 +251,12 @@ class Scheduler::Impl final {
       track.task = std::move(input);
       track.busy = true;
       track.requested = true;
+      MW_LOG_TRACE(
+          "streamer",
+          "Scheduler[{}] 派发处理: track={} status={} stream={} pts={}",
+          fmt::ptr(this), index == 0 ? "video" : "audio",
+          static_cast<int>(track.task.status), track.task.stream_index,
+          track.task.frame ? track.task.frame->get()->pts : AV_NOPTS_VALUE);
     }
     work_ready_[index].notify_one();
   }
@@ -265,8 +280,13 @@ class Scheduler::Impl final {
       }
     }
     if (track.source_head.status == AvDecoderReadStatus::kFrame) {
-      const auto decision =
-          realtime_.Schedule(InputPts(track.source_head), now);
+      const auto pts_us = InputPts(track.source_head);
+      const auto decision = realtime_.Schedule(pts_us, now);
+      MW_LOG_TRACE("streamer",
+                   "Scheduler[{}] 实时调度决策: track={} pts_us={} now_us={} "
+                   "ready={} discard={} wake_us={}",
+                   fmt::ptr(this), index == 0 ? "video" : "audio", pts_us, now,
+                   decision.ready, decision.discard, decision.wake_us);
       if (decision.discard) {
         track.source_head = {};
         return now;
@@ -301,6 +321,15 @@ class Scheduler::Impl final {
         track.head.status == AvDecoderReadStatus::kNull ? nullptr : &track.head;
     const auto& output = index == 0 ? on_video_frame_ : on_audio_frame_;
     auto step = syncer_.Step(index == 0, head, now, output);
+    if (head || step.frame || step.blocked)
+      MW_LOG_TRACE("streamer",
+                   "Scheduler[{}] 同步交付结果: track={} now_us={} "
+                   "has_input={} consumed={} output_pts={} blocked={} "
+                   "wake_us={}",
+                   fmt::ptr(this), index == 0 ? "video" : "audio", now,
+                   head != nullptr, step.consumed,
+                   step.frame ? step.frame->get()->pts : AV_NOPTS_VALUE,
+                   step.blocked, step.wake_us);
     if (step.consumed) track.head = {};
     track.syncer_wake_us = step.wake_us;
     if (step.blocked) {

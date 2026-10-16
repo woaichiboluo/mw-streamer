@@ -42,6 +42,12 @@ ffmpeg::Frame Video(std::uint8_t pixel = 12) {
   return frame;
 }
 
+ffmpeg::Frame InvalidFrame() {
+  ffmpeg::Frame frame;
+  const auto owned = std::move(frame);
+  return frame;
+}
+
 ffmpeg::Frame Audio(std::int16_t sample = 34) {
   ffmpeg::Frame frame;
   frame->format = AV_SAMPLE_FMT_S16;
@@ -251,6 +257,136 @@ TEST_CASE("Session callbacks have explicit lifecycle semantics",
   REQUIRE_FALSE(filter.error());
   REQUIRE_NOTHROW(filter.Stop());
   REQUIRE(stops == 1);
+}
+
+TEST_CASE("Frame consumers ignore invalid business callback output",
+          "[media_filter]") {
+  AvMediaFilter filter;
+  int videos = 0;
+  int audios = 0;
+  filter.SetOnVideo([&](const ffmpeg::Frame&) {
+    ++videos;
+    return InvalidFrame();
+  });
+  filter.SetOnAudio([&](const ffmpeg::Frame&) {
+    ++audios;
+    return InvalidFrame();
+  });
+  filter.Start();
+  REQUIRE_NOTHROW(filter.ConsumeVideo(Input(Video())));
+  REQUIRE_NOTHROW(filter.ConsumeAudio(Input(Audio())));
+  REQUIRE(videos == 1);
+  REQUIRE(audios == 1);
+  REQUIRE_FALSE(filter.error());
+  REQUIRE_THROWS_AS(filter.ProcessVideo(Input(Video())), std::invalid_argument);
+  REQUIRE(filter.error());
+  REQUIRE_THROWS_AS(filter.ConsumeAudio(Input(Audio())), std::logic_error);
+}
+
+TEST_CASE("Consumer callback failures retain their original exception",
+          "[media_filter]") {
+  AvMediaFilter filter;
+  const auto failure = std::make_exception_ptr(std::runtime_error("Consume"));
+  filter.SetOnAudio([&](const ffmpeg::Frame&) -> ffmpeg::Frame {
+    std::rethrow_exception(failure);
+  });
+  int stopped = 0;
+  filter.SetOnStop([&] { ++stopped; });
+  filter.Start();
+  REQUIRE_THROWS_AS(filter.ConsumeAudio(Input(Audio())), std::runtime_error);
+  REQUIRE(filter.error() == failure);
+  REQUIRE_THROWS_AS(filter.Reset(), std::logic_error);
+  REQUIRE_NOTHROW(filter.Stop());
+  REQUIRE(stopped == 1);
+}
+
+TEST_CASE("Explicit reset clears business history without restarting filters",
+          "[media_filter]") {
+  AvMediaFilter filter;
+  int starts = 0;
+  int resets = 0;
+  int history = 0;
+  filter.SetOnStart([&] { ++starts; });
+  filter.SetOnReset([&] {
+    ++resets;
+    history = 0;
+  });
+  filter.SetOnVideo([&](const ffmpeg::Frame& frame) {
+    ++history;
+    return frame.Ref();
+  });
+  REQUIRE_THROWS_AS(filter.Reset(), std::logic_error);
+  filter.Start();
+  REQUIRE_THROWS_AS(filter.SetOnReset({}), std::logic_error);
+  filter.ConsumeVideo(Input(Video()));
+  AvDecoderReadResult eof;
+  eof.status = AvDecoderReadStatus::kEof;
+  filter.ConsumeVideo(eof);
+  REQUIRE(filter.ProcessAudio(eof).status == AvDecoderReadStatus::kEof);
+  REQUIRE(resets == 0);
+  REQUIRE(history == 1);
+  filter.Reset();
+  REQUIRE(resets == 1);
+  REQUIRE(history == 0);
+  filter.ConsumeVideo(Input(Video()));
+  REQUIRE(history == 1);
+  REQUIRE(starts == 1);
+  filter.Stop();
+  filter.SetOnReset({});
+  filter.Start();
+  REQUIRE_NOTHROW(filter.Reset());
+}
+
+TEST_CASE("Reset waits for an active consumer before invoking its callback",
+          "[media_filter]") {
+  AvMediaFilter filter;
+  std::promise<void> entered;
+  auto entry = entered.get_future();
+  std::promise<void> release;
+  auto released = release.get_future().share();
+  std::atomic<bool> consumed = false;
+  bool consumed_at_reset = false;
+  filter.SetOnVideo([&](const ffmpeg::Frame&) {
+    entered.set_value();
+    released.wait();
+    consumed = true;
+    return InvalidFrame();
+  });
+  filter.SetOnReset([&] { consumed_at_reset = consumed.load(); });
+  filter.Start();
+  auto consumer = std::async(std::launch::async,
+                             [&] { filter.ConsumeVideo(Input(Video())); });
+  const auto started = entry.wait_for(2s);
+  auto reset = std::async(std::launch::async, [&] { filter.Reset(); });
+  const auto pending = reset.wait_for(40ms);
+  release.set_value();
+  consumer.get();
+  reset.get();
+  REQUIRE(started == std::future_status::ready);
+  REQUIRE(pending == std::future_status::timeout);
+  REQUIRE(consumed_at_reset);
+  REQUIRE_NOTHROW(filter.Stop());
+}
+
+TEST_CASE("Reset callback failures poison the session but still allow Stop",
+          "[media_filter]") {
+  AvMediaFilter filter;
+  const auto failure = std::make_exception_ptr(std::runtime_error("Reset"));
+  filter.SetOnReset([&] { std::rethrow_exception(failure); });
+  int stops = 0;
+  filter.SetOnStop([&] { ++stops; });
+  filter.Start();
+  REQUIRE_THROWS_AS(filter.Reset(), std::runtime_error);
+  REQUIRE(filter.error() == failure);
+  REQUIRE_THROWS_AS(filter.ConsumeVideo(Input(Video())), std::logic_error);
+  REQUIRE_THROWS_AS(filter.ProcessAudio(Input(Audio())), std::logic_error);
+  REQUIRE_NOTHROW(filter.Stop());
+  REQUIRE(stops == 1);
+  filter.SetOnReset({});
+  filter.Start();
+  REQUIRE_FALSE(filter.error());
+  REQUIRE_NOTHROW(filter.Reset());
+  REQUIRE_NOTHROW(filter.ConsumeVideo(Input(Video())));
 }
 
 TEST_CASE("Destruction stops an active session even when Stop throws",
