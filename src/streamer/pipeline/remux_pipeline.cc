@@ -397,7 +397,7 @@ class RemuxPipeline::Impl final {
           "streamer",
           "RemuxPipeline 建立取包时间基准: instance={} dts_us={} speed={}",
           static_cast<const void*>(this), dts_us, speed_);
-      media_clock_ = dts_us;
+      media_clock_ = static_cast<long double>(dts_us);
       clock_wall_ = now;
     }
     MW_LOG_TRACE("streamer",

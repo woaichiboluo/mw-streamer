@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_exception.hpp>
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -29,6 +30,15 @@ using mw::streamer::AvDecoderReadResult;
 using mw::streamer::AvDecoderReadStatus;
 using mw::streamer::AvMediaFilter;
 namespace ffmpeg = mw::streamer::ffmpeg;
+
+template <typename Exception>
+void CheckException(const std::exception_ptr& error,
+                    const std::string& message) {
+  REQUIRE(error);
+  // Recapturing an exception may copy it; its identity is not portable.
+  REQUIRE_THROWS_MATCHES(std::rethrow_exception(error), Exception,
+                         Catch::Matchers::Message(message));
+}
 
 ffmpeg::Frame Video(std::uint8_t pixel = 12) {
   ffmpeg::Frame frame;
@@ -216,16 +226,16 @@ TEST_CASE("Callback failures require a fresh filter session",
   });
   filter.Start();
   REQUIRE_THROWS_AS(filter.ProcessVideo(Input(Video())), BusinessError);
-  REQUIRE(filter.error() == failure);
-  REQUIRE_THROWS_AS(std::rethrow_exception(filter.error()), BusinessError);
+  const auto error = filter.error();
+  CheckException<BusinessError>(error, "Business processing failed");
   REQUIRE_THROWS_AS(filter.ProcessAudio(Input(Audio())), std::logic_error);
-  REQUIRE(filter.error() == failure);
+  REQUIRE(filter.error() == error);
   filter.Stop();
   REQUIRE(stops == 1);
-  REQUIRE(filter.error() == failure);
+  REQUIRE(filter.error() == error);
   filter.SetOnStart([] { throw std::runtime_error("Start failed"); });
   REQUIRE_THROWS_AS(filter.Start(), std::runtime_error);
-  REQUIRE(filter.error() == failure);
+  REQUIRE(filter.error() == error);
   filter.SetOnStart({});
   filter.SetOnVideo({});
   filter.Start();
@@ -294,10 +304,12 @@ TEST_CASE("Consumer callback failures retain their original exception",
   filter.SetOnStop([&] { ++stopped; });
   filter.Start();
   REQUIRE_THROWS_AS(filter.ConsumeAudio(Input(Audio())), std::runtime_error);
-  REQUIRE(filter.error() == failure);
+  const auto error = filter.error();
+  CheckException<std::runtime_error>(error, "Consume");
   REQUIRE_THROWS_AS(filter.Reset(), std::logic_error);
   REQUIRE_NOTHROW(filter.Stop());
   REQUIRE(stopped == 1);
+  REQUIRE(filter.error() == error);
 }
 
 TEST_CASE("Explicit reset clears business history without restarting filters",
@@ -377,11 +389,13 @@ TEST_CASE("Reset callback failures poison the session but still allow Stop",
   filter.SetOnStop([&] { ++stops; });
   filter.Start();
   REQUIRE_THROWS_AS(filter.Reset(), std::runtime_error);
-  REQUIRE(filter.error() == failure);
+  const auto error = filter.error();
+  CheckException<std::runtime_error>(error, "Reset");
   REQUIRE_THROWS_AS(filter.ConsumeVideo(Input(Video())), std::logic_error);
   REQUIRE_THROWS_AS(filter.ProcessAudio(Input(Audio())), std::logic_error);
   REQUIRE_NOTHROW(filter.Stop());
   REQUIRE(stops == 1);
+  REQUIRE(filter.error() == error);
   filter.SetOnReset({});
   filter.Start();
   REQUIRE_FALSE(filter.error());
@@ -601,8 +615,8 @@ TEST_CASE("A failing callback leaves the concurrent callback able to finish",
   REQUIRE(video_failed_while_audio_blocked == std::future_status::ready);
   REQUIRE(stop_while_audio_blocked == std::future_status::timeout);
   REQUIRE_FALSE(audio_error);
-  REQUIRE(video_error);
-  REQUIRE(filter.error() == video_error);
+  CheckException<std::runtime_error>(video_error, "Video callback failed");
+  CheckException<std::runtime_error>(filter.error(), "Video callback failed");
   REQUIRE_FALSE(stop_error);
   filter.SetOnAudio({});
   REQUIRE_NOTHROW(filter.Start());
