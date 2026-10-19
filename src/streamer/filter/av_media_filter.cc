@@ -4,17 +4,136 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <utility>
 
+#if defined(_WIN32)
+#include <Windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
+extern "C" {
+#include <ffnvcodec/dynlink_cuda.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_cuda.h>
+}
+
 #include "mw/log.h"
 #include "mw/streamer/performance/latency.h"
 
 namespace mw::streamer {
 namespace {
+
+// Load lazily: CPU and audio callbacks must work without an NVIDIA driver.
+class CudaDriver final {
+ public:
+  CudaDriver() {
+#if defined(_WIN32)
+    library_ = LoadLibraryW(L"nvcuda.dll");
+#else
+    library_ = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+#endif
+    if (!library_) throw std::runtime_error("无法加载滤镜 CUDA 驱动");
+    try {
+      push = Load<tcuCtxPushCurrent_v2*>("cuCtxPushCurrent_v2");
+      pop = Load<tcuCtxPopCurrent_v2*>("cuCtxPopCurrent_v2");
+    } catch (...) {
+      Close();
+      throw;
+    }
+  }
+  ~CudaDriver() { Close(); }
+  CudaDriver(const CudaDriver&) = delete;
+  CudaDriver& operator=(const CudaDriver&) = delete;
+
+  tcuCtxPushCurrent_v2* push = nullptr;
+  tcuCtxPopCurrent_v2* pop = nullptr;
+
+ private:
+  template <typename Function>
+  Function Load(const char* name) {
+#if defined(_WIN32)
+    const auto symbol = GetProcAddress(library_, name);
+#else
+    const auto symbol = dlsym(library_, name);
+#endif
+    if (!symbol) throw std::runtime_error("CUDA 驱动缺少滤镜上下文接口");
+    Function function = nullptr;
+    static_assert(sizeof(function) == sizeof(symbol));
+    std::memcpy(&function, &symbol, sizeof(function));
+    return function;
+  }
+
+  void Close() noexcept {
+#if defined(_WIN32)
+    FreeLibrary(library_);
+#else
+    dlclose(library_);
+#endif
+  }
+
+#if defined(_WIN32)
+  HMODULE library_ = nullptr;
+#else
+  void* library_ = nullptr;
+#endif
+};
+
+class VideoContextScope final {
+ public:
+  VideoContextScope(const AVFrame& frame, bool video) {
+    if (!video || frame.format != AV_PIX_FMT_CUDA) return;
+    if (!frame.hw_frames_ctx || !frame.hw_frames_ctx->data) {
+      throw std::invalid_argument("CUDA 滤镜帧缺少硬件帧上下文");
+    }
+    const auto* frames =
+        reinterpret_cast<const AVHWFramesContext*>(frame.hw_frames_ctx->data);
+    if (!frames->device_ctx ||
+        frames->device_ctx->type != AV_HWDEVICE_TYPE_CUDA ||
+        !frames->device_ctx->hwctx) {
+      throw std::invalid_argument("CUDA 滤镜帧缺少 CUDA 设备上下文");
+    }
+    const auto* context =
+        static_cast<const AVCUDADeviceContext*>(frames->device_ctx->hwctx);
+    if (!context->cuda_ctx) {
+      throw std::invalid_argument("CUDA 滤镜设备上下文无效");
+    }
+    static const CudaDriver driver;
+    if (driver.push(context->cuda_ctx) != CUDA_SUCCESS) {
+      throw std::runtime_error("无法绑定滤镜 CUDA 上下文");
+    }
+    driver_ = &driver;
+  }
+
+  ~VideoContextScope() {
+    if (driver_ && Pop() != CUDA_SUCCESS) {
+      MW_LOG_ERROR("streamer", "异常退出滤镜时恢复 CUDA 上下文失败");
+    }
+  }
+  VideoContextScope(const VideoContextScope&) = delete;
+  VideoContextScope& operator=(const VideoContextScope&) = delete;
+
+  void Finish() {
+    if (driver_ && Pop() != CUDA_SUCCESS) {
+      throw std::runtime_error("恢复滤镜 CUDA 上下文失败");
+    }
+  }
+
+ private:
+  CUresult Pop() noexcept {
+    CUcontext previous = nullptr;
+    const auto result = driver_->pop(&previous);
+    driver_ = nullptr;
+    return result;
+  }
+
+  const CudaDriver* driver_ = nullptr;
+};
 
 void LogFailure(const void* instance, const char* operation,
                 std::exception_ptr error, int stream_index = -1) noexcept {
@@ -163,7 +282,9 @@ class AvMediaFilter::Impl final {
     const auto started = latency.Begin();
     std::optional<std::int64_t> elapsed;
     try {
+      VideoContextScope context(*source, video);
       auto output = callback(*input.frame);
+      context.Finish();
       if (latency.enabled()) {
         elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
                       internal::StageLatency::Clock::now() - started)

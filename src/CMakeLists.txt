@@ -10,6 +10,7 @@ add_library(mw::log ALIAS mw_log)
 target_include_directories(mw_log
     PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 
 target_link_libraries(mw_log
@@ -79,11 +80,15 @@ endif()
 add_library(mw::streamer ALIAS mw_streamer)
 target_include_directories(mw_streamer PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
+target_compile_features(mw_streamer PUBLIC cxx_std_17)
+target_include_directories(mw_streamer SYSTEM PRIVATE
+    "${PROJECT_SOURCE_DIR}/third_party/nv-codec-headers/include")
 target_link_libraries(mw_streamer
     PUBLIC mw::log FFmpeg::avformat FFmpeg::avcodec FFmpeg::avutil FFmpeg::avfilter
     PRIVATE fmt::fmt Threads::Threads FFmpeg::avdevice FFmpeg::swresample
-        ZLMediaKit::MediaKit ZLMediaKit::ext-codec
+        ZLMediaKit::MediaKit ZLMediaKit::ext-codec ${CMAKE_DL_LIBS}
 )
 if(WIN32)
     target_link_libraries(mw_streamer PRIVATE winmm)
@@ -95,11 +100,48 @@ if(BUILD_TESTS AND BUILD_SHARED)
     target_compile_definitions(mw_streamer_test_static PUBLIC MW_STREAMER_STATIC_LIBRARY)
     target_include_directories(mw_streamer_test_static PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>")
+    target_include_directories(mw_streamer_test_static SYSTEM PRIVATE
+        "${PROJECT_SOURCE_DIR}/third_party/nv-codec-headers/include")
     target_link_libraries(mw_streamer_test_static PUBLIC
         mw::log FFmpeg::avformat FFmpeg::avcodec FFmpeg::avutil FFmpeg::avfilter
         PRIVATE fmt::fmt Threads::Threads FFmpeg::avdevice FFmpeg::swresample
-            ZLMediaKit::MediaKit ZLMediaKit::ext-codec)
+            ZLMediaKit::MediaKit ZLMediaKit::ext-codec ${CMAKE_DL_LIBS})
     if(WIN32)
         target_link_libraries(mw_streamer_test_static PRIVATE winmm)
     endif()
+endif()
+
+if(BUILD_FRAME_CONVTER)
+    if(NOT CUDAToolkit_ROOT AND CUDA_TOOLKIT_ROOT_DIR)
+        set(CUDAToolkit_ROOT "${CUDA_TOOLKIT_ROOT_DIR}")
+    endif()
+    find_package(CUDAToolkit REQUIRED)
+    if(NOT CMAKE_CUDA_COMPILER AND NOT DEFINED ENV{CUDACXX})
+        set(CMAKE_CUDA_COMPILER "${CUDAToolkit_NVCC_EXECUTABLE}")
+    endif()
+    enable_language(CUDA)
+    find_package(OpenCV REQUIRED CONFIG COMPONENTS core)
+    find_package(FFmpeg REQUIRED COMPONENTS SWSCALE)
+    set(MW_FRAME_CONVTER_SOURCES
+        frame_convter/opencv_cpu_convter.cc
+        frame_convter/opencv_cuda_convter.cc
+        frame_convter/cuda_pixels.cu)
+    if(BUILD_SHARED)
+        add_library(mw_frame_convter SHARED ${MW_FRAME_CONVTER_SOURCES})
+        target_compile_definitions(mw_frame_convter PRIVATE MW_FRAME_CONVTER_BUILDING_LIBRARY)
+        set_target_properties(mw_frame_convter PROPERTIES
+            CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
+    else()
+        add_library(mw_frame_convter STATIC ${MW_FRAME_CONVTER_SOURCES})
+        target_compile_definitions(mw_frame_convter PUBLIC MW_FRAME_CONVTER_STATIC_LIBRARY)
+    endif()
+    add_library(mw::frame_convter ALIAS mw_frame_convter)
+    target_compile_features(mw_frame_convter PUBLIC cxx_std_17)
+    set_target_properties(mw_frame_convter PROPERTIES
+        CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED YES
+        CUDA_RUNTIME_LIBRARY Shared)
+    target_link_libraries(mw_frame_convter
+        PUBLIC mw::streamer opencv_core
+        PRIVATE FFmpeg::swscale
+            CUDA::cuda_driver CUDA::cudart CUDA::nppicc CUDA::nppc)
 endif()

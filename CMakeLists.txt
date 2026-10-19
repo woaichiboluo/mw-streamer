@@ -4,7 +4,14 @@ cmake_policy(SET CMP0091 NEW)
 
 project(mw_streamer VERSION 0.1.0 LANGUAGES C CXX)
 
-option(BUILD_SHARED "Build mw::log and mw::streamer as shared libraries" OFF)
+# Keep a development build's default installation inside its build directory.
+if(PROJECT_IS_TOP_LEVEL AND CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    set(CMAKE_INSTALL_PREFIX "${PROJECT_BINARY_DIR}/install" CACHE PATH
+        "Installation directory" FORCE)
+endif()
+
+option(BUILD_SHARED "Build first-party libraries as shared libraries" OFF)
+option(BUILD_FRAME_CONVTER "Build the optional OpenCV frame conversion library" OFF)
 option(BUILD_TESTS "Build tests for refactored modules" ${PROJECT_IS_TOP_LEVEL})
 set(BUILD_SHARED_LIBS OFF)
 
@@ -23,6 +30,7 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
+include(GNUInstallDirs)
 include(cmake/Dependencies.cmake)
 
 find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVFORMAT AVUTIL AVFILTER AVDEVICE SWRESAMPLE)
@@ -56,6 +64,7 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 endif()
 
 add_subdirectory(src)
+include(cmake/Install.cmake)
 
 if(BUILD_TESTS)
     enable_testing()
@@ -76,4 +85,8 @@ if(BUILD_TESTS)
     add_subdirectory(tests/performance)
     add_subdirectory(tests/remuxer)
     add_subdirectory(tests/recorder)
+    if(BUILD_FRAME_CONVTER)
+        add_subdirectory(tests/frame_convter)
+    endif()
+    add_subdirectory(tests/install)
 endif()

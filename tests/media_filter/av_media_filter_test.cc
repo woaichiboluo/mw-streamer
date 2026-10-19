@@ -5,6 +5,7 @@
 #include <catch2/matchers/catch_matchers_exception.hpp>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <future>
 #include <memory>
@@ -14,9 +15,17 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#include <Windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
 extern "C" {
+#include <ffnvcodec/dynlink_cuda.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_cuda.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/samplefmt.h>
 }
@@ -30,6 +39,64 @@ using mw::streamer::AvDecoderReadResult;
 using mw::streamer::AvDecoderReadStatus;
 using mw::streamer::AvMediaFilter;
 namespace ffmpeg = mw::streamer::ffmpeg;
+
+class TestCudaDriver final {
+ public:
+  using SetCurrent = CUresult(CUDAAPI*)(CUcontext);
+
+  TestCudaDriver() {
+#if defined(_WIN32)
+    library_ = LoadLibraryW(L"nvcuda.dll");
+#else
+    library_ = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+#endif
+    if (!library_) throw std::runtime_error("Cannot load CUDA driver");
+    try {
+      current = Load<tcuCtxGetCurrent*>("cuCtxGetCurrent");
+      set = Load<SetCurrent>("cuCtxSetCurrent");
+      push = Load<tcuCtxPushCurrent_v2*>("cuCtxPushCurrent_v2");
+      pop = Load<tcuCtxPopCurrent_v2*>("cuCtxPopCurrent_v2");
+    } catch (...) {
+      Close();
+      throw;
+    }
+  }
+  ~TestCudaDriver() { Close(); }
+  TestCudaDriver(const TestCudaDriver&) = delete;
+  TestCudaDriver& operator=(const TestCudaDriver&) = delete;
+
+  tcuCtxGetCurrent* current = nullptr;
+  SetCurrent set = nullptr;
+  tcuCtxPushCurrent_v2* push = nullptr;
+  tcuCtxPopCurrent_v2* pop = nullptr;
+
+ private:
+  template <typename Function>
+  Function Load(const char* name) {
+#if defined(_WIN32)
+    const auto symbol = GetProcAddress(library_, name);
+#else
+    const auto symbol = dlsym(library_, name);
+#endif
+    if (!symbol) throw std::runtime_error("Cannot load CUDA context function");
+    Function function = nullptr;
+    static_assert(sizeof(function) == sizeof(symbol));
+    std::memcpy(&function, &symbol, sizeof(function));
+    return function;
+  }
+  void Close() noexcept {
+#if defined(_WIN32)
+    FreeLibrary(library_);
+#else
+    dlclose(library_);
+#endif
+  }
+#if defined(_WIN32)
+  HMODULE library_ = nullptr;
+#else
+  void* library_ = nullptr;
+#endif
+};
 
 template <typename Exception>
 void CheckException(const std::exception_ptr& error,
@@ -655,6 +722,122 @@ TEST_CASE("CUDA business filters retain hardware surfaces and input timing",
   CheckTiming(output);
   REQUIRE((*output.frame)->data[0] == surface);
   REQUIRE((*output.frame)->hw_frames_ctx->data == frame_context);
+}
+
+TEST_CASE("CUDA video callbacks reject missing hardware context before calling",
+          "[media_filter]") {
+  ffmpeg::Frame frame;
+  frame->format = AV_PIX_FMT_CUDA;
+  bool called = false;
+  AvMediaFilter filter;
+  filter.SetOnVideo([&](const ffmpeg::Frame& input) {
+    called = true;
+    return input.Ref();
+  });
+  filter.Start();
+  REQUIRE_THROWS_AS(filter.ProcessVideo(Input(std::move(frame))),
+                    std::invalid_argument);
+  REQUIRE_FALSE(called);
+  REQUIRE(filter.error());
+  filter.Stop();
+}
+
+TEST_CASE("CUDA video callbacks bind frame context and restore the caller",
+          "[.][media_filter][cuda]") {
+  ffmpeg::HwDeviceContext device(ffmpeg::HwDeviceType::kCuda);
+  ffmpeg::HwDeviceContext other(ffmpeg::HwDeviceType::kCuda);
+  const auto* native_device =
+      reinterpret_cast<const AVHWDeviceContext*>(device.get()->data);
+  const auto* native_other =
+      reinterpret_cast<const AVHWDeviceContext*>(other.get()->data);
+  const auto expected =
+      static_cast<const AVCUDADeviceContext*>(native_device->hwctx)->cuda_ctx;
+  const auto previous =
+      static_cast<const AVCUDADeviceContext*>(native_other->hwctx)->cuda_ctx;
+  REQUIRE(expected != previous);
+  std::unique_ptr<AVBufferRef, void (*)(AVBufferRef*)> frames(
+      av_hwframe_ctx_alloc(device.get()),
+      [](AVBufferRef* reference) { av_buffer_unref(&reference); });
+  REQUIRE(frames != nullptr);
+  auto* context = reinterpret_cast<AVHWFramesContext*>(frames->data);
+  context->format = AV_PIX_FMT_CUDA;
+  context->sw_format = AV_PIX_FMT_NV12;
+  context->width = 128;
+  context->height = 128;
+  REQUIRE(av_hwframe_ctx_init(frames.get()) >= 0);
+  ffmpeg::Frame frame;
+  REQUIRE(av_hwframe_get_buffer(frames.get(), frame.get(), 0) >= 0);
+  const TestCudaDriver driver;
+  bool fail = false;
+  bool switch_context = false;
+  CUcontext observed = nullptr;
+  CUcontext switched = nullptr;
+  CUcontext returned = nullptr;
+  AvMediaFilter filter;
+  filter.SetOnVideo([&](const ffmpeg::Frame& input) {
+    if (driver.current(&observed) != CUDA_SUCCESS) {
+      throw std::runtime_error("Cannot query callback CUDA context");
+    }
+    if (switch_context) {
+      if (driver.set(previous) != CUDA_SUCCESS ||
+          driver.current(&switched) != CUDA_SUCCESS ||
+          driver.set(expected) != CUDA_SUCCESS ||
+          driver.current(&returned) != CUDA_SUCCESS) {
+        throw std::runtime_error("Cannot switch callback CUDA context");
+      }
+    }
+    if (fail) throw std::runtime_error("Video callback failed");
+    return input.Ref();
+  });
+  filter.Start();
+
+  // A fresh scheduler-like worker starts without a CUDA context. Binding must
+  // cover the callback and restore this empty state afterward.
+  auto worker = std::async(std::launch::async, [&] {
+    CUcontext before = nullptr;
+    CUcontext after = nullptr;
+    const auto queried_before = driver.current(&before);
+    auto output = filter.ProcessVideo(Input(frame.Ref()));
+    const auto queried_after = driver.current(&after);
+    return queried_before == CUDA_SUCCESS && queried_after == CUDA_SUCCESS &&
+           before == nullptr && after == before && output.frame.has_value();
+  });
+  REQUIRE(worker.get());
+  REQUIRE(observed == expected);
+
+  // A caller may already own a different current context. Both consumption
+  // and throwing callbacks must preserve that exact context.
+  REQUIRE(driver.push(previous) == CUDA_SUCCESS);
+  struct RestoreContext final {
+    const TestCudaDriver& driver;
+    ~RestoreContext() {
+      CUcontext ignored = nullptr;
+      driver.pop(&ignored);
+    }
+  } restore{driver};
+  // Business processing may temporarily use another context. Rebinding the
+  // frame context before conversion must preserve the caller's context stack.
+  switch_context = true;
+  REQUIRE_NOTHROW(filter.ConsumeVideo(Input(frame.Ref())));
+  REQUIRE(observed == expected);
+  REQUIRE(switched == previous);
+  REQUIRE(returned == expected);
+  CUcontext restored = nullptr;
+  REQUIRE(driver.current(&restored) == CUDA_SUCCESS);
+  REQUIRE(restored == previous);
+  switched = nullptr;
+  returned = nullptr;
+  fail = true;
+  REQUIRE_THROWS_MATCHES(filter.ProcessVideo(Input(frame.Ref())),
+                         std::runtime_error,
+                         Catch::Matchers::Message("Video callback failed"));
+  REQUIRE(observed == expected);
+  REQUIRE(switched == previous);
+  REQUIRE(returned == expected);
+  REQUIRE(driver.current(&restored) == CUDA_SUCCESS);
+  REQUIRE(restored == previous);
+  CheckException<std::runtime_error>(filter.error(), "Video callback failed");
+  filter.Stop();
 }
 
 }  // namespace

@@ -28,6 +28,19 @@ set(FFMPEG_ROOT "" CACHE PATH "FFmpeg installation prefix")
 
 find_package(PkgConfig REQUIRED)
 
+# pkg-config also resolves Requires/Requires.private from sibling .pc files.
+# An absolute path to the requested .pc file alone does not cover those.
+set(_FFMPEG_SAVED_PKG_CONFIG_PATH "$ENV{PKG_CONFIG_PATH}")
+if(FFMPEG_ROOT)
+  if(CMAKE_HOST_WIN32)
+    set(_FFMPEG_PC_SEPARATOR ";")
+  else()
+    set(_FFMPEG_PC_SEPARATOR ":")
+  endif()
+  set(ENV{PKG_CONFIG_PATH}
+    "${FFMPEG_ROOT}/lib/pkgconfig${_FFMPEG_PC_SEPARATOR}${FFMPEG_ROOT}/lib64/pkgconfig${_FFMPEG_PC_SEPARATOR}${FFMPEG_ROOT}/share/pkgconfig${_FFMPEG_PC_SEPARATOR}$ENV{PKG_CONFIG_PATH}")
+endif()
+
 set(_FFMPEG_ROOT_INCLUDE_HINTS)
 set(_FFMPEG_ROOT_LIBRARY_HINTS)
 if(FFMPEG_ROOT)
@@ -427,6 +440,7 @@ foreach(_requested_component IN LISTS FFmpeg_FIND_COMPONENTS)
   )
 endforeach()
 
+set(ENV{PKG_CONFIG_PATH} "${_FFMPEG_SAVED_PKG_CONFIG_PATH}")
 unset(_library)
 
 foreach(_aggregate_variable IN ITEMS

@@ -30,6 +30,9 @@ class MW_STREAMER_API AvMediaFilter final {
   // frame; use writable/private storage when modifying pixels or samples.
   // Missing callbacks pass the original frame through. Callbacks change media
   // content only; the component preserves input timing on the returned header.
+  // CUDA video callbacks run with the input frame's CUDA context current on
+  // the calling thread. The previous context is restored on return or throw.
+  // Callbacks must restore any context stack changes they make themselves.
   using OnAudio = std::function<ffmpeg::Frame(const ffmpeg::Frame&)>;
   using OnVideo = std::function<ffmpeg::Frame(const ffmpeg::Frame&)>;
 

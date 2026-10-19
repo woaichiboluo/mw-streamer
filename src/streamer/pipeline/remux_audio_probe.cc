@@ -155,7 +155,8 @@ void CompareFrames(const AVFrame& expected, const AVFrame& actual) {
   if (bytes <= 0 || channels <= 0)
     throw std::runtime_error("AAC 探测帧缺少有效采样格式");
   const auto plane_bytes = static_cast<std::size_t>(expected.nb_samples) *
-                           bytes * (planar ? 1 : channels);
+                           static_cast<std::size_t>(bytes) *
+                           static_cast<std::size_t>(planar ? 1 : channels);
   for (int plane = 0; plane < (planar ? channels : 1); ++plane) {
     if (!expected.extended_data[plane] || !actual.extended_data[plane] ||
         std::memcmp(expected.extended_data[plane], actual.extended_data[plane],

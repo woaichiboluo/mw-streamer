@@ -7,7 +7,7 @@ if(NOT TARGET fmt::fmt)
     set(FMT_TEST OFF CACHE BOOL "Build fmt tests" FORCE)
     set(FMT_FUZZ OFF CACHE BOOL "Build fmt fuzzers" FORCE)
     set(FMT_CUDA_TEST OFF CACHE BOOL "Build fmt CUDA tests" FORCE)
-    set(FMT_INSTALL OFF CACHE BOOL "Generate fmt install targets" FORCE)
+    set(FMT_INSTALL ON CACHE BOOL "Generate fmt install targets" FORCE)
     set(FMT_MODULE OFF CACHE BOOL "Build fmt as a C++ module" FORCE)
 
     FetchContent_Declare(
@@ -24,7 +24,7 @@ if(NOT TARGET ZLMediaKit::MediaKit)
     find_package(SRT REQUIRED)
     set(ENABLE_MSVC_MT OFF CACHE BOOL "Use the DLL MSVC runtime in ZLMediaKit" FORCE)
     add_subdirectory("${PROJECT_SOURCE_DIR}/third_party/ZLMediaKit"
-        "${PROJECT_BINARY_DIR}/third_party/ZLMediaKit")
+        "${PROJECT_BINARY_DIR}/third_party/ZLMediaKit" EXCLUDE_FROM_ALL)
     target_link_libraries(ZLToolKit PUBLIC mw::log)
 
     # Treat SDK headers as external while keeping first-party warnings strict.
@@ -59,7 +59,11 @@ if(NOT TARGET spdlog::spdlog)
     set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "Build spdlog tests" FORCE)
     set(SPDLOG_BUILD_TESTS_HO OFF CACHE BOOL "Build spdlog header-only tests" FORCE)
     set(SPDLOG_BUILD_BENCH OFF CACHE BOOL "Build spdlog benchmarks" FORCE)
-    set(SPDLOG_INSTALL OFF CACHE BOOL "Generate spdlog install targets" FORCE)
+    if(BUILD_SHARED)
+        set(SPDLOG_INSTALL OFF CACHE BOOL "Generate spdlog install targets" FORCE)
+    else()
+        set(SPDLOG_INSTALL ON CACHE BOOL "Generate spdlog install targets" FORCE)
+    endif()
 
     FetchContent_Declare(
         spdlog
