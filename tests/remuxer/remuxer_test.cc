@@ -372,7 +372,7 @@ TEST_CASE("Remuxer 本地 MP4 异步录制排空后可以完整解码",
   remuxer.Stop();
 }
 
-TEST_CASE("Remuxer 仅录像保留非标准 NAL 而协议发布仍校验",
+TEST_CASE("Remuxer 录像保留非法 NAL 且协议跳过后继续处理",
           "[remuxer][recording][publish][validation]") {
   const auto runtime = InitRuntime();
   Media media;
@@ -380,16 +380,17 @@ TEST_CASE("Remuxer 仅录像保留非标准 NAL 而协议发布仍校验",
   REQUIRE(parameters->extradata_size >= 5);
   REQUIRE(parameters->extradata[0] == 1);
   const int length_width = (parameters->extradata[4] & 0x03) + 1;
-  auto& malformed = media.packets.back();
+  REQUIRE(media.packets.size() >= 3);
+  auto& malformed = media.packets[media.packets.size() / 2];
   REQUIRE(malformed->size > length_width);
   REQUIRE(av_packet_make_writable(malformed.get()) >= 0);
   // Retain the MP4 sample's length prefix and timestamps, but violate the
-  // forbidden_zero_bit constraint checked by protocol packet conversion.
+  // forbidden_zero_bit constraint handled by protocol packet conversion.
   malformed->data[length_width] |= 0x80;
 
   bool publish = false;
   SECTION("仅 MP4 录像逐包保留输入") {}
-  SECTION("启用 RTSP 发布仍拒绝非法 NAL") { publish = true; }
+  SECTION("启用 RTSP 发布跳过非法 NAL 后继续") { publish = true; }
   OutputDirectory directory;
   Errors errors;
   Remuxer remuxer;
@@ -397,14 +398,6 @@ TEST_CASE("Remuxer 仅录像保留非标准 NAL 而协议发布仍校验",
   const auto output = remuxer.AddPushUrl(directory.File("nonstandard.mp4"));
   if (publish) remuxer.AddRtspPublish("127.0.0.1", ReservePort());
   REQUIRE(remuxer.Start(media.streams));
-  if (publish) {
-    REQUIRE(remuxer.SubmitPacket(malformed));
-    const auto error = errors.Wait();
-    CHECK_THROWS_AS(std::rethrow_exception(error), std::invalid_argument);
-    remuxer.Stop();
-    CHECK(errors.Count() == 1);
-    return;
-  }
   for (const auto& packet : media.packets)
     REQUIRE(remuxer.SubmitPacket(packet));
   remuxer.Drain();

@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -230,16 +231,19 @@ ffmpeg::Packet Packet(const ffmpeg::StreamInfo& stream,
   return packet;
 }
 
-std::vector<std::string> Nals(const ffmpeg::Packet& packet) {
+std::vector<std::string> Nals(const char* data, std::size_t size) {
   std::vector<std::string> result;
-  const auto* data = reinterpret_cast<const char*>(packet->data);
   mediakit::splitH264(
-      data, static_cast<std::size_t>(packet->size),
-      mediakit::prefixSize(data, static_cast<std::size_t>(packet->size)),
-      [&](const char* nal, std::size_t size, std::size_t prefix) {
-        result.emplace_back(nal + prefix, size - prefix);
+      data, size, mediakit::prefixSize(data, size),
+      [&](const char* nal, std::size_t bytes, std::size_t prefix) {
+        result.emplace_back(nal + prefix, bytes - prefix);
       });
   return result;
+}
+
+std::vector<std::string> Nals(const ffmpeg::Packet& packet) {
+  return Nals(reinterpret_cast<const char*>(packet->data),
+              static_cast<std::size_t>(packet->size));
 }
 
 TEST_CASE("真实H264与H265配置准备参数集并保留包缓存和毫秒时间",
@@ -455,6 +459,116 @@ TEST_CASE("avcC与hvcC兼容一至四字节NAL长度和Annex B输入",
         std::string("\0\0\0\1", 4) + padded);
   auto truncated = Packet(stream, std::string("\0\0\0\x7f\x65\x80", 6));
   CHECK_THROWS_AS(converter.Convert(truncated, 20, 40), std::invalid_argument);
+}
+
+TEST_CASE("包转换逐NAL跳过非法头并保留同包有效NAL与后续音视频",
+          "[remuxer][shared][packet][video][validation]") {
+  Runtime runtime;
+  const auto* name = GENERATE("libx264", "libx265");
+  const bool length_prefixed = GENERATE(false, true);
+  const auto encoded = Video(name);
+  const auto audio = Audio();
+  PacketConverter prepared({encoded.stream});
+  const bool hevc =
+      encoded.stream.codec_parameters.get()->codec_id == AV_CODEC_ID_HEVC;
+  const auto configuration =
+      prepared.tracks().front()->getExtraData()->toString();
+  const auto nals = Nals(encoded.packets.front());
+  const auto key = std::find_if(nals.begin(), nals.end(), [&](const auto& nal) {
+    const auto header = static_cast<unsigned char>(nal[0]);
+    const auto type = hevc ? ((header >> 1) & 0x3f) : (header & 0x1f);
+    return hevc ? type >= 16 && type <= 23 : type == 5;
+  });
+  REQUIRE(key != nals.end());
+  REQUIRE(key->size() < 256);
+  const std::string prefix("\0\0\0\1", 4);
+  const std::vector<std::string> expected{*key, *key};
+  for (int width = length_prefixed ? 1 : 0; width <= (length_prefixed ? 4 : 0);
+       ++width) {
+    for (int invalid_header = 0; invalid_header < (hevc ? 2 : 1);
+         ++invalid_header) {
+      CAPTURE(name, width, invalid_header);
+      auto stream = encoded.stream;
+      if (length_prefixed) {
+        auto config = configuration;
+        const auto position = hevc ? 21U : 4U;
+        config[position] = static_cast<char>(
+            (static_cast<unsigned char>(config[position]) & 0xfc) |
+            (width - 1));
+        ExtraData(stream, config);
+      }
+      PacketConverter converter({stream, audio.stream});
+      auto invalid = *key;
+      if (invalid_header == 0) {
+        invalid[0] =
+            static_cast<char>(static_cast<unsigned char>(invalid[0]) | 0x80);
+      } else {
+        invalid[1] =
+            static_cast<char>(static_cast<unsigned char>(invalid[1]) & 0xf8);
+      }
+      const auto payload = [&](const std::vector<std::string>& units) {
+        std::string result;
+        for (const auto& nal : units) {
+          if (length_prefixed) {
+            for (int byte = width - 1; byte >= 0; --byte)
+              result.push_back(static_cast<char>(nal.size() >> (byte * 8)));
+          } else {
+            result += prefix;
+          }
+          result += nal;
+        }
+        return result;
+      };
+      const auto original = payload({*key, invalid, *key});
+      auto packet = Packet(stream, original);
+      const auto* data = packet->data;
+      auto converted = converter.Convert(packet, 20, 0);
+      REQUIRE(converted != nullptr);
+      CHECK(Nals(converted->data(), converted->size()) == expected);
+      CHECK(converted->dts() == 20);
+      CHECK(converted->pts() == 0);
+      CHECK(converted->getIndex() == stream.stream_index);
+      CHECK(converted->cacheAble());
+      CHECK(packet->data == data);
+      CHECK(packet->pts == 0);
+      CHECK(packet->dts == 0);
+      CHECK(std::string(reinterpret_cast<const char*>(packet->data),
+                        static_cast<std::size_t>(packet->size)) == original);
+      packet.Unref();
+      CHECK(Nals(converted->data(), converted->size()) == expected);
+
+      const auto all_invalid = payload({invalid, invalid});
+      auto rejected = Packet(stream, all_invalid);
+      CHECK(converter.Convert(rejected, 40, 40) == nullptr);
+      CHECK(std::string(reinterpret_cast<const char*>(rejected->data),
+                        static_cast<std::size_t>(rejected->size)) ==
+            all_invalid);
+      auto next = converter.Convert(Packet(stream, payload({*key})), 60, 60);
+      REQUIRE(next != nullptr);
+      CHECK(Nals(next->data(), next->size()) == std::vector<std::string>{*key});
+      CHECK(next->dts() == 60);
+      auto next_audio = converter.Convert(audio.packets.front(), 61, 61);
+      REQUIRE(next_audio != nullptr);
+      CHECK(next_audio->getIndex() == audio.stream.stream_index);
+      CHECK(next_audio->data() ==
+            reinterpret_cast<const char*>(audio.packets.front()->data));
+
+      if (length_prefixed) {
+        auto truncated = payload({*key, invalid});
+        for (int byte = width - 1; byte >= 0; --byte)
+          truncated.push_back(static_cast<char>(127U >> (byte * 8)));
+        truncated.push_back((*key)[0]);
+        CHECK_THROWS_AS(converter.Convert(Packet(stream, truncated), 80, 80),
+                        std::invalid_argument);
+      } else {
+        auto truncated = payload({*key, invalid});
+        truncated += prefix;
+        truncated.push_back((*key)[0]);
+        CHECK_THROWS_AS(converter.Convert(Packet(stream, truncated), 80, 80),
+                        std::invalid_argument);
+      }
+    }
+  }
 }
 
 TEST_CASE("AAC使用真实ASC并由Track生成一次ADTS头",

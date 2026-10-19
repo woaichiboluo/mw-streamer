@@ -416,6 +416,7 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
         const auto pts_ms = timestamp.pts_ms;
         auto frame = converter_->Convert(packet.packet, dts_ms, pts_ms);
         convert_latency_.End(convert_started);
+        if (!frame) continue;
         const auto output_started = output_latency_.Begin();
         output_->InputFrame(frame);
         // This measures synchronous dispatch, not asynchronous network writes.

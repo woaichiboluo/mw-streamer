@@ -20,6 +20,8 @@ class PacketConverter final {
   // Annex B packets and AAC configuration in ADTS packets.
   explicit PacketConverter(const std::vector<ffmpeg::StreamInfo>& streams);
   const std::vector<mediakit::Track::Ptr>& tracks() const noexcept;
+  // Invalid video NAL headers are filtered without modifying the input;
+  // returns nullptr if no valid NAL remains. Structural truncation is fatal.
   mediakit::Frame::Ptr Convert(const ffmpeg::Packet& packet,
                                std::uint64_t dts_ms, std::uint64_t pts_ms);
 

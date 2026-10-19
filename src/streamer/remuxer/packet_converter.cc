@@ -1,15 +1,22 @@
 #include "mw/streamer/remuxer/packet_converter.h"
 
 #include <algorithm>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
+extern "C" {
+#include <libavcodec/bsf.h>
+#include <libavutil/opt.h>
+}
+
 #include "Extension/Factory.h"
 #include "Network/Buffer.h"
 #include "ext-codec/AAC.h"
 #include "ext-codec/H264.h"
+#include "mw/streamer/ffmpeg/error.h"
 
 namespace mw::streamer::internal {
 namespace {
@@ -44,30 +51,74 @@ mediakit::CodecId Codec(const AVCodecParameters& parameters) {
   throw std::invalid_argument("Remuxer 仅支持 H264、H265 和 AAC 编码轨道");
 }
 
-void ValidateNal(mediakit::CodecId codec, const char* data, std::size_t size) {
+bool ValidNalHeader(mediakit::CodecId codec, const char* data,
+                    std::size_t size) {
   const auto* bytes = reinterpret_cast<const std::uint8_t*>(data);
-  if (size < (codec == mediakit::CodecH264 ? 2U : 3U) || (bytes[0] & 0x80)) {
-    throw std::invalid_argument("视频 NAL 头部无效或负载截断");
-  }
+  if (size < (codec == mediakit::CodecH264 ? 2U : 3U))
+    throw std::invalid_argument("视频 NAL 负载截断");
+  if (bytes[0] & 0x80) return false;
   if (codec == mediakit::CodecH264) {
     const auto type = bytes[0] & 0x1f;
-    if (type == 0 || type >= 24) {
+    if (type == 0 || type >= 24)
       throw std::invalid_argument("H264 NAL 类型无效");
-    }
-  } else if (!(bytes[1] & 0x07)) {
-    throw std::invalid_argument("H265 NAL temporal_id 无效");
+    return true;
   }
+  return (bytes[1] & 0x07) != 0;
 }
 
-void ValidateAnnexB(mediakit::CodecId codec, const char* data,
-                    std::size_t size) {
+void ValidateNal(mediakit::CodecId codec, const char* data, std::size_t size) {
+  if (!ValidNalHeader(codec, data, size))
+    throw std::invalid_argument("视频 NAL 头部无效");
+}
+
+bool HasInvalidNalHeader(mediakit::CodecId codec, const char* data,
+                         std::size_t size) {
   const auto prefix = mediakit::prefixSize(data, size);
   if (!prefix) throw std::invalid_argument("视频包缺少 Annex B 起始码");
+  bool invalid = false;
   mediakit::splitH264(
       data, size, prefix,
       [&](const char* nal, std::size_t bytes, std::size_t nal_prefix) {
-        ValidateNal(codec, nal + nal_prefix, bytes - nal_prefix);
+        if (!ValidNalHeader(codec, nal + nal_prefix, bytes - nal_prefix))
+          invalid = true;
       });
+  return invalid;
+}
+
+toolkit::Buffer::Ptr FilterInvalidNals(mediakit::CodecId codec,
+                                       const toolkit::Buffer& buffer) {
+  // Use FFmpeg's NAL parser to skip corrupt headers without decoding or
+  // discarding valid NALs from the same packet. Healthy packets bypass this.
+  const auto* filter = av_bsf_get_by_name("filter_units");
+  if (!filter) throw std::runtime_error("FFmpeg 缺少 filter_units 过滤器");
+  AVBSFContext* raw = nullptr;
+  ffmpeg::FfmpegException::throwIfError(av_bsf_alloc(filter, &raw),
+                                        "创建视频 NAL 过滤器");
+  const auto free_filter = [](AVBSFContext* context) { av_bsf_free(&context); };
+  std::unique_ptr<AVBSFContext, decltype(free_filter)> context(raw,
+                                                               free_filter);
+  raw->par_in->codec_type = AVMEDIA_TYPE_VIDEO;
+  raw->par_in->codec_id =
+      codec == mediakit::CodecH264 ? AV_CODEC_ID_H264 : AV_CODEC_ID_HEVC;
+  raw->time_base_in = AVRational{1, 1000};
+  // All NAL types pass; parsing alone removes invalid headers. The input is
+  // already Annex B, so container extradata and length sizes are not needed.
+  ffmpeg::FfmpegException::throwIfError(
+      av_opt_set(raw->priv_data, "pass_types", "0-63", 0),
+      "设置视频 NAL 过滤器");
+  ffmpeg::FfmpegException::throwIfError(av_bsf_init(raw),
+                                        "初始化视频 NAL 过滤器");
+  ffmpeg::Packet packet;
+  ffmpeg::FfmpegException::throwIfError(
+      av_new_packet(packet.get(), static_cast<int>(buffer.size())),
+      "分配视频 NAL 过滤包");
+  std::memcpy(packet->data, buffer.data(), buffer.size());
+  ffmpeg::FfmpegException::throwIfError(av_bsf_send_packet(raw, packet.get()),
+                                        "提交视频 NAL 过滤包");
+  const int result = av_bsf_receive_packet(raw, packet.get());
+  if (result == AVERROR(EAGAIN)) return nullptr;
+  ffmpeg::FfmpegException::throwIfError(result, "过滤视频 NAL 头部");
+  return std::make_shared<PacketBuffer>(packet);
 }
 
 std::uint32_t ReadLength(const std::uint8_t* data, std::size_t size,
@@ -102,12 +153,14 @@ bool LengthPrefixed(mediakit::CodecId codec, const toolkit::Buffer& buffer,
 
 void AppendNal(std::string& output, mediakit::CodecId codec,
                const std::uint8_t* data, std::size_t size, std::size_t& offset,
-               int length_width) {
+               int length_width, bool validate_header = true) {
   const auto length = ReadLength(data, size, offset, length_width);
-  if (length > size - offset) {
+  if (length < (codec == mediakit::CodecH264 ? 2U : 3U) ||
+      length > size - offset) {
     throw std::invalid_argument("视频 NAL 负载截断");
   }
-  ValidateNal(codec, reinterpret_cast<const char*>(data + offset), length);
+  if (validate_header)
+    ValidateNal(codec, reinterpret_cast<const char*>(data + offset), length);
   output.append("\0\0\0\1", 4);
   output.append(reinterpret_cast<const char*>(data + offset), length);
   offset += length;
@@ -185,7 +238,8 @@ PacketConverter::PacketConverter(
       } else {
         config = Configuration(codec, data, size, length_width);
       }
-      ValidateAnnexB(codec, config.data(), config.size());
+      if (HasInvalidNalHeader(codec, config.data(), config.size()))
+        throw std::invalid_argument("视频编码配置 NAL 头部无效");
       auto buffer = std::make_shared<toolkit::BufferString>(std::move(config));
       auto frame = mediakit::Factory::getFrameFromBuffer(codec, buffer, 0, 0);
       frame->setIndex(stream.stream_index);
@@ -233,11 +287,14 @@ mediakit::Frame::Ptr PacketConverter::Convert(const ffmpeg::Packet& packet,
       while (offset < buffer->size()) {
         AppendNal(annex_b, stream->codec,
                   reinterpret_cast<const std::uint8_t*>(buffer->data()),
-                  buffer->size(), offset, stream->nal_length_size);
+                  buffer->size(), offset, stream->nal_length_size, false);
       }
       buffer = std::make_shared<toolkit::BufferString>(std::move(annex_b));
     }
-    ValidateAnnexB(stream->codec, buffer->data(), buffer->size());
+    if (HasInvalidNalHeader(stream->codec, buffer->data(), buffer->size())) {
+      buffer = FilterInvalidNals(stream->codec, *buffer);
+      if (!buffer) return nullptr;
+    }
   }
   auto frame = mediakit::Factory::getFrameFromBuffer(
       stream->codec, std::move(buffer), dts_ms, pts_ms);
