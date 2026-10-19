@@ -160,16 +160,20 @@ std::size_t RemuxCounter(const std::string& line, const char* field) {
   return static_cast<std::size_t>(std::stoull(match[1].str()));
 }
 
-TEST_CASE("Remuxer 内部转换和同步输出按成功处理的包统计并独立结束会话",
+TEST_CASE("Remuxer 只统计实际执行的协议转换和同步输出并独立结束会话",
           "[performance][latency][remuxer]") {
   const RemuxMedia media;
+  bool recording_only = false;
+  SECTION("无外部输出仍执行协议转换") {}
+  SECTION("仅 MP4 录像跳过协议转换且完整排空") { recording_only = true; }
   RemuxerLog logging(mw::log::LogLevel::kInfo);
   {
     std::atomic<bool> failed{false};
     mw::streamer::Remuxer remuxer;
     remuxer.SetOnError([&](std::exception_ptr) { failed = true; });
     for (int session = 0; session < 2; ++session) {
-      const auto planned = remuxer.AddPushUrl(logging.OutputPath());
+      std::string planned;
+      if (recording_only) planned = remuxer.AddPushUrl(logging.OutputPath());
       REQUIRE(remuxer.Start({media.stream}));
       for (const auto& packet : media.packets) {
         REQUIRE(remuxer.SubmitPacket(packet));
@@ -177,8 +181,16 @@ TEST_CASE("Remuxer 内部转换和同步输出按成功处理的包统计并独�
       remuxer.Stop();
       remuxer.Stop();
       REQUIRE_FALSE(failed.load());
-      REQUIRE(logging.OutputExists(planned));
-      CheckRecording(planned, media.packets.size());
+      if (recording_only) {
+        REQUIRE(logging.OutputExists(planned));
+        CheckRecording(planned, media.packets.size());
+        const auto recordings = remuxer.recording_statuses();
+        REQUIRE(recordings.size() == 1);
+        CHECK(recordings.front().status.written_packets ==
+              media.packets.size());
+        CHECK(recordings.front().status.dropped_packets == 0);
+        CHECK(recordings.front().status.error.empty());
+      }
       REQUIRE(remuxer.push_statuses().empty());
     }
   }
@@ -187,7 +199,8 @@ TEST_CASE("Remuxer 内部转换和同步输出按成功处理的包统计并独�
     const auto summaries = RemuxSummaries(log, stage);
     REQUIRE(summaries.size() == 2);
     for (const auto& summary : summaries) {
-      CHECK(RemuxCounter(summary, "samples") == media.packets.size());
+      CHECK(RemuxCounter(summary, "samples") ==
+            (recording_only ? 0 : media.packets.size()));
       CHECK(RemuxCounter(summary, "unavailable") == 0);
     }
   }

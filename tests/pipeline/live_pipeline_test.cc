@@ -326,6 +326,10 @@ TEST_CASE("LivePipeline delivers decodable AV and continues after input EOF",
   CHECK(snapshot.error == nullptr);
   const std::string target = "rtsp://127.0.0.1:1/live_pipeline/unavailable";
   CHECK(pipeline.AddPushUrl(target) == target);
+  // Leaving recording-only mode needs subsequent frames to register the
+  // protocol source. Pending targets are excluded from pusher snapshots.
+  REQUIRE(
+      observations.Wait([&] { return !pipeline.remuxer_status().empty(); }));
   const auto pushes = pipeline.remuxer_status();
   REQUIRE(pushes.size() == 1);
   CHECK(pushes.front().url == target);
