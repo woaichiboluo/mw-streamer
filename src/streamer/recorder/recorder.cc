@@ -103,25 +103,6 @@ class FileWriter final {
       stream->time_base = info.time_base;
       stream->avg_frame_rate = info.frame_rate;
       stream->sample_aspect_ratio = info.sample_aspect_ratio;
-      if (stream->codecpar->codec_id == AV_CODEC_ID_AAC) {
-        const auto* filter = av_bsf_get_by_name("aac_adtstoasc");
-        if (!filter)
-          throw FfmpegException(AVERROR_BSF_NOT_FOUND, "查找录像 AAC 过滤器");
-        AVBSFContext* raw_filter = nullptr;
-        FfmpegException::throwIfError(av_bsf_alloc(filter, &raw_filter),
-                                      "创建录像 AAC 过滤器");
-        audio_filter_.reset(raw_filter);
-        audio_index_ = static_cast<std::size_t>(stream->index);
-        FfmpegException::throwIfError(
-            avcodec_parameters_copy(audio_filter_->par_in, stream->codecpar),
-            "复制录像 AAC 过滤器参数");
-        audio_filter_->time_base_in = info.time_base;
-        FfmpegException::throwIfError(av_bsf_init(audio_filter_.get()),
-                                      "初始化录像 AAC 过滤器");
-        FfmpegException::throwIfError(
-            avcodec_parameters_copy(stream->codecpar, audio_filter_->par_out),
-            "复制录像 AAC 输出参数");
-      }
     }
     // Force the local file protocol: even a colon in a filesystem name must
     // never select another FFmpeg protocol.
@@ -148,10 +129,32 @@ class FileWriter final {
           return info.stream_index == packet->stream_index;
         });
     const auto index = static_cast<std::size_t>(found - streams_.begin());
-    if (audio_filter_ && index == audio_index_)
+    const auto& info = streams_[index];
+    // Match the MP4 muxer's detection: only ADTS needs aac_adtstoasc. Raw AAC
+    // can be copied even when its input track has no AudioSpecificConfig.
+    if (info.codec_parameters.get()->codec_id == AV_CODEC_ID_AAC &&
+        packet->size > 2 && (AV_RB16(packet->data) & 0xfff0) == 0xfff0) {
+      if (!audio_filter_) {
+        const auto* filter = av_bsf_get_by_name("aac_adtstoasc");
+        if (!filter)
+          throw FfmpegException(AVERROR_BSF_NOT_FOUND, "查找录像 AAC 过滤器");
+        AVBSFContext* raw_filter = nullptr;
+        FfmpegException::throwIfError(av_bsf_alloc(filter, &raw_filter),
+                                      "创建录像 AAC 过滤器");
+        audio_filter_.reset(raw_filter);
+        audio_index_ = index;
+        FfmpegException::throwIfError(
+            avcodec_parameters_copy(audio_filter_->par_in,
+                                    info.codec_parameters.get()),
+            "复制录像 AAC 过滤器参数");
+        audio_filter_->time_base_in = info.time_base;
+        FfmpegException::throwIfError(av_bsf_init(audio_filter_.get()),
+                                      "初始化录像 AAC 过滤器");
+      }
       WriteAudio(packet.get());
-    else
+    } else {
       WritePacket(std::move(packet), index);
+    }
   }
 
   void Finish() {
@@ -165,10 +168,7 @@ class FileWriter final {
 
  private:
   void WriteAudio(AVPacket* packet) {
-    // HLS/TS may retain ADTS even when probing already supplied ASC extradata,
-    // so MP4's automatic filter selection alone is insufficient. Raw AAC is
-    // passed through by this filter; timestamps and payload ownership stay
-    // local.
+    // Also handle HLS/TS packets that retain ADTS despite having global ASC.
     FfmpegException::throwIfError(
         av_bsf_send_packet(audio_filter_.get(), packet), "提交录像 AAC 编码包");
     for (;;) {

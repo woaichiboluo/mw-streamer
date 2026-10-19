@@ -48,6 +48,7 @@ set(MW_STREAMER_SOURCES
     streamer/input/av_media_source.cc
     streamer/pipeline/live_pipeline.cc
     streamer/pipeline/remux_pipeline.cc
+    streamer/pipeline/remux_audio_probe.cc
     streamer/pipeline/offline_pipeline.cc
     streamer/platform/thread.cc
     streamer/encoder/av_encoder.cc

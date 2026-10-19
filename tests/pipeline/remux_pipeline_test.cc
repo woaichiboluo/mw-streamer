@@ -22,10 +22,12 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/mem.h>
 }
 
 #include "mw/streamer/ffmpeg/frame.h"
 #include "mw/streamer/init/init.h"
+#include "mw/streamer/recorder/recorder.h"
 
 namespace {
 
@@ -109,6 +111,71 @@ std::vector<ffmpeg::Packet> ReadPackets(AVFormatContext& input) {
   }
   REQUIRE(result == AVERROR_EOF);
   return packets;
+}
+
+void WriteAacWithoutConfig(
+    const std::string& path,
+    std::size_t audio_limit = std::numeric_limits<std::size_t>::max(),
+    bool corrupt_audio = false) {
+  const auto input = OpenMedia(SamplePath());
+  std::vector<ffmpeg::StreamInfo> streams;
+  for (unsigned index = 0; index < input->nb_streams; ++index) {
+    const auto* stream = input->streams[index];
+    ffmpeg::StreamInfo info;
+    info.stream_index = stream->index;
+    info.time_base = stream->time_base;
+    info.codec_parameters = ffmpeg::CodecParameters(*stream->codecpar);
+    auto* parameters = info.codec_parameters.get();
+    if (parameters->codec_id == AV_CODEC_ID_AAC) {
+      av_freep(&parameters->extradata);
+      parameters->extradata_size = 0;
+      parameters->profile = AV_PROFILE_UNKNOWN;
+    }
+    streams.push_back(std::move(info));
+  }
+  mw::streamer::Recorder recorder;
+  mw::streamer::RecorderConfig config;
+  config.path = path;
+  REQUIRE(recorder.Start(streams, config));
+  std::size_t audio_count = 0;
+  std::size_t submitted = 0;
+  for (auto& packet : ReadPackets(*input)) {
+    const auto* parameters = input->streams[packet->stream_index]->codecpar;
+    if (parameters->codec_id == AV_CODEC_ID_AAC) {
+      if (audio_count == audio_limit) break;
+      ++audio_count;
+      if (corrupt_audio) {
+        REQUIRE(av_packet_make_writable(packet.get()) >= 0);
+        std::fill(packet->data, packet->data + packet->size, 0);
+      }
+    }
+    REQUIRE(recorder.TrySubmitPacket(packet));
+    ++submitted;
+  }
+  recorder.Stop();
+  REQUIRE(recorder.status().state == RecorderState::kStopped);
+  REQUIRE(recorder.status().error.empty());
+  REQUIRE(recorder.status().written_packets == submitted);
+  REQUIRE(recorder.status().dropped_packets == 0);
+}
+
+void CheckOriginalPackets(const std::vector<ffmpeg::Packet>& actual,
+                          const std::vector<ffmpeg::Packet>& expected) {
+  REQUIRE(actual.size() == expected.size());
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    CAPTURE(index);
+    const auto& packet = actual[index];
+    const auto& original = expected[index];
+    CHECK(packet->pts == original->pts);
+    CHECK(packet->dts == original->dts);
+    CHECK(packet->duration == original->duration);
+    CHECK(packet->stream_index == original->stream_index);
+    CHECK(packet->time_base.num == original->time_base.num);
+    CHECK(packet->time_base.den == original->time_base.den);
+    REQUIRE(packet->size == original->size);
+    CHECK(std::equal(original->data, original->data + original->size,
+                     packet->data));
+  }
 }
 
 struct CodecCloser {
@@ -277,6 +344,80 @@ TEST_CASE("RemuxPipeline handles a video-only source without adding tracks",
   const auto recordings = pipeline.recording_statuses();
   REQUIRE(recordings.size() == 1);
   CheckRecording(recordings.front().path, source);
+}
+
+TEST_CASE("RemuxPipeline probes raw AAC and replays every original packet",
+          "[remux_pipeline][integration][aac-probe]") {
+  const auto runtime = InitRuntime();
+  const OutputDirectory directory;
+  std::size_t audio_limit = std::numeric_limits<std::size_t>::max();
+  SECTION("Normal input exceeds the bounded startup probe") {}
+  SECTION("EOF before eight audio packets still drains the startup buffer") {
+    audio_limit = 3;
+  }
+  const auto source = directory.File("without-asc.mp4");
+  WriteAacWithoutConfig(source, audio_limit);
+  const auto input = OpenMedia(source);
+  const int audio_index =
+      av_find_best_stream(input.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+  REQUIRE(audio_index >= 0);
+  REQUIRE(input->streams[audio_index]->codecpar->extradata_size == 0);
+  const auto expected = ReadPackets(*input);
+  const auto audio_packets = std::count_if(
+      expected.begin(), expected.end(), [&](const ffmpeg::Packet& packet) {
+        return packet->stream_index == audio_index;
+      });
+  if (audio_limit == 3) {
+    REQUIRE(audio_packets == 3);
+  } else {
+    REQUIRE(audio_packets > 8);
+  }
+
+  RemuxPipeline pipeline(Config(32.0));
+  Observations observations;
+  Observe(pipeline, observations);
+  const auto output = pipeline.AddPushUrl(directory.File("probed.mp4"));
+  REQUIRE(pipeline.Start(source));
+  REQUIRE(
+      WaitFor([&] { return pipeline.state() == RemuxPipelineState::kEnded; }));
+  pipeline.Stop();
+  CHECK_FALSE(pipeline.error());
+  CHECK(observations.errors.empty());
+  CheckOriginalPackets(observations.packets, expected);
+  const auto recordings = pipeline.recording_statuses();
+  REQUIRE(recordings.size() == 1);
+  CHECK(recordings.front().status.state == RecorderState::kStopped);
+  CHECK(recordings.front().status.error.empty());
+  CHECK(recordings.front().status.written_packets == expected.size());
+  CHECK(recordings.front().status.dropped_packets == 0);
+
+  const auto recorded = OpenMedia(output);
+  const int recorded_audio = av_find_best_stream(
+      recorded.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+  REQUIRE(recorded_audio >= 0);
+  CHECK(recorded->streams[recorded_audio]->codecpar->extradata_size > 0);
+  CheckRecording(output, source);
+}
+
+TEST_CASE(
+    "RemuxPipeline rejects undecodable AAC instead of publishing a config",
+    "[remux_pipeline][integration][aac-probe][error]") {
+  const auto runtime = InitRuntime();
+  const OutputDirectory directory;
+  const auto source = directory.File("corrupt-aac.mp4");
+  WriteAacWithoutConfig(source, 12, true);
+  RemuxPipeline pipeline(Config(32.0));
+  Observations observations;
+  Observe(pipeline, observations);
+  pipeline.AddPushUrl(directory.File("rejected.mp4"));
+  REQUIRE(pipeline.Start(source));
+  REQUIRE(
+      WaitFor([&] { return pipeline.state() == RemuxPipelineState::kFailed; }));
+  pipeline.Stop();
+  REQUIRE(pipeline.error());
+  REQUIRE(observations.errors.size() == 1);
+  CHECK(observations.errors.front() == pipeline.error());
+  CHECK(observations.packets.empty());
 }
 
 TEST_CASE("RemuxPipeline paces packet consumption and supports runtime speed",

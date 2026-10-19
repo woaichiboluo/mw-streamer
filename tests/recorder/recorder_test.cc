@@ -299,6 +299,91 @@ TEST_CASE("Recorder writes independently decodable fragmented MP4",
   CheckRecording(path, media);
 }
 
+TEST_CASE("Recorder preserves raw AAC without AudioSpecificConfig",
+          "[recorder][integration][raw-aac]") {
+  bool video = false;
+  SECTION("audio only") {}
+  SECTION("audio and video") { video = true; }
+  const Media original(video, true);
+  auto streams = original.streams;
+  for (auto& stream : streams) {
+    auto* parameters = stream.codec_parameters.get();
+    if (parameters->codec_id != AV_CODEC_ID_AAC) continue;
+    REQUIRE(parameters->extradata_size > 0);
+    av_freep(&parameters->extradata);
+    parameters->extradata_size = 0;
+    parameters->profile = AV_PROFILE_UNKNOWN;
+  }
+  std::vector<ffmpeg::Packet> snapshots;
+  for (const auto& packet : original.packets)
+    snapshots.push_back(packet.Clone());
+  const OutputDirectory output;
+  const auto path = output.File("raw-aac.mp4");
+  Recorder recorder;
+  REQUIRE(recorder.Start(streams, RecorderConfig{path}));
+  bool accepted = true;
+  for (const auto& packet : original.packets) {
+    if (!recorder.TrySubmitPacket(packet)) {
+      accepted = false;
+      break;
+    }
+  }
+  recorder.Stop();
+  const auto status = recorder.status();
+  INFO(status.error);
+  REQUIRE(status.state == RecorderState::kStopped);
+  CHECK(accepted);
+  CHECK(status.error.empty());
+  CHECK(status.written_packets == original.packets.size());
+  CHECK(status.dropped_packets == 0);
+  CHECK(status.queue_bytes == 0);
+  for (std::size_t index = 0; index < original.packets.size(); ++index) {
+    const auto& packet = original.packets[index];
+    const auto& snapshot = snapshots[index];
+    CHECK(packet->pts == snapshot->pts);
+    CHECK(packet->dts == snapshot->dts);
+    CHECK(packet->duration == snapshot->duration);
+    CHECK(packet->stream_index == snapshot->stream_index);
+    CHECK(av_cmp_q(packet->time_base, snapshot->time_base) == 0);
+    REQUIRE(packet->size == snapshot->size);
+    CHECK(std::equal(snapshot->data, snapshot->data + snapshot->size,
+                     packet->data));
+  }
+
+  const auto recorded = OpenMedia(path);
+  const int audio_index = av_find_best_stream(
+      recorded.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+  REQUIRE(audio_index >= 0);
+  std::vector<ffmpeg::Packet> audio_packets;
+  ffmpeg::Packet packet;
+  int result = 0;
+  while ((result = av_read_frame(recorded.get(), packet.get())) >= 0) {
+    if (packet->stream_index == audio_index)
+      audio_packets.push_back(packet.Ref());
+    packet.Unref();
+  }
+  REQUIRE(result == AVERROR_EOF);
+  std::size_t audio_count = 0;
+  for (const auto& item : original.packets) {
+    const auto source =
+        std::find_if(original.streams.begin(), original.streams.end(),
+                     [&](const auto& stream) {
+                       return stream.stream_index == item->stream_index;
+                     });
+    REQUIRE(source != original.streams.end());
+    if (source->codec_parameters.get()->codec_id != AV_CODEC_ID_AAC) continue;
+    REQUIRE(audio_count < audio_packets.size());
+    REQUIRE(item->size > 2);
+    REQUIRE_FALSE((item->data[0] == 0xff && (item->data[1] & 0xf6) == 0xf0));
+    const auto& actual = audio_packets[audio_count++];
+    REQUIRE(actual->size == item->size);
+    CHECK(std::equal(item->data, item->data + item->size, actual->data));
+  }
+  CHECK(audio_packets.size() == audio_count);
+  REQUIRE(audio_count > 0);
+  CheckRecording(path, original);
+}
+
 TEST_CASE("Recorder converts ADTS AAC into decodable fragmented MP4",
           "[recorder][integration][adts]") {
   const Media original(false, true);
@@ -315,6 +400,7 @@ TEST_CASE("Recorder converts ADTS AAC into decodable fragmented MP4",
   SECTION("source has no AudioSpecificConfig") {
     av_freep(&stream.codec_parameters.get()->extradata);
     stream.codec_parameters.get()->extradata_size = 0;
+    stream.codec_parameters.get()->profile = AV_PROFILE_UNKNOWN;
   }
   std::vector<ffmpeg::Packet> packets;
   ffmpeg::Packet packet;
@@ -344,6 +430,9 @@ TEST_CASE("Recorder converts ADTS AAC into decodable fragmented MP4",
   CHECK(status.written_packets == packets.size());
   CHECK(status.dropped_packets == 0);
   CHECK(status.queue_bytes == 0);
+  const auto recorded = OpenMedia(path);
+  REQUIRE(recorded->nb_streams == 1);
+  CHECK(recorded->streams[0]->codecpar->extradata_size > 0);
   for (std::size_t index = 0; index < packets.size(); ++index) {
     const auto& actual = packets[index];
     const auto& snapshot = snapshots[index];

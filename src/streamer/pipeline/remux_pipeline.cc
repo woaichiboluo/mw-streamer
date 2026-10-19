@@ -17,6 +17,7 @@ extern "C" {
 }
 
 #include "mw/log.h"
+#include "mw/streamer/pipeline/internal/remux_audio_probe.h"
 #include "mw/streamer/platform/thread.h"
 #include "mw/streamer/remuxer/remux_output.h"
 
@@ -446,9 +447,75 @@ class RemuxPipeline::Impl final {
     changed_.notify_all();
   }
 
-  void Initialize(const std::shared_ptr<const AvInputInfo>& info,
+  std::vector<ffmpeg::StreamInfo> PrepareStreams(
+      const AvInputProxyReadResult& first,
+      std::deque<AvInputProxyReadResult>& pending) {
+    auto streams = SelectedStreams(*first.info);
+    const auto audio =
+        std::find_if(streams.begin(), streams.end(), [&](const auto& stream) {
+          return stream.stream_index == first.info->audio_stream_index;
+        });
+    if (audio == streams.end() ||
+        audio->codec_parameters.get()->codec_id != AV_CODEC_ID_AAC ||
+        audio->codec_parameters.get()->extradata_size > 0)
+      return streams;
+
+    // Only startup packets are decoded. The source is assumed to keep its
+    // audio coding configuration stable within this input connection.
+    constexpr std::size_t kAudioPackets = 8;
+    constexpr std::size_t kMaxBytes = 16 * 1024 * 1024;
+    const auto deadline = Clock::now() + std::chrono::seconds(2);
+    std::vector<ffmpeg::Packet> packets;
+    std::size_t bytes = 0;
+    const auto collect = [&](const AvInputProxyReadResult& input) {
+      if (!input.packet) return false;
+      bytes += static_cast<std::size_t>(input.packet->get()->size);
+      if (bytes > kMaxBytes)
+        throw std::runtime_error("RemuxPipeline 音频探测缓存超过 16 MiB");
+      if (input.packet->get()->stream_index != audio->stream_index)
+        return false;
+      packets.push_back(input.packet->Ref());
+      packets.back()->time_base = audio->time_base;
+      std::size_t size = 0;
+      const auto* packet = packets.back().get();
+      return av_packet_get_side_data(packet, AV_PKT_DATA_NEW_EXTRADATA,
+                                     &size) ||
+             (packet->size > 2 && packet->data[0] == 0xff &&
+              (packet->data[1] & 0xf0) == 0xf0);
+    };
+    bool configured = collect(first);
+    while (!configured && packets.size() < kAudioPackets && !Stopping()) {
+      const auto remaining =
+          std::chrono::duration_cast<std::chrono::milliseconds>(deadline -
+                                                                Clock::now());
+      if (remaining.count() <= 0)
+        throw std::runtime_error("RemuxPipeline 音频探测等待超时");
+      auto input = input_.ReadPacketFor(remaining);
+      if (Stopping()) return streams;
+      if (input.status == AvInputReadStatus::kNull) {
+        if (const auto failure = input_.status().error)
+          std::rethrow_exception(failure);
+        throw std::runtime_error("RemuxPipeline 音频探测未取得输入包");
+      }
+      const bool boundary =
+          input.info != first.info || input.status == AvInputReadStatus::kEof;
+      if (!boundary) configured = collect(input);
+      pending.push_back(std::move(input));
+      if (boundary) break;
+    }
+    if (!Stopping()) {
+      *audio = internal::ProbeRemuxAudio(*audio, packets);
+      MW_LOG_INFO("streamer",
+                  "RemuxPipeline 音频启动探测完成: stream={} packets={} "
+                  "cached_bytes={} extradata={}",
+                  audio->stream_index, packets.size(), bytes,
+                  audio->codec_parameters.get()->extradata_size);
+    }
+    return streams;
+  }
+
+  void Initialize(const std::vector<ffmpeg::StreamInfo>& streams,
                   bool discontinuity) {
-    const auto streams = SelectedStreams(*info);
     for (const auto& stream : streams) stream.Validate();
     if (!fixed_streams_.empty() && !SameTracks(fixed_streams_, streams))
       throw std::invalid_argument("RemuxPipeline 固定输入源的轨道配置发生变化");
@@ -506,8 +573,12 @@ class RemuxPipeline::Impl final {
         if (Stopping()) input_.RequestStop();
       }
       std::shared_ptr<const AvInputInfo> description;
+      std::vector<ffmpeg::StreamInfo> streams;
+      std::deque<AvInputProxyReadResult> pending;
       while (!Stopping()) {
-        auto input = input_.ReadPacket();
+        auto input =
+            pending.empty() ? input_.ReadPacket() : std::move(pending.front());
+        if (!pending.empty()) pending.pop_front();
         if (Stopping()) break;
         if (input.status == AvInputReadStatus::kNull) {
           if (const auto failure = input_.status().error)
@@ -554,7 +625,10 @@ class RemuxPipeline::Impl final {
               "discontinuity={}",
               static_cast<const void*>(this), description != input.info,
               discontinuity);
-          Initialize(input.info, discontinuity);
+          if (description != input.info)
+            streams = PrepareStreams(input, pending);
+          if (Stopping()) break;
+          Initialize(streams, discontinuity);
           description = input.info;
         }
         if (!Pace(time.dts_us)) break;

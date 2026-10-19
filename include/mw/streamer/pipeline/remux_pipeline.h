@@ -54,6 +54,11 @@ struct RemuxPipelineStatus {
 // Reconnect/loop replaces Remuxer, including network sessions and file names.
 // Tracks must retain indices, time bases and codec configuration. Timestamp
 // discontinuities in flagged sources also start a new output session.
+// An AAC track without configuration is prepared before output starts, using
+// at most eight selected audio packets (two seconds/16 MiB of startup input).
+// Raw AAC may receive a compatible configuration after decoded sample matching;
+// this does not recover its original profile. Coding must remain stable within
+// a connection. Probe frames are discarded; encoded packets are preserved.
 // Requires Init; Stop/destroy before Shutdown. Serialize Start/Stop/configure/
 // output additions externally. Queries, SetSpeed and RequestStop are
 // concurrent.
