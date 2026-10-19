@@ -25,7 +25,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
-    add_compile_options(/utf-8)
+    add_compile_options(
+        "$<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>"
+        "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>"
+    )
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
