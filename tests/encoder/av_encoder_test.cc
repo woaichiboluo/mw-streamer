@@ -1137,6 +1137,61 @@ TEST_CASE("AvEncoder 共享 CUDA 设备支持 CPU 上传与 GPU 帧直接编码"
   CHECK(gpu->duration == 3000);
 }
 
+TEST_CASE("AvEncoder 自动下载 GPU 帧后送入 CPU 编码器",
+          "[av-encoder][gpu][download]") {
+  auto device = CudaDevice();
+  if (!device) {
+    SKIP("当前环境不能创建 CUDA 设备");
+  }
+  ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
+  Capture capture;
+  AvEncoder encoder(cpu);
+  capture.Bind(encoder);
+  auto config = Config();
+  config.audio_sample_format = AV_SAMPLE_FMT_NONE;
+  config.video_encoder_name = "libx264";
+  REQUIRE(encoder.Start(config));
+  const auto streams = encoder.streams();
+  REQUIRE(streams.size() == 1);
+  CHECK(streams[0].codec_parameters.get()->format == AV_PIX_FMT_NV12);
+  const auto gpu =
+      GpuFrame(*device, AV_PIX_FMT_NV12, config.width, config.height);
+  const auto* gpu_data = gpu->data[0];
+  const auto* gpu_pool = gpu->hw_frames_ctx;
+  REQUIRE(encoder.TryPushVideo(gpu));
+  encoder.Stop();
+  CHECK_FALSE(encoder.error());
+  CHECK_FALSE(capture.error);
+  CHECK(capture.error_count == 0);
+  REQUIRE(capture.packets.size() == 1);
+  CHECK(capture.packets[0]->pts == 30);
+  CHECK(capture.packets[0]->duration == 1);
+  const auto frames = Decode(streams[0], capture.packets);
+  REQUIRE(frames.size() == 1);
+  const auto& decoded = frames[0];
+  CHECK(decoded->width == config.width);
+  CHECK(decoded->height == config.height);
+  CHECK(decoded->pts == 30);
+  REQUIRE(decoded->format == AV_PIX_FMT_YUV420P);
+  for (int row = 0; row < config.height; ++row) {
+    const auto* pixels = decoded->data[0] + row * decoded->linesize[0];
+    CHECK(std::all_of(pixels, pixels + config.width, [](std::uint8_t value) {
+      return value >= 76 && value <= 84;
+    }));
+  }
+  CHECK(decoded->data[1][0] >= 124);
+  CHECK(decoded->data[1][0] <= 132);
+  CHECK(decoded->data[2][0] >= 124);
+  CHECK(decoded->data[2][0] <= 132);
+  CHECK(gpu->format == AV_PIX_FMT_CUDA);
+  CHECK(gpu->data[0] == gpu_data);
+  CHECK(gpu->hw_frames_ctx == gpu_pool);
+  CHECK(gpu->pts == 90000);
+  CHECK(gpu->duration == 3000);
+  CHECK(gpu->time_base.num == 1);
+  CHECK(gpu->time_base.den == 90000);
+}
+
 TEST_CASE("AvEncoder 硬件帧的软件布局不匹配通过 OnError 上报",
           "[av-encoder][gpu][error]") {
   if (!avcodec_find_encoder_by_name("h264_nvenc")) {
