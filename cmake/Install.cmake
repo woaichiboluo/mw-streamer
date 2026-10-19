@@ -55,10 +55,6 @@ if(NOT BUILD_SHARED)
     install(TARGETS ${mw_bundled_targets} EXPORT mw_streamerTargets
         ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}/mw_streamer")
 endif()
-install(FILES "${PROJECT_SOURCE_DIR}/third_party/ZLMediaKit/LICENSE"
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/mw_streamer/ZLMediaKit")
-install(FILES "${PROJECT_SOURCE_DIR}/third_party/nv-codec-headers/LICENSE"
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/mw_streamer/nv-codec-headers")
 
 set(mw_package_dir "${CMAKE_INSTALL_LIBDIR}/cmake/mw_streamer")
 configure_package_config_file(

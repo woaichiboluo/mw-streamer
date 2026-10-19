@@ -166,7 +166,7 @@ TEST_CASE("streamer configures only an attached console for UTF-8") {
 TEST_CASE("streamer ignores SIGPIPE across shutdown and reinitialization") {
   const pid_t child = fork();
   if (child == 0) {
-    struct sigaction action {};
+    struct sigaction action{};
     action.sa_handler = SIG_DFL;
     sigemptyset(&action.sa_mask);
     sigset_t signals;
