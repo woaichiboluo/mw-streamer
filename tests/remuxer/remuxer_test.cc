@@ -372,6 +372,68 @@ TEST_CASE("Remuxer 本地 MP4 异步录制排空后可以完整解码",
   remuxer.Stop();
 }
 
+TEST_CASE("Remuxer 仅录像保留非标准 NAL 而协议发布仍校验",
+          "[remuxer][recording][publish][validation]") {
+  const auto runtime = InitRuntime();
+  Media media;
+  const auto* parameters = media.streams.front().codec_parameters.get();
+  REQUIRE(parameters->extradata_size >= 5);
+  REQUIRE(parameters->extradata[0] == 1);
+  const int length_width = (parameters->extradata[4] & 0x03) + 1;
+  auto& malformed = media.packets.back();
+  REQUIRE(malformed->size > length_width);
+  REQUIRE(av_packet_make_writable(malformed.get()) >= 0);
+  // Retain the MP4 sample's length prefix and timestamps, but violate the
+  // forbidden_zero_bit constraint checked by protocol packet conversion.
+  malformed->data[length_width] |= 0x80;
+
+  bool publish = false;
+  SECTION("仅 MP4 录像逐包保留输入") {}
+  SECTION("启用 RTSP 发布仍拒绝非法 NAL") { publish = true; }
+  OutputDirectory directory;
+  Errors errors;
+  Remuxer remuxer;
+  remuxer.SetOnError([&](std::exception_ptr error) { errors.Add(error); });
+  const auto output = remuxer.AddPushUrl(directory.File("nonstandard.mp4"));
+  if (publish) remuxer.AddRtspPublish("127.0.0.1", ReservePort());
+  REQUIRE(remuxer.Start(media.streams));
+  if (publish) {
+    REQUIRE(remuxer.SubmitPacket(malformed));
+    const auto error = errors.Wait();
+    CHECK_THROWS_AS(std::rethrow_exception(error), std::invalid_argument);
+    remuxer.Stop();
+    CHECK(errors.Count() == 1);
+    return;
+  }
+  for (const auto& packet : media.packets)
+    REQUIRE(remuxer.SubmitPacket(packet));
+  remuxer.Drain();
+  remuxer.Stop();
+  CHECK(errors.Count() == 0);
+  const auto recordings = remuxer.recording_statuses();
+  REQUIRE(recordings.size() == 1);
+  CHECK(recordings.front().status.state == RecorderState::kStopped);
+  CHECK(recordings.front().status.error.empty());
+  CHECK(recordings.front().status.written_packets == media.packets.size());
+  CHECK(recordings.front().status.dropped_packets == 0);
+
+  // Inspect container packets only: the deliberately malformed sample must
+  // never be submitted to a decoder, including stream-info probing.
+  AVFormatContext* raw = nullptr;
+  REQUIRE(avformat_open_input(&raw, output.c_str(), nullptr, nullptr) >= 0);
+  const std::unique_ptr<AVFormatContext, FormatCloser> input(raw);
+  input->flags |= AVFMT_FLAG_NOPARSE | AVFMT_FLAG_NOFILLIN;
+  ffmpeg::Packet packet;
+  for (const auto& original : media.packets) {
+    REQUIRE(av_read_frame(input.get(), packet.get()) >= 0);
+    REQUIRE(packet->size == original->size);
+    CHECK(std::equal(original->data, original->data + original->size,
+                     packet->data));
+    packet.Unref();
+  }
+  CHECK(av_read_frame(input.get(), packet.get()) == AVERROR_EOF);
+}
+
 TEST_CASE("Remuxer 关闭协议后释放流标识且旧录像可以后台收尾",
           "[remuxer][recording][lifecycle][publish]") {
   const auto runtime = InitRuntime();

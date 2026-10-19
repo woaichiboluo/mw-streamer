@@ -65,10 +65,13 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
             },
             config_);
         output->Start(converter->tracks());
+        bool record_only = !registration_.entries().empty();
         try {
           for (const auto& entry : registration_.entries()) {
-            if (entry.kind != internal::OutputRegistration::Kind::kRecording)
+            if (entry.kind != internal::OutputRegistration::Kind::kRecording) {
               output->AddPrepared(entry);
+              record_only = false;
+            }
           }
           for (const auto& entry : registration_.entries()) {
             if (entry.kind == internal::OutputRegistration::Kind::kRecording) {
@@ -91,6 +94,7 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
         }
         output_ = std::move(output);
         converter_ = std::move(converter);
+        record_only_ = record_only;
         convert_latency_.Start("perf.remuxer.convert", this, "remux.convert");
         output_latency_.Start("perf.remuxer.output", this, "remux.output");
         std::lock_guard<std::mutex> lock(mutex_);
@@ -294,6 +298,7 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
         Sync(poller_, [&] {
           RequireAccepting();
           output_->AddPrepared(entry);
+          record_only_ = false;
         });
       }
     }
@@ -395,13 +400,16 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
       if (!packets.empty() && !timestamps_->initialized())
         timestamps_->Initialize(first_packets);
       std::set<int> eof_tracks;
-      if (finish && !output_->tracks_ready()) {
+      if (finish && !record_only_ && !output_->tracks_ready()) {
         for (const auto& packet : packets)
           eof_tracks.insert(packet.packet->stream_index);
       }
       for (const auto& packet : packets) {
         for (const auto& recording : recordings)
           recording.recorder->TrySubmitPacket(packet.packet);
+        // Local recording retains the original packet without protocol NAL
+        // validation or adaptation. Dynamic protocol outputs resume conversion.
+        if (record_only_) continue;
         const auto convert_started = convert_latency_.Begin();
         const auto timestamp = timestamps_->Convert(packet.packet);
         const auto dts_ms = timestamp.dts_ms;
@@ -440,7 +448,7 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
         writable_.notify_all();
       }
       try {
-        output_->Flush();
+        if (!record_only_) output_->Flush();
       } catch (...) {
         Error(std::current_exception());
       }
@@ -463,6 +471,7 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
     output_.reset();
     converter_.reset();
     timestamps_.reset();
+    record_only_ = false;
     // No further additions are accepted once closing_. This only requests
     // draining; file finalization and errors remain on each recorder thread.
     for (const auto& recording : recordings_) recording.recorder->Drain();
@@ -500,6 +509,8 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
   bool closing_ = false;
   bool scheduled_ = false;
   bool error_reported_ = false;
+  // Accessed only on the output poller, including startup and registration.
+  bool record_only_ = false;
   OnError on_error_;
   toolkit::EventPoller::Ptr poller_;
   std::shared_ptr<internal::RemuxOutput> output_;
