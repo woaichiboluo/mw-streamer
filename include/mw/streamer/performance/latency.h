@@ -9,6 +9,8 @@ extern "C" {
 #include <libavutil/buffer.h>
 }
 
+#include "mw/streamer/performance/config.h"
+
 namespace mw::streamer::internal {
 
 // One serial owner per stage. Audio/video workers use separate instances.
@@ -32,8 +34,8 @@ class StageLatency final {
   StageLatency(const StageLatency&) = delete;
   StageLatency& operator=(const StageLatency&) = delete;
 
-  // Module/stage names must outlive the session (normally string literals).
-  void Start(const char* module, const void* instance, const char* stage,
+  // Captures the runtime's fixed stage mode and its built-in log names.
+  void Start(PerformanceStage stage, const void* instance,
              int stream_index = -1) noexcept;
   bool enabled() const noexcept { return active_; }
   TimePoint Begin() const noexcept;

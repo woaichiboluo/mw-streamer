@@ -154,9 +154,9 @@ class Syncer::Impl final {
  private:
   void StartLatency() {
     if (config_.encoder.video_pixel_format != AV_PIX_FMT_NONE)
-      video_latency_.Start("perf.syncer.video", this, "syncer.video");
+      video_latency_.Start(PerformanceStage::kSyncerVideo, this);
     if (config_.encoder.audio_sample_format != AV_SAMPLE_FMT_NONE)
-      audio_latency_.Start("perf.syncer.audio", this, "syncer.audio");
+      audio_latency_.Start(PerformanceStage::kSyncerAudio, this);
   }
 
   SyncerConfig config_;

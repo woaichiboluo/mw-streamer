@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <iterator>
 #include <memory>
 #include <regex>
 #include <stdexcept>
@@ -25,12 +26,17 @@ using namespace std::chrono_literals;
 using mw::streamer::AvDecoderReadResult;
 using mw::streamer::AvDecoderReadStatus;
 using mw::streamer::AvMediaFilter;
+using mw::streamer::PerformanceMode;
+using mw::streamer::PerformanceStage;
 namespace ffmpeg = mw::streamer::ffmpeg;
 namespace fs = std::filesystem;
 
 class MediaFilterLatencyLog final {
  public:
-  MediaFilterLatencyLog()
+  explicit MediaFilterLatencyLog(
+      PerformanceMode video = PerformanceMode::kSummary,
+      PerformanceMode audio = PerformanceMode::kSummary,
+      bool configure_audio = true)
       : directory_(
             fs::temp_directory_path() /
             ("mw-media-filter-latency-" +
@@ -48,8 +54,13 @@ class MediaFilterLatencyLog final {
     config.log.rotating_file.enabled = true;
     config.log.rotating_file.path = path_.string();
     config.log.modules = {{"streamer", mw::log::LogLevel::kOff},
-                          {"perf.filter.video", mw::log::LogLevel::kInfo},
-                          {"perf.filter.audio", mw::log::LogLevel::kInfo}};
+                          {"perf.filter.video", mw::log::LogLevel::kOff},
+                          {"perf.filter.audio", mw::log::LogLevel::kTrace}};
+    config.performance.stages = {{PerformanceStage::kMediaFilterVideo, video}};
+    if (configure_audio) {
+      config.performance.stages.emplace(PerformanceStage::kMediaFilterAudio,
+                                        audio);
+    }
     runtime_.reset(mw::streamer::Init(config));
   }
 
@@ -57,6 +68,13 @@ class MediaFilterLatencyLog final {
     runtime_.reset();
     std::error_code error;
     fs::remove_all(directory_, error);
+  }
+
+  std::string Read() {
+    runtime_.reset();
+    std::ifstream file(path_);
+    REQUIRE(file.is_open());
+    return {std::istreambuf_iterator<char>(file), {}};
   }
 
   std::vector<std::string> Summaries(const std::string& stage) {
@@ -213,6 +231,67 @@ TEST_CASE("业务过滤器允许同轨并行并在Stop等待后汇总",
   const auto video = logging.Summaries("filter.video");
   REQUIRE(video.size() == 1);
   CHECK(Samples(video[0]) == 2);
+}
+
+TEST_CASE("性能阶段独立于日志模块且分别控制汇总和明细",
+          "[performance][latency][media_filter]") {
+  MediaFilterLatencyLog logging(PerformanceMode::kDetail,
+                                PerformanceMode::kSummary);
+  AvMediaFilter filter;
+  filter.SetOnVideo([](const ffmpeg::Frame& frame) { return frame.Ref(); });
+  filter.SetOnAudio([](const ffmpeg::Frame& frame) { return frame.Ref(); });
+  filter.Start();
+  filter.ProcessVideo(Input());
+  filter.ProcessAudio(Input());
+  filter.Stop();
+
+  const auto log = logging.Read();
+  CHECK(log.find("[perf.filter.video]") != std::string::npos);
+  CHECK(log.find("[perf.filter.audio]") != std::string::npos);
+  std::size_t video_details = 0;
+  std::size_t audio_details = 0;
+  std::size_t video_summaries = 0;
+  std::size_t audio_summaries = 0;
+  std::size_t begin = 0;
+  while (begin < log.size()) {
+    const auto end = log.find('\n', begin);
+    const auto line = log.substr(begin, end - begin);
+    const bool video = line.find("stage=filter.video ") != std::string::npos;
+    const bool audio = line.find("stage=filter.audio ") != std::string::npos;
+    if (line.find("report=summary") != std::string::npos && (video || audio)) {
+      CHECK(line.find("[info]") != std::string::npos);
+      CHECK(Samples(line) == 1);
+      if (video) ++video_summaries;
+      if (audio) ++audio_summaries;
+    } else if (line.find("latency(") != std::string::npos && (video || audio)) {
+      CHECK(line.find("[trace]") != std::string::npos);
+      if (video) ++video_details;
+      if (audio) ++audio_details;
+    }
+    if (end == std::string::npos) break;
+    begin = end + 1;
+  }
+  CHECK(video_summaries == 1);
+  CHECK(audio_summaries == 1);
+  CHECK(video_details == 1);
+  CHECK(audio_details == 0);
+}
+
+TEST_CASE("Trace日志模块不能开启未配置的性能阶段",
+          "[performance][latency][media_filter][disabled]") {
+  MediaFilterLatencyLog logging(PerformanceMode::kSummary,
+                                PerformanceMode::kOff, false);
+  AvMediaFilter filter;
+  filter.SetOnVideo([](const ffmpeg::Frame& frame) { return frame.Ref(); });
+  filter.SetOnAudio([](const ffmpeg::Frame& frame) { return frame.Ref(); });
+  filter.Start();
+  filter.ProcessVideo(Input());
+  filter.ProcessAudio(Input());
+  filter.Stop();
+
+  const auto log = logging.Read();
+  CHECK(log.find("stage=filter.video ") != std::string::npos);
+  CHECK(log.find("stage=filter.audio ") == std::string::npos);
 }
 
 }  // namespace

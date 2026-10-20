@@ -72,8 +72,7 @@ class AudioResampler::Impl final {
                 "channels={} capacity={}",
                 fmt::ptr(this), rate_, av_get_sample_fmt_name(format_),
                 layout_.value.nb_channels, capacity_);
-    latency_.Start("perf.filter.audio_resampler", this,
-                   "filter.audio_resampler");
+    latency_.Start(PerformanceStage::kAudioResampler, this);
   }
 
   ~Impl() { swr_free(&context_); }
@@ -155,8 +154,7 @@ class AudioResampler::Impl final {
     inputs_.clear();
     ClearConverter();
     failure_ = nullptr;
-    latency_.Start("perf.filter.audio_resampler", this,
-                   "filter.audio_resampler");
+    latency_.Start(PerformanceStage::kAudioResampler, this);
     stopped_ = false;
   }
 

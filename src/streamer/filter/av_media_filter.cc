@@ -179,8 +179,8 @@ class AvMediaFilter::Impl final {
       throw std::logic_error("AvMediaFilter 重新启动前需要 Stop");
     }
     if (on_start_) on_start_();
-    video_latency_.Start("perf.filter.video", this, "filter.video");
-    audio_latency_.Start("perf.filter.audio", this, "filter.audio");
+    video_latency_.Start(PerformanceStage::kMediaFilterVideo, this);
+    audio_latency_.Start(PerformanceStage::kMediaFilterAudio, this);
     error_ = {};
     started_ = true;
     MW_LOG_INFO("streamer", "AvMediaFilter 已启动: video={}, audio={}",

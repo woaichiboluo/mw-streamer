@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "mw/log.h"
+#include "mw/log/internal/performance.h"
 
 namespace mw::log {
 namespace {
@@ -27,10 +28,6 @@ constexpr std::string_view kLogPattern =
 
 std::string_view NormalizeModule(std::string_view module) noexcept {
   return module.empty() ? kDefaultModule : module;
-}
-
-LogLevel BuiltInModuleLevel(std::string_view module) noexcept {
-  return module == kDefaultModule ? LogLevel::kInfo : LogLevel::kError;
 }
 
 std::string_view FileName(const char* file) noexcept {
@@ -89,9 +86,8 @@ class LoggingImpl {
     }
     const auto normalized = NormalizeModule(module);
     const auto iterator = modules_.find(normalized);
-    const auto configured = iterator == modules_.end()
-                                ? BuiltInModuleLevel(normalized)
-                                : iterator->second;
+    const auto configured =
+        iterator == modules_.end() ? LogLevel::kInfo : iterator->second;
     return configured != LogLevel::kOff &&
            LevelRank(level) >= LevelRank(configured);
   }
@@ -111,8 +107,14 @@ class LoggingImpl {
     if (!ShouldLog(module, level)) {
       return;
     }
+    WriteFormattedUnchecked(module, level, file, line, format, args);
+  }
+
+  void WriteFormattedUnchecked(std::string_view label, LogLevel level,
+                               const char* file, std::uint32_t line,
+                               fmt::string_view format, fmt::format_args args) {
     logger_->log(ToSpdlogLevel(level), "[{}] {} [{}:{}]",
-                 NormalizeModule(module), fmt::vformat(format, args),
+                 NormalizeModule(label), fmt::vformat(format, args),
                  FileName(file), line);
   }
 
@@ -262,6 +264,19 @@ void WriteFormattedArgs(std::string_view module, LogLevel level,
       logger->log(ToSpdlogLevel(level), "[{}] {} [{}:{}]",
                   NormalizeModule(module), fmt::vformat(format, args),
                   FileName(file), line);
+    }
+  } catch (...) {
+  }
+}
+
+void internal::WritePerformanceFormattedArgs(std::string_view label,
+                                             LogLevel level, const char* file,
+                                             std::uint32_t line,
+                                             fmt::string_view format,
+                                             fmt::format_args args) noexcept {
+  try {
+    if (auto* logging = g_active_logging.load(std::memory_order_acquire)) {
+      logging->WriteFormattedUnchecked(label, level, file, line, format, args);
     }
   } catch (...) {
   }

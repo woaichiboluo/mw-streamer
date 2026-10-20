@@ -52,11 +52,14 @@ class EncoderLatencyLog final {
     config.log.console.enabled = false;
     config.log.rotating_file.enabled = true;
     config.log.rotating_file.path = path_.string();
-    config.log.modules = {
-        {"streamer", mw::log::LogLevel::kOff},
-        {"perf.encoder.video", mw::log::LogLevel::kTrace},
-        {"perf.encoder.audio", mw::log::LogLevel::kTrace},
-        {"perf.filter.encoder.audio", mw::log::LogLevel::kTrace}};
+    config.log.modules = {{"streamer", mw::log::LogLevel::kOff}};
+    config.performance.stages = {
+        {mw::streamer::PerformanceStage::kEncoderVideo,
+         mw::streamer::PerformanceMode::kDetail},
+        {mw::streamer::PerformanceStage::kEncoderAudio,
+         mw::streamer::PerformanceMode::kDetail},
+        {mw::streamer::PerformanceStage::kEncoderAudioFilter,
+         mw::streamer::PerformanceMode::kDetail}};
     runtime_.reset(mw::streamer::Init(config));
   }
   ~EncoderLatencyLog() {

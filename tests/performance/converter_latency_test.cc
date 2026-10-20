@@ -44,10 +44,12 @@ class ConverterLatencyLog final {
     config.log.console.enabled = false;
     config.log.rotating_file.enabled = true;
     config.log.rotating_file.path = path_.string();
-    config.log.modules = {
-        {"streamer", mw::log::LogLevel::kOff},
-        {"perf.filter.force_fps", mw::log::LogLevel::kTrace},
-        {"perf.filter.audio_resampler", mw::log::LogLevel::kTrace}};
+    config.log.modules = {{"streamer", mw::log::LogLevel::kOff}};
+    config.performance.stages = {
+        {mw::streamer::PerformanceStage::kForceFps,
+         mw::streamer::PerformanceMode::kDetail},
+        {mw::streamer::PerformanceStage::kAudioResampler,
+         mw::streamer::PerformanceMode::kDetail}};
     runtime_.reset(mw::streamer::Init(config));
   }
   ~ConverterLatencyLog() {

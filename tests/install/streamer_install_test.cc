@@ -2,6 +2,8 @@
 
 int main() {
   mw::streamer::InitConfig config;
+  config.performance.stages = {{mw::streamer::PerformanceStage::kEncoderVideo,
+                                mw::streamer::PerformanceMode::kSummary}};
   config.enable_cpu_affinity = false;
   auto* context = mw::streamer::Init(config);
   int result = 0;

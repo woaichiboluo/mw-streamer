@@ -6,6 +6,7 @@
 
 #include "mw/export.h"
 #include "mw/log.h"
+#include "mw/streamer/performance/config.h"
 
 namespace mw::streamer {
 
@@ -26,6 +27,7 @@ struct MW_STREAMER_API InitConfig {
   InitConfig();
 
   mw::log::LogConfig log;
+  PerformanceConfig performance;
   // Zero selects the hardware concurrency reported by ZLM.
   std::size_t event_poller_threads = 2;
   std::size_t work_threads = 1;
@@ -37,6 +39,7 @@ struct MW_STREAMER_API InitConfig {
 // Only one context may be active; another Init() is allowed after Shutdown().
 // On Windows, sets an attached console's input/output code pages to UTF-8
 // before initializing logging; the code pages remain set after Shutdown().
+// Copies the fixed performance configuration, independently of log.modules.
 // Initializes logging and FFmpeg, then delegates ZLM's owned resources to its
 // init/shutdown lifecycle. Requests 1 ms timer resolution on Windows until
 // Shutdown(). On POSIX, ignores SIGPIPE process-wide before initializing media

@@ -54,18 +54,13 @@ struct AsyncConfig {
 struct LogConfig {
   // Arbitrary nonempty names are matched exactly; dots have no hierarchy.
   // Assign or erase individual keys to change their levels. Replacing this map
-  // replaces all explicit levels. Unlisted modules use error, except "default",
-  // which uses info. Logging copies the map; edits affect the next instance.
-  std::map<std::string, LogLevel> modules = {
-      {"streamer", LogLevel::kInfo},
-      {"ffmpeg", LogLevel::kWarning},
-      {"perf.input", LogLevel::kOff},
-      {"perf.decoder.video", LogLevel::kOff},
-      {"perf.decoder.audio", LogLevel::kOff},
-      {"perf.encoder.video", LogLevel::kOff},
-      {"perf.encoder.audio", LogLevel::kOff},
-      {"perf.filter.encoder.audio", LogLevel::kOff},
-      {"default", LogLevel::kInfo}};
+  // replaces all explicit levels. Unlisted modules use info. Logging copies
+  // the map; edits affect the next instance.
+  // Performance instrumentation uses its own configuration, not this map.
+  std::map<std::string, LogLevel> modules = {{"streamer", LogLevel::kInfo},
+                                             {"ffmpeg", LogLevel::kWarning},
+                                             {"zlm", LogLevel::kWarning},
+                                             {"default", LogLevel::kInfo}};
   ConsoleConfig console;
   RotatingFileConfig rotating_file;
   AsyncConfig async;

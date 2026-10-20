@@ -5,7 +5,8 @@
 #include <memory>
 #include <new>
 
-#include "mw/log.h"
+#include "mw/log/internal/performance.h"
+#include "mw/streamer/performance/internal/settings.h"
 
 namespace mw::streamer::internal {
 namespace {
@@ -35,16 +36,18 @@ std::int64_t Elapsed(StageLatency::TimePoint begin,
 
 StageLatency::~StageLatency() { Finish(); }
 
-void StageLatency::Start(const char* module, const void* instance,
-                         const char* stage, int stream_index) noexcept {
+void StageLatency::Start(PerformanceStage stage, const void* instance,
+                         int stream_index) noexcept {
   Finish();
-  module_ = module;
-  stage_ = stage;
+  const auto& names = GetPerformanceStageNames(stage);
+  module_ = names.module;
+  stage_ = names.stage;
   instance_ = instance;
   stream_index_ = stream_index;
   total_ = interval_ = {};
-  active_ = mw::log::ShouldLog(module_, mw::log::LogLevel::kInfo);
-  trace_ = active_ && mw::log::ShouldLog(module_, mw::log::LogLevel::kTrace);
+  const auto mode = GetPerformanceMode(stage);
+  active_ = mode != PerformanceMode::kOff;
+  trace_ = mode == PerformanceMode::kDetail;
   if (!active_) return;
   token_ = next_token.fetch_add(1, std::memory_order_relaxed) + 1;
   started_ = reported_ = Clock::now();
@@ -112,13 +115,14 @@ void StageLatency::Observe(std::optional<std::int64_t> nanoseconds) noexcept {
   }
   if (trace_) {
     if (valid) {
-      MW_LOG_TRACE(module_,
-                   "Stage[{}] stage={} stream_index={} latency({:.3f}ms)",
-                   instance_, stage_, stream_index_,
-                   static_cast<double>(*nanoseconds) / 1e6);
+      MW_PERF_LOG_TRACE(module_,
+                        "Stage[{}] stage={} stream_index={} latency({:.3f}ms)",
+                        instance_, stage_, stream_index_,
+                        static_cast<double>(*nanoseconds) / 1e6);
     } else {
-      MW_LOG_TRACE(module_, "Stage[{}] stage={} stream_index={} latency(N/A)",
-                   instance_, stage_, stream_index_);
+      MW_PERF_LOG_TRACE(module_,
+                        "Stage[{}] stage={} stream_index={} latency(N/A)",
+                        instance_, stage_, stream_index_);
     }
   }
   Report(false);
@@ -136,24 +140,24 @@ void StageLatency::Report(bool final) noexcept {
   const auto throughput =
       seconds > 0 ? static_cast<double>(count) / seconds : 0;
   if (sample.valid) {
-    MW_LOG_INFO(module_,
-                "Stage[{}] stage={} stream_index={} report={} window_s={:.3f} "
-                "samples={} unavailable={} throughput={:.3f}/s "
-                "latency(mean:{:.3f}ms,max:{:.3f}ms)",
-                instance_, stage_, stream_index_,
-                final ? "summary" : "interval", seconds, count,
-                sample.unavailable, throughput,
-                static_cast<double>(sample.total_ns) / 1e6 /
-                    static_cast<double>(sample.valid),
-                static_cast<double>(sample.max_ns) / 1e6);
+    MW_PERF_LOG_INFO(
+        module_,
+        "Stage[{}] stage={} stream_index={} report={} window_s={:.3f} "
+        "samples={} unavailable={} throughput={:.3f}/s "
+        "latency(mean:{:.3f}ms,max:{:.3f}ms)",
+        instance_, stage_, stream_index_, final ? "summary" : "interval",
+        seconds, count, sample.unavailable, throughput,
+        static_cast<double>(sample.total_ns) / 1e6 /
+            static_cast<double>(sample.valid),
+        static_cast<double>(sample.max_ns) / 1e6);
   } else {
-    MW_LOG_INFO(module_,
-                "Stage[{}] stage={} stream_index={} report={} window_s={:.3f} "
-                "samples={} unavailable={} throughput={:.3f}/s "
-                "latency(mean:N/A,max:N/A)",
-                instance_, stage_, stream_index_,
-                final ? "summary" : "interval", seconds, count,
-                sample.unavailable, throughput);
+    MW_PERF_LOG_INFO(
+        module_,
+        "Stage[{}] stage={} stream_index={} report={} window_s={:.3f} "
+        "samples={} unavailable={} throughput={:.3f}/s "
+        "latency(mean:N/A,max:N/A)",
+        instance_, stage_, stream_index_, final ? "summary" : "interval",
+        seconds, count, sample.unavailable, throughput);
   }
   interval_ = {};
   reported_ = now;

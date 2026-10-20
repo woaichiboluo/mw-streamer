@@ -166,7 +166,7 @@ TEST_CASE(
     config.modules["业务支付:a;b"] = LogLevel::kDebug;
     mw::log::Logging logging(config);
     MW_LOG_DEBUG("configured.module", "configured-debug-probe");
-    MW_LOG_INFO("unconfigured.module", "configured-info-hidden");
+    MW_LOG_INFO("unconfigured.module", "unconfigured-info-probe");
     MW_LOG_ERROR("muted.module", "configured-off-hidden");
     MW_LOG_DEBUG("业务支付:a;b", "custom-module-probe-{}", 42);
   }
@@ -206,13 +206,14 @@ TEST_CASE(
         std::string::npos);
   for (const auto* marker :
        {"default-warning-probe", "default-error-probe",
-        "configured-debug-probe", "after-shutdown-probe",
-        "after-cpp-failure-probe", "after-failure-configured-probe"}) {
+        "configured-debug-probe", "unconfigured-info-probe",
+        "after-shutdown-probe", "after-cpp-failure-probe",
+        "after-failure-configured-probe"}) {
     CHECK(output.find(marker) != std::string::npos);
   }
   for (const auto* marker :
-       {"default-debug-hidden", "default-off-hidden", "configured-info-hidden",
-        "configured-off-hidden", "disabled-sinks-hidden"}) {
+       {"default-debug-hidden", "default-off-hidden", "configured-off-hidden",
+        "disabled-sinks-hidden"}) {
     CHECK(output.find(marker) == std::string::npos);
   }
   CHECK(
@@ -230,41 +231,37 @@ TEST_CASE("module levels preserve defaults and support complete replacement") {
     Logging logging(config);
     CHECK(mw::log::ShouldLog("streamer", LogLevel::kInfo));
     CHECK_FALSE(mw::log::ShouldLog("streamer", LogLevel::kDebug));
-    for (const auto* module :
-         {"perf.input", "perf.decoder.video", "perf.decoder.audio",
-          "perf.encoder.video", "perf.encoder.audio",
-          "perf.filter.encoder.audio"}) {
-      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kTrace));
-      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kDebug));
-      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kInfo));
-      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kWarning));
-      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kError));
-      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kCritical));
-    }
+    CHECK_FALSE(mw::log::ShouldLog("zlm", LogLevel::kDebug));
+    CHECK_FALSE(mw::log::ShouldLog("zlm", LogLevel::kInfo));
+    CHECK(mw::log::ShouldLog("zlm", LogLevel::kWarning));
+    CHECK(mw::log::ShouldLog("zlm", LogLevel::kError));
     CHECK(mw::log::ShouldLog("default", LogLevel::kInfo));
     CHECK(mw::log::ShouldLog("", LogLevel::kInfo));
     for (const auto* module : {"processor", "unknown.module"}) {
       CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kTrace));
       CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kDebug));
-      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kInfo));
-      CHECK_FALSE(mw::log::ShouldLog(module, LogLevel::kWarning));
+      CHECK(mw::log::ShouldLog(module, LogLevel::kInfo));
+      CHECK(mw::log::ShouldLog(module, LogLevel::kWarning));
       CHECK(mw::log::ShouldLog(module, LogLevel::kError));
       CHECK(mw::log::ShouldLog(module, LogLevel::kCritical));
     }
   }
-  config.modules["perf.input"] = LogLevel::kInfo;
+  config.modules["business.module"] = LogLevel::kInfo;
+  config.modules["zlm"] = LogLevel::kInfo;
   {
     Logging logging(config);
-    CHECK(mw::log::ShouldLog("perf.input", LogLevel::kInfo));
-    CHECK_FALSE(mw::log::ShouldLog("perf.input", LogLevel::kDebug));
-    CHECK_FALSE(mw::log::ShouldLog("perf.encoder.video", LogLevel::kCritical));
+    CHECK(mw::log::ShouldLog("business.module", LogLevel::kInfo));
+    CHECK(mw::log::ShouldLog("zlm", LogLevel::kInfo));
+    CHECK_FALSE(mw::log::ShouldLog("business.module", LogLevel::kDebug));
+    CHECK(mw::log::ShouldLog("unknown.module", LogLevel::kCritical));
   }
   config.modules.clear();
   {
     Logging logging(config);
-    CHECK_FALSE(mw::log::ShouldLog("streamer", LogLevel::kInfo));
-    CHECK_FALSE(mw::log::ShouldLog("perf.input", LogLevel::kInfo));
-    CHECK(mw::log::ShouldLog("perf.input", LogLevel::kError));
+    CHECK(mw::log::ShouldLog("streamer", LogLevel::kInfo));
+    CHECK(mw::log::ShouldLog("business.module", LogLevel::kInfo));
+    CHECK(mw::log::ShouldLog("zlm", LogLevel::kInfo));
+    CHECK(mw::log::ShouldLog("business.module", LogLevel::kError));
     CHECK(mw::log::ShouldLog("default", LogLevel::kInfo));
   }
   config.modules = {{"default", LogLevel::kOff}};
@@ -304,23 +301,23 @@ TEST_CASE(
   config.console.enabled = false;
   config.modules["custom.module"] = LogLevel::kTrace;
   config.modules["custom.module"] = LogLevel::kDebug;
-  config.modules["perf.input"] = LogLevel::kTrace;
+  config.modules["business.module"] = LogLevel::kTrace;
   {
     Logging logging(config);
     CHECK(mw::log::ShouldLog("streamer", LogLevel::kInfo));
     CHECK(mw::log::ShouldLog("custom.module", LogLevel::kDebug));
     CHECK_FALSE(mw::log::ShouldLog("custom.module", LogLevel::kTrace));
-    CHECK(mw::log::ShouldLog("perf.input", LogLevel::kTrace));
+    CHECK(mw::log::ShouldLog("business.module", LogLevel::kTrace));
     config.modules["custom.module"] = LogLevel::kOff;
-    config.modules.erase("perf.input");
+    config.modules.erase("business.module");
     CHECK(mw::log::ShouldLog("custom.module", LogLevel::kDebug));
-    CHECK(mw::log::ShouldLog("perf.input", LogLevel::kTrace));
+    CHECK(mw::log::ShouldLog("business.module", LogLevel::kTrace));
   }
   {
     Logging logging(config);
     CHECK(mw::log::ShouldLog("streamer", LogLevel::kInfo));
     CHECK_FALSE(mw::log::ShouldLog("custom.module", LogLevel::kCritical));
-    CHECK_FALSE(mw::log::ShouldLog("perf.input", LogLevel::kInfo));
+    CHECK(mw::log::ShouldLog("business.module", LogLevel::kInfo));
     config.modules.erase("custom.module");
     CHECK_FALSE(mw::log::ShouldLog("custom.module", LogLevel::kCritical));
   }

@@ -90,9 +90,9 @@ class AvDecoder::Impl final {
         avcodec_parameters_to_context(context, stream_.codec_parameters.get()),
         "avcodec_parameters_to_context");
     const bool video = context->codec_type == AVMEDIA_TYPE_VIDEO;
-    latency_.Start(video ? "perf.decoder.video" : "perf.decoder.audio", this,
-                   video ? "decode.video" : "decode.audio",
-                   stream_.stream_index);
+    latency_.Start(video ? PerformanceStage::kDecoderVideo
+                         : PerformanceStage::kDecoderAudio,
+                   this, stream_.stream_index);
 #ifdef AV_CODEC_FLAG_COPY_OPAQUE
     if (latency_.enabled()) context->flags |= AV_CODEC_FLAG_COPY_OPAQUE;
 #endif

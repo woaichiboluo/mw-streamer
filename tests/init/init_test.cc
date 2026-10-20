@@ -277,6 +277,7 @@ TEST_CASE("streamer defaults use two event pollers and one work thread") {
   CHECK(config.event_poller_threads == 2);
   CHECK(config.work_threads == 1);
   CHECK(config.log.modules.at("ffmpeg") == mw::log::LogLevel::kWarning);
+  CHECK(config.log.modules.at("zlm") == mw::log::LogLevel::kWarning);
 #ifdef MW_STREAMER_STATIC_LIBRARY
   const mediakit::RuntimeConfig native_config;
   CHECK(native_config.event_poller_threads == 2);
@@ -457,4 +458,21 @@ TEST_CASE("failed initialization restores FFmpeg logging before retry") {
   }
   CHECK(av_log_get_level() == AV_LOG_VERBOSE);
   CHECK(ReadLog(path).find("bridge-retry-instance") != std::string::npos);
+}
+
+TEST_CASE("invalid performance configuration releases initialization state") {
+  auto config = TestConfig();
+  SECTION("invalid stage") {
+    config.performance.stages[static_cast<mw::streamer::PerformanceStage>(-1)] =
+        mw::streamer::PerformanceMode::kSummary;
+  }
+  SECTION("invalid mode") {
+    config.performance.stages[mw::streamer::PerformanceStage::kInput] =
+        static_cast<mw::streamer::PerformanceMode>(-1);
+  }
+  REQUIRE_THROWS_AS(Init(config), std::invalid_argument);
+  const auto valid = TestConfig();
+  CHECK(valid.performance.stages.empty());
+  ContextOwner context(Init(valid), &Shutdown);
+  REQUIRE(context != nullptr);
 }

@@ -41,7 +41,7 @@ class ForceFps::Impl final {
         "ForceFps 配置: instance={} fps={}/{} time_base={}/{} capacity={}",
         fmt::ptr(this), config.fps.num, config.fps.den, time_base_.num,
         time_base_.den, capacity_);
-    latency_.Start("perf.filter.force_fps", this, "filter.force_fps");
+    latency_.Start(PerformanceStage::kForceFps, this);
   }
 
   bool TryPushFrame(const AvDecoderReadResult& input) {
@@ -187,7 +187,7 @@ class ForceFps::Impl final {
                 fmt::ptr(this), inputs_.size());
     inputs_.clear();
     ClearHistory();
-    latency_.Start("perf.filter.force_fps", this, "filter.force_fps");
+    latency_.Start(PerformanceStage::kForceFps, this);
     stopped_ = false;
   }
 

@@ -39,8 +39,9 @@ class SyncerLatencyLog final {
     config.log.console.enabled = false;
     config.log.rotating_file.enabled = true;
     config.log.rotating_file.path = path_.string();
-    config.log.modules = {{"streamer", mw::log::LogLevel::kOff},
-                          {"perf.syncer.video", mw::log::LogLevel::kInfo}};
+    config.log.modules = {{"streamer", mw::log::LogLevel::kOff}};
+    config.performance.stages = {{mw::streamer::PerformanceStage::kSyncerVideo,
+                                  mw::streamer::PerformanceMode::kSummary}};
     runtime_.reset(mw::streamer::Init(config));
   }
   ~SyncerLatencyLog() {

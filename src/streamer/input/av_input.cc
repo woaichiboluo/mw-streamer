@@ -79,7 +79,7 @@ class AvInput::Impl final {
       throw std::logic_error("重新打开 AvInput 前需要 Close");
     }
     cancelled_.store(false);
-    latency_.Start("perf.input", this, "read.packet");
+    latency_.Start(PerformanceStage::kInput, this);
     MW_LOG_DEBUG("streamer",
                  "AvInput[{}] 打开配置: 包容量={} 打开超时={}ms 读取超时={}ms "
                  "格式={} 选项数={}",

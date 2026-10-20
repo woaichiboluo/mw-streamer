@@ -16,6 +16,7 @@ extern "C" {
 
 #include "Common/Runtime.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/performance/internal/settings.h"
 #include "mw/streamer/platform/runtime.h"
 
 namespace mw::streamer {
@@ -96,11 +97,13 @@ class MwStreamerContext final {
       av_log_set_callback(av_log_default_callback);
       av_log_set_level(previous_ffmpeg_log_level);
     }
+    performance.reset();
     logging.reset();
     timer_resolution.reset();
   }
 
   std::unique_ptr<mw::log::Logging> logging;
+  std::unique_ptr<internal::PerformanceSettings> performance;
   bool ffmpeg_network_initialized = false;
   bool ffmpeg_logging_initialized = false;
   int previous_ffmpeg_log_level = AV_LOG_INFO;
@@ -114,6 +117,8 @@ MwStreamerContext* Init(const InitConfig& config) {
   internal::EnableUtf8Console();
   auto context = std::make_unique<MwStreamerContext>();
   context->logging = std::make_unique<mw::log::Logging>(config.log);
+  context->performance =
+      std::make_unique<internal::PerformanceSettings>(config.performance);
   context->previous_ffmpeg_log_level = av_log_get_level();
   av_log_set_callback(FfmpegLog);
   context->ffmpeg_logging_initialized = true;

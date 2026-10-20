@@ -493,6 +493,7 @@ TEST_CASE("LivePipeline supports single-track output and restart",
   SECTION("audio only") {
     video = false;
     config.encoder.video_pixel_format = AV_PIX_FMT_NONE;
+    config.encoder.fps = {0, 0};
   }
   OutputDirectory directory;
   Observations observations;

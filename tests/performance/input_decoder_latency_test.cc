@@ -30,7 +30,7 @@ namespace fs = std::filesystem;
 
 class InputDecoderLog final {
  public:
-  explicit InputDecoderLog(mw::log::LogLevel level)
+  explicit InputDecoderLog(mw::streamer::PerformanceMode mode)
       : directory_(
             fs::temp_directory_path() /
             ("mw-input-decoder-latency-" +
@@ -47,10 +47,11 @@ class InputDecoderLog final {
     config.log.async.enabled = false;
     config.log.rotating_file.enabled = true;
     config.log.rotating_file.path = path_.string();
-    config.log.modules = {{"perf.input", level},
-                          {"perf.decoder.video", level},
-                          {"perf.decoder.audio", level},
-                          {"streamer", mw::log::LogLevel::kOff}};
+    config.log.modules = {{"streamer", mw::log::LogLevel::kOff}};
+    config.performance.stages = {
+        {mw::streamer::PerformanceStage::kInput, mode},
+        {mw::streamer::PerformanceStage::kDecoderVideo, mode},
+        {mw::streamer::PerformanceStage::kDecoderAudio, mode}};
     runtime_.reset(mw::streamer::Init(config));
   }
 
@@ -179,7 +180,7 @@ TEST_CASE("Input latency counts successful reads and finalizes once per open",
   const auto video = NativeFixture(AVMEDIA_TYPE_VIDEO);
   const auto audio = NativeFixture(AVMEDIA_TYPE_AUDIO);
   const auto expected = video.packets.size() + audio.packets.size();
-  InputDecoderLog logging(mw::log::LogLevel::kInfo);
+  InputDecoderLog logging(mw::streamer::PerformanceMode::kSummary);
   {
     mw::streamer::AvInput input;
     for (int session = 0; session < 2; ++session) {
@@ -219,7 +220,7 @@ TEST_CASE(
     REQUIRE(packet->opaque_ref != nullptr);
     packet->opaque_ref->data[0] = 73;
   }
-  InputDecoderLog logging(mw::log::LogLevel::kInfo);
+  InputDecoderLog logging(mw::streamer::PerformanceMode::kSummary);
   {
     mw::streamer::AvDecoderConfig config;
     config.thread_count = 1;
@@ -284,7 +285,7 @@ TEST_CASE(
 TEST_CASE("Disabled input and decode latency leave packets and logs unchanged",
           "[latency][av-input][av-decoder][disabled]") {
   auto fixture = NativeFixture(AVMEDIA_TYPE_AUDIO);
-  InputDecoderLog logging(mw::log::LogLevel::kOff);
+  InputDecoderLog logging(mw::streamer::PerformanceMode::kOff);
   {
     mw::streamer::AvInput input;
     input.Open(FixturePath());

@@ -26,7 +26,7 @@ namespace fs = std::filesystem;
 
 class RemuxerLog final {
  public:
-  explicit RemuxerLog(mw::log::LogLevel level)
+  explicit RemuxerLog(mw::streamer::PerformanceMode mode)
       : directory_(
             fs::temp_directory_path() /
             ("mw-remuxer-latency-" +
@@ -42,10 +42,11 @@ class RemuxerLog final {
     config.log.async.enabled = false;
     config.log.rotating_file.enabled = true;
     config.log.rotating_file.path = (directory_ / "performance.log").string();
-    config.log.modules = {{"perf.remuxer.convert", level},
-                          {"perf.remuxer.output", level},
-                          {"streamer", mw::log::LogLevel::kOff},
+    config.log.modules = {{"streamer", mw::log::LogLevel::kOff},
                           {"zlm", mw::log::LogLevel::kOff}};
+    config.performance.stages = {
+        {mw::streamer::PerformanceStage::kRemuxerConvert, mode},
+        {mw::streamer::PerformanceStage::kRemuxerOutput, mode}};
     runtime_.reset(mw::streamer::Init(config));
   }
 
@@ -166,7 +167,7 @@ TEST_CASE("Remuxer 只统计实际执行的协议转换和同步输出并独立�
   bool recording_only = false;
   SECTION("无外部输出仍执行协议转换") {}
   SECTION("仅 MP4 录像跳过协议转换且完整排空") { recording_only = true; }
-  RemuxerLog logging(mw::log::LogLevel::kInfo);
+  RemuxerLog logging(mw::streamer::PerformanceMode::kSummary);
   {
     std::atomic<bool> failed{false};
     mw::streamer::Remuxer remuxer;
@@ -209,7 +210,7 @@ TEST_CASE("Remuxer 只统计实际执行的协议转换和同步输出并独立�
 TEST_CASE("关闭 Remuxer latency 不产生阶段统计且仍能正常排空",
           "[performance][latency][remuxer][disabled]") {
   const RemuxMedia media;
-  RemuxerLog logging(mw::log::LogLevel::kOff);
+  RemuxerLog logging(mw::streamer::PerformanceMode::kOff);
   {
     std::atomic<bool> failed{false};
     mw::streamer::Remuxer remuxer;

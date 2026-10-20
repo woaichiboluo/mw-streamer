@@ -388,12 +388,12 @@ class SyncerTiming::Impl final {
                      std::int64_t now) const {
     if (track.output_source && std::string_view(track.output_source) == source)
       return;
-    MW_LOG_INFO("streamer",
-                "Syncer[{}] 输出来源切换 track={} "
-                "old_source={} source={} now_us={}",
-                log_context_, TrackName(video),
-                track.output_source ? track.output_source : "none", source,
-                now);
+    MW_LOG_DEBUG("streamer",
+                 "Syncer[{}] 输出来源切换 track={} "
+                 "old_source={} source={} now_us={}",
+                 log_context_, TrackName(video),
+                 track.output_source ? track.output_source : "none", source,
+                 now);
     track.output_source = source;
   }
 

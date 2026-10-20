@@ -95,8 +95,8 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
         output_ = std::move(output);
         converter_ = std::move(converter);
         record_only_ = record_only;
-        convert_latency_.Start("perf.remuxer.convert", this, "remux.convert");
-        output_latency_.Start("perf.remuxer.output", this, "remux.output");
+        convert_latency_.Start(PerformanceStage::kRemuxerConvert, this);
+        output_latency_.Start(PerformanceStage::kRemuxerOutput, this);
         std::lock_guard<std::mutex> lock(mutex_);
         recordings_ = std::move(recordings);
         streams_ = std::move(session_streams);

@@ -418,6 +418,11 @@ TEST_CASE("AvEncoder 自行对齐 AAC frame_size 并在 Stop 排空尾部",
   capture.Bind(encoder);
   auto config = Config();
   config.video_pixel_format = AV_PIX_FMT_NONE;
+  SECTION("默认帧率") {}
+  SECTION("未指定帧率") { config.fps = {0, 0}; }
+  SECTION("零分子") { config.fps = {0, 1}; }
+  SECTION("零分母") { config.fps = {30, 0}; }
+  SECTION("负帧率") { config.fps = {-30, 1}; }
   REQUIRE(encoder.Start(config));
   const auto streams = encoder.streams();
   REQUIRE(streams.size() == 1);
@@ -1034,6 +1039,9 @@ TEST_CASE("AvEncoder 同步初始化失败可恢复且不尝试其他编码器",
     invalid.audio_sample_format = AV_SAMPLE_FMT_NONE;
   }
   SECTION("无效像素格式") { invalid.video_pixel_format = AV_PIX_FMT_NB; }
+  SECTION("视频帧率零分子") { invalid.fps = {0, 1}; }
+  SECTION("视频帧率零分母") { invalid.fps = {30, 0}; }
+  SECTION("视频帧率为负数") { invalid.fps = {-30, 1}; }
   SECTION("私有选项不能覆盖正式码率字段") { invalid.video_options["b"] = "1M"; }
   SECTION("CPU 设备不能满足指定的硬件编码器") {
     invalid.video_encoder_name = "h264_nvenc";

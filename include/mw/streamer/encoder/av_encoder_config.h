@@ -25,6 +25,7 @@ struct AvEncoderConfig {
   // Both zero preserve source size. Conversion here does not resize video.
   int width = 0;
   int height = 0;
+  // Must be positive when video is enabled; ignored for audio-only output.
   AVRational fps{30, 1};
   // The final image's pixel layout, including CUDA surfaces' software format.
   // NONE disables channel video output. Input FPS conversion preserves its

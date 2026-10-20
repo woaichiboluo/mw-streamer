@@ -369,8 +369,7 @@ class AudioFilter final {
   AudioFilter(AVSampleFormat input, AVSampleFormat output, int rate,
               const AVChannelLayout& layout, int frame_size)
       : time_base_{1, rate} {
-    latency_.Start("perf.filter.encoder.audio", this, "filter.encoder.audio",
-                   kAudioIndex);
+    latency_.Start(PerformanceStage::kEncoderAudioFilter, this, kAudioIndex);
     source_ = avfilter_graph_alloc_filter(
         graph_.get(), avfilter_get_by_name("abuffer"), "in");
     sink_ = avfilter_graph_alloc_filter(
@@ -480,11 +479,14 @@ class AvEncoder::Impl final {
       std::vector<ffmpeg::StreamInfo> streams;
       const bool video = config.video_pixel_format != AV_PIX_FMT_NONE;
       const bool audio = config.audio_sample_format != AV_SAMPLE_FMT_NONE;
-      if ((!video && !audio) || config.fps.num <= 0 || config.fps.den <= 0) {
-        throw std::invalid_argument("AvEncoder 需要至少一条轨道和有效帧率");
+      if (!video && !audio) {
+        throw std::invalid_argument("AvEncoder 需要至少一条轨道");
+      }
+      if (video && (config.fps.num <= 0 || config.fps.den <= 0)) {
+        throw std::invalid_argument("AvEncoder 视频帧率无效");
       }
       if (video) {
-        session->video_latency.Start("perf.encoder.video", this, "encode.video",
+        session->video_latency.Start(PerformanceStage::kEncoderVideo, this,
                                      kVideoIndex);
         session->video =
             OpenVideo(config, device_, session->video_latency.enabled());
@@ -492,7 +494,7 @@ class AvEncoder::Impl final {
             *session->video->get(), kVideoIndex));
       }
       if (audio) {
-        session->audio_latency.Start("perf.encoder.audio", this, "encode.audio",
+        session->audio_latency.Start(PerformanceStage::kEncoderAudio, this,
                                      kAudioIndex);
         session->audio = OpenAudio(config, session->audio_latency.enabled());
         const auto* context = session->audio->get();
