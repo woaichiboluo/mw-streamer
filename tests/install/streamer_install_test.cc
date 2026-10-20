@@ -11,8 +11,10 @@ int main() {
     mw::streamer::ffmpeg::AvDictionary dictionary;
     dictionary.Set("installed", "yes");
     mw::streamer::Remuxer remuxer;
+    const auto probe = mw::streamer::AvProbe::Probe("");
     if (!frame.get() || !packet.get() || dictionary.Get("installed") != "yes" ||
-        !remuxer.output_info().output_urls.empty()) {
+        !remuxer.output_info().output_urls.empty() || probe.info ||
+        !probe.error) {
       result = 1;
     }
     MW_LOG_INFO_DEFAULT("Installed streamer SDK: {}",

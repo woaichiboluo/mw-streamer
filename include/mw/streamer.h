@@ -21,6 +21,7 @@
 #include "mw/streamer/input/av_input.h"
 #include "mw/streamer/input/av_input_proxy.h"
 #include "mw/streamer/input/av_media_source.h"
+#include "mw/streamer/input/av_probe.h"
 #include "mw/streamer/media_frame.h"
 #include "mw/streamer/pipeline/live_pipeline.h"
 #include "mw/streamer/pipeline/offline_pipeline.h"

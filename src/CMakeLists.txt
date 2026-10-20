@@ -38,6 +38,8 @@ set(MW_STREAMER_SOURCES
     streamer/init/init.cc
     streamer/input/av_input.cc
     streamer/input/av_input_proxy.cc
+    streamer/input/av_probe.cc
+    streamer/input/input_info.cc
     streamer/decoder/av_decoder.cc
     streamer/filter/av_media_filter.cc
     streamer/filter/force_fps.cc

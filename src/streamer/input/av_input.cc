@@ -17,6 +17,7 @@ extern "C" {
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/av_dictionary.h"
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/input/internal/input_info.h"
 #include "mw/streamer/performance/latency.h"
 #include "mw/streamer/platform/thread.h"
 
@@ -117,34 +118,7 @@ class AvInput::Impl final {
       CheckIo(avformat_find_stream_info(format_, nullptr),
               "avformat_find_stream_info");
       deadline_ns_.store(0);
-      AvInputInfo info;
-      info.timestamp_discontinuities =
-          (format_->iformat->flags & AVFMT_TS_DISCONT) != 0;
-      info.start_time_us = format_->start_time;
-      info.duration_us = format_->duration;
-      info.metadata = ffmpeg::AvDictionary::ToMap(format_->metadata);
-      for (unsigned int index = 0; index < format_->nb_streams; ++index) {
-        auto* stream = format_->streams[index];
-        ffmpeg::StreamInfo description{
-            stream->index, ffmpeg::CodecParameters(*stream->codecpar),
-            stream->time_base};
-        if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-          description.frame_rate =
-              av_guess_frame_rate(format_, stream, nullptr);
-          description.sample_aspect_ratio =
-              av_guess_sample_aspect_ratio(format_, stream, nullptr);
-        }
-        description.disposition = stream->disposition;
-        description.metadata = ffmpeg::AvDictionary::ToMap(stream->metadata);
-        info.streams.push_back(std::move(description));
-        if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
-            info.video_stream_index < 0) {
-          info.video_stream_index = stream->index;
-        } else if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO &&
-                   info.audio_stream_index < 0) {
-          info.audio_stream_index = stream->index;
-        }
-      }
+      auto info = internal::MakeInputInfo(*format_);
       MW_LOG_DEBUG(
           "streamer",
           "AvInput[{}] 轨道: 总数={} 视频={} 音频={} 起点={}us 时长={}us",
