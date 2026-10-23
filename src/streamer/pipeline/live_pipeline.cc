@@ -18,6 +18,7 @@ SchedulerConfig MakeSchedulerConfig(const LivePipelineConfig& config) {
   scheduler.syncer.backup_video = config.backup_video;
   scheduler.syncer.options = config.syncer;
   scheduler.realtime = config.realtime;
+  scheduler.output_samples_per_frame = config.output_samples_per_frame;
   return scheduler;
 }
 

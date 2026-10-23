@@ -16,6 +16,9 @@ namespace mw::streamer {
 struct SchedulerConfig {
   SyncerConfig syncer;
   RealtimeConfig realtime;
+  // Audio business callbacks receive target-format frames of this size.
+  // Zero retains variable sizes; positive sizes pad boundary tails.
+  int output_samples_per_frame = 1024;
 };
 
 // One realtime driver releases source frames to independent video/audio

@@ -367,6 +367,36 @@ TEST_CASE("Scheduler continues producing both tracks after normal source EOF",
   CHECK_FALSE(scheduler.error());
 }
 
+TEST_CASE(
+    "Scheduler adapts audio format and block size before business filtering",
+    "[scheduler][audio][frame-size]") {
+  auto source = Source();
+  auto config = Config();
+  config.output_samples_per_frame = GENERATE(256, 1024);
+  std::atomic<int> filtered{0};
+  std::atomic<bool> invalid{false};
+  Scheduler scheduler(source, config);
+  scheduler.media_filter().SetOnAudio([&](const ffmpeg::Frame& frame) {
+    if (frame->sample_rate != 32000 || frame->format != AV_SAMPLE_FMT_S16 ||
+        frame->ch_layout.nb_channels != 1 ||
+        frame->nb_samples != config.output_samples_per_frame ||
+        frame->time_base.num != 1 || frame->time_base.den != 32000) {
+      invalid.store(true);
+    }
+    ++filtered;
+    return frame.Ref();
+  });
+  scheduler.SetOnVideoFrame([](const ffmpeg::Frame&) { return true; });
+  scheduler.SetOnAudioFrame([](const ffmpeg::Frame&) { return true; });
+  REQUIRE(source->Start(SamplePath()));
+  REQUIRE(scheduler.Start());
+  const bool received = WaitFor([&] { return filtered.load() >= 8; });
+  scheduler.Stop();
+  CHECK(received);
+  CHECK_FALSE(invalid.load());
+  CHECK_FALSE(scheduler.error());
+}
+
 TEST_CASE("Scheduler reports a filter failure once and can start a new session",
           "[scheduler]") {
   auto source = Source();

@@ -14,20 +14,16 @@
 #include <utility>
 
 extern "C" {
-#include <libavfilter/avfilter.h>
-#include <libavfilter/buffersink.h>
-#include <libavfilter/buffersrc.h>
 #include <libavutil/mathematics.h>
-#include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/samplefmt.h>
 }
 
 #include "mw/log.h"
+#include "mw/streamer/ffmpeg/audio_frame_adapter.h"
 #include "mw/streamer/ffmpeg/av_dictionary.h"
 #include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/ffmpeg/error.h"
-#include "mw/streamer/ffmpeg/filter_graph.h"
 #include "mw/streamer/performance/latency.h"
 #include "mw/streamer/platform/thread.h"
 
@@ -368,79 +364,27 @@ class AudioFilter final {
  public:
   AudioFilter(AVSampleFormat input, AVSampleFormat output, int rate,
               const AVChannelLayout& layout, int frame_size)
-      : time_base_{1, rate} {
+      : adapter_(input, output, rate, layout, frame_size) {
     latency_.Start(PerformanceStage::kEncoderAudioFilter, this, kAudioIndex);
-    source_ = avfilter_graph_alloc_filter(
-        graph_.get(), avfilter_get_by_name("abuffer"), "in");
-    sink_ = avfilter_graph_alloc_filter(
-        graph_.get(), avfilter_get_by_name("abuffersink"), "out");
-    if (!source_ || !sink_) throw std::bad_alloc();
-    auto* parameters = av_buffersrc_parameters_alloc();
-    if (!parameters) throw std::bad_alloc();
-    const std::unique_ptr<AVBufferSrcParameters,
-                          void (*)(AVBufferSrcParameters*)>
-        guard(parameters, [](AVBufferSrcParameters* value) {
-          av_channel_layout_uninit(&value->ch_layout);
-          av_free(value);
-        });
-    parameters->format = input;
-    parameters->sample_rate = rate;
-    parameters->time_base = time_base_;
-    Check(av_channel_layout_copy(&parameters->ch_layout, &layout),
-          "设置编码音频源布局");
-    Check(av_buffersrc_parameters_set(source_, parameters),
-          "设置编码音频源参数");
-    Check(avfilter_init_str(source_, nullptr), "初始化编码音频源");
-    const AVSampleFormat formats[]{output};
-    const int rates[]{rate};
-    Check(av_opt_set_array(sink_, "sample_formats",
-                           AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE, 0, 1,
-                           AV_OPT_TYPE_SAMPLE_FMT, formats),
-          "设置编码音频输出格式");
-    Check(av_opt_set_array(sink_, "samplerates",
-                           AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE, 0, 1,
-                           AV_OPT_TYPE_INT, rates),
-          "设置编码音频输出采样率");
-    Check(avfilter_init_str(sink_, nullptr), "初始化编码音频输出");
-    Check(avfilter_link(source_, 0, sink_, 0), "连接编码音频滤镜");
-    Check(avfilter_graph_config(graph_.get(), nullptr), "配置编码音频滤镜");
-    if (frame_size > 0) {
-      av_buffersink_set_frame_size(sink_,
-                                   static_cast<unsigned int>(frame_size));
-    }
   }
 
   void Submit(const ffmpeg::Frame& frame) {
-    // abuffer interprets PTS in its configured input time base. Reblocking
-    // retains the caller's timeline; only the timestamp unit changes here.
-    auto submitted = InTimeBase(frame, time_base_);
+    auto submitted = frame.Ref();
     if (latency_.enabled()) {
       latency_.Attach(submitted->opaque_ref, latency_.Begin());
     }
-    Check(av_buffersrc_write_frame(source_, submitted.get()),
-          "提交编码音频源帧");
+    adapter_.Submit(submitted);
   }
-  void End() {
-    Check(av_buffersrc_close(source_, AV_NOPTS_VALUE, 0), "结束编码音频源");
-  }
+  void End() { adapter_.End(); }
   bool Receive(ffmpeg::Frame& frame) {
-    const int result = av_buffersink_get_frame(sink_, frame.get());
-    if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) return false;
-    Check(result, "获取编码音频滤镜帧");
+    if (!adapter_.Receive(frame)) return false;
     latency_.Complete(frame->opaque_ref);
-    frame->time_base = av_buffersink_get_time_base(sink_);
     return true;
   }
 
  private:
-  static void Check(int result, const char* operation) {
-    ffmpeg::FfmpegException::throwIfError(result, operation);
-  }
   internal::StageLatency latency_;
-  const AVRational time_base_;
-  ffmpeg::FilterGraph graph_;
-  AVFilterContext* source_ = nullptr;
-  AVFilterContext* sink_ = nullptr;
+  ffmpeg::internal::AudioFrameAdapter adapter_;
 };
 
 }  // namespace

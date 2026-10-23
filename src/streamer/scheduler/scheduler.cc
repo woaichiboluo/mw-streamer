@@ -64,6 +64,7 @@ class Scheduler::Impl final {
     }
     if (target.audio_sample_format != AV_SAMPLE_FMT_NONE) {
       AudioResamplerConfig audio;
+      audio.output_samples_per_frame = config.output_samples_per_frame;
       audio.sample_rate = target.audio_sample_rate;
       audio.sample_format = target.audio_sample_format;
       audio.channel_layout = target.audio_channel_layout;
@@ -407,13 +408,15 @@ class Scheduler::Impl final {
       }
       if (input.status != AvDecoderReadStatus::kNull) {
         pending = index == 0 ? filter_.ProcessVideo(std::move(input))
-                             : filter_.ProcessAudio(std::move(input));
+                             : std::move(input);
       }
       if (pending.status != AvDecoderReadStatus::kNull &&
           converter.TryPushFrame(pending)) {
         pending = {};
       }
       auto output = converter.TryReadFrame();
+      if (index == 1 && output.status != AvDecoderReadStatus::kNull)
+        output = filter_.ProcessAudio(std::move(output));
       {
         std::lock_guard lock(wake_->mutex);
         auto& track = tracks_[index];

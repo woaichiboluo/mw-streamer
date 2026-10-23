@@ -553,4 +553,191 @@ TEST_CASE("AudioResampler owns custom target layouts independently",
   REQUIRE((*result.frame)->ch_layout.u.map[1].id == AV_CHAN_FRONT_RIGHT);
 }
 
+TEST_CASE(
+    "AudioResampler fixed blocks combine small inputs and split large ones",
+    "[audio-resampler][frame-size]") {
+  AudioResamplerConfig config;
+  config.output_samples_per_frame = 1024;
+  AudioResampler resampler(config);
+  Capture actual;
+  Capture expected;
+  std::int64_t endpoint = 48000;
+  for (const int samples : {257, 257, 510, 3072, 333}) {
+    auto input = Audio(samples, endpoint);
+    CaptureFrame(*input.frame->get(), expected);
+    REQUIRE(resampler.TryPushFrame(input));
+    Drain(resampler, actual);
+    endpoint += samples;
+  }
+  REQUIRE(actual.samples == std::vector<int>{1024, 1024, 1024, 1024});
+  REQUIRE(actual.pts == std::vector<std::int64_t>{48000, 49024, 50048, 51072});
+  REQUIRE(resampler.TryPushFrame(Eof(endpoint)));
+  Drain(resampler, actual);
+  REQUIRE(actual.samples == std::vector<int>{1024, 1024, 1024, 1024, 1024});
+  REQUIRE(actual.pts.back() == 52096);
+  expected.pcm.resize(5 * 1024 * 2, 0.0f);
+  CheckPcm(actual, expected);
+  REQUIRE(actual.eof.size() == 1);
+  REQUIRE(actual.eof.front().end_pts == endpoint);
+  REQUIRE(actual.pts.back() + actual.samples.back() > endpoint);
+}
+
+TEST_CASE("AudioResampler fixed blocks preserve resampled PCM and sample clock",
+          "[audio-resampler][frame-size]") {
+  AudioResamplerConfig config;
+  config.output_samples_per_frame = 1024;
+  AudioResampler resampler(config);
+  auto first = Audio(997, 44100 * 3, 44100);
+  NativeSwr oracle(*first.frame->get(), config);
+  Capture expected;
+  Capture actual;
+  std::int64_t endpoint = 44100 * 3;
+  for (int index = 0; index < 40; ++index) {
+    auto input = Audio(997, endpoint, 44100);
+    oracle.Convert(&input, expected);
+    REQUIRE(resampler.TryPushFrame(input));
+    Drain(resampler, actual);
+    endpoint += 997;
+  }
+  oracle.Flush(expected);
+  REQUIRE(resampler.TryPushFrame(Eof(endpoint, 44100)));
+  Drain(resampler, actual);
+  const auto output_samples = expected.pcm.size() / 2;
+  const auto blocks = (output_samples + 1023) / 1024;
+  REQUIRE(actual.samples.size() == blocks);
+  expected.pcm.resize(blocks * 1024 * 2, 0.0f);
+  CheckPcm(actual, expected);
+  for (std::size_t index = 0; index < actual.samples.size(); ++index) {
+    REQUIRE(actual.samples[index] == 1024);
+    REQUIRE(actual.pts[index] ==
+            expected.pts.front() + static_cast<std::int64_t>(index) * 1024);
+  }
+  REQUIRE(actual.eof.size() == 1);
+  REQUIRE(actual.eof.front().end_pts ==
+          av_rescale_q(endpoint, {1, 44100}, {1, 48000}));
+}
+
+TEST_CASE(
+    "AudioResampler fixed blocks tolerate quantized millisecond timestamps",
+    "[audio-resampler][frame-size][timing]") {
+  AudioResamplerConfig config;
+  config.output_samples_per_frame = 1024;
+  AudioResampler resampler(config);
+  auto first = Audio(1024, 0, 44100);
+  NativeSwr oracle(*first.frame->get(), config);
+  Capture expected;
+  Capture actual;
+  for (int index = 0; index < 40; ++index) {
+    auto input = Audio(1024, 0, 44100);
+    (*input.frame)->pts = av_rescale_q(index * 1024, {1, 44100}, {1, 1000});
+    (*input.frame)->time_base = {1, 1000};
+    input.time_base = {1, 1000};
+    oracle.Convert(&input, expected);
+    REQUIRE(resampler.TryPushFrame(input));
+    Drain(resampler, actual);
+  }
+  oracle.Flush(expected);
+  auto eof = Eof(av_rescale_q(40 * 1024, {1, 44100}, {1, 1000}));
+  eof.time_base = {1, 1000};
+  REQUIRE(resampler.TryPushFrame(eof));
+  Drain(resampler, actual);
+  const auto samples = expected.pcm.size() / 2;
+  REQUIRE(actual.samples.size() == (samples + 1023) / 1024);
+  for (std::size_t index = 0; index < actual.samples.size(); ++index) {
+    REQUIRE(actual.samples[index] == 1024);
+    REQUIRE(actual.pts[index] ==
+            expected.pts.front() + static_cast<std::int64_t>(index) * 1024);
+  }
+  REQUIRE(actual.eof.size() == 1);
+  REQUIRE(actual.eof.front().end_pts == eof.end_pts * 48);
+}
+
+TEST_CASE("AudioResampler fixed blocks isolate timestamp and stream boundaries",
+          "[audio-resampler][frame-size]") {
+  const bool change_stream = GENERATE(false, true);
+  AudioResamplerConfig config;
+  config.output_samples_per_frame = 1024;
+  AudioResampler resampler(config);
+  auto first = Audio(333, 48000);
+  const int next_stream = change_stream ? 9 : 7;
+  const std::int64_t next_pts = change_stream ? 48333 : -48000;
+  auto second = Audio(333, next_pts, 48000, AV_SAMPLE_FMT_FLTP, 2, next_stream);
+  REQUIRE(resampler.TryPushFrame(first));
+  REQUIRE(resampler.TryReadFrame().status == AvDecoderReadStatus::kNull);
+  REQUIRE(resampler.TryPushFrame(second));
+  REQUIRE(resampler.TryPushFrame(Eof(next_pts + 333, 48000, next_stream)));
+  Capture actual;
+  Drain(resampler, actual);
+  REQUIRE(actual.samples == std::vector<int>{1024, 1024});
+  REQUIRE(actual.pts == std::vector<std::int64_t>{48000, next_pts});
+  REQUIRE(actual.streams == std::vector<int>{7, next_stream});
+  Capture expected;
+  CaptureFrame(*first.frame->get(), expected);
+  expected.pcm.resize(1024 * 2, 0.0f);
+  CaptureFrame(*second.frame->get(), expected);
+  expected.pcm.resize(2048 * 2, 0.0f);
+  CheckPcm(actual, expected);
+  REQUIRE(actual.eof.size() == 1);
+  REQUIRE(actual.eof.front().end_pts == next_pts + 333);
+}
+
+TEST_CASE("AudioResampler fixed blocks drain a format change independently",
+          "[audio-resampler][frame-size]") {
+  AudioResamplerConfig config;
+  config.output_samples_per_frame = 1024;
+  AudioResampler resampler(config);
+  auto first = Audio(333, 48000);
+  auto second = Audio(333, 48333, 48000, AV_SAMPLE_FMT_S16, 1);
+  NativeSwr oracle(*second.frame->get(), config);
+  Capture expected;
+  CaptureFrame(*first.frame->get(), expected);
+  expected.pcm.resize(1024 * 2, 0.0f);
+  oracle.Convert(&second, expected);
+  oracle.Flush(expected);
+  expected.pcm.resize(2048 * 2, 0.0f);
+  REQUIRE(resampler.TryPushFrame(first));
+  REQUIRE(resampler.TryPushFrame(second));
+  REQUIRE(resampler.TryPushFrame(Eof(48666)));
+  Capture actual;
+  Drain(resampler, actual);
+  REQUIRE(actual.samples == std::vector<int>{1024, 1024});
+  REQUIRE(actual.pts == std::vector<std::int64_t>{48000, 48333});
+  CheckPcm(actual, expected);
+}
+
+TEST_CASE(
+    "AudioResampler fixed blocks discard partial samples on Stop and Reset",
+    "[audio-resampler][frame-size]") {
+  const bool stop = GENERATE(false, true);
+  AudioResamplerConfig config;
+  config.output_samples_per_frame = 1024;
+  AudioResampler resampler(config);
+  REQUIRE(resampler.TryPushFrame(Audio(333, 48000)));
+  REQUIRE(resampler.TryReadFrame().status == AvDecoderReadStatus::kNull);
+  if (stop) {
+    resampler.Stop();
+    REQUIRE_FALSE(resampler.TryPushFrame(Audio(1024, 0)));
+    REQUIRE(resampler.TryReadFrame().status == AvDecoderReadStatus::kNull);
+  }
+  resampler.Reset();
+  auto restarted = Audio(1024, 0);
+  REQUIRE(resampler.TryPushFrame(restarted));
+  REQUIRE(resampler.TryPushFrame(Eof(1024)));
+  Capture actual;
+  Capture expected;
+  CaptureFrame(*restarted.frame->get(), expected);
+  Drain(resampler, actual);
+  REQUIRE(actual.samples == std::vector<int>{1024});
+  REQUIRE(actual.pts == std::vector<std::int64_t>{0});
+  REQUIRE(actual.eof.size() == 1);
+  CheckPcm(actual, expected);
+}
+
+TEST_CASE("AudioResampler rejects a negative fixed block size",
+          "[audio-resampler][frame-size]") {
+  AudioResamplerConfig config;
+  config.output_samples_per_frame = -1;
+  REQUIRE_THROWS_AS(AudioResampler{config}, std::invalid_argument);
+}
+
 }  // namespace

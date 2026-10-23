@@ -2,7 +2,9 @@
 #define MW_STREAMER_INPUT_AV_PROBE_H_
 
 #include <exception>
+#include <map>
 #include <optional>
+#include <string>
 #include <string_view>
 
 #include "mw/export.h"
@@ -28,6 +30,12 @@ class MW_STREAMER_API AvProbe final {
   // URLs, are returned through error rather than thrown. A later playback
   // connection may observe different source properties.
   [[nodiscard]] static AvProbeResult Probe(std::string_view url) noexcept;
+  // Uses the same FFmpeg opening options as AvInputConfig::options, including
+  // HTTP headers and user_agent. Copies options without modifying the caller.
+  // The same thirty-second deadline and error-return contract apply.
+  [[nodiscard]] static AvProbeResult Probe(
+      std::string_view url,
+      const std::map<std::string, std::string>& options) noexcept;
 };
 
 }  // namespace mw::streamer

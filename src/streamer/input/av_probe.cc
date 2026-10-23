@@ -10,6 +10,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 }
 
+#include "mw/streamer/ffmpeg/av_dictionary.h"
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/input/internal/input_info.h"
 
@@ -39,6 +40,12 @@ struct ProbeInput {
 }  // namespace
 
 AvProbeResult AvProbe::Probe(std::string_view url) noexcept {
+  return Probe(url, {});
+}
+
+AvProbeResult AvProbe::Probe(
+    std::string_view url,
+    const std::map<std::string, std::string>& options) noexcept {
   try {
     if (url.empty() || url.find('\0') != std::string_view::npos ||
         url.find_first_not_of(" \t\r\n\f\v") == std::string_view::npos) {
@@ -49,9 +56,10 @@ AvProbeResult AvProbe::Probe(std::string_view url) noexcept {
     input.format = avformat_alloc_context();
     if (!input.format) throw std::bad_alloc();
     input.format->interrupt_callback = {&ProbeInput::Interrupt, &input};
-    input.CheckIo(
-        avformat_open_input(&input.format, address.c_str(), nullptr, nullptr),
-        "avformat_open_input");
+    ffmpeg::AvDictionary dictionary(options);
+    input.CheckIo(avformat_open_input(&input.format, address.c_str(), nullptr,
+                                      dictionary.address()),
+                  "avformat_open_input");
     input.CheckIo(avformat_find_stream_info(input.format, nullptr),
                   "avformat_find_stream_info");
     return {internal::MakeInputInfo(*input.format), {}};

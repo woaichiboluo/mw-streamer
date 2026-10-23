@@ -6,11 +6,14 @@
 #include <cstddef>
 #include <cstring>
 #include <exception>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -21,7 +24,9 @@ extern "C" {
 
 #include "mw/streamer/ffmpeg/error.h"
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -175,6 +180,193 @@ TEST_CASE("AvProbe results own independent stream descriptions",
   CHECK(first_parameters->width == expected_width);
   CHECK(first_parameters->extradata[0] == expected_extradata_byte);
   CHECK(AvProbe::Probe(SamplePath()).info.has_value());
+}
+
+// One request per instance; all socket waits are bounded so failed probes
+// cannot leave the test worker blocked during destruction.
+class HttpProbeSocket final {
+ public:
+#ifdef _WIN32
+  using Handle = SOCKET;
+  static constexpr Handle kInvalid = INVALID_SOCKET;
+#else
+  using Handle = int;
+  static constexpr Handle kInvalid = -1;
+#endif
+
+  HttpProbeSocket() {
+#ifdef _WIN32
+    WSADATA data{};
+    if (WSAStartup(MAKEWORD(2, 2), &data) != 0)
+      throw std::runtime_error("Cannot initialize probe test sockets");
+#endif
+    handle_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (handle_ == kInvalid) {
+#ifdef _WIN32
+      WSACleanup();
+#endif
+      throw std::runtime_error("Cannot create HTTP probe socket");
+    }
+  }
+  ~HttpProbeSocket() {
+    Close(handle_);
+#ifdef _WIN32
+    WSACleanup();
+#endif
+  }
+  HttpProbeSocket(const HttpProbeSocket&) = delete;
+  HttpProbeSocket& operator=(const HttpProbeSocket&) = delete;
+  Handle get() const { return handle_; }
+  static void Close(Handle handle) {
+#ifdef _WIN32
+    closesocket(handle);
+#else
+    close(handle);
+#endif
+  }
+
+ private:
+  Handle handle_ = kInvalid;
+};
+
+class HeaderCheckingHttpServer final {
+ public:
+  HeaderCheckingHttpServer() {
+    std::ifstream file(SamplePath(), std::ios::binary);
+    if (!file) throw std::runtime_error("Cannot read HTTP probe fixture");
+    media_.assign(std::istreambuf_iterator<char>(file), {});
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(listener_.get(), reinterpret_cast<const sockaddr*>(&address),
+             sizeof(address)) != 0 ||
+        listen(listener_.get(), 1) != 0)
+      throw std::runtime_error("Cannot bind HTTP probe socket");
+#ifdef _WIN32
+    int size = sizeof(address);
+#else
+    socklen_t size = sizeof(address);
+#endif
+    if (getsockname(listener_.get(), reinterpret_cast<sockaddr*>(&address),
+                    &size) != 0)
+      throw std::runtime_error("Cannot query HTTP probe port");
+    url_ =
+        fmt::format("http://127.0.0.1:{}/sample.mp4", ntohs(address.sin_port));
+    worker_ = std::thread([this] {
+      try {
+        Serve();
+      } catch (...) {
+        error_ = std::current_exception();
+      }
+    });
+  }
+  ~HeaderCheckingHttpServer() { Finish(); }
+  const std::string& url() const { return url_; }
+  void Finish() {
+    if (worker_.joinable()) worker_.join();
+  }
+  bool authorized() const { return authorized_; }
+  std::exception_ptr error() const { return error_; }
+
+ private:
+  static bool Ready(HttpProbeSocket::Handle socket, bool writing = false) {
+    fd_set descriptors;
+    FD_ZERO(&descriptors);
+    FD_SET(socket, &descriptors);
+    timeval timeout{3, 0};
+    return select(static_cast<int>(socket + 1),
+                  writing ? nullptr : &descriptors,
+                  writing ? &descriptors : nullptr, nullptr, &timeout) > 0;
+  }
+  void Serve() {
+    if (!Ready(listener_.get()))
+      throw std::runtime_error("HTTP probe connection timed out");
+    const auto client = accept(listener_.get(), nullptr, nullptr);
+    if (client == HttpProbeSocket::kInvalid)
+      throw std::runtime_error("Cannot accept HTTP probe connection");
+    // Close the accepted socket even when request parsing or allocation fails.
+    const auto close_client = [](const HttpProbeSocket::Handle* socket) {
+      HttpProbeSocket::Close(*socket);
+    };
+    std::unique_ptr<const HttpProbeSocket::Handle, decltype(close_client)>
+        connection(&client, close_client);
+    std::string request;
+    while (request.find("\r\n\r\n") == std::string::npos) {
+      if (request.size() >= 16384 || !Ready(client))
+        throw std::runtime_error("HTTP probe request timed out or too large");
+      char buffer[4096];
+      const auto count = recv(client, buffer, sizeof(buffer), 0);
+      if (count <= 0)
+        throw std::runtime_error("Cannot read HTTP probe request");
+      request.append(buffer, static_cast<std::size_t>(count));
+    }
+    authorized_ =
+        request.find("\r\nReferer: https://probe.test/\r\n") !=
+            std::string::npos &&
+        request.find("\r\nUser-Agent: mw-probe-test\r\n") != std::string::npos;
+    const auto response =
+        authorized_ ? fmt::format(
+                          "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\n"
+                          "Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                          media_.size(), media_)
+                    : std::string(
+                          "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n"
+                          "Connection: close\r\n\r\n");
+    std::size_t sent = 0;
+    while (sent < response.size()) {
+      if (!Ready(client, true))
+        throw std::runtime_error("HTTP probe response timed out");
+#ifdef _WIN32
+      constexpr int kSendFlags = 0;
+#else
+      constexpr int kSendFlags = MSG_NOSIGNAL;
+#endif
+      const auto count =
+          send(client, response.data() + sent,
+               static_cast<int>(response.size() - sent), kSendFlags);
+      if (count <= 0)
+        throw std::runtime_error("Cannot send HTTP probe response");
+      sent += static_cast<std::size_t>(count);
+    }
+  }
+
+  HttpProbeSocket listener_;
+  std::string media_;
+  std::string url_;
+  std::thread worker_;
+  bool authorized_ = false;
+  std::exception_ptr error_;
+};
+
+TEST_CASE("AvProbe forwards HTTP headers and user agent to the input",
+          "[av-probe][network][options]") {
+  HeaderCheckingHttpServer server;
+  std::map<std::string, std::string> options{
+      {"headers", "Referer: https://probe.test/\r\n"},
+      {"user_agent", "mw-probe-test"}};
+  bool authorized = true;
+  SECTION("both required options") {}
+  SECTION("missing headers") {
+    options.erase("headers");
+    authorized = false;
+  }
+  SECTION("missing user agent") {
+    options.erase("user_agent");
+    authorized = false;
+  }
+  const auto result = AvProbe::Probe(server.url(), options);
+  server.Finish();
+  CHECK(server.error() == nullptr);
+  CHECK(server.authorized() == authorized);
+  if (authorized) {
+    REQUIRE(result.info.has_value());
+    CHECK(result.error == nullptr);
+    CHECK(result.info->video_stream_index >= 0);
+    CHECK(result.info->audio_stream_index >= 0);
+  } else {
+    CHECK_FALSE(result.info.has_value());
+    CHECK(ExceptionCode(result.error) == AVERROR_HTTP_FORBIDDEN);
+  }
 }
 
 #ifndef _WIN32

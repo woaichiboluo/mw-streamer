@@ -26,6 +26,7 @@ set_target_properties(mw_log PROPERTIES
 )
 
 set(MW_STREAMER_SOURCES
+    streamer/ffmpeg/audio_frame_adapter.cc
     streamer/ffmpeg/av_dictionary.cc
     streamer/ffmpeg/codec_context.cc
     streamer/ffmpeg/codec_parameters.cc

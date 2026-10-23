@@ -17,5 +17,8 @@ target_compile_definitions(mw_av_probe_tests PRIVATE
 target_link_libraries(mw_av_probe_tests PRIVATE
     mw::streamer Catch2::Catch2WithMain FFmpeg::avformat fmt::fmt
 )
+if(WIN32)
+    target_link_libraries(mw_av_probe_tests PRIVATE ws2_32)
+endif()
 add_test(NAME mw_av_probe_tests COMMAND mw_av_probe_tests)
 set_tests_properties(mw_av_probe_tests PROPERTIES TIMEOUT 60)

@@ -33,6 +33,9 @@ struct LivePipelineConfig {
   // output; empty uses CPU black frames. Must match encoder video dimensions.
   // Pixels remain shared read-only; no implicit resizing is performed.
   std::optional<ffmpeg::Frame> backup_video;
+  // Target-format samples per channel delivered to the audio business filter.
+  // Zero keeps variable sizes; positive sizes pad boundary/EOF tails.
+  int output_samples_per_frame = 1024;
 };
 
 enum class LivePipelineState {

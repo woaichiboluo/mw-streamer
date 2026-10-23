@@ -359,6 +359,54 @@ TEST_CASE("LivePipeline delivers decodable AV and continues after input EOF",
   CheckRecording(output, true, true);
 }
 
+TEST_CASE(
+    "LivePipeline forwards fixed audio blocks and the encoder target format",
+    "[pipeline][integration][audio][frame-size]") {
+  const auto runtime = InitRuntime();
+  auto config = Config();
+  int expected_samples = 1024;
+  SECTION("default block size") {}
+  SECTION("custom block size") {
+    config.output_samples_per_frame = 256;
+    expected_samples = 256;
+  }
+  config.encoder.audio_sample_rate = 32000;
+  config.encoder.audio_channel_layout = AV_CHANNEL_LAYOUT_MONO;
+  Observations observations;
+  std::vector<ffmpeg::Frame> filtered;
+  LivePipeline pipeline(config);
+  Observe(pipeline, observations);
+  pipeline.media_filter().SetOnAudio([&](const ffmpeg::Frame& frame) {
+    std::lock_guard<std::mutex> lock(observations.mutex);
+    filtered.push_back(frame.Ref());
+    observations.changed.notify_all();
+    return frame.Ref();
+  });
+  REQUIRE(pipeline.Start(SamplePath()));
+  const bool received = observations.Wait([&] {
+    return (filtered.size() >= 8 && !observations.output.empty()) ||
+           !observations.errors.empty();
+  });
+  pipeline.Stop();
+  REQUIRE(received);
+  REQUIRE(observations.errors.empty());
+  REQUIRE(filtered.size() >= 8);
+  CHECK(std::any_of(
+      observations.output.begin(), observations.output.end(),
+      [](const ffmpeg::Packet& packet) { return packet->stream_index == 1; }));
+  for (const auto& frame : filtered) {
+    CHECK(frame->sample_rate == config.encoder.audio_sample_rate);
+    CHECK(frame->format == config.encoder.audio_sample_format);
+    CHECK(av_channel_layout_compare(&frame->ch_layout,
+                                    &config.encoder.audio_channel_layout) == 0);
+    CHECK(frame->nb_samples == expected_samples);
+    CHECK(frame->time_base.num == 1);
+    CHECK(frame->time_base.den == config.encoder.audio_sample_rate);
+  }
+  CHECK(pipeline.state() == LivePipelineState::kStopped);
+  CHECK_FALSE(pipeline.error());
+}
+
 TEST_CASE("LivePipeline records local MP4 before and during a session",
           "[pipeline][integration][local-output]") {
   const auto runtime = InitRuntime();

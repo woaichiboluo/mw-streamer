@@ -13,6 +13,7 @@ extern "C" {
 }
 
 #include "mw/log.h"
+#include "mw/streamer/ffmpeg/audio_frame_adapter.h"
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/performance/latency.h"
 
@@ -59,9 +60,11 @@ class AudioResampler::Impl final {
   explicit Impl(AudioResamplerConfig config)
       : rate_(config.sample_rate),
         format_(config.sample_format),
-        capacity_(config.input_capacity) {
+        capacity_(config.input_capacity),
+        output_samples_per_frame_(config.output_samples_per_frame) {
     if (rate_ <= 0 || av_get_bytes_per_sample(format_) <= 0 ||
-        !av_channel_layout_check(&config.channel_layout) || capacity_ == 0) {
+        !av_channel_layout_check(&config.channel_layout) || capacity_ == 0 ||
+        output_samples_per_frame_ < 0) {
       throw std::invalid_argument("AudioResampler 目标音频格式和容量无效");
     }
     FfmpegException::throwIfError(
@@ -97,40 +100,10 @@ class AudioResampler::Impl final {
     // Measure this read's processing only, excluding queue and lock waits.
     const auto started = latency_.Begin();
     try {
-      while (!inputs_.empty()) {
-        const auto& input = inputs_.front();
-        const bool eof = input.status == AvDecoderReadStatus::kEof;
-        if (context_ && (eof || !Matches(input))) {
-          auto output = Drain();
-          if (output.status == AvDecoderReadStatus::kFrame) {
-            latency_.End(started);
-            return output;
-          }
-          ClearConverter();
-        }
-        if (eof) {
-          auto output = input;
-          output.time_base = time_base();
-          if (output.end_pts != AV_NOPTS_VALUE) {
-            output.end_pts =
-                Rescale(output.end_pts, input.time_base, time_base());
-          }
-          MW_LOG_TRACE("streamer",
-                       "AudioResampler 输出 EOF: stream={} "
-                       "end_pts={} time_base=1/{}",
-                       output.stream_index, output.end_pts, rate_);
-          PopInput();
-          return output;
-        }
-        if (!context_) Initialize(input);
-        auto output = Convert(input);
-        PopInput();
-        if (output.status == AvDecoderReadStatus::kFrame) {
-          latency_.End(started);
-          return output;
-        }
-      }
-      return {};
+      auto output =
+          output_samples_per_frame_ > 0 ? ReadFixed() : ReadConverted();
+      if (output.status == AvDecoderReadStatus::kFrame) latency_.End(started);
+      return output;
     } catch (...) {
       failure_ = std::current_exception();
       throw;
@@ -146,6 +119,7 @@ class AudioResampler::Impl final {
     stopped_ = true;
     inputs_.clear();
     ClearConverter();
+    ClearBlocks();
   }
 
   void Reset() {
@@ -153,6 +127,7 @@ class AudioResampler::Impl final {
     MW_LOG_INFO("streamer", "AudioResampler 重置: queued={}", inputs_.size());
     inputs_.clear();
     ClearConverter();
+    ClearBlocks();
     failure_ = nullptr;
     latency_.Start(PerformanceStage::kAudioResampler, this);
     stopped_ = false;
@@ -161,6 +136,123 @@ class AudioResampler::Impl final {
   AVRational time_base() const { return AVRational{1, rate_}; }
 
  private:
+  AvDecoderReadResult ReadConverted() {
+    while (!inputs_.empty()) {
+      const auto& input = inputs_.front();
+      const bool eof = input.status == AvDecoderReadStatus::kEof;
+      if (context_ && (eof || !Matches(input))) {
+        auto output = Drain();
+        if (output.status == AvDecoderReadStatus::kFrame) {
+          return output;
+        }
+        ClearConverter();
+      }
+      if (eof) {
+        auto output = input;
+        output.time_base = time_base();
+        if (output.end_pts != AV_NOPTS_VALUE) {
+          output.end_pts =
+              Rescale(output.end_pts, input.time_base, time_base());
+        }
+        MW_LOG_TRACE("streamer",
+                     "AudioResampler 输出 EOF: stream={} "
+                     "end_pts={} time_base=1/{}",
+                     output.stream_index, output.end_pts, rate_);
+        PopInput();
+        return output;
+      }
+      if (!context_) Initialize(input);
+      auto output = Convert(input);
+      PopInput();
+      if (output.status == AvDecoderReadStatus::kFrame) {
+        return output;
+      }
+    }
+    return {};
+  }
+
+  AvDecoderReadResult ReadFixed() {
+    while (true) {
+      if (adapter_) {
+        ffmpeg::Frame frame;
+        if (adapter_->Receive(frame)) {
+          if (frame->nb_samples < output_samples_per_frame_) {
+            const int samples = frame->nb_samples;
+            auto padded = Allocate(output_samples_per_frame_, frame);
+            FfmpegException::throwIfError(
+                av_samples_copy(padded->extended_data, frame->extended_data, 0,
+                                0, samples, layout_.value.nb_channels, format_),
+                "复制音频尾块");
+            FfmpegException::throwIfError(
+                av_samples_set_silence(padded->extended_data, samples,
+                                       output_samples_per_frame_ - samples,
+                                       layout_.value.nb_channels, format_),
+                "补齐音频尾块");
+            frame = std::move(padded);
+          }
+          frame->duration = frame->nb_samples;
+          frame->best_effort_timestamp = frame->pts;
+          frame->pkt_dts = AV_NOPTS_VALUE;
+          auto output = block_metadata_;
+          output.frame = std::move(frame);
+          return output;
+        }
+        if (block_ending_) {
+          adapter_.reset();
+          block_ending_ = false;
+          block_next_pts_.reset();
+        }
+      }
+      auto input =
+          block_pending_ ? std::move(*block_pending_) : ReadConverted();
+      block_pending_.reset();
+      if (input.status == AvDecoderReadStatus::kNull) return {};
+      const bool eof = input.status == AvDecoderReadStatus::kEof;
+      if (adapter_ &&
+          (eof || input.stream_index != block_metadata_.stream_index ||
+           !BlockContinuous(input.frame->get()->pts) ||
+           block_generation_ != generation_)) {
+        block_pending_ = std::move(input);
+        adapter_->End();
+        block_ending_ = true;
+        continue;
+      }
+      if (eof) return input;
+      if (!adapter_) {
+        adapter_ = std::make_unique<ffmpeg::internal::AudioFrameAdapter>(
+            format_, format_, rate_, layout_.value, output_samples_per_frame_);
+      }
+      // Source PTS may be quantized (for example, milliseconds in FLV).
+      // Keep one sample clock within its precision instead of padding each
+      // rounding difference as a new segment.
+      if (block_next_pts_) input.frame->get()->pts = *block_next_pts_;
+      block_generation_ = generation_;
+      adapter_->Submit(*input.frame);
+      block_next_pts_ =
+          AddSamples(input.frame->get()->pts, input.frame->get()->nb_samples);
+      block_metadata_ = std::move(input);
+      block_metadata_.frame.reset();
+    }
+  }
+
+  bool BlockContinuous(std::int64_t pts) const {
+    const auto expected = *block_next_pts_;
+    const auto difference = pts >= expected
+                                ? static_cast<std::uint64_t>(pts) -
+                                      static_cast<std::uint64_t>(expected)
+                                : static_cast<std::uint64_t>(expected) -
+                                      static_cast<std::uint64_t>(pts);
+    return difference <= static_cast<std::uint64_t>(pts_precision_);
+  }
+
+  void ClearBlocks() {
+    adapter_.reset();
+    block_pending_.reset();
+    block_metadata_ = {};
+    block_next_pts_.reset();
+    block_ending_ = false;
+  }
+
   void Validate(const AvDecoderReadResult& input) const {
     if (input.status == AvDecoderReadStatus::kEof) {
       if (input.frame || (input.end_pts != AV_NOPTS_VALUE &&
@@ -210,6 +302,7 @@ class AudioResampler::Impl final {
   }
 
   void Initialize(const AvDecoderReadResult& input) {
+    ++generation_;
     const auto* frame = input.frame->get();
     FfmpegException::throwIfError(
         swr_alloc_set_opts2(&context_, &layout_.value, format_, rate_,
@@ -268,6 +361,10 @@ class AudioResampler::Impl final {
   }
 
   AvDecoderReadResult Convert(const AvDecoderReadResult& input) {
+    // Adjacent rounded timestamps can differ by one source time-base tick;
+    // include one target sample for the rate-conversion rounding.
+    pts_precision_ =
+        av_rescale_q_rnd(1, input.time_base, time_base(), AV_ROUND_UP) + 1;
     const auto* source = input.frame->get();
     const auto pts = Multiply(Rescale(source->pts, input.time_base,
                                       AVRational{1, source->sample_rate}),
@@ -319,6 +416,15 @@ class AudioResampler::Impl final {
   const int rate_;
   const AVSampleFormat format_;
   const std::size_t capacity_;
+  const int output_samples_per_frame_;
+  std::unique_ptr<ffmpeg::internal::AudioFrameAdapter> adapter_;
+  std::optional<AvDecoderReadResult> block_pending_;
+  AvDecoderReadResult block_metadata_;
+  std::optional<std::int64_t> block_next_pts_;
+  bool block_ending_ = false;
+  std::int64_t pts_precision_ = 1;
+  std::uint64_t generation_ = 0;
+  std::uint64_t block_generation_ = 0;
   ChannelLayout layout_;
   SwrContext* context_ = nullptr;
   std::mutex mutex_;

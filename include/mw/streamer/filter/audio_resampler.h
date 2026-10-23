@@ -21,13 +21,17 @@ struct AudioResamplerConfig {
   AVChannelLayout channel_layout = AV_CHANNEL_LAYOUT_STEREO;
   // Maximum queued inputs, including EOF. Must be positive.
   std::size_t input_capacity = 8;
+  // Samples per channel in each output frame; zero preserves variable sizes.
+  // Positive sizes pad boundary/EOF tails with silence. EOF end_pts remains
+  // the actual source endpoint. Negative sizes are invalid.
+  int output_samples_per_frame = 0;
 };
 
-// Pull-driven audio conversion before Syncer. No worker, wall clock, silence
-// insertion or async timestamp compensation. Copies input references into a
-// bounded queue; conversion and delay draining happen in TryReadFrame(). One
-// producer and one reader may run concurrently; finish calls before
-// destruction.
+// Pull-driven audio conversion before Syncer. No worker, wall clock, gap
+// filling or async timestamp compensation. Fixed-size tails may be padded.
+// Copies input references into a bounded queue; conversion and delay draining
+// happen in TryReadFrame(). One producer and one reader may run concurrently;
+// finish calls before destruction.
 class MW_STREAMER_API AudioResampler final {
  public:
   // Invalid audio target/capacity throws synchronously. Capacity counts queued
@@ -50,10 +54,13 @@ class MW_STREAMER_API AudioResampler final {
   // source PTS. Input PTS jumps remain visible; this is not a synchronizer.
   // Format/stream changes drain the old converter before processing
   // the new input. EOF drains all delayed samples first, then forwards the
-  // source end_pts in the target time base. No encoder frame-size reblocking.
-  // Conversion failures throw and are retained until Reset; later reads rethrow
-  // and further submissions return false. Invalid submissions do not poison
-  // the converter.
+  // source end_pts in the target time base. With output_samples_per_frame > 0,
+  // reblocks converted audio before delivery. Timestamp quantization within the
+  // source time-base precision follows the sample clock; larger PTS
+  // discontinuities and stream/format changes drain the old block before the
+  // new segment. Conversion failures throw and are retained until Reset; later
+  // reads rethrow and further submissions return false. Invalid submissions do
+  // not poison the converter.
   AvDecoderReadResult TryReadFrame();
   // Closes admission, discards queued inputs and conversion delay. Finish old
   // producer/reader calls before Reset or destruction; Stop does not join them.
