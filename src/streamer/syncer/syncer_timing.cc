@@ -515,6 +515,7 @@ class SyncerTiming::Impl final {
       // Limit forward-jump fill to five frames and move the pending real
       // frame to the next output PTS. A full batch waits half its duration
       // before retrying to avoid emitting all replacement frames at once.
+      // Rejected output resumes on downstream space without this pause.
       if (track.filled == 5 || blocked)
         clock_.Update(ToUs(last_pts, track), now);
       const auto original =
@@ -524,13 +525,14 @@ class SyncerTiming::Impl final {
       track.try_without_filling = true;
       track.pending_real_pts = *track.next;
       track.suspended_until =
-          track.filled == 5 || blocked
+          track.filled == 5 && !blocked
               ? Add(now, std::max<std::int64_t>(1000, track.filled_us / 2))
               : now;
       wake = track.suspended_until;
     } else {
-      // Match sentinel's longer source wait after a full backup sink.
-      if (blocked) track.wait_until = Add(now, 150000);
+      // Backpressure resumes on downstream space, without a timer penalty.
+      // The caller must honor blocked before retrying this same output PTS.
+      if (blocked) track.wait_until = now;
       // An input that arrived during filling makes the source wait ready.
       wake = input ? now : track.wait_until;
     }

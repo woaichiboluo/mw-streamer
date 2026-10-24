@@ -641,13 +641,14 @@ TEST_CASE("Syncer retries rejected real input without advancing its track",
   CHECK(PtsUs(*continuous.frame) == kStart + 80000);
 }
 
-TEST_CASE("Syncer finishes a rejected forward-fill batch without a PTS hole",
+TEST_CASE("Syncer retries rejected forward fill immediately without a PTS hole",
           "[syncer][backpressure]") {
+  const int accepted_fillers = GENERATE(0, 3);
   Syncer syncer(VideoConfig());
   auto first = VideoInput(50000000);
   REQUIRE(syncer.Step(true, &first, 0).consumed);
   auto jump = VideoInput(300000000);
-  for (int index = 1; index <= 2; ++index) {
+  for (int index = 1; index <= accepted_fillers; ++index) {
     const auto accepted = syncer.Step(true, &jump, 40000);
     REQUIRE(accepted.frame);
     CHECK_FALSE(accepted.consumed);
@@ -662,13 +663,20 @@ TEST_CASE("Syncer finishes a rejected forward-fill batch without a PTS hole",
   CHECK(rejected.blocked);
   CHECK_FALSE(rejected.consumed);
   CHECK_FALSE(rejected.frame);
-  CHECK(rejected_pts == kStart + 120000);
-  REQUIRE(rejected.wake_us > 40000);
-  const auto waiting = syncer.Step(true, &jump, rejected.wake_us - 1);
-  CHECK_FALSE(waiting.consumed);
-  CHECK_FALSE(waiting.frame);
-  const auto real = syncer.Step(true, &jump, rejected.wake_us);
+  CHECK(rejected_pts == kStart + (accepted_fillers + 1) * 40000);
+  REQUIRE(rejected.wake_us == 40000);
+  int accepted_calls = 0;
+  // Capacity may return before the rejected callback finishes. The pending
+  // real frame can replace the filler at this PTS without a timer penalty.
+  const auto real =
+      syncer.Step(true, &jump, 40000, [&](const ffmpeg::Frame& frame) {
+        ++accepted_calls;
+        CHECK(PtsUs(frame) == rejected_pts);
+        return true;
+      });
   REQUIRE(real.frame);
+  CHECK(accepted_calls == 1);
+  CHECK_FALSE(real.blocked);
   CHECK(real.consumed);
   CHECK(PtsUs(*real.frame) == rejected_pts);
   CHECK((*real.frame)->data[0][0] == 99);
@@ -679,13 +687,39 @@ TEST_CASE("Syncer finishes a rejected forward-fill batch without a PTS hole",
   CHECK(PtsUs(*continuous.frame) == rejected_pts + 40000);
 }
 
-TEST_CASE("Syncer retries a rejected timeout backup after its source wait",
-          "[syncer][backpressure]") {
+TEST_CASE(
+    "Syncer keeps the media pause after an accepted full forward-fill batch",
+    "[syncer][timing]") {
   Syncer syncer(VideoConfig());
-  REQUIRE_FALSE(syncer.Step(true, nullptr, 1000000).frame);
+  auto first = VideoInput(50000000);
+  REQUIRE(syncer.Step(true, &first, 0).consumed);
+  auto jump = VideoInput(300000000);
+  for (int index = 1; index <= 5; ++index) {
+    const auto filled = syncer.Step(true, &jump, 40000);
+    REQUIRE(filled.frame);
+    CHECK_FALSE(filled.consumed);
+    CHECK_FALSE(filled.blocked);
+    CHECK(PtsUs(*filled.frame) == kStart + index * 40000);
+    CHECK(filled.wake_us == (index == 5 ? 140000 : 40000));
+  }
+  const auto waiting = syncer.Step(true, &jump, 139999);
+  CHECK_FALSE(waiting.frame);
+  CHECK_FALSE(waiting.consumed);
+  CHECK(waiting.wake_us == 140000);
+  const auto real = syncer.Step(true, &jump, 140000);
+  REQUIRE(real.frame);
+  CHECK(real.consumed);
+  CHECK(PtsUs(*real.frame) == kStart + 240000);
+}
+
+TEST_CASE("Syncer retries timeout backup immediately when output space returns",
+          "[syncer][backpressure]") {
+  const bool video = GENERATE(false, true);
+  Syncer syncer(video ? VideoConfig() : AudioConfig());
+  REQUIRE_FALSE(syncer.Step(video, nullptr, 1000000).frame);
   std::int64_t rejected_pts = AV_NOPTS_VALUE;
   const auto rejected =
-      syncer.Step(true, nullptr, 3000000, [&](const ffmpeg::Frame& frame) {
+      syncer.Step(video, nullptr, 3000000, [&](const ffmpeg::Frame& frame) {
         rejected_pts = PtsUs(frame);
         return false;
       });
@@ -693,16 +727,15 @@ TEST_CASE("Syncer retries a rejected timeout backup after its source wait",
   CHECK_FALSE(rejected.consumed);
   CHECK_FALSE(rejected.frame);
   CHECK(rejected_pts == kStart);
-  REQUIRE(rejected.wake_us == 3150000);
+  REQUIRE(rejected.wake_us == 3000000);
   int calls = 0;
   const auto accept = [&](const ffmpeg::Frame&) {
     ++calls;
     return true;
   };
-  const auto early = syncer.Step(true, nullptr, rejected.wake_us - 1, accept);
-  CHECK_FALSE(early.frame);
-  CHECK(calls == 0);
-  const auto retried = syncer.Step(true, nullptr, rejected.wake_us, accept);
+  // Capacity can return during the rejected callback. No timer should delay
+  // that notification, and the rejected frame must retain its original PTS.
+  const auto retried = syncer.Step(video, nullptr, 3000000, accept);
   REQUIRE(retried.frame);
   CHECK(calls == 1);
   CHECK_FALSE(retried.blocked);

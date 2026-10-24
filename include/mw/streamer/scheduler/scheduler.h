@@ -60,7 +60,8 @@ class MW_STREAMER_API Scheduler final {
   // Configure only while stopped. Output callbacks run serially on the driver's
   // thread and must return promptly. True accepts the read-only frame; false
   // retains the input and next output PTS, suspending only that track until
-  // NotifyOutputSpace. Ref() retains accepted storage. Missing callbacks accept
+  // NotifyOutputSpace or a 20 ms retry deadline, whichever comes first.
+  // Ref() retains accepted storage. Missing callbacks accept
   // and discard output. Unrecoverable failures notify OnError
   // once, on the failing worker (or the lifecycle caller for Start/Stop
   // errors). All callbacks may query error() or RequestStop(), but must not

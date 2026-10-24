@@ -797,6 +797,7 @@ TEST_CASE("Scheduler waits for video output space while audio continues",
   Scheduler scheduler(source, Config());
   std::atomic<int> video_calls{0};
   std::atomic<int> audio_calls{0};
+  std::atomic<int> accepted_frames{0};
   std::atomic<bool> accept_video{false};
   std::mutex mutex;
   std::vector<std::int64_t> video_pts;
@@ -806,7 +807,9 @@ TEST_CASE("Scheduler waits for video output space while audio continues",
       video_pts.push_back(frame->pts);
     }
     ++video_calls;
-    return accept_video.load();
+    const bool accepted = accept_video.load();
+    if (accepted) ++accepted_frames;
+    return accepted;
   });
   scheduler.SetOnAudioFrame([&](const ffmpeg::Frame&) {
     ++audio_calls;
@@ -814,7 +817,7 @@ TEST_CASE("Scheduler waits for video output space while audio continues",
   });
   REQUIRE(source->Start(SamplePath()));
   REQUIRE(scheduler.Start());
-  const bool blocked = WaitFor([&] { return video_calls.load() == 1; });
+  const bool blocked = WaitFor([&] { return video_calls.load() >= 1; });
   const int audio_before = audio_calls.load();
   const bool audio_continued =
       WaitFor([&] { return audio_calls.load() >= audio_before + 4; });
@@ -823,40 +826,96 @@ TEST_CASE("Scheduler waits for video output space while audio continues",
   const int calls_while_full = video_calls.load();
   accept_video.store(true);
   scheduler.NotifyOutputSpace(true);
-  const bool resumed = WaitFor([&] { return video_calls.load() >= 2; });
+  const bool resumed = WaitFor([&] { return accepted_frames.load() > 0; });
   scheduler.Stop();
   CHECK(blocked);
   CHECK(audio_continued);
-  CHECK(calls_while_full == 1);
+  CHECK(calls_while_full >= 2);
   REQUIRE(resumed);
-  REQUIRE(video_pts.size() >= 2);
-  CHECK(video_pts[1] == video_pts[0]);
+  REQUIRE(video_pts.size() >= static_cast<std::size_t>(calls_while_full));
+  for (int attempt = 1; attempt < calls_while_full; ++attempt) {
+    CHECK(video_pts[static_cast<std::size_t>(attempt)] == video_pts[0]);
+  }
   CHECK_FALSE(scheduler.error());
 }
 
 TEST_CASE("Scheduler preserves output space notification before rejection",
           "[scheduler][backpressure]") {
+  using Clock = std::chrono::steady_clock;
   auto source = Source();
   Scheduler scheduler(source, Config());
-  std::atomic<int> attempts{0};
-  std::atomic<std::int64_t> first_pts{AV_NOPTS_VALUE};
-  std::atomic<std::int64_t> retried_pts{AV_NOPTS_VALUE};
+  std::mutex mutex;
+  std::condition_variable changed;
+  std::vector<Clock::time_point> attempts;
+  std::vector<std::int64_t> pts;
   scheduler.SetOnVideoFrame([&](const ffmpeg::Frame& frame) {
-    const int attempt = attempts.fetch_add(1);
-    if (attempt == 0) {
-      first_pts.store(frame->pts);
+    std::lock_guard lock(mutex);
+    attempts.push_back(Clock::now());
+    pts.push_back(frame->pts);
+    changed.notify_all();
+    if (attempts.size() <= 8) {
       scheduler.NotifyOutputSpace(true);
       return false;
     }
-    if (attempt == 1) retried_pts.store(frame->pts);
     return true;
   });
   REQUIRE(source->Start(SamplePath()));
   REQUIRE(scheduler.Start());
-  const bool retried = WaitFor([&] { return attempts.load() >= 2; }, 1s);
+  bool retried;
+  {
+    std::unique_lock lock(mutex);
+    retried = changed.wait_for(lock, 1s, [&] { return attempts.size() >= 9; });
+  }
   scheduler.Stop();
-  CHECK(retried);
-  CHECK(first_pts.load() == retried_pts.load());
+  REQUIRE(retried);
+  REQUIRE(attempts.size() >= 9);
+  CHECK(attempts[8] - attempts[0] < 100ms);
+  for (std::size_t attempt = 1; attempt < 9; ++attempt) {
+    CHECK(pts[attempt] == pts[0]);
+  }
+  CHECK_FALSE(scheduler.error());
+}
+
+TEST_CASE(
+    "Scheduler retries rejected output periodically without notifications",
+    "[scheduler][backpressure]") {
+  using Clock = std::chrono::steady_clock;
+  const bool video = GENERATE(false, true);
+  auto source = Source();
+  Scheduler scheduler(source, Config());
+  std::mutex mutex;
+  std::condition_variable changed;
+  std::vector<Clock::time_point> attempts;
+  std::vector<std::int64_t> pts;
+  const auto output = [&](const ffmpeg::Frame& frame) {
+    std::lock_guard lock(mutex);
+    attempts.push_back(Clock::now());
+    pts.push_back(frame->pts);
+    changed.notify_all();
+    return attempts.size() >= 3;
+  };
+  if (video) {
+    scheduler.SetOnVideoFrame(output);
+  } else {
+    scheduler.SetOnAudioFrame(output);
+  }
+  REQUIRE(source->Start(SamplePath()));
+  REQUIRE(scheduler.Start());
+  bool retried;
+  {
+    std::unique_lock lock(mutex);
+    retried = changed.wait_for(lock, 1s, [&] { return attempts.size() >= 3; });
+  }
+  scheduler.Stop();
+  REQUIRE(retried);
+  REQUIRE(attempts.size() >= 3);
+  CHECK(pts[1] == pts[0]);
+  CHECK(pts[2] == pts[0]);
+  for (std::size_t index = 1; index < 3; ++index) {
+    CAPTURE(index, video);
+    CHECK(attempts[index] - attempts[index - 1] >= 18ms);
+    CHECK(attempts[index] - attempts[index - 1] < 250ms);
+  }
   CHECK_FALSE(scheduler.error());
 }
 
@@ -877,13 +936,13 @@ TEST_CASE("Scheduler stops promptly while both outputs await space",
   REQUIRE(source->Start(SamplePath()));
   REQUIRE(scheduler.Start());
   const bool blocked = WaitFor(
-      [&] { return video_attempts.load() == 1 && audio_attempts.load() == 1; });
+      [&] { return video_attempts.load() >= 1 && audio_attempts.load() >= 1; });
   const auto before_stop = std::chrono::steady_clock::now();
   scheduler.Stop();
   CHECK(std::chrono::steady_clock::now() - before_stop < 500ms);
   CHECK(blocked);
-  CHECK(video_attempts.load() == 1);
-  CHECK(audio_attempts.load() == 1);
+  CHECK(video_attempts.load() >= 1);
+  CHECK(audio_attempts.load() >= 1);
   CHECK_FALSE(scheduler.error());
 }
 

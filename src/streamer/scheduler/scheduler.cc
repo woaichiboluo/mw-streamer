@@ -23,6 +23,7 @@ using Microseconds = std::chrono::microseconds;
 constexpr AVRational kMicroseconds{1, 1000000};
 constexpr auto kNoWake = std::numeric_limits<std::int64_t>::max();
 constexpr int kDiscardBatch = 8;
+constexpr std::int64_t kOutputRetryUs = 20000;
 
 std::int64_t InputPts(const AvDecoderReadResult& input) {
   if (!input.frame || input.time_base.num <= 0 || input.time_base.den <= 0 ||
@@ -186,6 +187,7 @@ class Scheduler::Impl final {
     std::int64_t syncer_wake_us = 0;
     bool output_blocked = false;
     std::uint64_t blocked_revision = 0;
+    std::int64_t output_retry_us = 0;
     void Clear() {
       busy = requested = completed = false;
       task = result = source_head = head = {};
@@ -193,6 +195,7 @@ class Scheduler::Impl final {
       syncer_wake_us = 0;
       output_blocked = false;
       blocked_revision = 0;
+      output_retry_us = 0;
     }
   };
 
@@ -308,14 +311,15 @@ class Scheduler::Impl final {
 
   void Deliver(std::size_t index, std::int64_t now) {
     auto& track = tracks_[index];
-    if (now < track.syncer_wake_us) return;
     std::uint64_t observed_space;
     {
       std::lock_guard lock(wake_->mutex);
       observed_space = wake_->output_space[index];
-      if (track.output_blocked && observed_space == track.blocked_revision)
+      if (track.output_blocked && observed_space == track.blocked_revision &&
+          now < track.output_retry_us)
         return;
     }
+    if (!track.output_blocked && now < track.syncer_wake_us) return;
     const bool retrying = track.output_blocked;
     track.output_blocked = false;
     const auto* head =
@@ -339,6 +343,7 @@ class Scheduler::Impl final {
                      index == 0 ? "video" : "audio");
       track.output_blocked = true;
       track.blocked_revision = observed_space;
+      track.output_retry_us = Now() + kOutputRetryUs;
     } else if (retrying && step.frame) {
       MW_LOG_DEBUG("streamer", "Scheduler 下游恢复接收: track={}",
                    index == 0 ? "video" : "audio");
@@ -374,7 +379,12 @@ class Scheduler::Impl final {
             blocked = track.output_blocked &&
                       track.blocked_revision == wake_->output_space[index];
           }
-          if (!blocked) wake = std::min(wake, tracks_[index].syncer_wake_us);
+          const auto& track = tracks_[index];
+          if (track.output_blocked) {
+            wake = std::min(wake, blocked ? track.output_retry_us : Now());
+          } else {
+            wake = std::min(wake, track.syncer_wake_us);
+          }
         }
         std::unique_lock lock(wake_->mutex);
         const auto changed = [&] {
