@@ -1,16 +1,21 @@
 #include "mw/streamer/pipeline/live_pipeline.h"
 
 #include <algorithm>
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -20,6 +25,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/mem.h>
+#include <libavutil/samplefmt.h>
 }
 
 #include "mw/streamer/init/init.h"
@@ -473,6 +479,260 @@ TEST_CASE("LivePipeline continues encoding after local recording fails",
   pipeline.Stop();
   REQUIRE(observations.errors.empty());
   CheckEncoded(observations.output, true, true);
+}
+
+void CheckBufferedAv(int buffered_frames, bool full_hd) {
+  using Clock = std::chrono::steady_clock;
+  CAPTURE(buffered_frames, full_hd);
+  const auto runtime = InitRuntime();
+  auto config = Config();
+  config.syncer = {};
+  config.encoder.fps = {30, 1};
+  config.encoder.width = full_hd ? 1920 : 64;
+  config.encoder.height = full_hd ? 1080 : 64;
+  Observations observations;
+  std::deque<ffmpeg::Frame> video_buffer;
+  std::deque<ffmpeg::Frame> audio_buffer;
+  std::atomic<bool> ready{false};
+  std::atomic<bool> premature_packet{false};
+  std::atomic<int> video_returned{0};
+  std::atomic<int> audio_returned{0};
+  std::atomic<int> standby_video_packets{0};
+  std::atomic<int> standby_audio_packets{0};
+  std::atomic<std::int64_t> first_packet_wall_us{-1};
+  int video_calls = 0;
+  bool unexpected_dimensions = false;
+  std::int64_t first_video_input_pts = AV_NOPTS_VALUE;
+  std::int64_t first_video_output_pts = AV_NOPTS_VALUE;
+  std::optional<ffmpeg::Frame> first_audio_input;
+  std::optional<ffmpeg::Frame> first_audio_output;
+  Clock::time_point first_video_input_at;
+  Clock::time_point opened;
+  LivePipeline pipeline(config);
+  Observe(pipeline, observations);
+  pipeline.SetOnOutputPacket([&](const ffmpeg::Packet& packet) {
+    auto unset = std::int64_t{-1};
+    first_packet_wall_us.compare_exchange_strong(
+        unset, std::chrono::duration_cast<std::chrono::microseconds>(
+                   Clock::now().time_since_epoch())
+                   .count());
+    if (!ready.load()) {
+      premature_packet.store(true);
+      if (packet->stream_index == 0) ++standby_video_packets;
+      if (packet->stream_index == 1) ++standby_audio_packets;
+    }
+    observations.Output(packet);
+  });
+  pipeline.media_filter().SetOnVideo(
+      [&](const ffmpeg::Frame& frame) -> std::optional<ffmpeg::Frame> {
+        if (++video_calls == 1) {
+          first_video_input_pts = frame->pts;
+          first_video_input_at = Clock::now();
+        }
+        unexpected_dimensions |= frame->width != config.encoder.width ||
+                                 frame->height != config.encoder.height;
+        video_buffer.push_back(frame.Ref());
+        if (video_calls <= buffered_frames) return std::nullopt;
+        if (!ready.load()) {
+          opened = std::chrono::steady_clock::now();
+          ready.store(true);
+        }
+        auto output = std::move(video_buffer.front());
+        video_buffer.pop_front();
+        if (av_frame_make_writable(output.get()) < 0)
+          throw std::runtime_error("Cannot mark buffered video");
+        const auto source_us =
+            av_rescale_q(output->pts - first_video_input_pts, output->time_base,
+                         AVRational{1, 1000000});
+        // Keep the actual source image, with two identifiable AV events at
+        // source time zero and one second. Only this small patch is replaced.
+        const int luma = source_us >= 500000 && source_us < 1000000 ? 96 : 180;
+        for (int plane = 0; plane < 3; ++plane) {
+          const int dimension = plane == 0 ? 32 : 16;
+          for (int row = 0; row < dimension; ++row)
+            std::fill_n(output->data[plane] + row * output->linesize[plane],
+                        dimension, plane == 0 ? luma : 128);
+        }
+        if (first_video_output_pts == AV_NOPTS_VALUE)
+          first_video_output_pts = output->pts;
+        ++video_returned;
+        return output;
+      });
+  pipeline.media_filter().SetOnAudio(
+      [&](const ffmpeg::Frame& frame) -> std::optional<ffmpeg::Frame> {
+        if (!first_audio_input) first_audio_input = frame.Ref();
+        audio_buffer.push_back(frame.Ref());
+        if (!ready.load()) return std::nullopt;
+        auto output = std::move(audio_buffer.front());
+        audio_buffer.pop_front();
+        if (!first_audio_output) first_audio_output = output.Ref();
+        const int rate = output->sample_rate;
+        const auto begin = av_rescale_q(output->pts - (*first_audio_input)->pts,
+                                        output->time_base, AVRational{1, rate});
+        const auto silence_begin = std::max<std::int64_t>(0, rate / 2 - begin);
+        const auto silence_end =
+            std::min<std::int64_t>(output->nb_samples, rate - begin);
+        if (silence_begin < silence_end) {
+          if (av_frame_make_writable(output.get()) < 0 ||
+              av_samples_set_silence(
+                  output->extended_data, static_cast<int>(silence_begin),
+                  static_cast<int>(silence_end - silence_begin),
+                  output->ch_layout.nb_channels,
+                  static_cast<AVSampleFormat>(output->format)) < 0)
+            throw std::runtime_error("Cannot mark buffered audio");
+        }
+        ++audio_returned;
+        return output;
+      });
+  const auto input =
+      (fs::u8path(MW_STREAMER_TEST_DATA_DIR) /
+       (full_hd ? "h264_aac_1080p_30fps.mp4" : "h264_aac_30fps.mp4"))
+          .generic_u8string();
+  REQUIRE(pipeline.Start(input));
+  const bool received = observations.Wait(
+      [&] {
+        const auto video_packets = std::count_if(
+            observations.output.begin(), observations.output.end(),
+            [](const ffmpeg::Packet& packet) {
+              return packet->stream_index == 0;
+            });
+        const auto audio_packets = std::count_if(
+            observations.output.begin(), observations.output.end(),
+            [](const ffmpeg::Packet& packet) {
+              return packet->stream_index == 1;
+            });
+        return (video_returned.load() >= 40 && audio_returned.load() >= 60 &&
+                video_packets >= 8 && audio_packets >= 8) ||
+               !observations.errors.empty();
+      },
+      12s);
+  pipeline.Stop();
+  REQUIRE(received);
+  REQUIRE(observations.errors.empty());
+  REQUIRE(ready.load());
+  REQUIRE_FALSE(unexpected_dimensions);
+  video_buffer.clear();
+  audio_buffer.clear();
+  const auto buffering_us =
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          opened - first_video_input_at)
+          .count();
+  const auto first_packet_us =
+      first_packet_wall_us.load() -
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          first_video_input_at.time_since_epoch())
+          .count();
+  CAPTURE(buffering_us, first_packet_us);
+  if (buffered_frames == 100) {
+    REQUIRE_FALSE(premature_packet.load());
+    CHECK(buffering_us >= 3200000);
+    CHECK(buffering_us < 4000000);
+  } else {
+    REQUIRE(standby_video_packets.load() > 0);
+    REQUIRE(standby_audio_packets.load() > 0);
+    CHECK(buffering_us >= 6500000);
+    CHECK(buffering_us < 7500000);
+    CHECK(first_packet_us >= 5900000);
+    CHECK(first_packet_us < 6500000);
+  }
+  REQUIRE(video_calls > buffered_frames);
+  REQUIRE(first_video_output_pts == first_video_input_pts);
+  REQUIRE(first_audio_input);
+  REQUIRE(first_audio_output);
+  REQUIRE((*first_audio_output)->data[0] == (*first_audio_input)->data[0]);
+  REQUIRE((*first_audio_output)->pts == (*first_audio_input)->pts);
+  const auto frames = DecodePackets(observations.output, true);
+  REQUIRE_FALSE(frames.empty());
+  REQUIRE(frames.front()->pts == 0);
+  const auto marker_luma = [](const ffmpeg::Frame& frame) {
+    int sum = 0;
+    for (int row = 8; row < 24; ++row)
+      for (int column = 8; column < 24; ++column)
+        sum += frame->data[0][row * frame->linesize[0] + column];
+    return sum / 256.0;
+  };
+  const auto restored = std::find_if(
+      frames.begin(), frames.end(),
+      [&](const ffmpeg::Frame& frame) { return marker_luma(frame) >= 140; });
+  REQUIRE(restored != frames.end());
+  if (buffered_frames == 100) {
+    REQUIRE(restored == frames.begin());
+  } else {
+    REQUIRE(restored != frames.begin());
+    CHECK(marker_luma(frames.front()) >= 14);
+    CHECK(marker_luma(frames.front()) <= 18);
+  }
+  for (std::size_t index = 1; index < frames.size(); ++index)
+    REQUIRE(frames[index]->pts > frames[index - 1]->pts);
+  CHECK(marker_luma(*restored) >= 170);
+  CHECK(marker_luma(*restored) <= 190);
+  std::vector<std::int64_t> video_events;
+  bool was_marked = false;
+  for (const auto& frame : frames) {
+    REQUIRE(frame->width == config.encoder.width);
+    REQUIRE(frame->height == config.encoder.height);
+    const bool marked = marker_luma(frame) >= 140;
+    if (marked && !was_marked) video_events.push_back(frame->pts);
+    was_marked = marked;
+  }
+  const auto audio = DecodePackets(observations.output, false);
+  REQUIRE_FALSE(audio.empty());
+  double energy = 0;
+  std::vector<std::int64_t> audio_events;
+  bool was_audible = false;
+  std::int64_t previous_audio_pts = AV_NOPTS_VALUE;
+  for (const auto& frame : audio) {
+    REQUIRE(frame->format == AV_SAMPLE_FMT_FLTP);
+    REQUIRE(frame->sample_rate == 48000);
+    if (previous_audio_pts != AV_NOPTS_VALUE)
+      REQUIRE(frame->pts > previous_audio_pts);
+    previous_audio_pts = frame->pts;
+    double frame_energy = 0;
+    for (int channel = 0; channel < frame->ch_layout.nb_channels; ++channel) {
+      const auto* samples =
+          reinterpret_cast<const float*>(frame->extended_data[channel]);
+      for (int sample = 0; sample < frame->nb_samples; ++sample)
+        frame_energy += samples[sample] * samples[sample];
+    }
+    energy += frame_energy;
+    const bool audible = frame_energy > 0.01;
+    if (audible && !was_audible) audio_events.push_back(frame->pts);
+    was_audible = audible;
+  }
+  REQUIRE(energy > 1.0);
+  REQUIRE(video_events.size() >= 2);
+  REQUIRE(audio_events.size() >= 2);
+  const auto video_packet = std::find_if(
+      observations.output.begin(), observations.output.end(),
+      [](const ffmpeg::Packet& packet) { return packet->stream_index == 0; });
+  const auto audio_packet = std::find_if(
+      observations.output.begin(), observations.output.end(),
+      [](const ffmpeg::Packet& packet) { return packet->stream_index == 1; });
+  REQUIRE(video_packet != observations.output.end());
+  REQUIRE(audio_packet != observations.output.end());
+  for (std::size_t event = 0; event < 2; ++event) {
+    const auto video_us =
+        av_rescale_q(video_events[event], (*video_packet)->time_base,
+                     AVRational{1, 1000000});
+    const auto audio_us =
+        av_rescale_q(audio_events[event], (*audio_packet)->time_base,
+                     AVRational{1, 1000000});
+    CAPTURE(event, video_us, audio_us);
+    // Allow video quantization and two AAC blocks for priming/preecho.
+    CHECK(std::abs(video_us - audio_us) <= 76000);
+  }
+  if (buffered_frames == 200)
+    REQUIRE(audio.front()->pts < audio_events.front());
+}
+
+TEST_CASE("LivePipeline buffers AV at thirty fps through startup or standby",
+          "[pipeline][integration][buffering]") {
+  CheckBufferedAv(GENERATE(100, 200), false);
+}
+
+TEST_CASE("LivePipeline buffers 1080p AV through startup or standby",
+          "[pipeline][integration][buffering][1080p]") {
+  CheckBufferedAv(GENERATE(100, 200), true);
 }
 
 TEST_CASE("LivePipeline retains and encodes the top-level standby frame",

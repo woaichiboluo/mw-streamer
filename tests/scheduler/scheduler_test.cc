@@ -7,19 +7,25 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/mathematics.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/samplefmt.h>
 }
@@ -278,6 +284,343 @@ TEST_CASE("Scheduler paces file processing before business filtering",
   CHECK(early_video <= 6);
   CHECK(early_audio >= 1);
   CHECK(early_audio <= 20);
+  CHECK_FALSE(scheduler.error());
+}
+
+TEST_CASE("Scheduler starts with buffered business frames instead of standby",
+          "[scheduler][buffering]") {
+  using Clock = std::chrono::steady_clock;
+  struct Timing {
+    std::int64_t pts;
+    AVRational time_base;
+    Clock::time_point received;
+  };
+  auto source = Source();
+  auto config = Config();
+  config.syncer.encoder.fps = {30, 1};
+  config.syncer.options.initial_timeout = 4s;
+  config.syncer.options.timeout = 1s;
+  config.syncer.options.forward_start_shift = true;
+  Scheduler scheduler(source, config);
+  std::deque<ffmpeg::Frame> video_buffer;
+  std::deque<ffmpeg::Frame> audio_buffer;
+  std::atomic<const std::uint8_t*> first_video{nullptr};
+  std::atomic<const std::uint8_t*> first_audio{nullptr};
+  std::atomic<int> video_calls{0};
+  std::atomic<int> audio_calls{0};
+  std::atomic<int> video_frames{0};
+  std::atomic<int> audio_frames{0};
+  std::atomic<bool> ready{false};
+  std::atomic<bool> unexpected_first_frame{false};
+  std::vector<Timing> video_inputs;
+  std::vector<Timing> video_outputs;
+  std::vector<Timing> audio_outputs;
+  std::optional<Timing> first_returned_video;
+  std::optional<Timing> first_returned_audio;
+  Clock::time_point released_at;
+  scheduler.media_filter().SetOnVideo(
+      [&](const ffmpeg::Frame& frame) -> std::optional<ffmpeg::Frame> {
+        if (video_calls.fetch_add(1) == 0) first_video.store(frame->data[0]);
+        video_inputs.push_back({frame->pts, frame->time_base, Clock::now()});
+        video_buffer.push_back(frame.Ref());
+        if (video_calls.load() <= 100) return std::nullopt;
+        if (video_calls.load() == 101) {
+          released_at = Clock::now();
+          ready.store(true);
+        }
+        auto output = std::move(video_buffer.front());
+        video_buffer.pop_front();
+        if (!first_returned_video) {
+          first_returned_video =
+              Timing{output->pts, output->time_base, Clock::now()};
+        }
+        return output;
+      });
+  scheduler.media_filter().SetOnAudio(
+      [&](const ffmpeg::Frame& frame) -> std::optional<ffmpeg::Frame> {
+        if (audio_calls.fetch_add(1) == 0) first_audio.store(frame->data[0]);
+        audio_buffer.push_back(frame.Ref());
+        if (!ready.load()) return std::nullopt;
+        auto output = std::move(audio_buffer.front());
+        audio_buffer.pop_front();
+        if (!first_returned_audio) {
+          first_returned_audio =
+              Timing{output->pts, output->time_base, Clock::now()};
+        }
+        return output;
+      });
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame& frame) {
+    video_outputs.push_back({frame->pts, frame->time_base, Clock::now()});
+    if (video_frames.fetch_add(1) == 0 &&
+        (!ready.load() || frame->data[0] != first_video.load())) {
+      unexpected_first_frame.store(true);
+    }
+    return true;
+  });
+  scheduler.SetOnAudioFrame([&](const ffmpeg::Frame& frame) {
+    audio_outputs.push_back({frame->pts, frame->time_base, Clock::now()});
+    if (audio_frames.fetch_add(1) == 0 &&
+        (!ready.load() || frame->data[0] != first_audio.load())) {
+      unexpected_first_frame.store(true);
+    }
+    return true;
+  });
+  const auto sample =
+      std::string(MW_SCHEDULER_TEST_DATA_DIR) + "/h264_aac_30fps.mp4";
+  REQUIRE(source->Start(sample));
+  const auto started = Clock::now();
+  REQUIRE(scheduler.Start());
+  const bool resumed = WaitFor(
+      [&] { return video_frames.load() >= 6 && audio_frames.load() >= 4; });
+  scheduler.Stop();
+  REQUIRE(resumed);
+  REQUIRE(video_inputs.size() >= 101);
+  REQUIRE(video_outputs.size() >= 6);
+  REQUIRE(audio_outputs.size() >= 4);
+  REQUIRE(first_returned_video);
+  REQUIRE(first_returned_audio);
+  for (std::size_t index = 0; index < 101; ++index) {
+    CAPTURE(index);
+    CHECK(av_compare_ts(video_inputs[index].pts - video_inputs.front().pts,
+                        video_inputs[index].time_base,
+                        static_cast<std::int64_t>(index),
+                        AVRational{1, 30}) == 0);
+  }
+  CHECK(released_at - started >= 3200ms);
+  CHECK(released_at - started < 4500ms);
+  CHECK(video_outputs.front().received >= released_at);
+  CHECK(audio_outputs.front().received >= released_at);
+  CHECK(video_outputs.front().received - started >= 3200ms);
+  CHECK(video_outputs.front().received - started < 4500ms);
+  CHECK(av_compare_ts(first_returned_video->pts,
+                      first_returned_video->time_base, video_inputs.front().pts,
+                      video_inputs.front().time_base) == 0);
+  const auto video_shift =
+      av_rescale_q(video_outputs.front().pts, video_outputs.front().time_base,
+                   AVRational{1, 1000000}) -
+      av_rescale_q(first_returned_video->pts, first_returned_video->time_base,
+                   AVRational{1, 1000000});
+  const auto audio_shift =
+      av_rescale_q(audio_outputs.front().pts, audio_outputs.front().time_base,
+                   AVRational{1, 1000000}) -
+      av_rescale_q(first_returned_audio->pts, first_returned_audio->time_base,
+                   AVRational{1, 1000000});
+  CHECK(video_shift == audio_shift);
+  for (std::size_t index = 1; index < 6; ++index) {
+    CHECK(av_compare_ts(video_outputs[index].pts - video_outputs[index - 1].pts,
+                        video_outputs[index].time_base, 1,
+                        AVRational{1, 30}) == 0);
+  }
+  CHECK(video_outputs[5].received - video_outputs.front().received >= 100ms);
+  CHECK(audio_outputs[3].received > audio_outputs.front().received);
+  CHECK(audio_calls.load() > 100);
+  CHECK_FALSE(unexpected_first_frame.load());
+  CHECK_FALSE(scheduler.error());
+}
+
+TEST_CASE(
+    "Scheduler recovers synchronized buffered media after startup standby",
+    "[scheduler][buffering][recovery]") {
+  using Clock = std::chrono::steady_clock;
+  struct SourceFrame {
+    ffmpeg::Frame retained;
+    std::int64_t pts_us;
+  };
+  struct Output {
+    const std::uint8_t* storage;
+    std::int64_t pts_us;
+    std::optional<std::int64_t> source_pts_us;
+    Clock::time_point received;
+    bool ready;
+  };
+  auto source = Source();
+  auto config = Config();
+  config.syncer.options = {};
+  config.syncer.encoder.fps = {30, 1};
+  Scheduler scheduler(source, config);
+  std::array<std::deque<ffmpeg::Frame>, 2> buffered;
+  std::array<std::unordered_map<const std::uint8_t*, SourceFrame>, 2> inputs;
+  std::mutex inputs_mutex;
+  std::array<std::vector<Output>, 2> outputs;
+  std::array<std::vector<std::int64_t>, 2> shifts;
+  std::array<std::unordered_set<const std::uint8_t*>, 2> seen_real_frames;
+  std::array<std::optional<std::int64_t>, 2> latest_shift;
+  std::array<std::atomic<int>, 2> calls{};
+  std::array<std::atomic<int>, 2> real_frames{};
+  std::array<std::atomic<const std::uint8_t*>, 2> first_storage{};
+  std::atomic<bool> ready{false};
+  Clock::time_point released_at;
+  std::int64_t max_shift_difference_us = 0;
+  bool first_audio_is_silent = false;
+  const auto filter =
+      [&](std::size_t index,
+          const ffmpeg::Frame& frame) -> std::optional<ffmpeg::Frame> {
+    const auto count = calls[index].fetch_add(1) + 1;
+    if (count == 1) first_storage[index].store(frame->data[0]);
+    {
+      std::lock_guard lock(inputs_mutex);
+      inputs[index].emplace(
+          frame->data[0],
+          SourceFrame{frame.Ref(), av_rescale_q(frame->pts, frame->time_base,
+                                                AVRational{1, 1000000})});
+    }
+    buffered[index].push_back(frame.Ref());
+    if (index == 0 && count == 201) {
+      released_at = Clock::now();
+      ready.store(true);
+    }
+    if (!ready.load()) return std::nullopt;
+    auto result = std::move(buffered[index].front());
+    buffered[index].pop_front();
+    return result;
+  };
+  scheduler.media_filter().SetOnVideo(
+      [&](const ffmpeg::Frame& frame) { return filter(0, frame); });
+  scheduler.media_filter().SetOnAudio(
+      [&](const ffmpeg::Frame& frame) { return filter(1, frame); });
+  const auto deliver = [&](std::size_t index, const ffmpeg::Frame& frame) {
+    std::optional<std::int64_t> source_pts_us;
+    {
+      std::lock_guard lock(inputs_mutex);
+      const auto found = inputs[index].find(frame->data[0]);
+      if (found != inputs[index].end()) source_pts_us = found->second.pts_us;
+    }
+    const auto pts_us =
+        av_rescale_q(frame->pts, frame->time_base, AVRational{1, 1000000});
+    if (index == 1 && outputs[index].empty()) {
+      const auto* samples =
+          reinterpret_cast<const std::int16_t*>(frame->data[0]);
+      first_audio_is_silent =
+          std::all_of(samples, samples + frame->nb_samples,
+                      [](std::int16_t sample) { return sample == 0; });
+    }
+    outputs[index].push_back(
+        {frame->data[0], pts_us, source_pts_us, Clock::now(), ready.load()});
+    if (source_pts_us &&
+        seen_real_frames[index].insert(frame->data[0]).second) {
+      const auto shift = pts_us - *source_pts_us;
+      shifts[index].push_back(shift);
+      latest_shift[index] = shift;
+      if (latest_shift[0] && latest_shift[1]) {
+        const auto difference = *latest_shift[0] - *latest_shift[1];
+        max_shift_difference_us = std::max(
+            max_shift_difference_us, difference < 0 ? -difference : difference);
+      }
+      ++real_frames[index];
+    }
+    return true;
+  };
+  scheduler.SetOnVideoFrame(
+      [&](const ffmpeg::Frame& frame) { return deliver(0, frame); });
+  scheduler.SetOnAudioFrame(
+      [&](const ffmpeg::Frame& frame) { return deliver(1, frame); });
+  const auto sample =
+      std::string(MW_SCHEDULER_TEST_DATA_DIR) + "/h264_aac_30fps.mp4";
+  REQUIRE(source->Start(sample));
+  const auto started = Clock::now();
+  REQUIRE(scheduler.Start());
+  const bool recovered = WaitFor(
+      [&] {
+        return real_frames[0].load() >= 35 && real_frames[1].load() >= 35;
+      },
+      10s);
+  scheduler.Stop();
+  INFO("Video/audio callback counts: " << calls[0].load() << "/"
+                                       << calls[1].load());
+  INFO("Video/audio distinct recovered frames: " << real_frames[0].load() << "/"
+                                                 << real_frames[1].load());
+  INFO("Video/audio output counts: " << outputs[0].size() << "/"
+                                     << outputs[1].size());
+  REQUIRE(recovered);
+  CHECK_FALSE(scheduler.error());
+  CHECK(calls[0].load() >= 235);
+  CHECK(released_at - started >= 6500ms);
+  CHECK(released_at - started < 7500ms);
+  CHECK(first_audio_is_silent);
+  for (std::size_t index = 0; index < 2; ++index) {
+    CAPTURE(index);
+    REQUIRE_FALSE(outputs[index].empty());
+    CHECK_FALSE(outputs[index].front().ready);
+    CHECK_FALSE(outputs[index].front().source_pts_us);
+    CHECK(outputs[index].front().received - started >= 5900ms);
+    CHECK(outputs[index].front().received - started < 6500ms);
+    for (std::size_t frame = 1; frame < outputs[index].size(); ++frame) {
+      CAPTURE(frame);
+      CHECK(outputs[index][frame].pts_us > outputs[index][frame - 1].pts_us);
+    }
+    const auto first_real = std::find_if(
+        outputs[index].begin(), outputs[index].end(),
+        [](const Output& output) { return output.source_pts_us.has_value(); });
+    REQUIRE(first_real != outputs[index].end());
+    INFO("First recovered frame: track="
+         << index << " output_pts_us=" << first_real->pts_us
+         << " source_pts_us=" << *first_real->source_pts_us << " wall_us="
+         << std::chrono::duration_cast<std::chrono::microseconds>(
+                first_real->received - started)
+                .count());
+    CHECK(first_real->ready);
+    CHECK(first_real->storage == first_storage[index].load());
+    CHECK(first_real->received >= released_at);
+    CHECK(outputs[index].back().received - first_real->received >= 1s);
+    REQUIRE(shifts[index].size() >= 35);
+    const auto shift_drift = shifts[index].back() - shifts[index].front();
+    INFO("Source-to-output shift drift (us): " << shift_drift);
+    CHECK(shift_drift >= -33334);
+    CHECK(shift_drift <= 33334);
+  }
+  INFO("First/last video shift (us): " << shifts[0].front() << "/"
+                                       << shifts[0].back());
+  INFO("First/last audio shift (us): " << shifts[1].front() << "/"
+                                       << shifts[1].back());
+  INFO("Maximum concurrent audio/video shift difference (us): "
+       << max_shift_difference_us);
+  INFO("First/last audio minus video shift (us): "
+       << shifts[1].front() - shifts[0].front() << "/"
+       << shifts[1].back() - shifts[0].back());
+  // Video output uses a 1/30 time base, so allow at most one video-frame
+  // quantization interval when comparing the two tracks' source-to-output map.
+  CHECK(max_shift_difference_us <= 33334);
+}
+
+TEST_CASE("Scheduler retains timeout standby when business filters stay empty",
+          "[scheduler][buffering]") {
+  auto source = Source();
+  auto config = Config();
+  config.syncer.options.initial_timeout = 100ms;
+  Scheduler scheduler(source, config);
+  std::atomic<int> video_calls{0};
+  std::atomic<int> audio_calls{0};
+  std::atomic<int> video_frames{0};
+  std::atomic<int> audio_frames{0};
+  scheduler.media_filter().SetOnVideo([&](const ffmpeg::Frame&) {
+    ++video_calls;
+    return std::nullopt;
+  });
+  scheduler.media_filter().SetOnAudio([&](const ffmpeg::Frame&) {
+    ++audio_calls;
+    return std::nullopt;
+  });
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
+    ++video_frames;
+    return true;
+  });
+  scheduler.SetOnAudioFrame([&](const ffmpeg::Frame&) {
+    ++audio_frames;
+    return true;
+  });
+  REQUIRE(source->Start(SamplePath()));
+  REQUIRE(scheduler.Start());
+  const bool filters_advanced = WaitFor(
+      [&] { return video_calls.load() >= 3 && audio_calls.load() >= 3; }, 1s);
+  const int early_video = video_frames.load();
+  const int early_audio = audio_frames.load();
+  const bool standby_started = WaitFor(
+      [&] { return video_frames.load() > 0 && audio_frames.load() > 0; }, 4s);
+  scheduler.Stop();
+  CHECK(filters_advanced);
+  CHECK(early_video == 0);
+  CHECK(early_audio == 0);
+  CHECK(standby_started);
   CHECK_FALSE(scheduler.error());
 }
 
