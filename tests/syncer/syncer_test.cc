@@ -30,7 +30,7 @@ using mw::streamer::Syncer;
 using mw::streamer::SyncerConfig;
 namespace ffmpeg = mw::streamer::ffmpeg;
 
-constexpr std::int64_t kStart = 10000000;
+constexpr std::int64_t kStart = 0;
 
 ffmpeg::Frame Video(std::uint8_t value) {
   ffmpeg::Frame frame;
@@ -152,8 +152,8 @@ TEST_CASE("Syncer generates a black CPU backup from the video target",
   config.encoder.video_pixel_format = format;
   Syncer timing(config);
   REQUIRE_FALSE(timing.Step(true, nullptr, 0).frame);
-  REQUIRE_FALSE(timing.Step(true, nullptr, 1000000).frame);
-  auto first = timing.Step(true, nullptr, 3000000);
+  REQUIRE_FALSE(timing.Step(true, nullptr, 4000000).frame);
+  auto first = timing.Step(true, nullptr, 6000000);
   REQUIRE(first.frame);
   const auto& frame = *first.frame;
   REQUIRE(frame->format == format);
@@ -172,7 +172,7 @@ TEST_CASE("Syncer generates a black CPU backup from the video target",
     const int black = format == AV_PIX_FMT_RGB24 ? 0 : index < 64 ? 16 : 128;
     REQUIRE(pixels[static_cast<std::size_t>(index)] == black);
   }
-  auto second = timing.Step(true, nullptr, 3040000);
+  auto second = timing.Step(true, nullptr, 6040000);
   REQUIRE(second.frame);
   REQUIRE(PtsUs(*second.frame) == kStart + 40000);
 }
@@ -187,8 +187,8 @@ TEST_CASE("Syncer retains a custom audio layout independently of its caller",
   Syncer timing(config);
   av_channel_layout_uninit(&layout);
   REQUIRE_FALSE(timing.Step(false, nullptr, 0).frame);
-  REQUIRE_FALSE(timing.Step(false, nullptr, 1000000).frame);
-  auto output = timing.Step(false, nullptr, 3000000);
+  REQUIRE_FALSE(timing.Step(false, nullptr, 4000000).frame);
+  auto output = timing.Step(false, nullptr, 6000000);
   REQUIRE(output.frame);
   const auto& actual = (*output.frame)->ch_layout;
   REQUIRE(actual.nb_channels == 2);
@@ -198,19 +198,22 @@ TEST_CASE("Syncer retains a custom audio layout independently of its caller",
           AV_CHAN_FRONT_RIGHT);
 }
 
-TEST_CASE("Syncer starts backup after input timeout and media clock hold",
+TEST_CASE("Syncer starts backup after initial timeout and media clock hold",
           "[syncer][timing]") {
   // With no input, the first timeout initializes the shared media clock.
   // Use independent clocks so a pre-boundary poll does not postpone the next
   // poll by 22 ms and hide the exact two-second clock boundary being tested.
   Syncer before(VideoConfig());
-  REQUIRE_FALSE(before.Step(true, nullptr, 0).frame);
-  REQUIRE_FALSE(before.Step(true, nullptr, 1000000).frame);
-  REQUIRE_FALSE(before.Step(true, nullptr, 2999999).frame);
+  const auto waiting = before.Step(true, nullptr, 0);
+  REQUIRE_FALSE(waiting.frame);
+  REQUIRE(waiting.wake_us == 4000000);
+  REQUIRE_FALSE(before.Step(true, nullptr, 3999999).frame);
+  REQUIRE_FALSE(before.Step(true, nullptr, 4000000).frame);
+  REQUIRE_FALSE(before.Step(true, nullptr, 5999999).frame);
   Syncer timing(VideoConfig());
   REQUIRE_FALSE(timing.Step(true, nullptr, 0).frame);
-  REQUIRE_FALSE(timing.Step(true, nullptr, 1000000).frame);
-  const auto output = timing.Step(true, nullptr, 3000000);
+  REQUIRE_FALSE(timing.Step(true, nullptr, 4000000).frame);
+  const auto output = timing.Step(true, nullptr, 6000000);
   REQUIRE(output.frame);
   REQUIRE(PtsUs(*output.frame) == kStart);
   REQUIRE((*output.frame)->data[0][0] == 7);
@@ -253,14 +256,66 @@ TEST_CASE(
   REQUIRE(saw_backup);
 }
 
+TEST_CASE(
+    "Syncer switches each track to the running timeout after its first real "
+    "frame",
+    "[syncer][timing]") {
+  const bool video_first = GENERATE(false, true);
+  Syncer timing(MixedConfig());
+  REQUIRE(timing.Step(true, nullptr, 0).wake_us == 4000000);
+  REQUIRE(timing.Step(false, nullptr, 0).wake_us == 4000000);
+  auto first = video_first ? VideoInput(0) : AudioInput(0);
+  REQUIRE(timing.Step(video_first, &first, 500000).consumed);
+  const auto running = timing.Step(video_first, nullptr, 1499999);
+  REQUIRE_FALSE(running.frame);
+  REQUIRE(running.wake_us == 1500000);
+  const auto waiting = timing.Step(!video_first, nullptr, 1499999);
+  REQUIRE_FALSE(waiting.frame);
+  REQUIRE(waiting.wake_us == 4000000);
+  auto peer = video_first ? AudioInput(0) : VideoInput(0);
+  REQUIRE(timing.Step(!video_first, &peer, 2000000).consumed);
+  const auto peer_running = timing.Step(!video_first, nullptr, 2999999);
+  REQUIRE_FALSE(peer_running.frame);
+  REQUIRE(peer_running.wake_us == 3000000);
+}
+
+TEST_CASE("Syncer rejected first real frame retains the initial timeout",
+          "[syncer][backpressure]") {
+  Syncer timing(VideoConfig());
+  auto input = VideoInput(0);
+  const auto rejected = timing.Step(true, &input, 500000,
+                                    [](const ffmpeg::Frame&) { return false; });
+  REQUIRE(rejected.blocked);
+  REQUIRE_FALSE(rejected.consumed);
+  const auto waiting = timing.Step(true, nullptr, 1500000);
+  REQUIRE_FALSE(waiting.frame);
+  REQUIRE(waiting.wake_us == 4000000);
+  REQUIRE(timing.Step(true, &input, 2000000).consumed);
+  REQUIRE(timing.Step(true, nullptr, 2999999).wake_us == 3000000);
+}
+
+TEST_CASE("Syncer backup output does not restart the real-frame timeout",
+          "[syncer][timing]") {
+  Syncer timing(VideoConfig());
+  REQUIRE_FALSE(timing.Step(true, nullptr, 4000000).frame);
+  const auto backups = DrainAt(timing, true, 6000000);
+  REQUIRE(backups.size() == 5);
+  const auto waiting = timing.Step(true, nullptr, 6000001);
+  REQUIRE_FALSE(waiting.frame);
+  REQUIRE(waiting.wake_us == 6022000);
+  auto input = VideoInput(0);
+  REQUIRE(timing.Step(true, &input, 6100000).consumed);
+  REQUIRE(timing.Step(true, nullptr, 7099999).wake_us == 7100000);
+}
+
 TEST_CASE("Syncer audio backups contain actual silence including unsigned PCM",
           "[syncer][timing]") {
   const auto format =
       GENERATE(AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_U8, AV_SAMPLE_FMT_FLTP);
   Syncer timing(AudioConfig(48000, format));
   REQUIRE_FALSE(timing.Step(false, nullptr, 0).frame);
-  REQUIRE_FALSE(timing.Step(false, nullptr, 1000000).frame);
-  auto output = timing.Step(false, nullptr, 3000000);
+  REQUIRE_FALSE(timing.Step(false, nullptr, 4000000).frame);
+  auto output = timing.Step(false, nullptr, 6000000);
   REQUIRE(output.frame);
   const auto& frame = *output.frame;
   REQUIRE(frame->format == format);
@@ -270,7 +325,7 @@ TEST_CASE("Syncer audio backups contain actual silence including unsigned PCM",
   REQUIRE(frame->nb_samples <= 1024);
   REQUIRE(frame->time_base.num == 1);
   REQUIRE(frame->time_base.den == 48000);
-  REQUIRE(frame->pts == 480000);
+  REQUIRE(frame->pts == 0);
   const int bytes = frame->nb_samples * av_get_bytes_per_sample(format);
   const int zero = format == AV_SAMPLE_FMT_U8 ? 128 : 0;
   for (int i = 0; i < bytes; ++i) {
@@ -292,6 +347,33 @@ TEST_CASE("Syncer preserves a common initial video audio offset when enabled",
   REQUIRE(second.consumed);
   REQUIRE(second.frame);
   REQUIRE(PtsUs(*second.frame) == kStart + 80000);
+}
+
+TEST_CASE(
+    "Syncer supports a nonzero start while preserving the shared AV offset",
+    "[syncer][timing]") {
+  auto config = MixedConfig();
+  config.options.start_ts = 7s;
+  config.options.forward_start_shift = true;
+  Syncer timing(config);
+  auto video = VideoInput(50000000);
+  auto audio = AudioInput(2403840);
+  const auto first_video = timing.Step(true, &video, 0);
+  REQUIRE(first_video.consumed);
+  REQUIRE(first_video.frame);
+  REQUIRE(PtsUs(*first_video.frame) == 7000000);
+  auto next = VideoInput(50040000);
+  const auto next_video = timing.Step(true, &next, 40000);
+  REQUIRE(next_video.consumed);
+  REQUIRE(next_video.frame);
+  REQUIRE(PtsUs(*next_video.frame) == 7040000);
+  const auto first_audio = timing.Step(false, &audio, 80000);
+  REQUIRE(first_audio.consumed);
+  REQUIRE(first_audio.frame);
+  REQUIRE(PtsUs(*first_audio.frame) == 7080000);
+  REQUIRE(PtsUs(*first_audio.frame) - PtsUs(*first_video.frame) == 80000);
+  REQUIRE((*video.frame)->pts == 50000000);
+  REQUIRE((*audio.frame)->pts == 2403840);
 }
 
 TEST_CASE("Syncer default fills an initial audio offset before its real frame",
@@ -477,7 +559,7 @@ TEST_CASE("Syncer audio continuity advances by exact sample counts",
   auto first = AudioInput(50LL * rate, rate, 1024);
   auto result = timing.Step(false, &first, 0);
   REQUIRE(result.frame);
-  REQUIRE((*result.frame)->pts == 10LL * rate);
+  REQUIRE((*result.frame)->pts == 0);
   for (int i = 1; i <= 200; ++i) {
     auto input = AudioInput(50LL * rate + i * 1024, rate, 1024);
     const auto now = av_rescale_rnd(i * 1024LL, 1000000, rate, AV_ROUND_UP);
@@ -486,7 +568,7 @@ TEST_CASE("Syncer audio continuity advances by exact sample counts",
     REQUIRE(result.frame);
     REQUIRE((*result.frame)->time_base.num == 1);
     REQUIRE((*result.frame)->time_base.den == rate);
-    REQUIRE((*result.frame)->pts == 10LL * rate + i * 1024);
+    REQUIRE((*result.frame)->pts == i * 1024);
   }
 }
 
@@ -512,10 +594,10 @@ TEST_CASE("Syncer consumes EOF and continues the live media timeline",
 TEST_CASE("Syncer first real frame starts after the last emitted backup ends",
           "[syncer][timing]") {
   Syncer timing(VideoConfig());
-  REQUIRE_FALSE(timing.Step(true, nullptr, 1000000).frame);
+  REQUIRE_FALSE(timing.Step(true, nullptr, 4000000).frame);
   std::vector<ffmpeg::Frame> backups;
-  std::int64_t now = 3000000;
-  for (; now <= 3500000; now += 22000) {
+  std::int64_t now = 6000000;
+  for (; now <= 6500000; now += 22000) {
     auto batch = DrainAt(timing, true, now);
     for (auto& frame : batch) {
       backups.push_back(std::move(frame));
@@ -590,6 +672,11 @@ TEST_CASE("Syncer validates timing and enabled track configuration",
   REQUIRE_THROWS_AS(Syncer{config}, std::invalid_argument);
   config = VideoConfig();
   config.options.freeze = -1us;
+  REQUIRE_THROWS_AS(Syncer{config}, std::invalid_argument);
+  config = VideoConfig();
+  config.options.initial_timeout = 0us;
+  REQUIRE_THROWS_AS(Syncer{config}, std::invalid_argument);
+  config.options.initial_timeout = -1us;
   REQUIRE_THROWS_AS(Syncer{config}, std::invalid_argument);
 }
 
@@ -716,10 +803,10 @@ TEST_CASE("Syncer retries timeout backup immediately when output space returns",
           "[syncer][backpressure]") {
   const bool video = GENERATE(false, true);
   Syncer syncer(video ? VideoConfig() : AudioConfig());
-  REQUIRE_FALSE(syncer.Step(video, nullptr, 1000000).frame);
+  REQUIRE_FALSE(syncer.Step(video, nullptr, 4000000).frame);
   std::int64_t rejected_pts = AV_NOPTS_VALUE;
   const auto rejected =
-      syncer.Step(video, nullptr, 3000000, [&](const ffmpeg::Frame& frame) {
+      syncer.Step(video, nullptr, 6000000, [&](const ffmpeg::Frame& frame) {
         rejected_pts = PtsUs(frame);
         return false;
       });
@@ -727,7 +814,7 @@ TEST_CASE("Syncer retries timeout backup immediately when output space returns",
   CHECK_FALSE(rejected.consumed);
   CHECK_FALSE(rejected.frame);
   CHECK(rejected_pts == kStart);
-  REQUIRE(rejected.wake_us == 3000000);
+  REQUIRE(rejected.wake_us == 6000000);
   int calls = 0;
   const auto accept = [&](const ffmpeg::Frame&) {
     ++calls;
@@ -735,7 +822,7 @@ TEST_CASE("Syncer retries timeout backup immediately when output space returns",
   };
   // Capacity can return during the rejected callback. No timer should delay
   // that notification, and the rejected frame must retain its original PTS.
-  const auto retried = syncer.Step(video, nullptr, 3000000, accept);
+  const auto retried = syncer.Step(video, nullptr, 6000000, accept);
   REQUIRE(retried.frame);
   CHECK(calls == 1);
   CHECK_FALSE(retried.blocked);
@@ -797,8 +884,11 @@ TEST_CASE("Syncer reset discards both shared timeline and frozen picture",
   REQUIRE(reset.frame);
   REQUIRE(PtsUs(*reset.frame) == kStart);
   syncer.Reset();
-  REQUIRE_FALSE(syncer.Step(true, nullptr, 1000000).frame);
-  const auto backup = syncer.Step(true, nullptr, 3000000);
+  const auto waiting = syncer.Step(true, nullptr, 1000000);
+  REQUIRE_FALSE(waiting.frame);
+  REQUIRE(waiting.wake_us == 4000000);
+  REQUIRE_FALSE(syncer.Step(true, nullptr, 4000000).frame);
+  const auto backup = syncer.Step(true, nullptr, 6000000);
   REQUIRE(backup.frame);
   REQUIRE((*backup.frame)->data[0][0] == 7);
 }

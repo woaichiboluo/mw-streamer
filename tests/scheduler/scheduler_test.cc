@@ -70,9 +70,9 @@ SchedulerConfig Config() {
   config.syncer.encoder.audio_sample_format = AV_SAMPLE_FMT_S16;
   config.syncer.encoder.audio_sample_rate = 32000;
   config.syncer.encoder.audio_channel_layout = AV_CHANNEL_LAYOUT_MONO;
+  config.syncer.options.initial_timeout = 20ms;
   config.syncer.options.timeout = 20ms;
   config.syncer.options.freeze = 20ms;
-  config.syncer.options.start_ts = 0us;
   return config;
 }
 

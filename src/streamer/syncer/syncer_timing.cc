@@ -171,7 +171,7 @@ class SyncerTiming::Impl final {
                            ? AVRational{1, config_.encoder.audio_sample_rate}
                            : kMicroseconds;
     for (auto* track : {&video_, &audio_}) {
-      track->wait_until = config_.options.timeout.count();
+      track->wait_until = config_.options.initial_timeout.count();
       if (!config_.options.forward_start_shift) {
         track->next = FromUs(config_.options.start_ts.count(), *track);
       }

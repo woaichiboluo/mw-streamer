@@ -2,10 +2,12 @@
 
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_exception.hpp>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <future>
 #include <memory>
@@ -153,11 +155,12 @@ AvDecoderReadResult Input(ffmpeg::Frame frame, std::int64_t pts = 12000) {
   return result;
 }
 
-void CheckTiming(const AvDecoderReadResult& output, std::int64_t pts = 12000) {
+void CheckTiming(const AvDecoderReadResult& output, std::int64_t pts = 12000,
+                 int time_base_den = 90000) {
   REQUIRE(output.status == AvDecoderReadStatus::kFrame);
   REQUIRE(output.stream_index == 7);
   REQUIRE(output.time_base.num == 1);
-  REQUIRE(output.time_base.den == 90000);
+  REQUIRE(output.time_base.den == time_base_den);
   REQUIRE(output.end_pts == 98765);
   REQUIRE(output.frame.has_value());
   REQUIRE((*output.frame)->pts == pts);
@@ -168,23 +171,92 @@ void CheckTiming(const AvDecoderReadResult& output, std::int64_t pts = 12000) {
   REQUIRE((*output.frame)->duration == 128);
 }
 
-TEST_CASE("Business filters change content while preserving source timing",
+TEST_CASE("Business filters can explicitly copy source timing with new content",
           "[media_filter]") {
   AvMediaFilter filter;
   filter.SetOnVideo([](const ffmpeg::Frame& frame) {
-    return Video(static_cast<std::uint8_t>(frame->data[0][0] + 3));
+    auto output = Video(static_cast<std::uint8_t>(frame->data[0][0] + 3));
+    output.CopyPropertiesFrom(frame);
+    return output;
   });
   filter.SetOnAudio([](const ffmpeg::Frame& frame) {
-    return Audio(reinterpret_cast<const std::int16_t*>(frame->data[0])[0] * 2);
+    auto output =
+        Audio(reinterpret_cast<const std::int16_t*>(frame->data[0])[0] * 2);
+    output.CopyPropertiesFrom(frame);
+    return output;
   });
   filter.Start();
   auto video = filter.ProcessVideo(Input(Video()));
   auto audio = filter.ProcessAudio(Input(Audio()));
-  CheckTiming(video);
-  CheckTiming(audio);
+  CheckTiming(video, 12000, 48000);
+  CheckTiming(audio, 12000, 48000);
   REQUIRE((*video.frame)->data[0][0] == 15);
   REQUIRE(reinterpret_cast<const std::int16_t*>((*audio.frame)->data[0])[0] ==
           68);
+}
+
+TEST_CASE("Business filters own every returned frame timing field",
+          "[media_filter]") {
+  const bool video = GENERATE(false, true);
+  auto returned = video ? Video() : Audio();
+  returned->pts = -96000;
+  returned->pkt_dts = -97000;
+  returned->best_effort_timestamp = -95000;
+  returned->time_base = {1001, 30000};
+  returned->duration = 19;
+  AvMediaFilter filter;
+  auto callback = [&](const ffmpeg::Frame&) { return returned.Ref(); };
+  filter.SetOnVideo(callback);
+  filter.SetOnAudio(callback);
+  filter.Start();
+  auto input = Input(video ? Video() : Audio());
+  auto original = input.frame->Ref();
+  auto output = video ? filter.ProcessVideo(std::move(input))
+                      : filter.ProcessAudio(std::move(input));
+  REQUIRE(output.status == AvDecoderReadStatus::kFrame);
+  REQUIRE(output.stream_index == 7);
+  REQUIRE(output.end_pts == 98765);
+  REQUIRE(output.time_base.num == 1001);
+  REQUIRE(output.time_base.den == 30000);
+  REQUIRE((*output.frame)->pts == -96000);
+  REQUIRE((*output.frame)->pkt_dts == -97000);
+  REQUIRE((*output.frame)->best_effort_timestamp == -95000);
+  REQUIRE((*output.frame)->time_base.num == 1001);
+  REQUIRE((*output.frame)->time_base.den == 30000);
+  REQUIRE((*output.frame)->duration == 19);
+  REQUIRE(original->pts == 12000);
+  REQUIRE(original->time_base.den == 48000);
+  REQUIRE(original->duration == 128);
+}
+
+TEST_CASE("Business filters buffer one hundred frames without forwarding null",
+          "[media_filter]") {
+  const bool video = GENERATE(false, true);
+  std::deque<ffmpeg::Frame> buffered;
+  auto callback =
+      [&](const ffmpeg::Frame& frame) -> std::optional<ffmpeg::Frame> {
+    buffered.push_back(frame.Ref());
+    if (buffered.size() <= 100) return std::nullopt;
+    auto output = std::move(buffered.front());
+    buffered.pop_front();
+    return output;
+  };
+  AvMediaFilter filter;
+  filter.SetOnVideo(callback);
+  filter.SetOnAudio(callback);
+  filter.Start();
+  for (int index = 0; index < 103; ++index) {
+    auto input = Input(video ? Video() : Audio(), 12000 + index * 128);
+    auto output = video ? filter.ProcessVideo(std::move(input))
+                        : filter.ProcessAudio(std::move(input));
+    if (index < 100) {
+      REQUIRE(output.status == AvDecoderReadStatus::kNull);
+      REQUIRE_FALSE(output.frame);
+    } else {
+      CheckTiming(output, 12000 + (index - 100) * 128, 48000);
+    }
+    REQUIRE_FALSE(filter.error());
+  }
 }
 
 TEST_CASE("Missing business callbacks pass through the original frames",
@@ -237,13 +309,15 @@ TEST_CASE("PTS jumps do not reset or repair business-filter timestamps",
           "[media_filter]") {
   AvMediaFilter filter;
   int processed = 0;
-  filter.SetOnVideo([&](const ffmpeg::Frame&) {
-    return Video(static_cast<std::uint8_t>(++processed));
+  filter.SetOnVideo([&](const ffmpeg::Frame& frame) {
+    auto output = Video(static_cast<std::uint8_t>(++processed));
+    output.CopyPropertiesFrom(frame);
+    return output;
   });
   filter.Start();
   for (const std::int64_t pts : {12000, 90000000, -300000, 100}) {
     auto output = filter.ProcessVideo(Input(Video(), pts));
-    CheckTiming(output, pts);
+    CheckTiming(output, pts, 48000);
     REQUIRE((*output.frame)->data[0][0] == processed);
   }
   REQUIRE(processed == 4);
@@ -713,13 +787,13 @@ TEST_CASE("CUDA business filters retain hardware surfaces and input timing",
   filter.SetOnVideo([](const ffmpeg::Frame& input) { return input.Ref(); });
   filter.Start();
   auto output = filter.ProcessVideo(Input(std::move(frame)));
-  CheckTiming(output);
+  CheckTiming(output, 12000, 48000);
   REQUIRE((*output.frame)->format == AV_PIX_FMT_CUDA);
   REQUIRE((*output.frame)->data[0] == surface);
   REQUIRE((*output.frame)->hw_frames_ctx->data == frame_context);
   output = filter.ProcessVideo(std::move(output));
   filter.Stop();
-  CheckTiming(output);
+  CheckTiming(output, 12000, 48000);
   REQUIRE((*output.frame)->data[0] == surface);
   REQUIRE((*output.frame)->hw_frames_ctx->data == frame_context);
 }

@@ -70,9 +70,9 @@ LivePipelineConfig Config() {
                            {"x264-params", "repeat-headers=1"}};
   encoder.audio_sample_format = AV_SAMPLE_FMT_FLTP;
   encoder.audio_sample_rate = 48000;
+  config.syncer.initial_timeout = 20ms;
   config.syncer.timeout = 20ms;
   config.syncer.freeze = 20ms;
-  config.syncer.start_ts = 0us;
   config.syncer.forward_start_shift = true;
   return config;
 }

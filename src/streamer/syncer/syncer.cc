@@ -28,7 +28,8 @@ bool ValidVideoFrame(const AVFrame& frame) {
 void ValidateConfig(const SyncerConfig& config) {
   const bool video = config.encoder.video_pixel_format != AV_PIX_FMT_NONE;
   const bool audio = config.encoder.audio_sample_format != AV_SAMPLE_FMT_NONE;
-  if ((!video && !audio) || config.options.timeout.count() <= 0 ||
+  if ((!video && !audio) || config.options.initial_timeout.count() <= 0 ||
+      config.options.timeout.count() <= 0 ||
       config.options.freeze.count() < 0 ||
       config.options.max_streams_diff.count() <= 0) {
     throw std::invalid_argument("Syncer 轨道或时间阈值无效");

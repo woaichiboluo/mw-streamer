@@ -4,6 +4,7 @@
 #include <exception>
 #include <functional>
 #include <memory>
+#include <optional>
 
 #include "mw/export.h"
 #include "mw/streamer/decoder/av_decoder.h"
@@ -28,13 +29,17 @@ class MW_STREAMER_API AvMediaFilter final {
   using OnReset = std::function<void()>;
   // Input headers and shared media buffers are read-only. Return an owned
   // frame; use writable/private storage when modifying pixels or samples.
-  // Missing callbacks pass the original frame through. Callbacks change media
-  // content only; the component preserves input timing on the returned header.
+  // Missing callbacks pass the original frame through. Return std::nullopt
+  // while buffering; no frame is forwarded. After buffering, return a frame
+  // on every call. Callbacks own all output timing, including the time base;
+  // this component never restores input timestamps on the returned frame.
   // CUDA video callbacks run with the input frame's CUDA context current on
   // the calling thread. The previous context is restored on return or throw.
   // Callbacks must restore any context stack changes they make themselves.
-  using OnAudio = std::function<ffmpeg::Frame(const ffmpeg::Frame&)>;
-  using OnVideo = std::function<ffmpeg::Frame(const ffmpeg::Frame&)>;
+  using OnAudio =
+      std::function<std::optional<ffmpeg::Frame>(const ffmpeg::Frame&)>;
+  using OnVideo =
+      std::function<std::optional<ffmpeg::Frame>(const ffmpeg::Frame&)>;
 
   AvMediaFilter();
   // Stops an active session; exceptions from OnStop are logged here.
@@ -72,16 +77,18 @@ class MW_STREAMER_API AvMediaFilter final {
   std::exception_ptr error() const;
 
   // Require a started session. Consume the result's frame reference and return
-  // the processed frame with its stream/time-base/EOF data intact.
-  // Preserve PTS, DTS, best-effort timestamp, time base and duration exactly;
-  // this is metadata forwarding, not timestamp repair or resynchronization.
+  // the processed frame with its stream/EOF data intact. The result time base
+  // follows the returned frame's time base. All frame timing is forwarded
+  // unchanged; no timestamp repair or resynchronization occurs here.
+  // A std::nullopt callback result becomes kNull with no frame. A present,
+  // moved-from Frame is invalid and fails the session.
   // EOF/underflow do not reset history or stop the session. Processing a frame
   // after a callback failure requires Stop/Start; it throws std::logic_error.
   AvDecoderReadResult ProcessVideo(AvDecoderReadResult input);
   AvDecoderReadResult ProcessAudio(AvDecoderReadResult input);
 
   // Execute the same business callbacks but discard their output. Empty or
-  // invalid returned frames are accepted; output timing is not restored.
+  // invalid returned frames are accepted.
   // Session, input validation, EOF and failure semantics match Process calls.
   void ConsumeVideo(AvDecoderReadResult input);
   void ConsumeAudio(AvDecoderReadResult input);

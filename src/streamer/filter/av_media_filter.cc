@@ -264,13 +264,9 @@ class AvMediaFilter::Impl final {
       }
       ++active_calls_;
     }
-    // Save timing before invoking business code. A callback may return fresh
-    // storage without copying properties; execution time must not become PTS.
     const auto* source = input.frame->get();
     const auto pts = source->pts;
     const auto dts = source->pkt_dts;
-    const auto best_effort = source->best_effort_timestamp;
-    const auto time_base = source->time_base;
     const auto duration = source->duration;
     MW_LOG_TRACE("streamer",
                  "AvMediaFilter[{}] 开始处理帧: track={} stream={} pts={} "
@@ -291,14 +287,14 @@ class AvMediaFilter::Impl final {
                       .count();
       }
       if (!consume) {
-        if (!output.get()) {
+        if (output && !output->get()) {
           throw std::invalid_argument("AvMediaFilter 回调返回了无效帧");
         }
-        output->pts = pts;
-        output->pkt_dts = dts;
-        output->best_effort_timestamp = best_effort;
-        output->time_base = time_base;
-        output->duration = duration;
+        if (output) {
+          input.time_base = output->get()->time_base;
+        } else {
+          input.status = AvDecoderReadStatus::kNull;
+        }
         input.frame = std::move(output);
       }
     } catch (...) {

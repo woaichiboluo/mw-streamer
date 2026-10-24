@@ -15,10 +15,13 @@ namespace mw::streamer {
 
 // Continuity policy, independent of encoder formats and standby storage.
 struct SyncerOptions {
+  // Per-track wait for the first real frame since Reset. Backup output does
+  // not end startup; accepting a real frame switches to timeout below.
+  std::chrono::microseconds initial_timeout{4000000};
   std::chrono::microseconds timeout{1000000};
   std::chrono::microseconds freeze{5000000};
   std::chrono::microseconds max_streams_diff{1000};
-  std::chrono::microseconds start_ts{10000000};
+  std::chrono::microseconds start_ts{0};
   // False seeds each track's expected PTS with start_ts, filling positive
   // initial gaps and correcting negative offsets.
   // True leaves it unset until the first frame or input timeout.
@@ -48,8 +51,8 @@ struct SyncerStep {
   // Earliest useful retry in the caller's elapsed monotonic microseconds,
   // including after a returned frame ends a bounded fill batch.
   std::int64_t wake_us = 0;
-  // The output was not accepted. Wait for downstream space before retrying;
-  // no frame was committed and the input head remains unconsumed.
+  // The output was not accepted. Retry on downstream space or the caller's
+  // backpressure timer; no frame was committed and the head is unconsumed.
   bool blocked = false;
 };
 
