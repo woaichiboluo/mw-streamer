@@ -7,6 +7,7 @@
 #include <cstring>
 #include <exception>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -24,6 +25,7 @@ extern "C" {
 }
 
 #include "mw/log.h"
+#include "mw/streamer/ffmpeg/hw_device_context.h"
 #include "mw/streamer/performance/latency.h"
 
 namespace mw::streamer {
@@ -84,25 +86,34 @@ class CudaDriver final {
 #endif
 };
 
+AVBufferRef* VideoDevice(const AVFrame& frame, bool video) {
+  if (!video || frame.format != AV_PIX_FMT_CUDA) return nullptr;
+  if (!frame.hw_frames_ctx || !frame.hw_frames_ctx->data) {
+    throw std::invalid_argument("CUDA 滤镜帧缺少硬件帧上下文");
+  }
+  const auto* frames =
+      reinterpret_cast<const AVHWFramesContext*>(frame.hw_frames_ctx->data);
+  if (!frames->device_ref || !frames->device_ctx ||
+      frames->device_ctx->type != AV_HWDEVICE_TYPE_CUDA ||
+      !frames->device_ctx->hwctx) {
+    throw std::invalid_argument("CUDA 滤镜帧缺少 CUDA 设备上下文");
+  }
+  const auto* context =
+      static_cast<const AVCUDADeviceContext*>(frames->device_ctx->hwctx);
+  if (!context->cuda_ctx) {
+    throw std::invalid_argument("CUDA 滤镜设备上下文无效");
+  }
+  return frames->device_ref;
+}
+
 class VideoContextScope final {
  public:
-  VideoContextScope(const AVFrame& frame, bool video) {
-    if (!video || frame.format != AV_PIX_FMT_CUDA) return;
-    if (!frame.hw_frames_ctx || !frame.hw_frames_ctx->data) {
-      throw std::invalid_argument("CUDA 滤镜帧缺少硬件帧上下文");
-    }
-    const auto* frames =
-        reinterpret_cast<const AVHWFramesContext*>(frame.hw_frames_ctx->data);
-    if (!frames->device_ctx ||
-        frames->device_ctx->type != AV_HWDEVICE_TYPE_CUDA ||
-        !frames->device_ctx->hwctx) {
-      throw std::invalid_argument("CUDA 滤镜帧缺少 CUDA 设备上下文");
-    }
+  explicit VideoContextScope(const AVBufferRef* device) {
+    if (!device) return;
+    const auto* native =
+        reinterpret_cast<const AVHWDeviceContext*>(device->data);
     const auto* context =
-        static_cast<const AVCUDADeviceContext*>(frames->device_ctx->hwctx);
-    if (!context->cuda_ctx) {
-      throw std::invalid_argument("CUDA 滤镜设备上下文无效");
-    }
+        static_cast<const AVCUDADeviceContext*>(native->hwctx);
     static const CudaDriver driver;
     if (driver.push(context->cuda_ctx) != CUDA_SUCCESS) {
       throw std::runtime_error("无法绑定滤镜 CUDA 上下文");
@@ -204,7 +215,15 @@ class AvMediaFilter::Impl final {
     stopping_ = false;
     idle_.notify_all();
     MW_LOG_INFO("streamer", "AvMediaFilter 已停止");
-    if (on_stop_) on_stop_();
+    // Keep the device alive through cleanup, including a throwing callback,
+    // and release it before another session can start.
+    auto device = std::move(video_device_);
+    video_device_.reset();
+    if (on_stop_) {
+      VideoContextScope context(device ? device->get() : nullptr);
+      on_stop_();
+      context.Finish();
+    }
   }
 
   std::exception_ptr error() const {
@@ -224,7 +243,12 @@ class AvMediaFilter::Impl final {
       throw std::logic_error("AvMediaFilter 回调失败后需要 Stop/Start");
     }
     try {
-      if (on_reset_) on_reset_();
+      if (on_reset_) {
+        VideoContextScope context(video_device_ ? video_device_->get()
+                                                : nullptr);
+        on_reset_();
+        context.Finish();
+      }
     } catch (...) {
       error_ = std::current_exception();
       LogFailure(this, "reset", error_);
@@ -278,7 +302,16 @@ class AvMediaFilter::Impl final {
     const auto started = latency.Begin();
     std::optional<std::int64_t> elapsed;
     try {
-      VideoContextScope context(*source, video);
+      auto* device = VideoDevice(*source, video);
+      VideoContextScope context(device);
+      if (device) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!video_device_) {
+          auto* reference = av_buffer_ref(device);
+          if (!reference) throw std::bad_alloc();
+          video_device_.emplace(reference);
+        }
+      }
       auto output = callback(*input.frame);
       context.Finish();
       if (latency.enabled()) {
@@ -338,6 +371,7 @@ class AvMediaFilter::Impl final {
   bool started_ = false;
   bool stopping_ = false;
   std::exception_ptr error_;
+  std::optional<ffmpeg::HwDeviceContext> video_device_;
   internal::StageLatency video_latency_;
   internal::StageLatency audio_latency_;
 };

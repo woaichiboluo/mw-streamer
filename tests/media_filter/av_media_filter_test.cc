@@ -914,4 +914,145 @@ TEST_CASE("CUDA video callbacks bind frame context and restore the caller",
   filter.Stop();
 }
 
+TEST_CASE("CUDA lifecycle callbacks retain session context and restore callers",
+          "[.][media_filter][cuda]") {
+  // 0: success, 1: reset failure, 2: stop failure, 3: video failure.
+  auto failure = GENERATE(0, 1, 2, 3);
+  const auto different_caller_context = GENERATE(false, true);
+  CAPTURE(failure, different_caller_context);
+  ffmpeg::HwDeviceContext device(ffmpeg::HwDeviceType::kCuda);
+  ffmpeg::HwDeviceContext other(ffmpeg::HwDeviceType::kCuda);
+  const auto native_context = [](const ffmpeg::HwDeviceContext& hardware) {
+    const auto* native =
+        reinterpret_cast<const AVHWDeviceContext*>(hardware.get()->data);
+    return static_cast<const AVCUDADeviceContext*>(native->hwctx)->cuda_ctx;
+  };
+  const auto expected = native_context(device);
+  const auto previous =
+      different_caller_context ? native_context(other) : nullptr;
+  const auto cuda_frame = [](ffmpeg::HwDeviceContext& hardware) {
+    std::unique_ptr<AVBufferRef, void (*)(AVBufferRef*)> frames(
+        av_hwframe_ctx_alloc(hardware.get()),
+        [](AVBufferRef* reference) { av_buffer_unref(&reference); });
+    if (!frames) throw std::runtime_error("Cannot allocate CUDA frame context");
+    auto* context = reinterpret_cast<AVHWFramesContext*>(frames->data);
+    context->format = AV_PIX_FMT_CUDA;
+    context->sw_format = AV_PIX_FMT_NV12;
+    context->width = 128;
+    context->height = 128;
+    ffmpeg::Frame frame;
+    if (av_hwframe_ctx_init(frames.get()) < 0 ||
+        av_hwframe_get_buffer(frames.get(), frame.get(), 0) < 0) {
+      throw std::runtime_error("Cannot allocate CUDA frame");
+    }
+    return frame;
+  };
+  const TestCudaDriver driver;
+  CUcontext reset_context = nullptr;
+  CUcontext stop_context = nullptr;
+  int stops = 0;
+  AvMediaFilter filter;
+  filter.SetOnVideo([&](const ffmpeg::Frame& input) {
+    if (failure == 3) throw std::runtime_error("Video callback failed");
+    return input.Ref();
+  });
+  filter.SetOnReset([&] {
+    if (driver.current(&reset_context) != CUDA_SUCCESS) {
+      throw std::runtime_error("Cannot query reset CUDA context");
+    }
+    if (failure == 1) throw std::runtime_error("Reset callback failed");
+  });
+  filter.SetOnStop([&] {
+    ++stops;
+    if (driver.current(&stop_context) != CUDA_SUCCESS) {
+      throw std::runtime_error("Cannot query stop CUDA context");
+    }
+    if (failure == 2) throw std::runtime_error("Stop callback failed");
+  });
+  // Lifecycle calls run on a fresh thread, with either no current context or
+  // a different context. Check restoration after both return and exception.
+  const auto invoke = [&](auto operation) {
+    return std::async(
+               std::launch::async,
+               [&, operation] {
+                 if (driver.set(previous) != CUDA_SUCCESS) {
+                   throw std::runtime_error("Cannot set caller CUDA context");
+                 }
+                 std::exception_ptr error;
+                 try {
+                   operation();
+                 } catch (...) {
+                   error = std::current_exception();
+                 }
+                 CUcontext after = nullptr;
+                 const auto queried = driver.current(&after);
+                 const auto cleared = driver.set(nullptr);
+                 return std::make_pair(error, queried == CUDA_SUCCESS &&
+                                                  after == previous &&
+                                                  cleared == CUDA_SUCCESS);
+               })
+        .get();
+  };
+  REQUIRE(av_buffer_get_ref_count(device.get()) == 1);
+  filter.Start();
+  if (failure == 3) {
+    REQUIRE_THROWS_MATCHES(filter.ConsumeVideo(Input(cuda_frame(device))),
+                           std::runtime_error,
+                           Catch::Matchers::Message("Video callback failed"));
+  } else {
+    filter.ConsumeVideo(Input(cuda_frame(device)));
+  }
+  // No input frame or frame pool remains. The session must own its device.
+  REQUIRE(av_buffer_get_ref_count(device.get()) == 2);
+  if (failure != 3) {
+    const auto reset = invoke([&] { filter.Reset(); });
+    REQUIRE(reset.second);
+    REQUIRE(reset_context == expected);
+    if (failure == 1) {
+      CheckException<std::runtime_error>(reset.first, "Reset callback failed");
+      CheckException<std::runtime_error>(filter.error(),
+                                         "Reset callback failed");
+    } else {
+      REQUIRE_FALSE(reset.first);
+      REQUIRE_NOTHROW(filter.ConsumeVideo(Input(cuda_frame(device))));
+    }
+    REQUIRE(av_buffer_get_ref_count(device.get()) == 2);
+  }
+  const auto stopped = invoke([&] { filter.Stop(); });
+  REQUIRE(stopped.second);
+  REQUIRE(stop_context == expected);
+  if (failure == 2) {
+    CheckException<std::runtime_error>(stopped.first, "Stop callback failed");
+  } else {
+    REQUIRE_FALSE(stopped.first);
+  }
+  REQUIRE(av_buffer_get_ref_count(device.get()) == 1);
+  REQUIRE_NOTHROW(filter.Stop());
+  REQUIRE(stops == 1);
+
+  // A session with no CUDA video processing must not inherit the old context.
+  failure = 0;
+  filter.Start();
+  const auto empty_reset = invoke([&] { filter.Reset(); });
+  REQUIRE_FALSE(empty_reset.first);
+  REQUIRE(empty_reset.second);
+  REQUIRE(reset_context == previous);
+  const auto empty_stop = invoke([&] { filter.Stop(); });
+  REQUIRE_FALSE(empty_stop.first);
+  REQUIRE(empty_stop.second);
+  REQUIRE(stop_context == previous);
+
+  // The next CUDA session can use another context without retaining the old
+  // device, even if the previous session ended through a callback exception.
+  filter.Start();
+  filter.ConsumeVideo(Input(cuda_frame(other)));
+  REQUIRE(av_buffer_get_ref_count(device.get()) == 1);
+  REQUIRE(av_buffer_get_ref_count(other.get()) == 2);
+  const auto restarted_stop = invoke([&] { filter.Stop(); });
+  REQUIRE_FALSE(restarted_stop.first);
+  REQUIRE(restarted_stop.second);
+  REQUIRE(stop_context == native_context(other));
+  REQUIRE(av_buffer_get_ref_count(other.get()) == 1);
+}
+
 }  // namespace
