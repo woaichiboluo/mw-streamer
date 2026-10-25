@@ -39,6 +39,10 @@ endif()
 
 function(mw_copy_test_runtime_dlls target)
     if(WIN32)
+        # DLL implementation changes need not update their import libraries.
+        # Relink to rerun deployment instead of testing an older copied DLL.
+        set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS
+            "$<TARGET_RUNTIME_DLLS:${target}>")
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_RUNTIME_DLLS:${target}> $<TARGET_FILE_DIR:${target}>

@@ -9,6 +9,7 @@ target_link_libraries(mw_av_input_tests PRIVATE
 )
 add_test(NAME mw_av_input_tests COMMAND mw_av_input_tests)
 set_tests_properties(mw_av_input_tests PROPERTIES TIMEOUT 60)
+mw_copy_test_runtime_dlls(mw_av_input_tests)
 
 add_executable(mw_av_probe_tests av_probe_test.cc)
 target_compile_definitions(mw_av_probe_tests PRIVATE
