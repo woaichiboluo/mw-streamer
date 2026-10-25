@@ -905,6 +905,8 @@ TEST_CASE(
   LivePipeline pipeline(Config());
   std::string input = SamplePath();
   bool callback_error = true;
+  bool remuxer_error = false;
+  std::optional<std::int64_t> first_video_dts;
   SECTION("source terminal failure") {
     callback_error = false;
     input = directory.File("missing.mp4");
@@ -920,6 +922,20 @@ TEST_CASE(
   SECTION("encoded output observer failure") {
     pipeline.SetOnOutputPacket(
         [](const ffmpeg::Packet&) { throw SessionError(); });
+  }
+  SECTION("remuxer retains the original asynchronous DTS failure") {
+    callback_error = false;
+    remuxer_error = true;
+    pipeline.SetOnOutputPacket([&](const ffmpeg::Packet& packet) {
+      if (packet->stream_index != 0) return;
+      if (!first_video_dts) {
+        first_video_dts = packet->dts;
+      } else {
+        // Fault injection only: corrupt the encoder-owned packet before the
+        // pipeline submits it, so the poller reports an asynchronous failure.
+        const_cast<AVPacket*>(packet.get())->dts = *first_video_dts - 1;
+      }
+    });
   }
   bool snapshot_failed = false;
   pipeline.SetOnError([&](std::exception_ptr error) {
@@ -939,6 +955,15 @@ TEST_CASE(
   CHECK(pipeline.error() == observations.errors.front());
   if (callback_error) {
     CHECK_THROWS_AS(std::rethrow_exception(pipeline.error()), SessionError);
+  }
+  if (remuxer_error) {
+    CHECK_THROWS_AS(std::rethrow_exception(pipeline.error()),
+                    std::invalid_argument);
+    try {
+      std::rethrow_exception(pipeline.error());
+    } catch (const std::invalid_argument& failure) {
+      CHECK(std::string(failure.what()) == "编码包 DTS 回退");
+    }
   }
   static_cast<void>(started);
 }

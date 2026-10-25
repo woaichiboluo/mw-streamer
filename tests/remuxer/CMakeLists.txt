@@ -45,3 +45,20 @@ add_test(NAME mw_remuxer_tests COMMAND mw_remuxer_tests)
 set_tests_properties(mw_remuxer_tests PROPERTIES
     TIMEOUT 60 LABELS "remuxer")
 mw_copy_test_runtime_dlls(mw_remuxer_tests)
+
+# Queue/poller coordination must share the SDK singleton with the tested code.
+add_executable(mw_remuxer_queue_tests remuxer_queue_test.cc)
+target_compile_definitions(mw_remuxer_queue_tests PRIVATE
+    MW_STREAMER_TEST_DATA_DIR="${MW_STREAMER_TEST_DATA_DIR}")
+target_link_libraries(mw_remuxer_queue_tests PRIVATE
+    Catch2::Catch2WithMain FFmpeg::avformat
+    ZLMediaKit::MediaKit ZLMediaKit::ext-codec)
+if(BUILD_SHARED)
+    target_link_libraries(mw_remuxer_queue_tests PRIVATE mw_streamer_test_static)
+else()
+    target_link_libraries(mw_remuxer_queue_tests PRIVATE mw::streamer)
+endif()
+add_test(NAME mw_remuxer_queue_tests COMMAND mw_remuxer_queue_tests)
+set_tests_properties(mw_remuxer_queue_tests PROPERTIES
+    TIMEOUT 60 LABELS "remuxer")
+mw_copy_test_runtime_dlls(mw_remuxer_queue_tests)

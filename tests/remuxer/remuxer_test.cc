@@ -601,13 +601,16 @@ TEST_CASE("Remuxer 多轮 Start Drain Stop 排空并支持重复停止",
   const Media media;
   Errors errors;
   Remuxer remuxer;
+  CHECK_FALSE(remuxer.error());
   remuxer.SetOnError([&](std::exception_ptr error) { errors.Add(error); });
   for (int session = 0; session < 3; ++session) {
     REQUIRE(remuxer.Start(media.streams));
+    CHECK_FALSE(remuxer.error());
     for (const auto& packet : media.packets)
       REQUIRE(remuxer.SubmitPacket(packet));
     remuxer.Drain();
     remuxer.Stop();
+    CHECK_FALSE(remuxer.error());
     remuxer.Drain();
     remuxer.Stop();
     CHECK_FALSE(remuxer.SubmitPacket(media.packets.front()));
@@ -630,12 +633,18 @@ TEST_CASE("Remuxer 非法轨道启动返回失败且无需停止即可重试",
   Remuxer remuxer;
   remuxer.SetOnError([&](std::exception_ptr error) { errors.Add(error); });
   CHECK_FALSE(remuxer.Start(streams));
+  const auto startup_failure = remuxer.error();
+  REQUIRE(startup_failure);
+  CHECK_THROWS(std::rethrow_exception(startup_failure));
   CHECK_FALSE(remuxer.SubmitPacket(media.packets.front()));
+  CHECK(remuxer.error() == startup_failure);
   CHECK(errors.Count() == 0);
   REQUIRE(remuxer.Start(media.streams));
+  CHECK_FALSE(remuxer.error());
   for (const auto& packet : media.packets)
     REQUIRE(remuxer.SubmitPacket(packet));
   remuxer.Stop();
+  CHECK_FALSE(remuxer.error());
   CHECK(errors.Count() == 0);
 }
 
@@ -652,10 +661,12 @@ TEST_CASE("Remuxer 重复启动返回失败且保留当前输出会话",
   REQUIRE(remuxer.SubmitPacket(media.packets.front()));
   CHECK_FALSE(remuxer.Start(media.streams));
   CHECK_FALSE(remuxer.Start({}));
+  CHECK_FALSE(remuxer.error());
   CHECK(remuxer.output_info().output_urls == std::vector<std::string>{output});
   for (std::size_t index = 1; index < media.packets.size(); ++index)
     REQUIRE(remuxer.SubmitPacket(media.packets[index]));
   remuxer.Stop();
+  CHECK_FALSE(remuxer.error());
   CHECK(errors.Count() == 0);
   CheckRecording(output, media.packets.size());
   CHECK_FALSE(remuxer.SubmitPacket(media.packets.front()));
@@ -676,6 +687,8 @@ TEST_CASE("Remuxer 输出启动失败回滚已绑定发布路径且允许重新�
   failed.AddRtspPublish("127.0.0.1", port);
   failed.AddHlsPublish("127.0.0.1", port, true);
   CHECK_FALSE(failed.Start(media.streams));
+  const auto startup_failure = failed.error();
+  REQUIRE(startup_failure);
   CHECK_FALSE(failed.SubmitPacket(media.packets.front()));
   CHECK(errors.Count() == 0);
   Remuxer replacement({"remuxer_test", stream});
@@ -685,11 +698,15 @@ TEST_CASE("Remuxer 输出启动失败回滚已绑定发布路径且允许重新�
   for (const auto& packet : media.packets)
     REQUIRE(replacement.SubmitPacket(packet));
   replacement.Stop();
+  CHECK_FALSE(replacement.error());
   failed.Stop();
+  CHECK(failed.error() == startup_failure);
   failed.AddRtspPublish("127.0.0.1", port);
   REQUIRE(failed.Start(media.streams));
+  CHECK_FALSE(failed.error());
   for (const auto& packet : media.packets) REQUIRE(failed.SubmitPacket(packet));
   failed.Stop();
+  CHECK_FALSE(failed.error());
   CHECK(errors.Count() == 0);
 }
 
@@ -708,7 +725,9 @@ TEST_CASE("Remuxer 保留处理异常类型且错误回调抛异常后仍能停�
   SECTION("回调抛出非标准异常") { failure = CallbackFailure::kUnknown; }
   Errors errors;
   Remuxer remuxer;
+  bool callback_snapshot_matches = false;
   remuxer.SetOnError([&](std::exception_ptr error) {
+    callback_snapshot_matches = remuxer.error() == error;
     errors.Add(error);
     if (failure == CallbackFailure::kStandard)
       throw std::runtime_error("测试错误回调异常");
@@ -717,6 +736,7 @@ TEST_CASE("Remuxer 保留处理异常类型且错误回调抛异常后仍能停�
   REQUIRE(remuxer.Start(streams));
   REQUIRE(remuxer.SubmitPacket(InvalidPacket(streams.front())));
   const auto error = errors.Wait();
+  CHECK(remuxer.error() == error);
   CHECK_FALSE(remuxer.SubmitPacket(media.packets.front()));
   REQUIRE_THROWS_AS(std::rethrow_exception(error), std::invalid_argument);
   try {
@@ -725,12 +745,17 @@ TEST_CASE("Remuxer 保留处理异常类型且错误回调抛异常后仍能停�
     CHECK(std::string(exception.what()).find("Annex B") != std::string::npos);
   }
   remuxer.Stop();
+  CHECK(callback_snapshot_matches);
+  CHECK(remuxer.error() == error);
   CHECK(errors.Count() == 1);
   CHECK_FALSE(remuxer.SubmitPacket(media.packets.front()));
+  CHECK(remuxer.error() == error);
   REQUIRE(remuxer.Start(media.streams));
+  CHECK_FALSE(remuxer.error());
   for (const auto& packet : media.packets)
     REQUIRE(remuxer.SubmitPacket(packet));
   remuxer.Stop();
+  CHECK_FALSE(remuxer.error());
   CHECK(errors.Count() == 1);
 }
 

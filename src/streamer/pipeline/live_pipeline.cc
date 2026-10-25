@@ -60,7 +60,12 @@ class LivePipeline::Impl final {
     scheduler_.SetOnError([this](std::exception_ptr error) { Fail(error); });
     encoder_.SetOnPacket([this](const ffmpeg::Packet& packet) {
       if (on_output_packet_) on_output_packet_(packet);
-      remuxer_.SubmitPacket(packet);
+      if (!remuxer_.SubmitPacket(packet)) {
+        if (const auto failure = remuxer_.error())
+          std::rethrow_exception(failure);
+        if (const auto failure = error()) std::rethrow_exception(failure);
+        throw std::runtime_error("LivePipeline Remuxer 拒绝编码包");
+      }
     });
     encoder_.SetOnError([this](std::exception_ptr error) { Fail(error); });
     remuxer_.SetOnError([this](std::exception_ptr error) { Fail(error); });
@@ -116,8 +121,11 @@ class LivePipeline::Impl final {
       MW_LOG_DEBUG("streamer", "LivePipeline 编码器启动完成: instance={}",
                    static_cast<const void*>(this));
       CheckFailure();
-      if (!remuxer_.Start(encoder_.streams()))
+      if (!remuxer_.Start(encoder_.streams())) {
+        if (const auto failure = remuxer_.error())
+          std::rethrow_exception(failure);
         throw std::runtime_error("LivePipeline Remuxer 启动失败");
+      }
       MW_LOG_DEBUG("streamer", "LivePipeline Remuxer 启动完成: instance={}",
                    static_cast<const void*>(this));
       CheckFailure();

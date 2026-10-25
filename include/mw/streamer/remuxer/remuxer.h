@@ -87,7 +87,13 @@ class MW_STREAMER_API Remuxer final {
   // in order. Protocol buffering and network delivery are managed by ZLM.
   // Concurrent calls are safe, but each track must arrive in DTS order.
   // Calling on this remuxer's output poller throws to prevent self-wait.
+  // True means accepted locally; false means the session is not accepting.
+  // After false, error() retains the cause if rejection followed a failure.
   bool SubmitPacket(const ffmpeg::Packet& packet);
+  // Thread-safe snapshot of the first terminal processing/startup exception.
+  // Preserved after Stop; beginning a new session clears it. Repeated Start
+  // while running leaves the current session and its error unchanged.
+  std::exception_ptr error() const;
   // Before Start, registers an output without creating resources; during a
   // session, activates it synchronously. Network URLs retry automatically.
   // Local .mp4 targets use independent asynchronous fMP4 Recorders; .m3u8
