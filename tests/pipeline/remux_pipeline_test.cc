@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <future>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -27,6 +28,7 @@ extern "C" {
 
 #include "mw/streamer/ffmpeg/frame.h"
 #include "mw/streamer/init/init.h"
+#include "mw/streamer/pipeline/internal/audio_probe_timeout.h"
 #include "mw/streamer/recorder/recorder.h"
 
 namespace {
@@ -344,6 +346,54 @@ TEST_CASE("RemuxPipeline handles a video-only source without adding tracks",
   const auto recordings = pipeline.recording_statuses();
   REQUIRE(recordings.size() == 1);
   CheckRecording(recordings.front().path, source);
+}
+
+TEST_CASE("AAC sampling timeout interrupts an ordinary blocking input read",
+          "[remux_pipeline][aac-probe][timeout]") {
+  const auto runtime = InitRuntime();
+  const OutputDirectory directory;
+  mw::streamer::AvInputProxy input;
+  REQUIRE(input.Start(directory.File("missing-input.mp4")));
+  const auto started = std::chrono::steady_clock::now();
+  mw::streamer::internal::AudioProbeTimeout timeout(input);
+  auto reader =
+      std::async(std::launch::async, [&] { return input.ReadPacket(); });
+  const auto ready = reader.wait_for(4s);
+  const bool expired = timeout.Finish();
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  input.Stop();
+  const auto result = reader.get();
+  CHECK(ready == std::future_status::ready);
+  CHECK(expired);
+  CHECK(elapsed >= 1900ms);
+  CHECK(elapsed < 4s);
+  CHECK(result.status == mw::streamer::AvInputReadStatus::kNull);
+  // The expired guard remains alive while the same proxy opens a new session.
+  REQUIRE(input.Start(SamplePath()));
+  const auto next = input.ReadPacket();
+  input.Stop();
+  CHECK(next.status == mw::streamer::AvInputReadStatus::kPacket);
+}
+
+TEST_CASE("Completed AAC sampling cancels its timer without stopping input",
+          "[remux_pipeline][aac-probe][timeout][cancel]") {
+  const auto runtime = InitRuntime();
+  const OutputDirectory directory;
+  mw::streamer::AvInputProxy input;
+  REQUIRE(input.Start(directory.File("missing-input.mp4")));
+  mw::streamer::internal::AudioProbeTimeout timeout(input);
+  auto reader =
+      std::async(std::launch::async, [&] { return input.ReadPacket(); });
+  const auto started = std::chrono::steady_clock::now();
+  const bool expired = timeout.Finish();
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  const auto pending = reader.wait_for(40ms);
+  input.Stop();
+  const auto result = reader.get();
+  CHECK_FALSE(expired);
+  CHECK(elapsed < 500ms);
+  CHECK(pending == std::future_status::timeout);
+  CHECK(result.status == mw::streamer::AvInputReadStatus::kNull);
 }
 
 TEST_CASE("RemuxPipeline probes raw AAC and replays every original packet",

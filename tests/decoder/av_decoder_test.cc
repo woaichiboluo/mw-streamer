@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -27,6 +28,7 @@ extern "C" {
 #include <fmt/format.h>
 
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/platform/wait_signal.h"
 
 namespace {
 
@@ -36,6 +38,7 @@ using mw::streamer::AvDecoderConfig;
 using mw::streamer::AvDecoderReadResult;
 using mw::streamer::AvDecoderReadStatus;
 namespace ffmpeg = mw::streamer::ffmpeg;
+using mw::streamer::internal::WaitSignal;
 
 struct FormatDeleter {
   void operator()(AVFormatContext* context) const {
@@ -220,6 +223,16 @@ bool WaitFor(Predicate predicate) {
   return true;
 }
 
+template <typename Predicate>
+bool WaitForSignal(WaitSignal& signal, Predicate predicate) {
+  const auto deadline = std::chrono::steady_clock::now() + 3s;
+  for (;;) {
+    const auto revision = signal.GetRevision();
+    if (predicate()) return true;
+    if (!signal.WaitUntil(revision, deadline)) return predicate();
+  }
+}
+
 AvDecoderReadResult ReadAvailable(AvDecoder& decoder) {
   AvDecoderReadResult result;
   REQUIRE(WaitFor([&] {
@@ -230,7 +243,7 @@ AvDecoderReadResult ReadAvailable(AvDecoder& decoder) {
   return result;
 }
 
-// The producer retries the same item while the test consumes bounded output.
+// The producer blocks on capacity while the test consumes bounded output.
 // Unwinding stops the decoder before joining, so failed assertions cannot hang.
 class SourceFeeder {
  public:
@@ -238,22 +251,17 @@ class SourceFeeder {
       : decoder_(decoder), worker_([this, &source, replays] {
           try {
             const auto submit = [&](auto push) {
-              const auto deadline = std::chrono::steady_clock::now() + 5s;
-              while (!push()) {
-                if (decoder_.error() || stopping_.load() ||
-                    std::chrono::steady_clock::now() >= deadline) {
-                  throw std::runtime_error(
-                      "Decoder input did not accept retry");
-                }
-                std::this_thread::sleep_for(1ms);
+              if (!push()) {
+                throw std::runtime_error(
+                    "Decoder stopped before accepting input");
               }
             };
             for (int replay = 0; replay < replays; ++replay) {
-              if (replay) submit([&] { return decoder_.TryReset(); });
+              if (replay) submit([&] { return decoder_.Reset(); });
               for (const auto& packet : source.packets) {
-                submit([&] { return decoder_.TryPushPacket(packet); });
+                submit([&] { return decoder_.PushPacket(packet); });
               }
-              submit([&] { return decoder_.TryPushEof(); });
+              submit([&] { return decoder_.PushEof(); });
             }
           } catch (...) {
             failure_ = std::current_exception();
@@ -262,7 +270,6 @@ class SourceFeeder {
 
   ~SourceFeeder() {
     if (worker_.joinable()) {
-      stopping_.store(true);
       decoder_.RequestStop();
       worker_.join();
     }
@@ -275,7 +282,6 @@ class SourceFeeder {
 
  private:
   AvDecoder& decoder_;
-  std::atomic<bool> stopping_{false};
   std::exception_ptr failure_;
   std::thread worker_;
 };
@@ -718,98 +724,311 @@ TEST_CASE(
   }
 }
 
-TEST_CASE("AvDecoder notifies input consumption for packets EOF and reset",
-          "[av-decoder][notification]") {
-  const auto source = ReadSource("h264_aac.mp4", AVMEDIA_TYPE_VIDEO);
-  auto native = OpenReferenceCodec(source.stream);
-  const auto reference =
-      ReferenceDecode(native.get(), source.stream, source.packets);
-  std::atomic<std::size_t> callbacks{0};
-  AvDecoderConfig config;
-  config.thread_count = 1;
-  AvDecoder decoder(source.stream, config);
-  decoder.SetOnInputSpace([&] { ++callbacks; });
-  SourceFeeder feeder(decoder, source);
-  CheckSource(decoder, source, reference);
-  feeder.Join();
-  CHECK(callbacks.load() == source.packets.size() + 1);
-  REQUIRE(decoder.TryReset());
-  REQUIRE(decoder.TryPushEof());
-  REQUIRE(ReadAvailable(decoder).status == AvDecoderReadStatus::kEof);
-  CHECK(callbacks.load() == source.packets.size() + 3);
+std::size_t FillDecoderQueues(AvDecoder& decoder, const Source& source) {
+  std::size_t submitted = 0;
+  auto stable_since = std::chrono::steady_clock::now();
+  REQUIRE(WaitFor([&] {
+    while (submitted < source.packets.size() &&
+           decoder.TryPushPacket(source.packets[submitted])) {
+      ++submitted;
+      stable_since = std::chrono::steady_clock::now();
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (decoder.buffered_frames() != 1 || decoder.buffered_packets() != 1) {
+      stable_since = now;
+      return false;
+    }
+    // Keep refilling transient vacancies until both queues stay full for 20 ms.
+    return now - stable_since >= 20ms;
+  }));
+  REQUIRE(submitted < source.packets.size());
+  REQUIRE(decoder.buffered_frames() == 1);
+  REQUIRE(decoder.buffered_packets() == 1);
+  return submitted;
 }
 
 TEST_CASE(
-    "AvDecoder input notification permits reentry and isolates exceptions",
-    "[av-decoder][notification]") {
+    "AvDecoder blocking packet submission resumes when output is consumed",
+    "[av-decoder][backpressure][blocking]") {
   const auto source = ReadSource("h264_aac.mp4", AVMEDIA_TYPE_VIDEO);
-  std::atomic<std::size_t> old_callbacks{0};
-  std::atomic<std::size_t> callbacks{0};
-  std::atomic<bool> queued_eof{false};
-  AvDecoder decoder(source.stream);
-  decoder.SetOnInputSpace([&] { ++old_callbacks; });
-  decoder.SetOnInputSpace([&] {
-    static_cast<void>(decoder.buffered_packets());
-    if (++callbacks == 1) {
-      queued_eof = decoder.TryPushEof();
+  const auto reference = ReferenceDecode(source.stream, source.packets);
+  AvDecoderConfig config;
+  config.thread_count = 1;
+  config.packet_capacity = 1;
+  config.frame_capacity = 1;
+  AvDecoder decoder(source.stream, config);
+  const auto submitted = FillDecoderQueues(decoder, source);
+  const auto& pending = source.packets[submitted];
+  const auto* storage = pending->data;
+  std::promise<void> completion;
+  auto completed = completion.get_future();
+  bool accepted = false;
+  std::exception_ptr failure;
+  std::thread producer([&] {
+    try {
+      accepted = decoder.PushPacket(pending);
+    } catch (...) {
+      failure = std::current_exception();
     }
-    throw std::runtime_error("observer failure");
+    completion.set_value();
   });
-  REQUIRE(decoder.TryReset());
-  REQUIRE(ReadAvailable(decoder).status == AvDecoderReadStatus::kEof);
-  CHECK(queued_eof.load());
-  CHECK(old_callbacks.load() == 0);
-  CHECK(callbacks.load() == 2);
-  CHECK(decoder.error() == nullptr);
-  decoder.SetOnInputSpace({});
-  REQUIRE(decoder.TryReset());
-  REQUIRE(decoder.TryPushEof());
-  REQUIRE(ReadAvailable(decoder).status == AvDecoderReadStatus::kEof);
-  CHECK(callbacks.load() == 2);
+  const auto blocked = completed.wait_for(40ms);
+  std::vector<AvDecoderReadResult> output;
+  const bool resumed = WaitFor([&] {
+    auto result = decoder.TryReadFrame();
+    if (result.status != AvDecoderReadStatus::kNull) {
+      output.push_back(std::move(result));
+    }
+    return completed.wait_for(0ms) == std::future_status::ready;
+  });
+  decoder.RequestStop();
+  producer.join();
+  decoder.Stop();
+  CHECK(blocked == std::future_status::timeout);
+  CHECK(resumed);
+  CHECK_FALSE(failure);
+  CHECK(accepted);
+  CHECK(pending->data == storage);
+  REQUIRE_FALSE(output.empty());
+  REQUIRE(output.front().frame);
+  CHECK(Record(*output.front().frame->get(),
+               output.front().frame->get()->pts) == reference.frames.front());
+  CHECK_FALSE(decoder.error());
 }
 
-TEST_CASE("AvDecoder notifies after queuing every decoded frame and EOF",
+TEST_CASE("AvDecoder RequestStop rejects a packet producer blocked by capacity",
+          "[av-decoder][backpressure][blocking][stop]") {
+  const auto source = ReadSource("h264_aac.mp4", AVMEDIA_TYPE_VIDEO);
+  AvDecoderConfig config;
+  config.thread_count = 1;
+  config.packet_capacity = 1;
+  config.frame_capacity = 1;
+  AvDecoder decoder(source.stream, config);
+  const auto submitted = FillDecoderQueues(decoder, source);
+  const auto& pending = source.packets[submitted];
+  const auto* storage = pending->data;
+  std::promise<void> completion;
+  auto completed = completion.get_future();
+  bool accepted = true;
+  std::exception_ptr failure;
+  std::thread producer([&] {
+    try {
+      accepted = decoder.PushPacket(pending);
+    } catch (...) {
+      failure = std::current_exception();
+    }
+    completion.set_value();
+  });
+  const auto blocked = completed.wait_for(40ms);
+  decoder.RequestStop();
+  const auto cancelled = completed.wait_for(250ms);
+  decoder.Stop();
+  producer.join();
+  CHECK(blocked == std::future_status::timeout);
+  CHECK(cancelled == std::future_status::ready);
+  CHECK_FALSE(failure);
+  CHECK_FALSE(accepted);
+  CHECK(pending->data == storage);
+  CHECK_FALSE(decoder.PushPacket(pending));
+  CHECK_FALSE(decoder.PushEof());
+  CHECK_FALSE(decoder.Reset());
+}
+
+TEST_CASE(
+    "AvDecoder blocking EOF and reset preserve replay order under backpressure",
+    "[av-decoder][backpressure][blocking][eof][reset]") {
+  const auto source = ReadSource("h264_aac.mp4", AVMEDIA_TYPE_VIDEO);
+  AvDecoderConfig config;
+  config.thread_count = 1;
+  config.packet_capacity = 1;
+  config.frame_capacity = 1;
+  AvDecoder decoder(source.stream, config);
+  const auto submitted = FillDecoderQueues(decoder, source);
+  const std::vector<ffmpeg::Packet> prefix(
+      source.packets.begin(),
+      source.packets.begin() + static_cast<std::ptrdiff_t>(submitted));
+  auto native = OpenReferenceCodec(source.stream);
+  const auto first = ReferenceDecode(native.get(), source.stream, prefix);
+  avcodec_flush_buffers(native.get());
+  const auto second =
+      ReferenceDecode(native.get(), source.stream, source.packets);
+  std::atomic<bool> accepted_first_eof{false};
+  std::promise<void> completion;
+  auto completed = completion.get_future();
+  std::exception_ptr failure;
+  std::thread producer([&] {
+    try {
+      const auto submit = [](bool accepted) {
+        if (!accepted)
+          throw std::runtime_error("Decoder stopped during replay");
+      };
+      submit(decoder.PushEof());
+      accepted_first_eof.store(true);
+      submit(decoder.Reset());
+      for (const auto& packet : source.packets)
+        submit(decoder.PushPacket(packet));
+      submit(decoder.PushEof());
+    } catch (...) {
+      failure = std::current_exception();
+    }
+    completion.set_value();
+  });
+  const auto blocked = completed.wait_for(40ms);
+  const bool eof_accepted_early = accepted_first_eof.load();
+  std::vector<AvDecoderReadResult> output;
+  int eof_count = 0;
+  const bool drained = WaitFor([&] {
+    auto result = decoder.TryReadFrame();
+    if (result.status != AvDecoderReadStatus::kNull) {
+      eof_count += result.status == AvDecoderReadStatus::kEof;
+      output.push_back(std::move(result));
+    }
+    return eof_count == 2 || decoder.error();
+  });
+  const auto finished = completed.wait_for(250ms);
+  decoder.RequestStop();
+  producer.join();
+  decoder.Stop();
+  CHECK(blocked == std::future_status::timeout);
+  CHECK_FALSE(eof_accepted_early);
+  CHECK(drained);
+  CHECK(finished == std::future_status::ready);
+  CHECK_FALSE(failure);
+  CHECK_FALSE(decoder.error());
+  REQUIRE(eof_count == 2);
+  std::size_t index = 0;
+  for (const auto* expected : {&first, &second}) {
+    for (const auto& frame : expected->frames) {
+      REQUIRE(index < output.size());
+      const auto& actual = output[index++];
+      REQUIRE(actual.frame);
+      CHECK(Record(*actual.frame->get(), actual.frame->get()->pts) == frame);
+    }
+    REQUIRE(index < output.size());
+    CHECK(output[index].status == AvDecoderReadStatus::kEof);
+    CHECK(output[index++].end_pts == expected->end_pts);
+  }
+  CHECK(index == output.size());
+}
+
+TEST_CASE("AvDecoder read signal wakes for decoded frames and separate EOF",
           "[av-decoder][notification]") {
   const auto source = ReadSource("h264_aac.mp4", AVMEDIA_TYPE_VIDEO);
   const auto reference = ReferenceDecode(source.stream, source.packets);
-  std::atomic<std::size_t> notifications{0};
+  auto signal = std::make_shared<WaitSignal>();
   AvDecoder decoder(source.stream);
-  decoder.SetOnReadReady([&] {
-    static_cast<void>(decoder.buffered_frames());
-    static_cast<void>(decoder.error());
-    ++notifications;
-    throw std::runtime_error("read observer failure");
-  });
+  decoder.SetReadSignal(signal);
   SourceFeeder feeder(decoder, source);
-  CheckSource(decoder, source, reference);
+  std::vector<AvDecoderReadResult> output;
+  bool completed = true;
+  for (std::size_t index = 0; index <= reference.frames.size(); ++index) {
+    AvDecoderReadResult result;
+    if (!WaitForSignal(*signal,
+                       [&] {
+                         result = decoder.TryReadFrame();
+                         return result.status != AvDecoderReadStatus::kNull ||
+                                decoder.error();
+                       }) ||
+        decoder.error()) {
+      completed = false;
+      break;
+    }
+    output.push_back(std::move(result));
+  }
+  decoder.RequestStop();
   feeder.Join();
   decoder.Stop();
-  CHECK(notifications.load() == reference.frames.size() + 1);
+  REQUIRE(completed);
+  REQUIRE(output.size() == reference.frames.size() + 1);
+  for (std::size_t index = 0; index < reference.frames.size(); ++index) {
+    REQUIRE(output[index].frame);
+    CHECK(Record(*output[index].frame->get(),
+                 output[index].frame->get()->pts) == reference.frames[index]);
+  }
+  CHECK(output.back().status == AvDecoderReadStatus::kEof);
+  CHECK(output.back().end_pts == reference.end_pts);
   CHECK(decoder.error() == nullptr);
 }
 
-TEST_CASE("AvDecoder read notifications permit reading replacement and stop",
-          "[av-decoder][notification]") {
+TEST_CASE(
+    "AvDecoder replaces weak read signals and wakes already-ready binding",
+    "[av-decoder][notification]") {
   const auto source = ReadSource("h264_aac.mp4", AVMEDIA_TYPE_VIDEO);
-  std::atomic<bool> first_eof{false};
-  std::atomic<bool> second_eof{false};
   AvDecoder decoder(source.stream);
-  decoder.SetOnReadReady([&] {
-    const auto result = decoder.TryReadFrame();
-    decoder.SetOnReadReady([&] {
-      const auto next = decoder.TryReadFrame();
-      decoder.RequestStop();
-      second_eof = next.status == AvDecoderReadStatus::kEof;
-    });
-    first_eof = result.status == AvDecoderReadStatus::kEof;
-  });
-  REQUIRE(decoder.TryPushEof());
-  REQUIRE(WaitFor([&] { return first_eof.load(); }));
-  REQUIRE(decoder.TryReset());
-  REQUIRE(decoder.TryPushEof());
-  REQUIRE(WaitFor([&] { return second_eof.load(); }));
+  auto original = std::make_shared<WaitSignal>();
+  decoder.SetReadSignal(original);
+  REQUIRE(decoder.PushEof());
+  REQUIRE(WaitFor([&] { return decoder.buffered_frames() > 0; }));
+  auto replacement = std::make_shared<WaitSignal>();
+  const auto revision = replacement->GetRevision();
+  decoder.SetReadSignal(replacement);
+  CHECK(
+      replacement->WaitUntil(revision, std::chrono::steady_clock::now() + 1s));
+  original.reset();
+  CHECK(decoder.ReadFrame().status == AvDecoderReadStatus::kEof);
+  REQUIRE(decoder.Reset());
+  const auto next_revision = replacement->GetRevision();
+  REQUIRE(decoder.PushEof());
+  CHECK(replacement->WaitUntil(next_revision,
+                               std::chrono::steady_clock::now() + 1s));
+  CHECK(decoder.ReadFrame().status == AvDecoderReadStatus::kEof);
+  decoder.SetReadSignal({});
+  replacement.reset();
+  REQUIRE(decoder.Reset());
+  REQUIRE(decoder.PushEof());
+  CHECK(decoder.ReadFrame().status == AvDecoderReadStatus::kEof);
   decoder.Stop();
   CHECK(decoder.error() == nullptr);
+}
+
+TEST_CASE("AvDecoder blocking reader wakes on Stop and decode failure",
+          "[av-decoder][blocking][stop][error][notification]") {
+  bool fail = false;
+  SECTION("Stop closes an empty output queue") {}
+  SECTION("decode failure closes an empty output queue") { fail = true; }
+  const auto source = ReadSource("h264_aac.mp4", AVMEDIA_TYPE_VIDEO);
+  ffmpeg::Packet invalid;
+  REQUIRE(av_new_packet(invalid.get(), 1) >= 0);
+  invalid->data[0] = 0;
+  invalid->stream_index = source.stream.stream_index;
+  invalid->pts = invalid->dts = 0;
+  AvDecoderConfig config;
+  config.thread_count = 1;
+  AvDecoder decoder(source.stream, config);
+  auto signal = std::make_shared<WaitSignal>();
+  decoder.SetReadSignal(signal);
+  const auto revision = signal->GetRevision();
+  std::promise<void> completion;
+  auto completed = completion.get_future();
+  AvDecoderReadResult output;
+  std::exception_ptr reader_failure;
+  std::thread consumer([&] {
+    try {
+      output = decoder.ReadFrame();
+    } catch (...) {
+      reader_failure = std::current_exception();
+    }
+    completion.set_value();
+  });
+  const auto blocked = completed.wait_for(40ms);
+  bool submitted = true;
+  if (fail)
+    submitted = decoder.PushPacket(invalid);
+  else
+    decoder.RequestStop();
+  const bool signaled =
+      signal->WaitUntil(revision, std::chrono::steady_clock::now() + 1s);
+  const auto resumed = completed.wait_for(1s);
+  decoder.Stop();
+  consumer.join();
+  CHECK(blocked == std::future_status::timeout);
+  CHECK(submitted);
+  CHECK(signaled);
+  CHECK(resumed == std::future_status::ready);
+  CHECK_FALSE(reader_failure);
+  CHECK(output.status == AvDecoderReadStatus::kNull);
+  CHECK_FALSE(output.frame);
+  CHECK(static_cast<bool>(decoder.error()) == fail);
 }
 
 }  // namespace

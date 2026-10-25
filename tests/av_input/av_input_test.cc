@@ -305,11 +305,70 @@ TEST_CASE(
   input.Close();
 }
 
-TEST_CASE("AvInput timed reads preserve packet order and EOF",
-          "[av-input][packet][timeout]") {
+TEST_CASE("AvInput cancellation wakes an empty reader before packet production",
+          "[av-input][backpressure][cancel]") {
+  AvInputConfig config;
+  config.packet_capacity = 1;
+  AvInput input(config);
+  std::promise<void> opened;
+  auto opening = opened.get_future();
+  std::promise<void> release;
+  auto allowed = release.get_future();
+  input.SetOnStateChanged([&](const auto& status) {
+    if (status.state == AvInputState::kOpened) {
+      opened.set_value();
+      // Hold producer startup so the consumer must wait on an empty queue.
+      allowed.wait();
+    }
+  });
+  std::exception_ptr open_error;
+  std::thread opener([&] {
+    try {
+      input.Open(SamplePath());
+    } catch (...) {
+      open_error = std::current_exception();
+    }
+  });
+  const auto ready = opening.wait_for(2s);
+  std::promise<void> completed;
+  auto completion = completed.get_future();
+  std::thread consumer;
+  AvInputReadStatus result = AvInputReadStatus::kPacket;
+  bool has_packet = true;
+  std::exception_ptr read_error;
+  auto blocked = std::future_status::ready;
+  if (ready == std::future_status::ready) {
+    consumer = std::thread([&] {
+      try {
+        const auto output = input.ReadPacket();
+        result = output.status;
+        has_packet = output.packet.has_value();
+      } catch (...) {
+        read_error = std::current_exception();
+      }
+      completed.set_value();
+    });
+    blocked = completion.wait_for(40ms);
+  }
+  input.RequestCancel();
+  const auto resumed = completion.wait_for(250ms);
+  release.set_value();
+  opener.join();
+  if (consumer.joinable()) consumer.join();
+  input.Close();
+  REQUIRE(ready == std::future_status::ready);
+  CHECK(blocked == std::future_status::timeout);
+  CHECK(resumed == std::future_status::ready);
+  CHECK_FALSE(open_error);
+  CHECK_FALSE(read_error);
+  CHECK(result == AvInputReadStatus::kNull);
+  CHECK_FALSE(has_packet);
+}
+
+TEST_CASE("AvInput nonblocking reads preserve packet order and EOF",
+          "[av-input][packet][nonblocking]") {
   AvInput input;
-  CHECK_THROWS_AS(input.ReadPacketFor(-1ms), std::invalid_argument);
-  CHECK(input.ReadPacketFor(0ms).status == AvInputReadStatus::kNull);
+  CHECK(input.TryReadPacket().status == AvInputReadStatus::kNull);
   AvInputConfig config;
   config.packet_capacity = 2;
   AvInput opened(config);
@@ -319,7 +378,11 @@ TEST_CASE("AvInput timed reads preserve packet order and EOF",
   ffmpeg::Packet expected;
   std::size_t count = 0;
   while (av_read_frame(native.get(), expected.get()) >= 0) {
-    const auto result = opened.ReadPacketFor(count == 0 ? 0ms : 1s);
+    mw::streamer::AvInputReadResult result;
+    REQUIRE(WaitFor([&] {
+      result = opened.TryReadPacket();
+      return result.status != AvInputReadStatus::kNull;
+    }));
     REQUIRE(result.status == AvInputReadStatus::kPacket);
     REQUIRE(result.packet.has_value());
     CheckPacket(*result.packet->get(), *expected.get());
@@ -327,8 +390,8 @@ TEST_CASE("AvInput timed reads preserve packet order and EOF",
     ++count;
   }
   REQUIRE(count > 0);
-  CHECK(opened.ReadPacketFor(1s).status == AvInputReadStatus::kEof);
-  CHECK(opened.ReadPacketFor(0ms).status == AvInputReadStatus::kEof);
+  CHECK(opened.ReadPacket().status == AvInputReadStatus::kEof);
+  CHECK(opened.TryReadPacket().status == AvInputReadStatus::kEof);
 }
 
 TEST_CASE("AvInput returned packets and descriptions survive Close",
@@ -625,8 +688,9 @@ class StallingHttpServer final {
   mw::streamer::internal::Thread worker_;
 };
 
-TEST_CASE("AvInput timed reads do not cancel producer underflow",
-          "[av-input][network][timeout][cancel]") {
+TEST_CASE(
+    "AvInput blocking reads wait through producer underflow until cancellation",
+    "[av-input][network][cancel]") {
   StallingHttpServer server(true);
   AvInputConfig config;
   config.input_format_name = "flv";
@@ -637,21 +701,26 @@ TEST_CASE("AvInput timed reads do not cancel producer underflow",
   config.options["probesize"] = "2048";
   AvInput input(config);
   input.Open(server.url());
-  std::size_t count = 0;
-  for (;;) {
-    auto result = input.ReadPacketFor(40ms);
-    if (result.status == AvInputReadStatus::kNull) break;
-    REQUIRE(result.status == AvInputReadStatus::kPacket);
-    ++count;
-  }
-  REQUIRE(count > 0);
-  CHECK(input.status().state == AvInputState::kOpened);
-  CHECK(input.status().error == nullptr);
-  auto received =
-      std::async(std::launch::async, [&] { return input.ReadPacketFor(5s); });
-  CHECK(received.wait_for(40ms) == std::future_status::timeout);
+  std::atomic<std::size_t> packets{0};
+  auto received = std::async(std::launch::async, [&] {
+    for (;;) {
+      auto result = input.ReadPacket();
+      if (result.status != AvInputReadStatus::kPacket) return result;
+      ++packets;
+    }
+  });
+  const bool underflow = WaitFor(
+      [&] { return packets.load() > 0 && input.buffered_packets() == 0; });
+  const auto blocked = received.wait_for(40ms);
+  const auto status = input.status();
   input.RequestCancel();
-  REQUIRE(received.wait_for(1s) == std::future_status::ready);
+  const auto resumed = received.wait_for(1s);
+  input.Close();
+  CHECK(underflow);
+  CHECK(blocked == std::future_status::timeout);
+  CHECK(status.state == AvInputState::kOpened);
+  CHECK(status.error == nullptr);
+  REQUIRE(resumed == std::future_status::ready);
   CHECK(received.get().status == AvInputReadStatus::kNull);
 }
 

@@ -17,6 +17,10 @@
 
 namespace mw::streamer {
 
+namespace internal {
+class WaitSignal;
+}
+
 struct AvDecoderConfig {
   // Empty selects by codec id. A specified decoder must exist and match the
   // track/device; no other decoder is tried on failure.
@@ -46,23 +50,16 @@ struct AvDecoderReadResult {
 
 // One decoder/worker per track, with Packet input and Frame output
 // queues. Does not read a Proxy, select tracks, reconnect, filter or map
-// clocks. One packet producer and one nonblocking frame consumer may run
-// concurrently. Stop/destruction must be serialized; finish callers before
-// destruction.
+// clocks. One packet producer and one frame consumer may run
+// concurrently. All input submission methods share the same producer and must
+// not overlap or reenter each other. Stop/destruction must be serialized;
+// finish callers before destruction.
 class MW_STREAMER_API AvDecoder final {
  public:
   // A terminal worker failure is retained in error() and notified once outside
   // locks, on the decoder worker. Observers may query, read or RequestStop, but
   // must not call Stop or destroy this object. Callback exceptions are logged.
   using OnError = std::function<void(std::exception_ptr)>;
-  // Invoked on the worker, outside locks, after consuming each input item,
-  // including EOF/Reset. Observers may query, TryPush or RequestStop, but must
-  // not call Stop or destroy this object. Callback exceptions are logged.
-  using OnInputSpace = std::function<void()>;
-  // Invoked on the worker, outside locks, after queuing each frame or EOF.
-  // Observers may query, TryReadFrame or RequestStop. Exceptions are logged;
-  // observers must not Stop or destroy the decoder.
-  using OnReadReady = std::function<void()>;
 
   // Copies stream parameters, opens the codec and starts its worker. Invalid
   // arguments/opening/thread creation failures throw synchronously.
@@ -83,17 +80,23 @@ class MW_STREAMER_API AvDecoder final {
   // Thread-safe registration/replacement. Register before submitting packets;
   // failures that have already occurred are not replayed.
   void SetOnError(OnError callback);
-  // Thread-safe registration/replacement. Register before submitting packets;
-  // earlier input consumption is not replayed.
-  void SetOnInputSpace(OnInputSpace callback);
-  // Thread-safe replacement, without replay or waiting for an executing
-  // observer. Captured state must remain valid for any in-flight callback.
-  void SetOnReadReady(OnReadReady callback);
+  // Thread-safe weak wakeup slot for the sole frame consumer. Queue admission
+  // and closure notify the signal directly. Binding replays existing queue
+  // readiness; it does not consume frames or EOF.
+  void SetReadSignal(std::weak_ptr<internal::WaitSignal> signal);
+
+  // Waits for input capacity. Stop or terminal failure wakes blocked
+  // submissions and returns false. Packet validation and accepted EOF/Reset
+  // ordering match the nonblocking methods below. A packet reference is
+  // retained while waiting; the caller's packet remains unchanged.
+  bool PushPacket(const ffmpeg::Packet& packet);
+  bool PushEof();
+  bool Reset();
 
   // Never waits for queue space. Copies a packet reference only on acceptance;
   // false preserves the caller's packet and means full, stopped or failed.
   // An empty/wrong-track packet throws. After accepted EOF, packets and
-  // repeated EOF throw until TryReset succeeds. All input items share
+  // repeated EOF throw until Reset or TryReset succeeds. All input items share
   // packet_capacity.
   bool TryPushPacket(const ffmpeg::Packet& packet);
   // Queues a drain behind accepted packets, publishing delayed frames then EOF.
@@ -106,6 +109,10 @@ class MW_STREAMER_API AvDecoder final {
   // leaves the accepted EOF state unchanged; retry before submitting more
   // media.
   bool TryReset();
+  // Waits for a queued frame/EOF or Stop/failure. Failure drains already
+  // decoded output before kNull; Stop returns kNull immediately. Normal EOF
+  // leaves the worker and output queue available for a subsequent Reset.
+  AvDecoderReadResult ReadFrame();
   // Never waits for media. Returns queued frames/EOF in order, then kNull.
   // Frames own their storage independently of codec lifetime. PTS uses
   // best_effort_timestamp in the original stream time base.

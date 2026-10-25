@@ -55,8 +55,8 @@ class LivePipeline::Impl final {
     scheduler_.SetOnAudioFrame([this](const ffmpeg::Frame& frame) {
       return encoder_.TryPushAudio(frame);
     });
-    encoder_.SetOnInputSpace(
-        [this](bool video) { scheduler_.NotifyOutputSpace(video); });
+    encoder_.SetWriteSignal(true, scheduler_.output_signal(true));
+    encoder_.SetWriteSignal(false, scheduler_.output_signal(false));
     scheduler_.SetOnError([this](std::exception_ptr error) { Fail(error); });
     encoder_.SetOnPacket([this](const ffmpeg::Packet& packet) {
       if (on_output_packet_) on_output_packet_(packet);

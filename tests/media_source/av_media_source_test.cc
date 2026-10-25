@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -34,6 +35,7 @@ extern "C" {
 #include <fmt/format.h>
 
 #include "mw/streamer/ffmpeg/error.h"
+#include "mw/streamer/platform/wait_signal.h"
 
 namespace {
 
@@ -42,6 +44,7 @@ using mw::streamer::AvDecoderReadStatus;
 using mw::streamer::AvMediaSource;
 using mw::streamer::AvMediaSourceConfig;
 using mw::streamer::AvMediaSourceState;
+using mw::streamer::internal::WaitSignal;
 namespace ffmpeg = mw::streamer::ffmpeg;
 
 std::string SamplePath(std::string_view name = "h264_aac.mp4") {
@@ -56,6 +59,16 @@ bool WaitFor(Predicate predicate, std::chrono::milliseconds timeout = 5s) {
     std::this_thread::sleep_for(1ms);
   }
   return true;
+}
+
+template <typename Predicate>
+bool WaitForSignal(WaitSignal& signal, Predicate predicate) {
+  const auto deadline = std::chrono::steady_clock::now() + 5s;
+  for (;;) {
+    const auto revision = signal.GetRevision();
+    if (predicate()) return true;
+    if (!signal.WaitUntil(revision, deadline)) return predicate();
+  }
 }
 
 struct FormatDeleter {
@@ -493,6 +506,37 @@ TEST_CASE("AvMediaSource retries a missing source and recovers when it appears",
 }
 
 TEST_CASE(
+    "AvMediaSource receives connection state events without input packets",
+    "[av-media-source][retry][notification]") {
+  TemporaryMedia missing;
+  AvMediaSource input(SourceConfig());
+  std::mutex mutex;
+  std::condition_variable changed;
+  bool waiting_retry = false;
+  std::thread::id observer_thread;
+  std::atomic<int> packets{0};
+  input.SetOnPacket([&](const ffmpeg::Packet&) { ++packets; });
+  input.SetOnStateChanged([&](const auto& status) {
+    if (status.state == AvMediaSourceState::kWaitingRetry) {
+      std::lock_guard lock(mutex);
+      waiting_retry = true;
+      observer_thread = std::this_thread::get_id();
+      changed.notify_all();
+    }
+  });
+  REQUIRE(input.Start(missing.path()));
+  bool notified;
+  {
+    std::unique_lock lock(mutex);
+    notified = changed.wait_for(lock, 500ms, [&] { return waiting_retry; });
+  }
+  input.Stop();
+  CHECK(notified);
+  CHECK(packets.load() == 0);
+  CHECK(observer_thread != std::this_thread::get_id());
+}
+
+TEST_CASE(
     "AvMediaSource Stop cancels retry backoff without callbacks afterwards",
     "[av-media-source][retry][stop]") {
   TemporaryMedia missing;
@@ -707,9 +751,8 @@ TEST_CASE("AvMediaSource bounded packet queues preserve compressed loop output",
   input.Stop();
 }
 
-TEST_CASE(
-    "AvMediaSource retries partial EOF and Reset without duplicating input",
-    "[av-media-source][backpressure][eof][reset][oracle]") {
+TEST_CASE("AvMediaSource blocks EOF and Reset without duplicating input",
+          "[av-media-source][backpressure][eof][reset][oracle]") {
   bool loop = false;
   SECTION("final EOF waits for both consumers") {}
   SECTION("loop reset follows both accepted EOFs") { loop = true; }
@@ -765,7 +808,7 @@ TEST_CASE(
       std::this_thread::sleep_for(1ms);
     } while (std::chrono::steady_clock::now() < until);
   };
-  // The video's accepted EOF must not be retried while audio rejects its EOF.
+  // The video's accepted EOF must not be repeated while audio's Push blocks.
   check_stalled_video();
   REQUIRE(WaitFor([&] { return consume(1); }));
   REQUIRE((frame_counts[1] == 1));
@@ -812,15 +855,12 @@ TEST_CASE("AvMediaSource validates arguments without introducing output modes",
   SECTION("negative audio codec threads") {
     config.audio_decoder.thread_count = -1;
   }
-  SECTION("zero packet read timeout") { config.packet_read_timeout = 0ms; }
-  SECTION("negative packet read timeout") { config.packet_read_timeout = -1ms; }
   CHECK_THROWS_AS(AvMediaSource(config), std::invalid_argument);
 }
 
 TEST_CASE("AvMediaSource stops under unread-track backpressure and restarts",
           "[av-media-source][backpressure][restart]") {
   auto config = SourceConfig(true);
-  config.packet_read_timeout = 10s;
   config.video_decoder.packet_capacity = 1;
   config.audio_decoder.packet_capacity = 1;
   config.video_decoder.frame_capacity = 1;
@@ -968,22 +1008,21 @@ TEST_CASE("AvMediaSource packet observer exceptions fail the source",
           "[av-media-source][packet]") {
   AvMediaSource input(SourceConfig());
   std::atomic<int> calls{0};
-  std::atomic<bool> failed_wakeup{false};
-  input.SetOnReadReady([&] {
-    if (input.status().state == AvMediaSourceState::kFailed) {
-      failed_wakeup = true;
-    }
-  });
+  auto signal = std::make_shared<WaitSignal>();
+  input.SetReadSignal(signal);
   input.SetOnPacket([&](const ffmpeg::Packet&) {
     ++calls;
     throw std::logic_error("packet observer failed");
   });
   REQUIRE(input.Start(SamplePath()));
-  REQUIRE(WaitFor([&] { return failed_wakeup.load(); }));
+  const bool failed_wakeup = WaitForSignal(*signal, [&] {
+    return input.status().state == AvMediaSourceState::kFailed;
+  });
   const auto failure = input.status().error;
+  input.Stop();
+  CHECK(failed_wakeup);
   REQUIRE(failure);
   CHECK_THROWS_AS(std::rethrow_exception(failure), std::logic_error);
-  input.Stop();
   CHECK((calls.load() == 1));
   CHECK((input.status().state == AvMediaSourceState::kFailed));
 }
@@ -1003,57 +1042,56 @@ TEST_CASE("AvMediaSource packet observers may request stop without joining",
   CHECK((input.status().state == AvMediaSourceState::kStopped));
 }
 
-TEST_CASE("AvMediaSource read wakeups support live replacement and exceptions",
-          "[av-media-source][notification]") {
-  std::atomic<int> old_calls{0};
-  std::atomic<int> replacement_calls{0};
-  std::atomic<int> state_calls{0};
+TEST_CASE(
+    "AvMediaSource weak read signals support replacement and ready binding",
+    "[av-media-source][notification]") {
+  auto original = std::make_shared<WaitSignal>();
   AvMediaSource input(SourceConfig());
-  input.SetOnStateChanged([&](const auto&) { ++state_calls; });
-  input.SetOnReadReady([&] { ++old_calls; });
+  input.SetReadSignal(original);
   REQUIRE(input.Start(SamplePath()));
-  REQUIRE(WaitFor([&] { return old_calls.load() != 0; }));
-  input.SetOnReadReady([&] {
-    static_cast<void>(input.status());
-    static_cast<void>(input.info());
-    ++replacement_calls;
-    throw std::runtime_error("read observer failure");
+  const bool started = WaitForSignal(*original, [&] {
+    const auto state = input.status().state;
+    return state == AvMediaSourceState::kRunning ||
+           state == AvMediaSourceState::kDraining;
   });
+  auto replacement = std::make_shared<WaitSignal>();
+  const auto revision = replacement->GetRevision();
+  input.SetReadSignal(replacement);
+  const bool bound =
+      replacement->WaitUntil(revision, std::chrono::steady_clock::now() + 1s);
+  original.reset();
   CheckSource(input, ReadNative(SamplePath()));
-  REQUIRE(WaitFor(
-      [&] { return input.status().state == AvMediaSourceState::kEnded; }));
+  const bool ended = WaitForSignal(*replacement, [&] {
+    return input.status().state == AvMediaSourceState::kEnded;
+  });
+  input.Stop();
+  CHECK(started);
+  CHECK(bound);
+  CHECK(ended);
+  CHECK(input.status().error == nullptr);
+  input.SetReadSignal({});
+  replacement.reset();
+  REQUIRE(input.Start(SamplePath()));
+  CheckSource(input, ReadNative(SamplePath()));
   input.Stop();
   CHECK(input.status().error == nullptr);
-  CHECK(replacement_calls.load() > 0);
-  // Status notifications alone cannot satisfy this: both decoders must wake
-  // the frame consumer after queuing decoded output and final EOF.
-  CHECK(old_calls.load() + replacement_calls.load() > state_calls.load() + 2);
-  input.SetOnReadReady({});
-  const auto previous = replacement_calls.load();
-  REQUIRE(input.Start(SamplePath()));
-  CheckSource(input, ReadNative(SamplePath()));
-  input.Stop();
-  CHECK(replacement_calls.load() == previous);
 }
 
-TEST_CASE("AvMediaSource read observers may consume frames and request stop",
+TEST_CASE("AvMediaSource signaled consumers can read frames and request stop",
           "[av-media-source][notification]") {
-  std::mutex reader_mutex;
-  std::atomic<bool> received{false};
+  auto signal = std::make_shared<WaitSignal>();
   AvMediaSource input(SourceConfig());
-  input.SetOnReadReady([&] {
-    std::lock_guard lock(reader_mutex);
+  input.SetReadSignal(signal);
+  REQUIRE(input.Start(SamplePath()));
+  const bool received = WaitForSignal(*signal, [&] {
     const auto video = input.TryReadVideo();
     const auto audio = input.TryReadAudio();
-    if (video.status == AvDecoderReadStatus::kFrame ||
-        audio.status == AvDecoderReadStatus::kFrame) {
-      input.RequestStop();
-      received = true;
-    }
+    return video.status == AvDecoderReadStatus::kFrame ||
+           audio.status == AvDecoderReadStatus::kFrame;
   });
-  REQUIRE(input.Start(SamplePath()));
-  REQUIRE(WaitFor([&] { return received.load(); }));
+  input.RequestStop();
   input.Stop();
+  CHECK(received);
   CHECK(input.status().state == AvMediaSourceState::kStopped);
   CHECK(input.status().error == nullptr);
 }

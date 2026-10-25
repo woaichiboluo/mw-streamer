@@ -15,6 +15,10 @@
 
 namespace mw::streamer {
 
+namespace internal {
+class WriteSignal;
+}
+
 // One bounded input queue and one owned worker per enabled track. Audio/video
 // admission and encoding advance independently, preserving per-track FIFO.
 // This component does not mux packets or create hardware devices. Serialize
@@ -34,12 +38,6 @@ class MW_STREAMER_API AvEncoder final {
   // are logged; the original exception remains in error(). Initialization
   // failures return false from Start and do not invoke this callback.
   using OnError = std::function<void(std::exception_ptr)>;
-  // Called after a worker removes an accepted input, outside locks; true is
-  // video and false is audio. The two tracks may notify concurrently. Callbacks
-  // may query or TryPush, but must not Start/Stop/destroy this encoder.
-  // Observer exceptions are logged and do not fail encoding. No calls after
-  // Stop returns.
-  using OnInputSpace = std::function<void(bool video)>;
 
   explicit AvEncoder(const ffmpeg::HwDeviceContext& device);
   ~AvEncoder();
@@ -50,8 +48,10 @@ class MW_STREAMER_API AvEncoder final {
 
   void SetOnPacket(OnPacket callback);
   void SetOnError(OnError callback);
-  // Configure before Start or after Stop. Earlier removals are not replayed.
-  void SetOnInputSpace(OnInputSpace callback);
+  // Thread-safe weak wakeup slot for this track's producer. Successful queue
+  // reads and closure notify it directly. Slots survive Stop/Start; binding an
+  // existing queue with capacity immediately notifies the new signal.
+  void SetWriteSignal(bool video, std::weak_ptr<internal::WriteSignal> signal);
   // Copies the config/layout, opens enabled codecs/filters synchronously, then
   // starts one worker per enabled track. NONE disables that track; both
   // disabled is invalid. Video dimensions/layout must be explicit. Hardware

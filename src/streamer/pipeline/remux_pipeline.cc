@@ -17,6 +17,7 @@ extern "C" {
 }
 
 #include "mw/log.h"
+#include "mw/streamer/pipeline/internal/audio_probe_timeout.h"
 #include "mw/streamer/pipeline/internal/remux_audio_probe.h"
 #include "mw/streamer/platform/thread.h"
 #include "mw/streamer/remuxer/remux_output.h"
@@ -464,7 +465,6 @@ class RemuxPipeline::Impl final {
     // audio coding configuration stable within this input connection.
     constexpr std::size_t kAudioPackets = 8;
     constexpr std::size_t kMaxBytes = 16 * 1024 * 1024;
-    const auto deadline = Clock::now() + std::chrono::seconds(2);
     std::vector<ffmpeg::Packet> packets;
     std::size_t bytes = 0;
     const auto collect = [&](const AvInputProxyReadResult& input) {
@@ -484,15 +484,15 @@ class RemuxPipeline::Impl final {
               (packet->data[1] & 0xf0) == 0xf0);
     };
     bool configured = collect(first);
+    std::optional<internal::AudioProbeTimeout> timeout;
+    if (!configured) timeout.emplace(input_);
     while (!configured && packets.size() < kAudioPackets && !Stopping()) {
-      const auto remaining =
-          std::chrono::duration_cast<std::chrono::milliseconds>(deadline -
-                                                                Clock::now());
-      if (remaining.count() <= 0)
-        throw std::runtime_error("RemuxPipeline 音频探测等待超时");
-      auto input = input_.ReadPacketFor(remaining);
+      auto input = input_.ReadPacket();
       if (Stopping()) return streams;
       if (input.status == AvInputReadStatus::kNull) {
+        const bool expired = timeout->Finish();
+        if (Stopping()) return streams;
+        if (expired) throw std::runtime_error("RemuxPipeline 音频探测等待超时");
         if (const auto failure = input_.status().error)
           std::rethrow_exception(failure);
         throw std::runtime_error("RemuxPipeline 音频探测未取得输入包");
@@ -503,6 +503,9 @@ class RemuxPipeline::Impl final {
       pending.push_back(std::move(input));
       if (boundary) break;
     }
+    const bool expired = timeout && timeout->Finish();
+    if (Stopping()) return streams;
+    if (expired) throw std::runtime_error("RemuxPipeline 音频探测等待超时");
     if (!Stopping()) {
       *audio = internal::ProbeRemuxAudio(*audio, packets);
       MW_LOG_INFO("streamer",

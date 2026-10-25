@@ -481,9 +481,10 @@ TEST_CASE("LivePipeline continues encoding after local recording fails",
   CheckEncoded(observations.output, true, true);
 }
 
-void CheckBufferedAv(int buffered_frames, bool full_hd) {
+void CheckBufferedAv(int buffered_frames, bool full_hd,
+                     std::optional<bool> stall_video = std::nullopt) {
   using Clock = std::chrono::steady_clock;
-  CAPTURE(buffered_frames, full_hd);
+  CAPTURE(buffered_frames, full_hd, stall_video);
   const auto runtime = InitRuntime();
   auto config = Config();
   config.syncer = {};
@@ -508,7 +509,25 @@ void CheckBufferedAv(int buffered_frames, bool full_hd) {
   std::optional<ffmpeg::Frame> first_audio_output;
   Clock::time_point first_video_input_at;
   Clock::time_point opened;
+  struct PacketGate {
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool entered = false;
+    bool released = false;
+    int peer_packets = 0;
+    void Release() {
+      {
+        std::lock_guard lock(mutex);
+        released = true;
+      }
+      changed.notify_all();
+    }
+  } gate;
   LivePipeline pipeline(config);
+  struct ReleaseBeforeStop {
+    PacketGate& gate;
+    ~ReleaseBeforeStop() { gate.Release(); }
+  } release_before_stop{gate};
   Observe(pipeline, observations);
   pipeline.SetOnOutputPacket([&](const ffmpeg::Packet& packet) {
     auto unset = std::int64_t{-1};
@@ -520,6 +539,18 @@ void CheckBufferedAv(int buffered_frames, bool full_hd) {
       premature_packet.store(true);
       if (packet->stream_index == 0) ++standby_video_packets;
       if (packet->stream_index == 1) ++standby_audio_packets;
+    }
+    if (stall_video) {
+      std::unique_lock lock(gate.mutex);
+      const bool stalled_track = packet->stream_index == (*stall_video ? 0 : 1);
+      if (!gate.entered && stalled_track) {
+        gate.entered = true;
+        gate.changed.notify_all();
+        gate.changed.wait(lock, [&] { return gate.released; });
+      } else if (gate.entered && !gate.released && !stalled_track) {
+        ++gate.peer_packets;
+        gate.changed.notify_all();
+      }
     }
     observations.Output(packet);
   });
@@ -589,6 +620,21 @@ void CheckBufferedAv(int buffered_frames, bool full_hd) {
        (full_hd ? "h264_aac_1080p_30fps.mp4" : "h264_aac_30fps.mp4"))
           .generic_u8string();
   REQUIRE(pipeline.Start(input));
+  bool stalled = true;
+  bool peer_advanced = true;
+  if (stall_video) {
+    std::unique_lock lock(gate.mutex);
+    stalled = gate.changed.wait_for(lock, 12s, [&] { return gate.entered; });
+    if (stalled) {
+      // Hold one encoding worker beyond the three-frame queue's capacity at
+      // 30 fps, while the other worker and shared scheduler keep advancing.
+      gate.changed.wait_for(lock, 300ms, [] { return false; });
+      peer_advanced = gate.peer_packets >= 4;
+    }
+    gate.released = true;
+    lock.unlock();
+    gate.changed.notify_all();
+  }
   const bool received = observations.Wait(
       [&] {
         const auto video_packets = std::count_if(
@@ -607,6 +653,8 @@ void CheckBufferedAv(int buffered_frames, bool full_hd) {
       },
       12s);
   pipeline.Stop();
+  REQUIRE(stalled);
+  CHECK(peer_advanced);
   REQUIRE(received);
   REQUIRE(observations.errors.empty());
   REQUIRE(ready.load());
@@ -733,6 +781,11 @@ TEST_CASE("LivePipeline buffers AV at thirty fps through startup or standby",
 TEST_CASE("LivePipeline buffers 1080p AV through startup or standby",
           "[pipeline][integration][buffering][1080p]") {
   CheckBufferedAv(GENERATE(100, 200), true);
+}
+
+TEST_CASE("LivePipeline restores AV markers after either encoder track stalls",
+          "[pipeline][integration][backpressure][av-sync]") {
+  CheckBufferedAv(100, false, GENERATE(false, true));
 }
 
 TEST_CASE("LivePipeline retains and encodes the top-level standby frame",

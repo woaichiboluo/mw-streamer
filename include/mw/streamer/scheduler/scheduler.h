@@ -13,6 +13,10 @@
 
 namespace mw::streamer {
 
+namespace internal {
+class WriteSignal;
+}
+
 struct SchedulerConfig {
   SyncerConfig syncer;
   RealtimeConfig realtime;
@@ -25,19 +29,19 @@ struct SchedulerConfig {
 // processing workers using a shared PTS-to-steady-clock mapping. The driver
 // owns the passive Syncer and serializes its output without a second FPS/sample
 // clock. Real input follows the realtime mapping; sentinel fillers follow its
-// bounded-batch deadlines. Input/worker/downstream notifications wake the
-// driver. Each track has at most one processing task, one converted result and
-// one lookahead source item. Conversion is drained before requesting more
-// input. Missing input and normal EOF leave the live output running. Disabled
-// input tracks are drained in bounded batches on input notifications, without
-// filtering.
+// bounded-batch deadlines. A shared signal for input, worker completion and
+// downstream events wakes the driver. Each track has at most one processing
+// task, one converted result and one lookahead source item. Conversion is
+// drained before requesting more input. Missing input and normal EOF leave the
+// live output running. Disabled input tracks are drained in bounded batches on
+// queue readiness, without filtering.
 //
 // Retains the externally managed source, without starting, stopping or changing
-// its business callbacks. The single-consumer read-ready slot is installed on
-// Start and cleared on Stop. This must be its only frame consumer while
-// started. Stop Scheduler before restarting the source. Serialize
-// configuration, Start/Stop and destruction; RequestStop/error are safe from
-// any thread.
+// its business callbacks. The single-consumer queue signal is installed on
+// Start and detached on Stop, without closing source queues. This must be its
+// only frame consumer while started. Stop Scheduler before restarting the
+// source. Serialize configuration, Start/Stop and destruction;
+// RequestStop/error are safe from any thread.
 class MW_STREAMER_API Scheduler final {
  public:
   using OnVideoFrame = std::function<bool(const ffmpeg::Frame&)>;
@@ -60,7 +64,7 @@ class MW_STREAMER_API Scheduler final {
   // Configure only while stopped. Output callbacks run serially on the driver's
   // thread and must return promptly. True accepts the read-only frame; false
   // retains the input and next output PTS, suspending only that track until
-  // NotifyOutputSpace or a 20 ms retry deadline, whichever comes first.
+  // this track's write signal or a 20 ms retry deadline, whichever comes first.
   // Ref() retains accepted storage. Missing callbacks accept
   // and discard output. Unrecoverable failures notify OnError
   // once, on the failing worker (or the lifecycle caller for Start/Stop
@@ -76,9 +80,11 @@ class MW_STREAMER_API Scheduler final {
   // Call Stop before restart, including after a worker failure.
   bool Start();
   std::exception_ptr error() const;
-  // Thread-safe downstream wakeup after capacity becomes available. May be
-  // called before an admission callback returns false; the wake is retained.
-  void NotifyOutputSpace(bool video) noexcept;
+  // Bind the downstream queue to this track's capacity signal. A capacity
+  // change wakes the shared driver without advancing the other track's
+  // revision. Notifications preceding rejection are retained. Does not own
+  // or close the downstream queue.
+  std::shared_ptr<internal::WriteSignal> output_signal(bool video) const;
   // Cancels internal work without joining or stopping the external source.
   void RequestStop() noexcept;
   // Joins internal workers and releases pending frames. Waits for executing

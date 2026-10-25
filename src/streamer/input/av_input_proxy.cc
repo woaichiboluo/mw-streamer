@@ -15,8 +15,6 @@
 namespace mw::streamer {
 namespace {
 
-using Clock = std::chrono::steady_clock;
-
 const char* StateName(AvInputProxyState state) {
   switch (state) {
     case AvInputProxyState::kStopped:
@@ -89,6 +87,7 @@ class AvInputProxy::Impl final {
       std::lock_guard<std::mutex> lock(mutex_);
       stopping_ = false;
       available_ = false;
+      read_state_changed_ = false;
       status_ = {};
       status_.state = AvInputProxyState::kConnecting;
       terminal_.reset();
@@ -106,23 +105,25 @@ class AvInputProxy::Impl final {
     return false;
   }
 
-  AvInputProxyReadResult ReadUntil(std::optional<Clock::time_point> deadline) {
+  AvInputProxyReadResult ReadPacket(bool wait,
+                                    bool return_on_state_change = false) {
     for (;;) {
       std::shared_ptr<AvInput> input;
       std::shared_ptr<const AvInputInfo> description;
       {
         std::unique_lock<std::mutex> lock(mutex_);
-        const auto ready = [this] {
+        const auto ready = [this, return_on_state_change] {
           return stopping_ || available_ || Terminal(status_.state) ||
+                 (return_on_state_change && read_state_changed_) ||
                  (!config_.loop && terminal_ &&
                   terminal_->state == AvInputState::kEnded);
         };
-        if (deadline) {
-          changed_.wait_until(lock, *deadline, ready);
-        } else {
-          changed_.wait(lock, ready);
-        }
+        if (wait) changed_.wait(lock, ready);
         description = status_.info;
+        if (return_on_state_change && read_state_changed_) {
+          read_state_changed_ = false;
+          return {AvInputReadStatus::kNull, {}, description};
+        }
         if (stopping_ || status_.state == AvInputProxyState::kStopped ||
             status_.state == AvInputProxyState::kFailed) {
           return {AvInputReadStatus::kNull, {}, description};
@@ -137,7 +138,7 @@ class AvInputProxy::Impl final {
         }
         input = input_;
       }
-      auto result = input->ReadPacketUntil(deadline);
+      auto result = wait ? input->ReadPacket() : input->TryReadPacket();
       if (result.status == AvInputReadStatus::kPacket) {
         MW_LOG_TRACE("streamer", "AvInputProxy[{}] 返回包: 流={}",
                      static_cast<const void*>(this),
@@ -159,21 +160,14 @@ class AvInputProxy::Impl final {
                      static_cast<const void*>(this), config_.loop);
         return {result.status, {}, description};
       }
+      if (!wait) return {AvInputReadStatus::kNull, {}, description};
       std::unique_lock<std::mutex> lock(mutex_);
-      const auto changed = [this, &input] {
+      const auto changed = [this, &input, return_on_state_change] {
         return stopping_ || Terminal(status_.state) ||
+               (return_on_state_change && read_state_changed_) ||
                (available_ && input_ != input);
       };
-      if (deadline) {
-        // A timed-out input is still healthy. Do not wait indefinitely for a
-        // replacement connection, or reset the deadline during reconnection.
-        if (Clock::now() >= *deadline ||
-            !changed_.wait_until(lock, *deadline, changed)) {
-          return {AvInputReadStatus::kNull, {}, status_.info};
-        }
-      } else {
-        changed_.wait(lock, changed);
-      }
+      changed_.wait(lock, changed);
     }
   }
 
@@ -296,16 +290,23 @@ class AvInputProxy::Impl final {
         }
       }
     }
-    if (!on_state_changed_) return;
-    try {
-      on_state_changed_(snapshot);
-    } catch (const std::exception& failure) {
-      MW_LOG_ERROR("streamer", "AvInputProxy[{}] 状态通知异常: {}",
-                   static_cast<const void*>(this), failure.what());
-    } catch (...) {
-      MW_LOG_ERROR("streamer", "AvInputProxy[{}] 状态通知发生未知异常",
-                   static_cast<const void*>(this));
+    if (on_state_changed_) {
+      try {
+        on_state_changed_(snapshot);
+      } catch (const std::exception& failure) {
+        MW_LOG_ERROR("streamer", "AvInputProxy[{}] 状态通知异常: {}",
+                     static_cast<const void*>(this), failure.what());
+      } catch (...) {
+        MW_LOG_ERROR("streamer", "AvInputProxy[{}] 状态通知发生未知异常",
+                     static_cast<const void*>(this));
+      }
     }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      // Publish the wakeup after the observer has queued its control event.
+      read_state_changed_ = true;
+    }
+    changed_.notify_all();
   }
 
   bool Stopping() const {
@@ -358,9 +359,15 @@ class AvInputProxy::Impl final {
           {
             std::lock_guard<std::mutex> lock(mutex_);
             status_.info = std::move(description);
-            available_ = !stopping_;
           }
           if (!Stopping()) Publish(AvInputProxyState::kConnected);
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            // The controller must see Connected before it can block on the
+            // new input's packet queue, which may remain empty indefinitely.
+            available_ = !stopping_;
+          }
+          changed_.notify_all();
           {
             std::unique_lock<std::mutex> lock(mutex_);
             changed_.wait(lock, [this] { return stopping_ || terminal_; });
@@ -418,6 +425,7 @@ class AvInputProxy::Impl final {
   std::condition_variable changed_;
   bool stopping_ = false;
   bool available_ = false;
+  bool read_state_changed_ = false;
   AvInputProxyStatus status_;
   std::optional<AvInputStatus> terminal_;
   std::shared_ptr<AvInput> input_;
@@ -436,21 +444,13 @@ bool AvInputProxy::Start(std::string_view url) noexcept {
   return impl_->Start(url);
 }
 AvInputProxyReadResult AvInputProxy::ReadPacket() {
-  return impl_->ReadUntil(std::nullopt);
+  return impl_->ReadPacket(true);
+}
+AvInputProxyReadResult AvInputProxy::ReadPacketOrStateChange() {
+  return impl_->ReadPacket(true, true);
 }
 AvInputProxyReadResult AvInputProxy::TryReadPacket() {
-  return impl_->ReadUntil(Clock::time_point::min());
-}
-AvInputProxyReadResult AvInputProxy::ReadPacketFor(
-    std::chrono::milliseconds timeout) {
-  if (timeout.count() < 0) {
-    throw std::invalid_argument("AvInputProxy 读取等待超时不能为负数");
-  }
-  const auto now = Clock::now();
-  const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-      Clock::time_point::max() - now);
-  return impl_->ReadUntil(timeout >= remaining ? Clock::time_point::max()
-                                               : now + timeout);
+  return impl_->ReadPacket(false);
 }
 void AvInputProxy::RequestStop() noexcept { impl_->RequestStop(); }
 void AvInputProxy::Stop() noexcept { impl_->Stop(); }

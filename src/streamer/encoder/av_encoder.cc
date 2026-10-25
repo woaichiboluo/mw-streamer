@@ -1,9 +1,8 @@
 #include "mw/streamer/encoder/av_encoder.h"
 
 #include <algorithm>
-#include <condition_variable>
+#include <chrono>
 #include <cstdint>
-#include <deque>
 #include <iterator>
 #include <limits>
 #include <mutex>
@@ -25,6 +24,7 @@ extern "C" {
 #include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/performance/latency.h"
+#include "mw/streamer/platform/blocking_queue.h"
 #include "mw/streamer/platform/thread.h"
 
 namespace mw::streamer {
@@ -390,6 +390,8 @@ class AudioFilter final {
 }  // namespace
 
 class AvEncoder::Impl final {
+  using FrameQueue = internal::BlockingQueue<std::optional<ffmpeg::Frame>>;
+
  public:
   explicit Impl(const ffmpeg::HwDeviceContext& device)
       : device_(device.Ref()) {}
@@ -403,9 +405,11 @@ class AvEncoder::Impl final {
     CheckConfigurable();
     on_error_ = std::move(callback);
   }
-  void SetOnInputSpace(OnInputSpace callback) {
-    CheckConfigurable();
-    on_input_space_ = std::move(callback);
+  void SetWriteSignal(bool video, std::weak_ptr<internal::WriteSignal> signal) {
+    std::lock_guard lock(mutex_);
+    auto& track = video ? video_ : audio_;
+    track.write_signal = signal;
+    if (track.frames) track.frames->SetWriteSignal(std::move(signal));
   }
 
   bool Start(const AvEncoderConfig& config) noexcept {
@@ -475,8 +479,16 @@ class AvEncoder::Impl final {
         }
         streams_ = std::move(streams);
         session_ = std::move(session);
-        // Workers cannot leave their initial queue wait until this lock is
-        // released. A partial startup failure marks the session aborted first.
+        if (video) {
+          video_.frames = std::make_shared<FrameQueue>(kFrameCapacity);
+          video_.frames->SetWriteSignal(video_.write_signal);
+        }
+        if (audio) {
+          audio_.frames = std::make_shared<FrameQueue>(kFrameCapacity);
+          audio_.frames->SetWriteSignal(audio_.write_signal);
+        }
+        // Workers capture their queue under this lock. A partial startup
+        // failure marks the session aborted before either worker can encode.
         try {
           if (video && !video_.worker.Start([this] { Run(true); }))
             throw std::runtime_error("启动 AvEncoder 视频线程失败");
@@ -538,14 +550,14 @@ class AvEncoder::Impl final {
       throw std::invalid_argument("编码音频内容或格式不匹配");
     ValidateTiming(frame);
     auto& track = video ? video_ : audio_;
-    if (track.frames.size() >= kFrameCapacity) {
+    if (track.frames->Size() >= kFrameCapacity) {
       if (!track.backpressured) {
         track.backpressured = true;
         MW_LOG_DEBUG("streamer",
                      "AvEncoder 输入背压开始: instance={} track={} stream={} "
                      "queue={}/{}",
                      fmt::ptr(this), video ? "video" : "audio",
-                     video ? kVideoIndex : kAudioIndex, track.frames.size(),
+                     video ? kVideoIndex : kAudioIndex, track.frames->Size(),
                      kFrameCapacity);
       }
       MW_LOG_TRACE(
@@ -554,47 +566,58 @@ class AvEncoder::Impl final {
           "duration={} time_base={}/{} queue={}/{}",
           fmt::ptr(this), video ? "video" : "audio", frame->pts,
           frame->duration, frame->time_base.num, frame->time_base.den,
-          track.frames.size(), kFrameCapacity);
+          track.frames->Size(), kFrameCapacity);
       return false;
     }
-    track.frames.push_back(frame.Ref());
+    // One producer owns each track. While holding the session state lock,
+    // only the consumer can free capacity after the check above.
+    if (track.frames->Push(std::optional<ffmpeg::Frame>(frame.Ref()),
+                           std::chrono::steady_clock::duration::zero()) !=
+        internal::BlockingQueueResult::kSuccess)
+      return false;
     MW_LOG_TRACE("streamer",
                  "AvEncoder 帧入队: instance={} track={} stream={} pts={} "
                  "duration={} time_base={}/{} queue={}/{}",
                  fmt::ptr(this), video ? "video" : "audio",
                  video ? kVideoIndex : kAudioIndex, frame->pts, frame->duration,
                  frame->time_base.num, frame->time_base.den,
-                 track.frames.size(), kFrameCapacity);
-    wake_.notify_all();
+                 track.frames->Size(), kFrameCapacity);
     return true;
   }
 
   void Stop() noexcept {
-    if (!HasWorkers()) return;
+    const bool had_workers = HasWorkers();
+    std::shared_ptr<FrameQueue> video;
+    std::shared_ptr<FrameQueue> audio;
     {
       std::lock_guard lock(mutex_);
       accepting_ = false;
+      video = video_.frames;
+      audio = audio_.frames;
       MW_LOG_DEBUG(
           "streamer",
           "AvEncoder 停止接收并排空: instance={} video_queue={} audio_queue={}",
-          fmt::ptr(this), video_.frames.size(), audio_.frames.size());
+          fmt::ptr(this), video ? video->Size() : 0, audio ? audio->Size() : 0);
     }
-    wake_.notify_all();
+    if (video) video->Close();
+    if (audio) audio->Close();
     video_.worker.Join();
     audio_.worker.Join();
     std::lock_guard lock(mutex_);
-    video_.frames.clear();
-    audio_.frames.clear();
+    video_.frames.reset();
+    audio_.frames.reset();
     video_.backpressured = false;
     audio_.backpressured = false;
     session_.reset();
-    MW_LOG_INFO("streamer", "AvEncoder 已停止: instance={}", fmt::ptr(this));
+    if (had_workers)
+      MW_LOG_INFO("streamer", "AvEncoder 已停止: instance={}", fmt::ptr(this));
   }
 
  private:
   struct Track {
     internal::Thread worker;
-    std::deque<ffmpeg::Frame> frames;
+    std::shared_ptr<FrameQueue> frames;
+    std::weak_ptr<internal::WriteSignal> write_signal;
     bool backpressured = false;
   };
 
@@ -709,17 +732,19 @@ class AvEncoder::Impl final {
   void Run(bool video) noexcept {
     try {
       auto& track = video ? video_ : audio_;
+      std::shared_ptr<FrameQueue> frames;
+      {
+        std::lock_guard lock(mutex_);
+        if (error_) return;
+        frames = track.frames;
+      }
       for (;;) {
         std::optional<ffmpeg::Frame> frame;
+        const auto read = frames->Pop(frame);
         {
-          std::unique_lock lock(mutex_);
-          wake_.wait(lock, [this, &track] {
-            return !accepting_ || error_ || !track.frames.empty();
-          });
+          std::lock_guard lock(mutex_);
           if (error_) return;
-          if (!track.frames.empty()) {
-            frame = std::move(track.frames.front());
-            track.frames.pop_front();
+          if (read == internal::BlockingQueueResult::kSuccess) {
             MW_LOG_TRACE(
                 "streamer",
                 "AvEncoder 消费输入: instance={} track={} stream={} pts={} "
@@ -727,32 +752,16 @@ class AvEncoder::Impl final {
                 fmt::ptr(this), video ? "video" : "audio",
                 video ? kVideoIndex : kAudioIndex, (*frame)->pts,
                 (*frame)->duration, (*frame)->time_base.num,
-                (*frame)->time_base.den, track.frames.size(), kFrameCapacity);
+                (*frame)->time_base.den, frames->Size(), kFrameCapacity);
             if (track.backpressured) {
               track.backpressured = false;
               MW_LOG_DEBUG("streamer",
                            "AvEncoder 输入背压恢复: instance={} track={} "
                            "stream={} queue={}/{}",
                            fmt::ptr(this), video ? "video" : "audio",
-                           video ? kVideoIndex : kAudioIndex,
-                           track.frames.size(), kFrameCapacity);
+                           video ? kVideoIndex : kAudioIndex, frames->Size(),
+                           kFrameCapacity);
             }
-          }
-        }
-        if (frame && on_input_space_) {
-          try {
-            on_input_space_(video);
-          } catch (const std::exception& error) {
-            MW_LOG_ERROR("streamer",
-                         "AvEncoder OnInputSpace 回调异常: instance={} "
-                         "track={} error={}",
-                         fmt::ptr(this), video ? "video" : "audio",
-                         error.what());
-          } catch (...) {
-            MW_LOG_ERROR(
-                "streamer",
-                "AvEncoder OnInputSpace 回调抛出未知异常: instance={} track={}",
-                fmt::ptr(this), video ? "video" : "audio");
           }
         }
         // Closing admission drains each track's accepted FIFO before codec
@@ -766,6 +775,8 @@ class AvEncoder::Impl final {
     } catch (...) {
       const auto failure = std::current_exception();
       bool first = false;
+      std::shared_ptr<FrameQueue> video_frames;
+      std::shared_ptr<FrameQueue> audio_frames;
       {
         std::lock_guard lock(mutex_);
         if (!error_) {
@@ -773,10 +784,18 @@ class AvEncoder::Impl final {
           first = true;
         }
         accepting_ = false;
-        video_.frames.clear();
-        audio_.frames.clear();
+        video_frames = video_.frames;
+        audio_frames = audio_.frames;
       }
-      wake_.notify_all();
+      for (const auto& frames : {video_frames, audio_frames}) {
+        if (!frames) continue;
+        frames->Close();
+        std::optional<ffmpeg::Frame> discarded;
+        while (frames->TryPop(discarded) ==
+               internal::BlockingQueueResult::kSuccess) {
+          discarded.reset();
+        }
+      }
       try {
         std::rethrow_exception(failure);
       } catch (const ffmpeg::FfmpegException& error) {
@@ -815,9 +834,7 @@ class AvEncoder::Impl final {
   Track audio_;
   OnPacket on_packet_;
   OnError on_error_;
-  OnInputSpace on_input_space_;
   mutable std::mutex mutex_;
-  std::condition_variable wake_;
   bool accepting_ = false;
   std::exception_ptr error_;
   std::unique_ptr<Session> session_;
@@ -833,8 +850,9 @@ void AvEncoder::SetOnPacket(OnPacket callback) {
 void AvEncoder::SetOnError(OnError callback) {
   impl_->SetOnError(std::move(callback));
 }
-void AvEncoder::SetOnInputSpace(OnInputSpace callback) {
-  impl_->SetOnInputSpace(std::move(callback));
+void AvEncoder::SetWriteSignal(bool video,
+                               std::weak_ptr<internal::WriteSignal> signal) {
+  impl_->SetWriteSignal(video, std::move(signal));
 }
 bool AvEncoder::Start(const AvEncoderConfig& config) noexcept {
   return impl_->Start(config);

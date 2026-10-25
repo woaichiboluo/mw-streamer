@@ -3,7 +3,6 @@
 #include <atomic>
 #include <cerrno>
 #include <condition_variable>
-#include <deque>
 #include <exception>
 #include <mutex>
 #include <new>
@@ -19,6 +18,7 @@ extern "C" {
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/input/internal/input_info.h"
 #include "mw/streamer/performance/latency.h"
+#include "mw/streamer/platform/blocking_queue.h"
 #include "mw/streamer/platform/thread.h"
 
 namespace mw::streamer {
@@ -53,6 +53,8 @@ std::int64_t NowNs() {
 }  // namespace
 
 class AvInput::Impl final {
+  using PacketQueue = internal::BlockingQueue<AvInputReadResult>;
+
  public:
   explicit Impl(AvInputConfig config) : config_(std::move(config)) {
     if (config_.packet_capacity == 0 || config_.open_timeout.count() <= 0 ||
@@ -89,6 +91,7 @@ class AvInput::Impl final {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       info_ = {};
+      packets_ = std::make_shared<PacketQueue>(config_.packet_capacity);
     }
     Publish(AvInputState::kOpening);
     try {
@@ -139,33 +142,32 @@ class AvInput::Impl final {
     }
   }
 
-  AvInputReadResult ReadUntil(std::optional<Clock::time_point> deadline) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    const auto ready = [this] {
-      return cancelled_.load() || !packets_.empty() ||
-             (status_.state != AvInputState::kOpening &&
-              status_.state != AvInputState::kOpened);
-    };
-    if (deadline) {
-      changed_.wait_until(lock, *deadline, ready);
-    } else {
-      changed_.wait(lock, ready);
+  AvInputReadResult ReadPacket(bool wait) {
+    std::shared_ptr<PacketQueue> packets;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (cancelled_.load()) return {};
+      packets = packets_;
     }
+    if (!packets) return {};
+    AvInputReadResult output;
+    const auto result = wait ? packets->Pop(output) : packets->TryPop(output);
+    std::unique_lock<std::mutex> lock(mutex_);
     if (cancelled_.load() || status_.state == AvInputState::kClosed ||
-        status_.state == AvInputState::kCancelled) {
+        status_.state == AvInputState::kCancelled || packets != packets_) {
       return {AvInputReadStatus::kNull, {}};
     }
-    if (!packets_.empty()) {
-      auto packet = std::move(packets_.front());
-      packets_.pop_front();
-      const auto buffered = packets_.size();
+    if (result == internal::BlockingQueueResult::kSuccess) {
+      const auto buffered = packets->Size();
       lock.unlock();
+      // Only EOF drain acknowledgement uses the state condition variable.
       changed_.notify_all();
+      const auto& packet = *output.packet;
       MW_LOG_TRACE("streamer",
                    "AvInput[{}] 消费包: 流={} PTS={} DTS={} 字节={} 剩余={}",
                    static_cast<const void*>(this), packet->stream_index,
                    packet->pts, packet->dts, packet->size, buffered);
-      return {AvInputReadStatus::kPacket, std::move(packet)};
+      return output;
     }
     if (status_.state == AvInputState::kEnded) {
       return {AvInputReadStatus::kEof, {}};
@@ -175,10 +177,13 @@ class AvInput::Impl final {
 
   void RequestCancel() noexcept {
     bool requested;
+    std::shared_ptr<PacketQueue> packets;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       requested = !cancelled_.exchange(true);
+      packets = packets_;
     }
+    if (packets) packets->Close();
     changed_.notify_all();
     if (requested) {
       MW_LOG_DEBUG("streamer", "AvInput[{}] 请求取消",
@@ -196,9 +201,18 @@ class AvInput::Impl final {
     latency_.Finish();
     avformat_close_input(&format_);
     deadline_ns_.store(0);
+    std::shared_ptr<PacketQueue> packets;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      packets_.clear();
+      // Readers retain this session's closed queue until their Pop returns.
+      packets = std::move(packets_);
+    }
+    AvInputReadResult discarded;
+    if (packets) {
+      while (packets->TryPop(discarded) ==
+             internal::BlockingQueueResult::kSuccess) {
+        discarded = {};
+      }
     }
     Publish(AvInputState::kClosed);
   }
@@ -215,7 +229,7 @@ class AvInput::Impl final {
 
   std::size_t buffered_packets() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return packets_.size();
+    return packets_ ? packets_->Size() : 0;
   }
 
  private:
@@ -243,11 +257,16 @@ class AvInput::Impl final {
   void Publish(AvInputState state, std::exception_ptr error = {}) {
     AvInputStatus snapshot{state, std::move(error)};
     AvInputState previous;
+    std::shared_ptr<PacketQueue> packets;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       previous = status_.state;
       status_ = snapshot;
+      if (state == AvInputState::kEnded || state == AvInputState::kFailed ||
+          state == AvInputState::kCancelled)
+        packets = packets_;
     }
+    if (packets) packets->Close();
     changed_.notify_all();
     if (state == AvInputState::kOpening || state == AvInputState::kOpened ||
         state == AvInputState::kClosed) {
@@ -298,25 +317,13 @@ class AvInput::Impl final {
 
   void Run() noexcept {
     try {
+      std::shared_ptr<PacketQueue> packets;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        packets = packets_;
+      }
       for (;;) {
-        const bool trace = log::ShouldLog("streamer", log::LogLevel::kTrace);
-        {
-          std::unique_lock<std::mutex> lock(mutex_);
-          if (trace && !cancelled_.load() &&
-              packets_.size() >= config_.packet_capacity) {
-            const auto buffered = packets_.size();
-            lock.unlock();
-            MW_LOG_TRACE("streamer", "AvInput[{}] 包队列已满: {}/{}",
-                         static_cast<const void*>(this), buffered,
-                         config_.packet_capacity);
-            lock.lock();
-          }
-          changed_.wait(lock, [this] {
-            return cancelled_.load() ||
-                   packets_.size() < config_.packet_capacity;
-          });
-          if (cancelled_.load()) break;
-        }
+        if (cancelled_.load()) break;
         ffmpeg::Packet packet;
         if (deadline_ns_.load() == 0) BeginIo(config_.read_timeout);
         const auto read_started = latency_.Begin();
@@ -331,8 +338,9 @@ class AvInput::Impl final {
                        static_cast<const void*>(this));
           {
             std::unique_lock<std::mutex> lock(mutex_);
-            changed_.wait(
-                lock, [this] { return cancelled_.load() || packets_.empty(); });
+            changed_.wait(lock, [&] {
+              return cancelled_.load() || packets->Size() == 0;
+            });
             if (cancelled_.load()) break;
           }
           Publish(AvInputState::kEnded);
@@ -353,14 +361,12 @@ class AvInput::Impl final {
         const auto pts = packet->pts;
         const auto dts = packet->dts;
         const int bytes = packet->size;
-        std::size_t buffered;
-        {
-          std::lock_guard<std::mutex> lock(mutex_);
-          if (cancelled_.load()) break;
-          packets_.push_back(std::move(packet));
-          buffered = packets_.size();
-        }
-        changed_.notify_all();
+        // Demuxing precedes admission: in addition to the bounded queue, the
+        // producer can retain at most one packet while waiting for capacity.
+        if (packets->Push({AvInputReadStatus::kPacket, std::move(packet)}) !=
+            internal::BlockingQueueResult::kSuccess)
+          break;
+        const auto buffered = packets->Size();
         MW_LOG_TRACE(
             "streamer",
             "AvInput[{}] 投递包: 流={} PTS={} DTS={} 字节={} 缓存={}/{}",
@@ -391,7 +397,7 @@ class AvInput::Impl final {
   std::atomic<std::int64_t> deadline_ns_{0};
   AvInputStatus status_;
   AvInputInfo info_;
-  std::deque<ffmpeg::Packet> packets_;
+  std::shared_ptr<PacketQueue> packets_;
   AVFormatContext* format_ = nullptr;
   internal::Thread worker_;
   OnStateChanged on_state_changed_;
@@ -405,26 +411,8 @@ void AvInput::SetOnStateChanged(OnStateChanged callback) {
   impl_->SetOnStateChanged(std::move(callback));
 }
 void AvInput::Open(std::string_view url) { impl_->Open(url); }
-AvInputReadResult AvInput::ReadPacket() {
-  return ReadPacketUntil(std::nullopt);
-}
-AvInputReadResult AvInput::TryReadPacket() {
-  return ReadPacketUntil(Clock::time_point::min());
-}
-AvInputReadResult AvInput::ReadPacketFor(std::chrono::milliseconds timeout) {
-  if (timeout.count() < 0) {
-    throw std::invalid_argument("AvInput 读取等待超时不能为负数");
-  }
-  const auto now = Clock::now();
-  const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-      Clock::time_point::max() - now);
-  return ReadPacketUntil(timeout >= remaining ? Clock::time_point::max()
-                                              : now + timeout);
-}
-AvInputReadResult AvInput::ReadPacketUntil(
-    std::optional<Clock::time_point> deadline) {
-  return impl_->ReadUntil(deadline);
-}
+AvInputReadResult AvInput::ReadPacket() { return impl_->ReadPacket(true); }
+AvInputReadResult AvInput::TryReadPacket() { return impl_->ReadPacket(false); }
 void AvInput::RequestCancel() noexcept { impl_->RequestCancel(); }
 void AvInput::Close() noexcept { impl_->Close(); }
 AvInputStatus AvInput::status() const { return impl_->status(); }

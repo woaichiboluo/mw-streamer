@@ -13,6 +13,7 @@
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -28,12 +29,16 @@ extern "C" {
 #include "mw/streamer/ffmpeg/frame.h"
 #include "mw/streamer/ffmpeg/hw_device_context.h"
 #include "mw/streamer/ffmpeg/packet.h"
+#include "mw/streamer/platform/wait_signal.h"
+#include "mw/streamer/platform/write_signal.h"
 
 namespace {
 
 namespace ffmpeg = mw::streamer::ffmpeg;
 using mw::streamer::AvEncoder;
 using mw::streamer::AvEncoderConfig;
+using mw::streamer::internal::WaitSignal;
+using mw::streamer::internal::WriteSignal;
 using namespace std::chrono_literals;
 
 AvEncoderConfig Config() {
@@ -753,6 +758,11 @@ TEST_CASE("AvEncoder 每轨队列独立拒绝满队列且另一轨继续编码",
   capture.Bind(encoder);
   const int blocked = block_audio ? 1 : 0;
   const int other = 1 - blocked;
+  auto wake = std::make_shared<WaitSignal>();
+  auto blocked_signal = std::make_shared<WriteSignal>(wake);
+  auto other_signal = std::make_shared<WriteSignal>(wake);
+  encoder.SetWriteSignal(!block_audio, blocked_signal);
+  encoder.SetWriteSignal(block_audio, other_signal);
   encoder.SetOnPacket([&](const ffmpeg::Packet& packet) {
     {
       std::lock_guard lock(capture.mutex);
@@ -784,6 +794,8 @@ TEST_CASE("AvEncoder 每轨队列独立拒绝满队列且另一轨继续编码",
   CHECK(pending->pts == rejected_pts);
   CHECK(pending->duration == (block_audio ? 3008 : 3000));
   CHECK(pending->data[0] != nullptr);
+  const auto blocked_revision = blocked_signal->GetRevision();
+  const auto other_revision = other_signal->GetRevision();
 
   auto advancing = block_audio ? VideoFrame() : AudioFrame(3008);
   REQUIRE((block_audio ? encoder.TryPushVideo(advancing)
@@ -793,6 +805,8 @@ TEST_CASE("AvEncoder 每轨队列独立拒绝满队列且另一轨继续编码",
   REQUIRE((block_audio ? encoder.TryPushVideo(advancing)
                        : encoder.TryPushAudio(advancing)));
   REQUIRE(capture.WaitStreamPackets(other, block_audio ? 2 : 4));
+  CHECK(blocked_signal->GetRevision() == blocked_revision);
+  CHECK(other_signal->GetRevision() != other_revision);
   gate.Release();
   encoder.Stop();
   CHECK_FALSE(encoder.error());
@@ -811,22 +825,31 @@ TEST_CASE("AvEncoder 每轨队列独立拒绝满队列且另一轨继续编码",
   int decoded_samples = 0;
   for (const auto& frame : audio_frames) decoded_samples += frame->nb_samples;
   CHECK(decoded_samples == (block_audio ? 12288 : 6144));
+  for (const auto& stream : streams) {
+    std::optional<std::int64_t> last_pts;
+    std::optional<std::int64_t> last_dts;
+    for (const auto& packet : capture.packets) {
+      if (packet->stream_index != stream.stream_index) continue;
+      if (last_pts) CHECK(packet->pts > *last_pts);
+      if (last_dts) CHECK(packet->dts > *last_dts);
+      last_pts = packet->pts;
+      last_dts = packet->dts;
+    }
+  }
   const auto warnings = log.Read();
   CHECK(warnings.empty());
 }
 
-TEST_CASE("AvEncoder 出队通知支持原帧重试且观察异常不影响编码",
+TEST_CASE("AvEncoder 写信号支持满队列原帧重试及跨会话重新绑定",
           "[av-encoder][queue][notification][lifecycle]") {
   bool video = true;
-  bool throw_observer = false;
   SECTION("视频空间通知") {}
   SECTION("音频空间通知") { video = false; }
-  SECTION("通知观察者抛出异常") { throw_observer = true; }
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   Gate gate;
   Capture capture;
-  std::array<int, 2> notifications{};
-  int replacement_notifications = 0;
+  auto wake = std::make_shared<WaitSignal>();
+  auto original = std::make_shared<WriteSignal>(wake);
   AvEncoder encoder(cpu);
   capture.Bind(encoder);
   encoder.SetOnPacket([&](const ffmpeg::Packet& packet) {
@@ -837,16 +860,7 @@ TEST_CASE("AvEncoder 出队通知支持原帧重试且观察异常不影响编�
     }
     gate.Enter();
   });
-  encoder.SetOnInputSpace([&](bool notified_video) {
-    const auto failure = encoder.error();
-    {
-      std::lock_guard lock(capture.mutex);
-      if (failure) capture.error = failure;
-      ++notifications[notified_video ? 0 : 1];
-      capture.wake.notify_all();
-    }
-    if (throw_observer) throw std::runtime_error("空间观察者测试异常");
-  });
+  encoder.SetWriteSignal(video, original);
   auto config = Config();
   if (video)
     config.audio_sample_format = AV_SAMPLE_FMT_NONE;
@@ -854,7 +868,6 @@ TEST_CASE("AvEncoder 出队通知支持原帧重试且观察异常不影响编�
     config.video_pixel_format = AV_PIX_FMT_NONE;
   REQUIRE(encoder.Start(config));
   ReleaseGate release_before_encoder{gate};
-  CHECK_THROWS_AS(encoder.SetOnInputSpace({}), std::logic_error);
   auto frame = video ? VideoFrame() : AudioFrame(3008);
   const auto push = [&] {
     return video ? encoder.TryPushVideo(frame) : encoder.TryPushAudio(frame);
@@ -871,30 +884,48 @@ TEST_CASE("AvEncoder 出队通知支持原帧重试且观察异常不影响编�
   REQUIRE_FALSE(push());
   CHECK(frame->pts == rejected_pts);
   CHECK(frame->data[0] == rejected_data);
+  auto replacement = std::make_shared<WriteSignal>(wake);
+  encoder.SetWriteSignal(video, replacement);
+  original.reset();
+  const auto write_revision = replacement->GetRevision();
+  const auto wake_revision = wake->GetRevision();
   gate.Release();
-  {
-    std::unique_lock lock(capture.mutex);
-    REQUIRE(capture.wake.wait_for(
-        lock, 10s, [&] { return notifications[video ? 0 : 1] >= 2; }));
+  const bool signaled =
+      wake->WaitUntil(wake_revision, std::chrono::steady_clock::now() + 1s);
+  const bool capacity_changed = replacement->GetRevision() != write_revision;
+  bool retried = false;
+  const auto deadline = std::chrono::steady_clock::now() + 5s;
+  for (;;) {
+    const auto revision = wake->GetRevision();
+    if (push()) {
+      retried = true;
+      break;
+    }
+    if (encoder.error() || !wake->WaitUntil(revision, deadline)) break;
   }
-  REQUIRE(push());
   encoder.Stop();
+  CHECK(signaled);
+  CHECK(capacity_changed);
+  REQUIRE(retried);
   CHECK_FALSE(encoder.error());
   CHECK_FALSE(capture.error);
   CHECK(capture.packets.size() == (video ? 5 : 16));
   const auto decoded = Decode(encoder.streams().front(), capture.packets);
   CHECK(decoded.size() == (video ? 5 : 15));
-  CHECK(notifications[video ? 0 : 1] == 5);
-  CHECK(notifications[video ? 1 : 0] == 0);
   CHECK(frame->pts == rejected_pts);
   CHECK_FALSE(push());
-  CHECK(notifications[video ? 0 : 1] == 5);
-  encoder.SetOnInputSpace([&](bool) { ++replacement_notifications; });
+  capture.packets.clear();
+  const auto restart_revision = wake->GetRevision();
   REQUIRE(encoder.Start(config));
+  CHECK(
+      wake->WaitUntil(restart_revision, std::chrono::steady_clock::now() + 1s));
   REQUIRE(push());
   encoder.Stop();
-  CHECK(replacement_notifications == 1);
-  CHECK(notifications[video ? 0 : 1] == 5);
+  CHECK(capture.packets.size() == (video ? 1 : 4));
+  CHECK(Decode(encoder.streams().front(), capture.packets).size() ==
+        (video ? 1 : 3));
+  encoder.SetWriteSignal(video, {});
+  replacement.reset();
   CHECK_FALSE(encoder.error());
 }
 

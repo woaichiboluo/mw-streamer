@@ -1,7 +1,6 @@
 #include "mw/streamer/decoder/av_decoder.h"
 
-#include <condition_variable>
-#include <deque>
+#include <chrono>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -12,6 +11,7 @@
 #include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/performance/latency.h"
+#include "mw/streamer/platform/blocking_queue.h"
 #include "mw/streamer/platform/thread.h"
 
 namespace mw::streamer {
@@ -80,7 +80,9 @@ class AvDecoder::Impl final {
        const ffmpeg::HwDeviceContext* device = nullptr)
       : stream_(stream),
         config_(std::move(config)),
-        context_(FindDecoder(stream, config_, device)) {
+        context_(FindDecoder(stream, config_, device)),
+        packets_(config_.packet_capacity),
+        frames_(config_.frame_capacity) {
     if (config_.packet_capacity == 0 || config_.frame_capacity == 0 ||
         config_.thread_count < 0) {
       throw std::invalid_argument("AvDecoder 缓存容量必须为正，线程数不能为负");
@@ -144,35 +146,45 @@ class AvDecoder::Impl final {
     on_error_ = std::move(callback);
   }
 
-  void SetOnInputSpace(OnInputSpace callback) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    on_input_space_ = std::move(callback);
+  void SetReadSignal(std::weak_ptr<internal::WaitSignal> signal) {
+    frames_.SetReadSignal(std::move(signal));
   }
 
-  void SetOnReadReady(OnReadReady callback) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    on_read_ready_ = std::move(callback);
-  }
-
-  bool TryPushPacket(const ffmpeg::Packet& packet) {
+  bool PushPacket(const ffmpeg::Packet& packet, bool wait = true) {
     if (!packet.get() || !packet->data || packet->size <= 0 ||
         packet->stream_index != stream_.stream_index) {
       throw std::invalid_argument("AvDecoder Packet 为空或不属于当前轨道");
     }
-    return TryPush(InputKind::kPacket, &packet);
+    return Push(InputKind::kPacket, &packet, wait);
   }
 
-  bool TryPushEof() { return TryPush(InputKind::kEof); }
+  bool PushEof(bool wait = true) {
+    return Push(InputKind::kEof, nullptr, wait);
+  }
 
-  bool TryReset() { return TryPush(InputKind::kReset); }
+  bool Reset(bool wait = true) {
+    return Push(InputKind::kReset, nullptr, wait);
+  }
 
-  AvDecoderReadResult TryReadFrame() {
+  AvDecoderReadResult ReadFrame(bool wait) {
     AvDecoderReadResult result;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!frames_.empty() && !stopping_) {
-        result = std::move(frames_.front());
-        frames_.pop_front();
+      result.stream_index = stream_.stream_index;
+      result.time_base = stream_.time_base;
+      if (stopping_) return result;
+    }
+    const auto read = wait ? frames_.Pop(result) : frames_.TryPop(result);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (stopping_) {
+        return {AvDecoderReadStatus::kNull,
+                {},
+                stream_.stream_index,
+                stream_.time_base,
+                AV_NOPTS_VALUE};
+      }
+      if (read == internal::BlockingQueueResult::kSuccess) {
         MW_LOG_TRACE(
             "streamer",
             "AvDecoder 消费输出: instance={} stream={} kind={} pts={} "
@@ -181,26 +193,16 @@ class AvDecoder::Impl final {
             result.status == AvDecoderReadStatus::kFrame ? "frame" : "eof",
             result.frame ? result.frame->get()->pts : result.end_pts,
             result.frame ? result.frame->get()->duration : 0,
-            stream_.time_base.num, stream_.time_base.den, frames_.size(),
+            stream_.time_base.num, stream_.time_base.den, frames_.Size(),
             config_.frame_capacity);
-      } else {
-        result.stream_index = stream_.stream_index;
-        result.time_base = stream_.time_base;
       }
     }
-    changed_.notify_all();
     return result;
   }
 
-  std::size_t buffered_packets() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return packets_.size();
-  }
+  std::size_t buffered_packets() const { return packets_.Size(); }
 
-  std::size_t buffered_frames() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return frames_.size();
-  }
+  std::size_t buffered_frames() const { return frames_.Size(); }
 
   std::exception_ptr error() const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -214,7 +216,8 @@ class AvDecoder::Impl final {
       std::lock_guard<std::mutex> lock(mutex_);
       stopping_ = true;
     }
-    changed_.notify_all();
+    packets_.Close();
+    frames_.Close();
   }
 
   void Stop() noexcept {
@@ -222,9 +225,12 @@ class AvDecoder::Impl final {
     RequestStop();
     worker_.Join();
     latency_.Finish();
-    std::lock_guard<std::mutex> lock(mutex_);
-    packets_.clear();
-    frames_.clear();
+    DiscardInput();
+    AvDecoderReadResult discarded;
+    while (frames_.TryPop(discarded) ==
+           internal::BlockingQueueResult::kSuccess) {
+      discarded = {};
+    }
     if (had_worker) {
       MW_LOG_INFO("streamer", "AvDecoder 已停止: instance={} stream={}",
                   fmt::ptr(this), stream_.stream_index);
@@ -260,47 +266,63 @@ class AvDecoder::Impl final {
   enum class InputKind { kPacket, kEof, kReset };
 
   struct Input {
-    InputKind kind;
+    InputKind kind = InputKind::kPacket;
     std::optional<ffmpeg::Packet> packet;
   };
 
-  bool TryPush(InputKind kind, const ffmpeg::Packet* packet = nullptr) {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (stopping_ || error_) return false;
-      if (submitted_eof_ && kind != InputKind::kReset) {
-        throw std::logic_error(
-            "AvDecoder 提交 EOF 后需要先 Reset 才能继续输入");
-      }
-      if (packets_.size() >= config_.packet_capacity) {
-        MW_LOG_TRACE("streamer",
-                     "AvDecoder 输入队列满: instance={} stream={} queue={}/{}",
-                     fmt::ptr(this), stream_.stream_index, packets_.size(),
-                     config_.packet_capacity);
-        return false;
-      }
-      packets_.push_back({kind, packet ? std::optional<ffmpeg::Packet>(*packet)
-                                       : std::nullopt});
-      submitted_eof_ = kind == InputKind::kEof;
-      if (packet) {
-        MW_LOG_TRACE("streamer",
-                     "AvDecoder 包入队: instance={} stream={} pts={} dts={} "
-                     "duration={} time_base={}/{} bytes={} queue={}/{}",
-                     fmt::ptr(this), stream_.stream_index, (*packet)->pts,
-                     (*packet)->dts, (*packet)->duration, stream_.time_base.num,
-                     stream_.time_base.den, (*packet)->size, packets_.size(),
-                     config_.packet_capacity);
-      } else {
-        MW_LOG_DEBUG(
-            "streamer",
-            "AvDecoder 控制入队: instance={} stream={} kind={} queue={}/{}",
-            fmt::ptr(this), stream_.stream_index,
-            kind == InputKind::kEof ? "eof" : "reset", packets_.size(),
-            config_.packet_capacity);
-      }
+  bool Push(InputKind kind, const ffmpeg::Packet* packet, bool wait) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (stopping_ || error_) return false;
+    if (submitted_eof_ && kind != InputKind::kReset) {
+      throw std::logic_error("AvDecoder 提交 EOF 后需要先 Reset 才能继续输入");
     }
-    changed_.notify_all();
+    if (!wait && packets_.Size() >= config_.packet_capacity) {
+      MW_LOG_TRACE("streamer",
+                   "AvDecoder 输入队列满: instance={} stream={} queue={}/{}",
+                   fmt::ptr(this), stream_.stream_index, packets_.Size(),
+                   config_.packet_capacity);
+      return false;
+    }
+    Input input{kind,
+                packet ? std::optional<ffmpeg::Packet>(*packet) : std::nullopt};
+    internal::BlockingQueueResult result;
+    if (wait) {
+      lock.unlock();
+      result = packets_.Push(std::move(input));
+      lock.lock();
+    } else {
+      // A single producer owns admission; only the consumer can reduce the
+      // size after the capacity check. Stop/failure use the state lock first.
+      result = packets_.Push(std::move(input),
+                             std::chrono::steady_clock::duration::zero());
+    }
+    if (result != internal::BlockingQueueResult::kSuccess) return false;
+    submitted_eof_ = kind == InputKind::kEof;
+    if (packet) {
+      MW_LOG_TRACE("streamer",
+                   "AvDecoder 包入队: instance={} stream={} pts={} dts={} "
+                   "duration={} time_base={}/{} bytes={} queue={}/{}",
+                   fmt::ptr(this), stream_.stream_index, (*packet)->pts,
+                   (*packet)->dts, (*packet)->duration, stream_.time_base.num,
+                   stream_.time_base.den, (*packet)->size, packets_.Size(),
+                   config_.packet_capacity);
+    } else {
+      MW_LOG_DEBUG(
+          "streamer",
+          "AvDecoder 控制入队: instance={} stream={} kind={} queue={}/{}",
+          fmt::ptr(this), stream_.stream_index,
+          kind == InputKind::kEof ? "eof" : "reset", packets_.Size(),
+          config_.packet_capacity);
+    }
     return true;
+  }
+
+  void DiscardInput() {
+    Input discarded;
+    while (packets_.TryPop(discarded) ==
+           internal::BlockingQueueResult::kSuccess) {
+      discarded = {};
+    }
   }
 
   std::int64_t FrameEndPts(const ffmpeg::Frame& frame) const {
@@ -329,34 +351,17 @@ class AvDecoder::Impl final {
   }
 
   bool Emit(AvDecoderReadResult result) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    changed_.wait(lock, [this] {
-      return stopping_ || frames_.size() < config_.frame_capacity;
-    });
-    if (stopping_) return false;
     MW_LOG_TRACE("streamer",
-                 "AvDecoder 输出就绪: instance={} stream={} kind={} pts={} "
+                 "AvDecoder 提交输出: instance={} stream={} kind={} pts={} "
                  "duration={} time_base={}/{} queue={}/{}",
                  fmt::ptr(this), stream_.stream_index,
                  result.status == AvDecoderReadStatus::kFrame ? "frame" : "eof",
                  result.frame ? result.frame->get()->pts : result.end_pts,
                  result.frame ? result.frame->get()->duration : 0,
-                 stream_.time_base.num, stream_.time_base.den,
-                 frames_.size() + 1, config_.frame_capacity);
-    frames_.push_back(std::move(result));
-    auto callback = on_read_ready_;
-    lock.unlock();
-    if (callback) {
-      try {
-        callback();
-      } catch (const std::exception& observer_error) {
-        MW_LOG_ERROR("streamer", "AvDecoder 读取就绪通知异常: {}",
-                     observer_error.what());
-      } catch (...) {
-        MW_LOG_ERROR("streamer", "AvDecoder 读取就绪通知发生未知异常");
-      }
-    }
-    return true;
+                 stream_.time_base.num, stream_.time_base.den, frames_.Size(),
+                 config_.frame_capacity);
+    return frames_.Push(std::move(result)) ==
+           internal::BlockingQueueResult::kSuccess;
   }
 
   void Run() noexcept {
@@ -411,25 +416,11 @@ class AvDecoder::Impl final {
           }
         }
         Input input;
-        OnInputSpace on_input_space;
+        if (packets_.Pop(input) != internal::BlockingQueueResult::kSuccess)
+          return;
         {
-          std::unique_lock<std::mutex> lock(mutex_);
-          changed_.wait(lock,
-                        [this] { return stopping_ || !packets_.empty(); });
+          std::lock_guard<std::mutex> lock(mutex_);
           if (stopping_) return;
-          input = std::move(packets_.front());
-          packets_.pop_front();
-          on_input_space = on_input_space_;
-        }
-        if (on_input_space) {
-          try {
-            on_input_space();
-          } catch (const std::exception& observer_error) {
-            MW_LOG_ERROR("streamer", "AvDecoder 输入空间通知异常: {}",
-                         observer_error.what());
-          } catch (...) {
-            MW_LOG_ERROR("streamer", "AvDecoder 输入空间通知发生未知异常");
-          }
         }
         if (input.kind == InputKind::kReset) {
           MW_LOG_DEBUG("streamer",
@@ -473,9 +464,11 @@ class AvDecoder::Impl final {
       {
         std::lock_guard<std::mutex> lock(mutex_);
         error_ = failure;
-        packets_.clear();
         callback = std::move(on_error_);
       }
+      packets_.Close();
+      frames_.Close();
+      DiscardInput();
       try {
         std::rethrow_exception(failure);
       } catch (const ffmpeg::FfmpegException& error) {
@@ -509,16 +502,13 @@ class AvDecoder::Impl final {
   const ffmpeg::StreamInfo stream_;
   const AvDecoderConfig config_;
   OnError on_error_;
-  OnInputSpace on_input_space_;
-  OnReadReady on_read_ready_;
   ffmpeg::CodecContext context_;
   mutable std::mutex mutex_;
-  std::condition_variable changed_;
   bool stopping_ = false;
   bool submitted_eof_ = false;
   std::exception_ptr error_;
-  std::deque<Input> packets_;
-  std::deque<AvDecoderReadResult> frames_;
+  internal::BlockingQueue<Input> packets_;
+  internal::BlockingQueue<AvDecoderReadResult> frames_;
   internal::StageLatency latency_;
   internal::Thread worker_;
 };
@@ -533,18 +523,23 @@ AvDecoder::~AvDecoder() = default;
 void AvDecoder::SetOnError(OnError callback) {
   impl_->SetOnError(std::move(callback));
 }
-void AvDecoder::SetOnInputSpace(OnInputSpace callback) {
-  impl_->SetOnInputSpace(std::move(callback));
+void AvDecoder::SetReadSignal(std::weak_ptr<internal::WaitSignal> signal) {
+  impl_->SetReadSignal(std::move(signal));
 }
-void AvDecoder::SetOnReadReady(OnReadReady callback) {
-  impl_->SetOnReadReady(std::move(callback));
+bool AvDecoder::PushPacket(const ffmpeg::Packet& packet) {
+  return impl_->PushPacket(packet);
 }
+bool AvDecoder::PushEof() { return impl_->PushEof(); }
+bool AvDecoder::Reset() { return impl_->Reset(); }
 bool AvDecoder::TryPushPacket(const ffmpeg::Packet& packet) {
-  return impl_->TryPushPacket(packet);
+  return impl_->PushPacket(packet, false);
 }
-bool AvDecoder::TryPushEof() { return impl_->TryPushEof(); }
-bool AvDecoder::TryReset() { return impl_->TryReset(); }
-AvDecoderReadResult AvDecoder::TryReadFrame() { return impl_->TryReadFrame(); }
+bool AvDecoder::TryPushEof() { return impl_->PushEof(false); }
+bool AvDecoder::TryReset() { return impl_->Reset(false); }
+AvDecoderReadResult AvDecoder::ReadFrame() { return impl_->ReadFrame(true); }
+AvDecoderReadResult AvDecoder::TryReadFrame() {
+  return impl_->ReadFrame(false);
+}
 std::size_t AvDecoder::buffered_packets() const {
   return impl_->buffered_packets();
 }

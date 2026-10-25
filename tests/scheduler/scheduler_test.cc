@@ -31,6 +31,7 @@ extern "C" {
 }
 
 #include "mw/streamer/input/av_media_source.h"
+#include "mw/streamer/platform/write_signal.h"
 
 namespace {
 
@@ -1003,6 +1004,63 @@ TEST_CASE("Scheduler owns a source reference without controlling its lifecycle",
   CHECK(retained.expired());
 }
 
+TEST_CASE(
+    "Scheduler Stop leaves the running source readable and permits restart",
+    "[scheduler][lifecycle][restart]") {
+  auto source = Source();
+  Scheduler scheduler(source, Config());
+  std::atomic<int> frames{0};
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
+    ++frames;
+    return true;
+  });
+  REQUIRE(source->Start(SamplePath()));
+  REQUIRE(scheduler.Start());
+  const bool first_session = WaitFor([&] { return frames.load() >= 3; });
+  scheduler.Stop();
+  CHECK(first_session);
+  CHECK(source->status().state != AvMediaSourceState::kStopped);
+  CHECK(source->status().state != AvMediaSourceState::kFailed);
+  bool video_read = false;
+  bool audio_read = false;
+  const bool source_readable = WaitFor([&] {
+    video_read |= source->TryReadVideo().status ==
+                  mw::streamer::AvDecoderReadStatus::kFrame;
+    audio_read |= source->TryReadAudio().status ==
+                  mw::streamer::AvDecoderReadStatus::kFrame;
+    return video_read && audio_read;
+  });
+  CHECK(source_readable);
+  const int previous_frames = frames.load();
+  REQUIRE(scheduler.Start());
+  const bool second_session =
+      WaitFor([&] { return frames.load() >= previous_frames + 3; });
+  scheduler.Stop();
+  source->Stop();
+  CHECK(second_session);
+  CHECK_FALSE(scheduler.error());
+}
+
+TEST_CASE("Scheduler Stop wakes an idle driver before the initial timeout",
+          "[scheduler][lifecycle][stop]") {
+  auto source = Source();
+  auto config = Config();
+  config.syncer.options.initial_timeout = 4s;
+  Scheduler scheduler(source, config);
+  std::atomic<int> frames{0};
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
+    ++frames;
+    return true;
+  });
+  REQUIRE(scheduler.Start());
+  std::this_thread::sleep_for(20ms);
+  const auto started = std::chrono::steady_clock::now();
+  scheduler.Stop();
+  CHECK(std::chrono::steady_clock::now() - started < 250ms);
+  CHECK(frames.load() == 0);
+  CHECK_FALSE(scheduler.error());
+}
+
 TEST_CASE("Scheduler forwards an output callback failure once", "[scheduler]") {
   auto source = Source();
   std::atomic<int> errors{0};
@@ -1164,11 +1222,11 @@ TEST_CASE("Scheduler waits for video output space while audio continues",
   const int audio_before = audio_calls.load();
   const bool audio_continued =
       WaitFor([&] { return audio_calls.load() >= audio_before + 4; });
-  scheduler.NotifyOutputSpace(false);
+  scheduler.output_signal(false)->Notify();
   std::this_thread::sleep_for(100ms);
   const int calls_while_full = video_calls.load();
   accept_video.store(true);
-  scheduler.NotifyOutputSpace(true);
+  scheduler.output_signal(true)->Notify();
   const bool resumed = WaitFor([&] { return accepted_frames.load() > 0; });
   scheduler.Stop();
   CHECK(blocked);
@@ -1197,7 +1255,7 @@ TEST_CASE("Scheduler preserves output space notification before rejection",
     pts.push_back(frame->pts);
     changed.notify_all();
     if (attempts.size() <= 8) {
-      scheduler.NotifyOutputSpace(true);
+      scheduler.output_signal(true)->Notify();
       return false;
     }
     return true;

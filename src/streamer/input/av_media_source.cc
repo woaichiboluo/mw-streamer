@@ -1,6 +1,5 @@
 #include "mw/streamer/input/av_media_source.h"
 
-#include <array>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -13,6 +12,7 @@
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/platform/thread.h"
+#include "mw/streamer/platform/wait_signal.h"
 
 namespace mw::streamer {
 namespace {
@@ -62,9 +62,6 @@ class AvMediaSource::Impl final {
       : config_(std::move(config)), proxy_(config_.proxy) {
     ValidateDecoderConfig(config_.video_decoder);
     ValidateDecoderConfig(config_.audio_decoder);
-    if (config_.packet_read_timeout.count() <= 0) {
-      throw std::invalid_argument("AvMediaSource 读包等待时间必须为正");
-    }
     if (device) device_ = device->Ref();
     proxy_.SetOnStateChanged([this](const AvInputProxyStatus& status) {
       {
@@ -76,6 +73,10 @@ class AvMediaSource::Impl final {
         ++revision_;
       }
       changed_.notify_all();
+      if (status.state == AvInputProxyState::kFailed) {
+        NotifyReadSignal();
+        StopDecoders();
+      }
     });
   }
 
@@ -95,9 +96,16 @@ class AvMediaSource::Impl final {
     on_packet_ = std::move(callback);
   }
 
-  void SetOnReadReady(OnReadReady callback) {
-    std::lock_guard lock(mutex_);
-    on_read_ready_ = std::move(callback);
+  void SetReadSignal(std::weak_ptr<internal::WaitSignal> signal) {
+    {
+      std::lock_guard lock(mutex_);
+      read_signal_ = signal;
+      if (session_) {
+        if (session_->video) session_->video->SetReadSignal(signal);
+        if (session_->audio) session_->audio->SetReadSignal(signal);
+      }
+    }
+    if (const auto wake = signal.lock()) wake->Notify();
   }
 
   bool Start(std::string_view url) noexcept {
@@ -125,6 +133,7 @@ class AvMediaSource::Impl final {
       audio_eof_ = false;
       final_eof_submitted_ = false;
     }
+    NotifyReadSignal();
     MW_LOG_INFO("streamer", "AvMediaSource [{}] 启动: loop={}",
                 static_cast<const void*>(this), config_.proxy.loop);
     if (worker_.Start([this]() noexcept { Run(); })) return true;
@@ -140,6 +149,7 @@ class AvMediaSource::Impl final {
     }
     url_.clear();
     changed_.notify_all();
+    NotifyReadSignal();
     return false;
   }
 
@@ -189,6 +199,7 @@ class AvMediaSource::Impl final {
       session = session_;
     }
     changed_.notify_all();
+    NotifyReadSignal();
     proxy_.RequestStop();
     if (session) session->RequestStop();
     if (requested) {
@@ -202,21 +213,13 @@ class AvMediaSource::Impl final {
   }
 
  private:
-  void NotifyReadReady() {
-    OnReadReady callback;
+  void NotifyReadSignal() {
+    std::shared_ptr<internal::WaitSignal> signal;
     {
       std::lock_guard lock(mutex_);
-      callback = on_read_ready_;
+      signal = read_signal_.lock();
     }
-    if (!callback) return;
-    try {
-      callback();
-    } catch (const std::exception& observer_error) {
-      MW_LOG_ERROR("streamer", "AvMediaSource 读取就绪通知异常: {}",
-                   observer_error.what());
-    } catch (...) {
-      MW_LOG_ERROR("streamer", "AvMediaSource 读取就绪通知发生未知异常");
-    }
+    if (signal) signal->Notify();
   }
 
   struct Session {
@@ -237,12 +240,6 @@ class AvMediaSource::Impl final {
     std::unique_ptr<AvDecoder> audio;
   };
 
-  struct PendingInput {
-    AvInputProxyReadResult input;
-    std::array<bool, 2> reset_submitted{};
-    std::array<bool, 2> eof_submitted{};
-  };
-
   std::shared_ptr<Session> ReadSession() const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (stopping_ || failure_ || status_.state == AvMediaSourceState::kEnded) {
@@ -257,17 +254,19 @@ class AvMediaSource::Impl final {
       if (!failure_) failure_ = std::move(error);
     }
     changed_.notify_all();
-    // A decoder failure must also interrupt a controller blocked in
-    // ReadPacketFor.
+    NotifyReadSignal();
+    // A failed track must also release delivery blocked on the other track.
+    StopDecoders();
     proxy_.RequestStop();
   }
 
-  void InputSpaceAvailable() {
+  void StopDecoders() noexcept {
+    std::shared_ptr<Session> session;
     {
-      std::lock_guard lock(mutex_);
-      ++revision_;
+      std::lock_guard<std::mutex> lock(mutex_);
+      session = session_;
     }
-    changed_.notify_all();
+    if (session) session->RequestStop();
   }
 
   void CheckFailure() const {
@@ -344,7 +343,7 @@ class AvMediaSource::Impl final {
                    static_cast<const void*>(this), StateName(state),
                    snapshot.retry_count, snapshot.retry_delay.count());
     }
-    NotifyReadReady();
+    NotifyReadSignal();
     if (!on_state_changed_) return;
     try {
       on_state_changed_(snapshot);
@@ -404,23 +403,25 @@ class AvMediaSource::Impl final {
                                                 config_.video_decoder)
                   : std::make_unique<AvDecoder>(*stream, config_.video_decoder);
       created->video->SetOnError(on_error);
-      created->video->SetOnInputSpace([this] { InputSpaceAvailable(); });
-      created->video->SetOnReadReady([this] { NotifyReadReady(); });
     }
     if (const auto* stream = FindStream(*info, info->audio_stream_index)) {
       created->audio =
           std::make_unique<AvDecoder>(*stream, config_.audio_decoder);
       created->audio->SetOnError(on_error);
-      created->audio->SetOnInputSpace([this] { InputSpaceAvailable(); });
-      created->audio->SetOnReadReady([this] { NotifyReadReady(); });
     }
     if (!created->video && !created->audio) {
       throw std::invalid_argument("AvMediaSource 输入没有所选音视频轨道");
     }
+    bool cancelled;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       session_ = created;
+      if (created->video) created->video->SetReadSignal(read_signal_);
+      if (created->audio) created->audio->SetReadSignal(read_signal_);
+      cancelled = stopping_ || failure_;
     }
+    // Cancellation before publication cannot have seen these new queues.
+    if (cancelled) created->RequestStop();
     session = std::move(created);
     MW_LOG_DEBUG(
         "streamer",
@@ -465,51 +466,34 @@ class AvMediaSource::Impl final {
     return progress;
   }
 
-  bool SubmitControl(const Session& session, bool reset,
-                     std::array<bool, 2>& submitted) {
-    bool progress = false;
-    const std::array<AvDecoder*, 2> decoders{session.video.get(),
-                                             session.audio.get()};
-    for (std::size_t index = 0; index < decoders.size(); ++index) {
-      if (submitted[index]) continue;
-      auto* decoder = decoders[index];
-      if (!decoder || (reset ? decoder->TryReset() : decoder->TryPushEof())) {
-        submitted[index] = true;
-        progress = true;
-      } else if (const auto failure = decoder->error()) {
-        std::rethrow_exception(failure);
+  bool SubmitControl(const Session& session, bool reset) {
+    for (auto* decoder : {session.video.get(), session.audio.get()}) {
+      if (decoder && !(reset ? decoder->Reset() : decoder->PushEof())) {
+        CheckFailure();
+        if (const auto failure = decoder->error())
+          std::rethrow_exception(failure);
+        return false;
       }
     }
-    return progress;
+    return true;
   }
 
-  bool Dispatch(std::shared_ptr<Session>& session,
-                std::optional<PendingInput>& pending) {
-    bool progress = false;
-    if (!pending) {
-      auto input = proxy_.ReadPacketFor(config_.packet_read_timeout);
-      if (input.status == AvInputReadStatus::kNull) return false;
-      Initialize(input.info, session);
-      if (input.status == AvInputReadStatus::kPacket && on_packet_)
-        on_packet_(*input.packet);
-      pending.emplace();
-      pending->input = std::move(input);
-      progress = true;
-    }
-    if (Stopping()) return progress;
-    const auto& result = pending->input;
+  bool Dispatch(std::shared_ptr<Session>& session) {
+    auto result = proxy_.ReadPacketOrStateChange();
+    if (result.status == AvInputReadStatus::kNull) return false;
+    Initialize(result.info, session);
+    if (result.status == AvInputReadStatus::kPacket && on_packet_)
+      on_packet_(*result.packet);
+    CheckFailure();
+    if (Stopping()) return false;
     if (session->dispatched_info && session->dispatched_info != result.info) {
       // Both tracks must accept their ordered reset before the first new
-      // packet/EOF. Remember partial submission across queue-full retries.
-      progress |= SubmitControl(*session, true, pending->reset_submitted);
-      if (!pending->reset_submitted[0] || !pending->reset_submitted[1])
-        return progress;
+      // packet/EOF. Each blocking submission happens exactly once.
+      if (!SubmitControl(*session, true)) return false;
     }
     session->dispatched_info = result.info;
     if (result.status == AvInputReadStatus::kEof) {
-      progress |= SubmitControl(*session, false, pending->eof_submitted);
-      if (!pending->eof_submitted[0] || !pending->eof_submitted[1])
-        return progress;
+      if (!SubmitControl(*session, false)) return false;
       MW_LOG_DEBUG("streamer", "AvMediaSource [{}] 已分发源 EOF: loop={}",
                    static_cast<const void*>(this), config_.proxy.loop);
       if (!config_.proxy.loop) {
@@ -523,10 +507,11 @@ class AvMediaSource::Impl final {
                           : session->audio.get();
       if (!decoder)
         throw std::logic_error("AvMediaSource Packet 缺少对应 Decoder");
-      if (!decoder->TryPushPacket(*result.packet)) {
+      if (!decoder->PushPacket(*result.packet)) {
+        CheckFailure();
         if (const auto failure = decoder->error())
           std::rethrow_exception(failure);
-        return progress;
+        return false;
       }
       if (mw::log::ShouldLog("streamer", mw::log::LogLevel::kTrace)) {
         MW_LOG_TRACE("streamer",
@@ -538,7 +523,6 @@ class AvMediaSource::Impl final {
                      result.packet->get()->size);
       }
     }
-    pending.reset();
     return true;
   }
 
@@ -564,7 +548,6 @@ class AvMediaSource::Impl final {
 
   void Run() noexcept {
     std::shared_ptr<Session> session;
-    std::optional<PendingInput> pending;
     bool ended = false;
     try {
       // Start publishes an immediate snapshot; notify it on this worker too.
@@ -586,8 +569,8 @@ class AvMediaSource::Impl final {
           ended = true;
           break;
         }
-        if (!final_eof_submitted_) progress |= Dispatch(session, pending);
-        if (!progress && (pending || final_eof_submitted_)) {
+        if (!final_eof_submitted_) progress |= Dispatch(session);
+        if (!progress && final_eof_submitted_) {
           std::unique_lock<std::mutex> lock(mutex_);
           changed_.wait(lock, [this, observed] {
             return stopping_ || failure_ || revision_ != observed ||
@@ -633,7 +616,7 @@ class AvMediaSource::Impl final {
   bool final_eof_submitted_ = false;
   OnStateChanged on_state_changed_;
   OnPacket on_packet_;
-  OnReadReady on_read_ready_;
+  std::weak_ptr<internal::WaitSignal> read_signal_;
   std::string url_;
   internal::Thread worker_;
 };
@@ -650,8 +633,8 @@ void AvMediaSource::SetOnStateChanged(OnStateChanged callback) {
 void AvMediaSource::SetOnPacket(OnPacket callback) {
   impl_->SetOnPacket(std::move(callback));
 }
-void AvMediaSource::SetOnReadReady(OnReadReady callback) {
-  impl_->SetOnReadReady(std::move(callback));
+void AvMediaSource::SetReadSignal(std::weak_ptr<internal::WaitSignal> signal) {
+  impl_->SetReadSignal(std::move(signal));
 }
 bool AvMediaSource::Start(std::string_view url) noexcept {
   return impl_->Start(url);

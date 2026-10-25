@@ -1,8 +1,6 @@
 #include "mw/streamer/pipeline/offline_pipeline.h"
 
 #include <array>
-#include <condition_variable>
-#include <cstdint>
 #include <filesystem>
 #include <mutex>
 #include <stdexcept>
@@ -11,6 +9,7 @@
 
 #include "mw/log.h"
 #include "mw/streamer/platform/thread.h"
+#include "mw/streamer/platform/wait_signal.h"
 
 namespace mw::streamer {
 namespace {
@@ -44,7 +43,7 @@ class OfflinePipeline::Impl final {
  public:
   Impl(const ffmpeg::HwDeviceContext& device, OfflinePipelineConfig config)
       : source_(device, MakeSourceConfig(std::move(config))) {
-    source_.SetOnReadReady([this] { Wake(); });
+    source_.SetReadSignal(signal_);
     source_.SetOnStateChanged([this](const AvMediaSourceStatus& status) {
       if (status.state == AvMediaSourceState::kFailed) {
         Fail(status.error);
@@ -58,9 +57,8 @@ class OfflinePipeline::Impl final {
           else if (status.state == AvMediaSourceState::kDraining)
             state_ = OfflinePipelineState::kDraining;
         }
-        ++revision_;
       }
-      changed_.notify_all();
+      signal_->Notify();
     });
     source_.SetOnPacket([this](const ffmpeg::Packet& packet) {
       if (on_input_packet_) on_input_packet_(packet);
@@ -136,7 +134,7 @@ class OfflinePipeline::Impl final {
     if (requested)
       MW_LOG_DEBUG("streamer", "OfflinePipeline[{}] 请求停止", fmt::ptr(this));
     source_.RequestStop();
-    changed_.notify_all();
+    signal_->Notify();
   }
 
   void Stop() noexcept {
@@ -167,22 +165,10 @@ class OfflinePipeline::Impl final {
     std::lock_guard lock(mutex_);
     return stopping_;
   }
-  void Wake() {
-    {
-      std::lock_guard lock(mutex_);
-      ++revision_;
-    }
-    changed_.notify_all();
-  }
-
   bool Consume() {
     std::array<bool, 2> eof{};
     while (!Stopping()) {
-      std::uint64_t observed;
-      {
-        std::lock_guard lock(mutex_);
-        observed = revision_;
-      }
+      const auto observed = signal_->GetRevision();
       const auto info = source_.info();
       bool progress = false;
       if (info) {
@@ -212,8 +198,8 @@ class OfflinePipeline::Impl final {
           return !Stopping();
       }
       if (!progress) {
-        std::unique_lock lock(mutex_);
-        changed_.wait(lock, [&] { return stopping_ || revision_ != observed; });
+        if (Stopping()) return false;
+        signal_->Wait(observed);
       }
     }
     return false;
@@ -243,12 +229,15 @@ class OfflinePipeline::Impl final {
                      fmt::ptr(this));
         // Consuming the last EOF acknowledges completion to MediaSource.
         // Wait for its final state before Stop can turn it into cancellation.
-        std::unique_lock lock(mutex_);
-        changed_.wait(lock, [&] {
-          return stopping_ ||
-                 source_.status().state == AvMediaSourceState::kEnded;
-        });
-        completed = !stopping_;
+        for (;;) {
+          const auto observed = signal_->GetRevision();
+          if (Stopping()) break;
+          if (source_.status().state == AvMediaSourceState::kEnded) {
+            completed = true;
+            break;
+          }
+          signal_->Wait(observed);
+        }
       }
     } catch (...) {
       Fail(std::current_exception());
@@ -304,8 +293,8 @@ class OfflinePipeline::Impl final {
   }
 
   mutable std::mutex mutex_;
-  std::condition_variable changed_;
-  std::uint64_t revision_ = 0;
+  std::shared_ptr<internal::WaitSignal> signal_ =
+      std::make_shared<internal::WaitSignal>();
   OfflinePipelineState state_ = OfflinePipelineState::kStopped;
   bool started_ = false;
   bool stopping_ = false;

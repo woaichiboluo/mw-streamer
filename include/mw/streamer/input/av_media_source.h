@@ -1,7 +1,6 @@
 #ifndef MW_STREAMER_INPUT_AV_MEDIA_SOURCE_H_
 #define MW_STREAMER_INPUT_AV_MEDIA_SOURCE_H_
 
-#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <functional>
@@ -20,9 +19,6 @@ struct AvMediaSourceConfig {
   AvInputProxyConfig proxy;
   AvDecoderConfig video_decoder;
   AvDecoderConfig audio_decoder;
-  // Maximum packet-queue wait before servicing connection/control events.
-  // This does not change FFmpeg's network read timeout. Must be positive.
-  std::chrono::milliseconds packet_read_timeout{100};
 };
 
 enum class AvMediaSourceState {
@@ -48,11 +44,14 @@ struct AvMediaSourceStatus {
 
 // Owns an input proxy and one decoder per selected track. Decoders own the
 // frame queues; this class adds no frame queue, filtering or clock mapping.
-// Dispatch retains at most one input item. A full decoder input queue pauses
-// further proxy reads until that item is accepted, including ordered EOF/reset
+// Dispatch blocks on bounded decoder input queues, including ordered EOF/reset
 // submission to all present tracks. One stalled track may delay the other.
-// Empty packet reads wait up to packet_read_timeout; decoder backpressure and
-// final EOF acknowledgements wait for notifications instead of polling.
+// Stop or a terminal input/decoder failure wakes blocked delivery to both
+// tracks. Recoverable connection events wait for blocked delivery to resume
+// before the dispatcher invokes their state observers. They do not discard
+// queued media. Empty packet reads block until data, connection events or
+// cancellation. Decoder backpressure is handled inside its queue; final EOF
+// acknowledgement waits for the consumers to read both tracks' EOF items.
 // Lifecycle/configuration calls must be serialized externally. One reader per
 // track may run concurrently with the other track and Stop. Consume every
 // present track to relieve backpressure. Stop and finish readers before restart
@@ -71,12 +70,6 @@ class MW_STREAMER_API AvMediaSource final {
   // query status/info or RequestStop, but must not change configuration,
   // Start/Stop or destroy the source. Exceptions fail the source.
   using OnPacket = std::function<void(const ffmpeg::Packet&)>;
-  // Wakeup slot for the sole frame consumer. Invoked outside locks when a
-  // decoded frame/EOF is queued or source status changes, potentially
-  // concurrently from both decoder workers and the controller. A notification
-  // does not guarantee a readable frame. Observers may query/read/RequestStop,
-  // but must not Start/Stop/destroy the source. Exceptions are logged.
-  using OnReadReady = std::function<void()>;
 
   // Invalid input/retry/decoder configuration throws synchronously.
   explicit AvMediaSource(AvMediaSourceConfig config = {});
@@ -95,10 +88,10 @@ class MW_STREAMER_API AvMediaSource final {
   void SetOnStateChanged(OnStateChanged callback);
   // Register only before Start or after Stop.
   void SetOnPacket(OnPacket callback);
-  // Thread-safe registration/replacement, including while running. Existing
-  // frames/status are not replayed. Does not wait for in-flight callbacks:
-  // capture weak references or independently owned state to protect lifetime.
-  void SetOnReadReady(OnReadReady callback);
+  // Thread-safe weak wakeup slot for the sole frame consumer. Decoder queues
+  // and source state changes notify it directly. Binding wakes it to rescan
+  // current frames/status; a notification does not guarantee a readable frame.
+  void SetReadSignal(std::weak_ptr<internal::WaitSignal> signal);
   // Starts asynchronously. Invalid URL/restart/thread creation failure returns
   // false and logs; connection/decode failures are reported through status.
   // Call Stop before another Start.
