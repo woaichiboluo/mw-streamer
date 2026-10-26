@@ -740,7 +740,7 @@ void CheckBufferedAv(int buffered_frames, bool full_hd,
       const auto* samples =
           reinterpret_cast<const float*>(frame->extended_data[channel]);
       for (int sample = 0; sample < frame->nb_samples; ++sample)
-        frame_energy += samples[sample] * samples[sample];
+        frame_energy += static_cast<double>(samples[sample] * samples[sample]);
     }
     energy += frame_energy;
     const bool audible = frame_energy > 0.01;

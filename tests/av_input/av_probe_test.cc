@@ -318,12 +318,13 @@ class HeaderCheckingHttpServer final {
         throw std::runtime_error("HTTP probe response timed out");
 #ifdef _WIN32
       constexpr int kSendFlags = 0;
+      const auto remaining = static_cast<int>(response.size() - sent);
 #else
       constexpr int kSendFlags = MSG_NOSIGNAL;
+      const auto remaining = response.size() - sent;
 #endif
       const auto count =
-          send(client, response.data() + sent,
-               static_cast<int>(response.size() - sent), kSendFlags);
+          send(client, response.data() + sent, remaining, kSendFlags);
       if (count <= 0)
         throw std::runtime_error("Cannot send HTTP probe response");
       sent += static_cast<std::size_t>(count);
