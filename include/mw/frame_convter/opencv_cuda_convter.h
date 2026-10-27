@@ -12,6 +12,7 @@ namespace mw::frame_convter {
 
 // Synchronous frame conversion. ToMat/ToFrame run entirely on the GPU and
 // support CUDA NV12/P010 frames with native color metadata.
+// Unspecified colorspace uses BT709 for conversion; properties are preserved.
 // HDR tone mapping and primaries/transfer-function changes are not supported.
 // For ToMat/ToFrame, OpenCV's current CUDA context must match the frame's
 // context; a mismatch throws std::invalid_argument without staging copies.

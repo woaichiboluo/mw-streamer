@@ -135,6 +135,7 @@ Color ReadColor(const AVFrame& frame, AVPixelFormat format) {
   Color color{};
   color.p010 = format == AV_PIX_FMT_P010LE;
   switch (frame.colorspace) {
+    case AVCOL_SPC_UNSPECIFIED:
     case AVCOL_SPC_BT709:
       color.kr = 0.2126F;
       color.kb = 0.0722F;

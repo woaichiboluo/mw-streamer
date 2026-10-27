@@ -77,6 +77,7 @@ bool IsRgb(const AVFrame& frame) {
 
 int Matrix(const AVFrame& frame) {
   switch (frame.colorspace) {
+    case AVCOL_SPC_UNSPECIFIED:
     case AVCOL_SPC_BT709:
       return SWS_CS_ITU709;
     case AVCOL_SPC_BT470BG:

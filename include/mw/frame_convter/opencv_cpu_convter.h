@@ -11,7 +11,8 @@ namespace mw::frame_convter {
 
 // CPU pixel conversion only: no resizing, device transfers, tone mapping or
 // changes to primaries/transfer functions. YUV conversions require native
-// AVFrame colorspace and color_range; missing/unsupported values throw.
+// AVFrame color_range. Unspecified colorspace uses BT709 for conversion;
+// properties are preserved. Unsupported matrices and missing ranges throw.
 // Calls are synchronous and independent, and may run concurrently. Inputs must
 // remain alive and read-only for the call. Returned buffers are independently
 // owned; an OpenCV ROI and padded/negative FFmpeg linesizes are supported.

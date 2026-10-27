@@ -5,6 +5,7 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <cmath>
 #include <cstdint>
+#include <opencv2/core.hpp>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -117,6 +118,40 @@ TEST_CASE("CPU frame conversion uses native range and matrix metadata",
     CheckNear(OpencvCpuConvter::ToMat(frame, RgbOrder::kBgr),
               cv::Vec3b(0, 0, 255), 3);
   }
+}
+
+TEST_CASE("CPU frame conversion defaults unspecified matrix to BT709",
+          "[frame-convter][cpu]") {
+  const auto format = GENERATE(AV_PIX_FMT_YUV420P, AV_PIX_FMT_NV12,
+                               AV_PIX_FMT_P010LE, AV_PIX_FMT_YUV420P10LE);
+  const auto range = GENERATE(AVCOL_RANGE_MPEG, AVCOL_RANGE_JPEG);
+  auto reference = Reference(format);
+  reference->color_range = range;
+  cv::Mat image(10, 18, CV_8UC3, cv::Scalar(40, 120, 200));
+  auto source = OpencvCpuConvter::ToFrame(image, reference);
+  const auto expected = OpencvCpuConvter::ToMat(source);
+  source->colorspace = AVCOL_SPC_UNSPECIFIED;
+  REQUIRE(cv::norm(OpencvCpuConvter::ToMat(source), expected, cv::NORM_INF) ==
+          0);
+  REQUIRE(source->colorspace == AVCOL_SPC_UNSPECIFIED);
+  REQUIRE(source->color_range == range);
+
+  reference->colorspace = AVCOL_SPC_UNSPECIFIED;
+  auto restored = OpencvCpuConvter::ToFrame(image, reference);
+  REQUIRE(cv::norm(OpencvCpuConvter::ToMat(restored), expected, cv::NORM_INF) ==
+          0);
+  REQUIRE(restored->colorspace == AVCOL_SPC_UNSPECIFIED);
+  REQUIRE(restored->color_range == range);
+
+  auto target = Reference(AV_PIX_FMT_YUV444P);
+  target->color_range = range;
+  auto converted = OpencvCpuConvter::Convert(source, target);
+  target->colorspace = AVCOL_SPC_UNSPECIFIED;
+  auto unspecified = OpencvCpuConvter::Convert(source, target);
+  REQUIRE(cv::norm(OpencvCpuConvter::ToMat(unspecified),
+                   OpencvCpuConvter::ToMat(converted), cv::NORM_INF) == 0);
+  REQUIRE(unspecified->colorspace == AVCOL_SPC_UNSPECIFIED);
+  REQUIRE(unspecified->color_range == range);
 }
 
 TEST_CASE("CPU frame conversion accepts bottom-up software frames",
@@ -308,8 +343,8 @@ TEST_CASE("CPU frame conversion rejects invalid inputs and missing color data",
     REQUIRE_THROWS_AS(OpencvCpuConvter::ToFrame(gray, reference),
                       std::invalid_argument);
   }
-  SECTION("missing color matrix") {
-    valid->colorspace = AVCOL_SPC_UNSPECIFIED;
+  SECTION("unsupported color matrix") {
+    valid->colorspace = AVCOL_SPC_BT2020_CL;
     REQUIRE_THROWS_AS(OpencvCpuConvter::ToMat(valid, RgbOrder::kBgr),
                       std::invalid_argument);
   }

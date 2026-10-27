@@ -129,10 +129,11 @@ void CheckYuv(const ffmpeg::Frame& frame, int y, int u, int v,
 TEST_CASE("CUDA conversion honors NV12 and P010 matrix range and RGB order",
           "[.][frame-convter][cuda]") {
   const auto format = GENERATE(AV_PIX_FMT_NV12, AV_PIX_FMT_P010LE);
-  const auto matrix = GENERATE(AVCOL_SPC_SMPTE170M, AVCOL_SPC_BT709);
+  const auto matrix =
+      GENERATE(AVCOL_SPC_SMPTE170M, AVCOL_SPC_BT709, AVCOL_SPC_UNSPECIFIED);
   const auto range = GENERATE(AVCOL_RANGE_MPEG, AVCOL_RANGE_JPEG);
   const bool limited = range == AVCOL_RANGE_MPEG;
-  const bool bt709 = matrix == AVCOL_SPC_BT709;
+  const bool bt709 = matrix != AVCOL_SPC_SMPTE170M;
   auto device = PrimaryDevice();
   SECTION("black and white honor native range") {
     const bool white = GENERATE(false, true);
@@ -162,7 +163,8 @@ TEST_CASE("CUDA conversion honors NV12 and P010 matrix range and RGB order",
 TEST_CASE("CUDA reverse conversion owns pixels and inherits reference metadata",
           "[.][frame-convter][cuda]") {
   const auto format = GENERATE(AV_PIX_FMT_NV12, AV_PIX_FMT_P010LE);
-  const auto matrix = GENERATE(AVCOL_SPC_SMPTE170M, AVCOL_SPC_BT709);
+  const auto matrix =
+      GENERATE(AVCOL_SPC_SMPTE170M, AVCOL_SPC_BT709, AVCOL_SPC_UNSPECIFIED);
   const auto range = GENERATE(AVCOL_RANGE_MPEG, AVCOL_RANGE_JPEG);
   const auto order = GENERATE(RgbOrder::kBgr, RgbOrder::kRgb);
   auto device = PrimaryDevice();
@@ -205,7 +207,7 @@ TEST_CASE("CUDA reverse conversion owns pixels and inherits reference metadata",
   storage.setTo(cv::Scalar(0, 0, 0));
   reference.Unref();
   const bool limited = range == AVCOL_RANGE_MPEG;
-  const bool bt709 = matrix == AVCOL_SPC_BT709;
+  const bool bt709 = matrix != AVCOL_SPC_SMPTE170M;
   const int y = limited ? (bt709 ? 63 : 81) : (bt709 ? 54 : 76);
   const int u = limited ? (bt709 ? 102 : 90) : (bt709 ? 99 : 85);
   CheckYuv(Download(frame), y, u, limited ? 240 : 255);
@@ -247,8 +249,8 @@ TEST_CASE(
     REQUIRE_THROWS_AS(OpencvCudaConvter::ToFrame(image, frame),
                       std::invalid_argument);
   }
-  SECTION("missing matrix") {
-    frame->colorspace = AVCOL_SPC_UNSPECIFIED;
+  SECTION("unsupported matrix") {
+    frame->colorspace = AVCOL_SPC_BT2020_CL;
     REQUIRE_THROWS_AS(OpencvCudaConvter::ToMat(frame), std::invalid_argument);
     REQUIRE_THROWS_AS(OpencvCudaConvter::ToFrame(image, frame),
                       std::invalid_argument);
