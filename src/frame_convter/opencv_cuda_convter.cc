@@ -8,20 +8,19 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <new>
 #include <stdexcept>
 #include <string>
-#include <utility>
 
 extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_cuda.h>
 #include <libavutil/imgutils.h>
-#include <libavutil/mem.h>
 #include <libavutil/pixdesc.h>
 }
 
 #include "cuda_pixels.h"
+#include "mw/frame_convter/internal/cuda_buffer_pool.h"
+#include "mw/frame_convter/internal/cuda_frame_pool.h"
 #include "mw/streamer/ffmpeg/error.h"
 
 namespace mw::frame_convter {
@@ -29,66 +28,11 @@ namespace {
 
 namespace ffmpeg = streamer::ffmpeg;
 
-void CheckCuda(cudaError_t status) {
-  if (status != cudaSuccess) {
-    throw std::runtime_error(std::string("CUDA 帧转换失败: ") +
-                             cudaGetErrorString(status));
-  }
-}
-
-void CheckDriver(CUresult status) {
-  if (status != CUDA_SUCCESS) {
-    const char* message = nullptr;
-    cuGetErrorString(status, &message);
-    throw std::runtime_error(std::string("CUDA 驱动操作失败: ") +
-                             (message ? message : "未知错误"));
-  }
-}
-
-class ContextScope final {
- public:
-  explicit ContextScope(CUcontext context) {
-    CheckDriver(cuCtxPushCurrent(context));
-  }
-  ~ContextScope() {
-    if (active_) {
-      CUcontext previous = nullptr;
-      cuCtxPopCurrent(&previous);
-    }
-  }
-  void Finish() {
-    CUcontext previous = nullptr;
-    const auto status = cuCtxPopCurrent(&previous);
-    active_ = false;
-    CheckDriver(status);
-  }
-  ContextScope(const ContextScope&) = delete;
-  ContextScope& operator=(const ContextScope&) = delete;
-
- private:
-  bool active_ = true;
-};
-
-// Declare after owned buffers so exceptional exits finish queued reads/writes
-// before buffers are released or control returns to the owner of the inputs.
-class ConversionCompletion final {
- public:
-  explicit ConversionCompletion(CUstream stream = nullptr) : stream_(stream) {}
-  ~ConversionCompletion() {
-    if (pending_) cuStreamSynchronize(stream_);
-  }
-  ConversionCompletion(const ConversionCompletion&) = delete;
-  ConversionCompletion& operator=(const ConversionCompletion&) = delete;
-
-  void Finish() {
-    CheckDriver(cuStreamSynchronize(stream_));
-    pending_ = false;
-  }
-
- private:
-  CUstream stream_;
-  bool pending_ = true;
-};
+using internal::CheckCuda;
+using internal::CheckDriver;
+using internal::ContextScope;
+using internal::FramePool;
+using internal::GpuMatBufferPool;
 
 void CheckSize(int width, int height) {
   if (width <= 0 || height <= 0 || width % 2 || height % 2 ||
@@ -230,7 +174,17 @@ internal::ColorMatrix ColorMatrix(const Color& color, RgbOrder order,
   return matrix;
 }
 
-CUcontext PrepareDevice(const AVCUDADeviceContext& frame_device) {
+void CheckStream(cudaStream_t stream, CUcontext expected) {
+  if (!stream) return;
+  CUcontext context = nullptr;
+  CheckDriver(cuStreamGetCtx(stream, &context));
+  if (context != expected) {
+    throw std::invalid_argument("CUDA stream 与帧必须使用同一上下文");
+  }
+}
+
+CUcontext CheckContext(const AVCUDADeviceContext& frame_device,
+                       cudaStream_t stream) {
   // Validate before initializing a runtime context or doing GPU work. In
   // particular, an unbound caller must not create a different primary context.
   CUcontext current = nullptr;
@@ -238,9 +192,7 @@ CUcontext PrepareDevice(const AVCUDADeviceContext& frame_device) {
   if (current != frame_device.cuda_ctx) {
     throw std::invalid_argument("OpenCV 与 FFmpeg 必须使用同一 CUDA 上下文");
   }
-  CheckDriver(cuStreamSynchronize(frame_device.stream));
-  // Includes work submitted by the caller on non-default OpenCV streams.
-  CheckCuda(cudaDeviceSynchronize());
+  CheckStream(stream, current);
   return current;
 }
 
@@ -269,12 +221,13 @@ void CheckNpp(NppStatus status) {
   }
 }
 
-NppStreamContext NppContext() {
+NppStreamContext NppContext(cudaStream_t cuda_stream) {
   int device = 0;
   CheckCuda(cudaGetDevice(&device));
   cudaDeviceProp properties{};
   CheckCuda(cudaGetDeviceProperties(&properties, device));
   NppStreamContext stream{};
+  stream.hStream = cuda_stream;
   stream.nCudaDeviceId = device;
   stream.nMultiProcessorCount = properties.multiProcessorCount;
   stream.nMaxThreadsPerMultiProcessor = properties.maxThreadsPerMultiProcessor;
@@ -282,7 +235,7 @@ NppStreamContext NppContext() {
   stream.nSharedMemPerBlock = properties.sharedMemPerBlock;
   stream.nCudaDevAttrComputeCapabilityMajor = properties.major;
   stream.nCudaDevAttrComputeCapabilityMinor = properties.minor;
-  CheckCuda(cudaStreamGetFlags(nullptr, &stream.nStreamFlags));
+  CheckCuda(cudaStreamGetFlags(cuda_stream, &stream.nStreamFlags));
   return stream;
 }
 
@@ -291,28 +244,6 @@ NppStreamContext NppContext() {
 // float images. Dispatch depends only on the frame's native format/metadata.
 bool UseNpp(const Color& color) {
   return !color.p010 && color.chroma_x == 0.5F && color.chroma_y == 0.5F;
-}
-
-ffmpeg::Frame AllocateFrame(const ffmpeg::Frame& reference,
-                            const AVHWFramesContext& context, int width,
-                            int height) {
-  const auto unref = [](AVBufferRef* value) { av_buffer_unref(&value); };
-  const std::unique_ptr<AVBufferRef, decltype(unref)> pool(
-      av_hwframe_ctx_alloc(context.device_ref), unref);
-  if (!pool) throw std::bad_alloc();
-  auto* output_context = reinterpret_cast<AVHWFramesContext*>(pool->data);
-  output_context->format = AV_PIX_FMT_CUDA;
-  output_context->sw_format = context.sw_format;
-  output_context->width = width;
-  output_context->height = height;
-  ffmpeg::FfmpegException::throwIfError(av_hwframe_ctx_init(pool.get()),
-                                        "初始化 CUDA 转换帧池");
-  ffmpeg::Frame output;
-  ffmpeg::FfmpegException::throwIfError(
-      av_hwframe_get_buffer(pool.get(), output.get(), 0), "分配 CUDA 转换帧");
-  output.CopyPropertiesFrom(reference);
-  output.ClearCrop();
-  return output;
 }
 
 bool Contains(const AVPixelFormat* formats, AVPixelFormat format) {
@@ -356,10 +287,68 @@ void ValidateUploadPixels(const ffmpeg::Frame& source) {
   }
 }
 
+CUcontext DeviceContext(const ffmpeg::HwDeviceContext& device) {
+  if (!device.get() || !device.get()->data) {
+    throw std::invalid_argument("转换器需要已初始化的 CUDA 设备");
+  }
+  const auto* hardware =
+      reinterpret_cast<const AVHWDeviceContext*>(device.get()->data);
+  if (hardware->type != AV_HWDEVICE_TYPE_CUDA || !hardware->hwctx) {
+    throw std::invalid_argument("转换器需要已初始化的 CUDA 设备");
+  }
+  const auto* cuda = static_cast<const AVCUDADeviceContext*>(hardware->hwctx);
+  if (!cuda->cuda_ctx) {
+    throw std::invalid_argument("CUDA 设备上下文未初始化");
+  }
+  return cuda->cuda_ctx;
+}
+
 }  // namespace
 
+class OpencvCudaConvter::Impl {
+ public:
+  Impl(const ffmpeg::HwDeviceContext& source, std::size_t pool_bytes)
+      : device(source),
+        context(DeviceContext(device)),
+        buffers(context, pool_bytes) {}
+
+  void CheckDevice(CUcontext actual) const {
+    if (actual != context) {
+      throw std::invalid_argument("CUDA 帧不属于转换器绑定的上下文");
+    }
+  }
+
+  ffmpeg::HwDeviceContext device;
+  CUcontext context;
+  GpuMatBufferPool buffers;
+  FramePool uploads;
+  FramePool outputs;
+};
+
+OpencvCudaConvter::OpencvCudaConvter(const ffmpeg::HwDeviceContext& device,
+                                     std::size_t pool_bytes)
+    : impl_(std::make_unique<Impl>(device, pool_bytes)) {}
+
+OpencvCudaConvter::~OpencvCudaConvter() = default;
+
+ffmpeg::Frame OpencvCudaConvter::allocate(const ffmpeg::Frame& reference,
+                                          int width, int height) {
+  CheckSize(width, height);
+  const auto& context = FrameContext(reference);
+  const auto& device =
+      *static_cast<const AVCUDADeviceContext*>(context.device_ctx->hwctx);
+  impl_->CheckDevice(device.cuda_ctx);
+  ContextScope context_scope(impl_->context);
+  auto output =
+      impl_->outputs.Get(impl_->device.get(), context.sw_format, width, height);
+  output.CopyPropertiesFrom(reference);
+  output.ClearCrop();
+  context_scope.Finish();
+  return output;
+}
+
 cv::cuda::GpuMat OpencvCudaConvter::ToMat(const ffmpeg::Frame& frame,
-                                          RgbOrder order) {
+                                          RgbOrder order, cudaStream_t stream) {
   const auto& context = FrameContext(frame);
   CheckSize(frame->width, frame->height);
   if (frame->width > context.width || frame->height > context.height) {
@@ -369,7 +358,8 @@ cv::cuda::GpuMat OpencvCudaConvter::ToMat(const ffmpeg::Frame& frame,
   const auto matrix = ColorMatrix(color, order, true);
   const auto& device =
       *static_cast<const AVCUDADeviceContext*>(context.device_ctx->hwctx);
-  PrepareDevice(device);
+  impl_->CheckDevice(device.cuda_ctx);
+  CheckContext(device, stream);
   const auto bytes =
       static_cast<std::size_t>(frame->width) * (color.p010 ? 2U : 1U);
   for (int plane = 0; plane < 2; ++plane) {
@@ -379,34 +369,38 @@ cv::cuda::GpuMat OpencvCudaConvter::ToMat(const ffmpeg::Frame& frame,
     }
     CheckPointer(frame->data[plane], device.cuda_ctx);
   }
-  cv::cuda::GpuMat output(frame->height, frame->width, CV_8UC3);
-  ConversionCompletion completion;
+  cv::cuda::GpuMat output(frame->height, frame->width, CV_8UC3,
+                          &impl_->buffers);
   const std::uint8_t* y = frame->data[0];
   const std::uint8_t* uv = frame->data[1];
   const auto y_step = static_cast<std::size_t>(frame->linesize[0]);
   const auto uv_step = static_cast<std::size_t>(frame->linesize[1]);
-  if (UseNpp(color)) {
-    const Npp8u* planes[] = {y, uv};
-    int steps[] = {NppStep(y_step), NppStep(uv_step)};
-    // NPP shipped with CUDA 12.8 uses output-affine offsets, as verified by
-    // matrix/range/channel-order tests. Its inverse-transform header instead
-    // documents input offsets.
-    CheckNpp(nppiNV12ToRGB_8u_ColorTwist32f_P2C3R_Ctx(
-        planes, steps, output.data, NppStep(output.step),
-        {frame->width, frame->height}, matrix.values, NppContext()));
-  } else {
-    CheckCuda(internal::YuvToRgb(y, y_step, uv, uv_step, color.p010,
-                                 frame->width, frame->height, color.chroma_x,
-                                 color.chroma_y, matrix, output.data,
-                                 output.step, nullptr));
+  try {
+    if (UseNpp(color)) {
+      const Npp8u* planes[] = {y, uv};
+      int steps[] = {NppStep(y_step), NppStep(uv_step)};
+      // NPP shipped with CUDA 12.8 uses output-affine offsets, as verified by
+      // matrix/range/channel-order tests. Its inverse-transform header instead
+      // documents input offsets.
+      CheckNpp(nppiNV12ToRGB_8u_ColorTwist32f_P2C3R_Ctx(
+          planes, steps, output.data, NppStep(output.step),
+          {frame->width, frame->height}, matrix.values, NppContext(stream)));
+    } else {
+      CheckCuda(internal::YuvToRgb(y, y_step, uv, uv_step, color.p010,
+                                   frame->width, frame->height, color.chroma_x,
+                                   color.chroma_y, matrix, output.data,
+                                   output.step, stream));
+    }
+  } catch (...) {
+    impl_->buffers.Retire(output);
+    throw;
   }
-  completion.Finish();
   return output;
 }
 
 ffmpeg::Frame OpencvCudaConvter::ToFrame(const cv::cuda::GpuMat& image,
                                          const ffmpeg::Frame& reference,
-                                         RgbOrder order) {
+                                         RgbOrder order, cudaStream_t stream) {
   if (image.empty() || image.type() != CV_8UC3 ||
       image.step < static_cast<std::size_t>(image.cols) * 3 ||
       image.step > static_cast<std::size_t>(INT_MAX)) {
@@ -418,87 +412,81 @@ ffmpeg::Frame OpencvCudaConvter::ToFrame(const cv::cuda::GpuMat& image,
   const auto matrix = ColorMatrix(color, order, false);
   const auto& device =
       *static_cast<const AVCUDADeviceContext*>(context.device_ctx->hwctx);
-  const auto current = PrepareDevice(device);
+  impl_->CheckDevice(device.cuda_ctx);
+  const auto current = CheckContext(device, stream);
   CheckPointer(image.data, current);
-  auto output = AllocateFrame(reference, context, image.cols, image.rows);
-  ConversionCompletion completion;
+  auto output = allocate(reference, image.cols, image.rows);
   auto* y = output->data[0];
   auto* uv = output->data[1];
   const auto y_step = static_cast<std::size_t>(output->linesize[0]);
   const auto uv_step = static_cast<std::size_t>(output->linesize[1]);
-  if (UseNpp(color)) {
-    Npp8u* planes[] = {y, uv};
-    int steps[] = {NppStep(y_step), NppStep(uv_step)};
-    CheckNpp(nppiRGBToNV12_8u_ColorTwist32f_C3P2R_Ctx(
-        image.data, NppStep(image.step), planes, steps,
-        {image.cols, image.rows}, matrix.values, NppContext()));
-  } else {
-    CheckCuda(internal::RgbToYuv(
-        image.data, image.step, y, y_step, uv, uv_step, color.p010, image.cols,
-        image.rows, color.chroma_x, color.chroma_y, matrix, nullptr));
+  try {
+    if (UseNpp(color)) {
+      Npp8u* planes[] = {y, uv};
+      int steps[] = {NppStep(y_step), NppStep(uv_step)};
+      CheckNpp(nppiRGBToNV12_8u_ColorTwist32f_C3P2R_Ctx(
+          image.data, NppStep(image.step), planes, steps,
+          {image.cols, image.rows}, matrix.values, NppContext(stream)));
+    } else {
+      CheckCuda(internal::RgbToYuv(image.data, image.step, y, y_step, uv,
+                                   uv_step, color.p010, image.cols, image.rows,
+                                   color.chroma_x, color.chroma_y, matrix,
+                                   stream));
+    }
+  } catch (...) {
+    impl_->outputs.Discard(output);
+    throw;
   }
-  completion.Finish();
   return output;
 }
 
-ffmpeg::Frame OpencvCudaConvter::CpuFrameToCuda(
-    const ffmpeg::Frame& source, const ffmpeg::HwDeviceContext& device) {
+ffmpeg::Frame OpencvCudaConvter::CpuFrameToCuda(const ffmpeg::Frame& source,
+                                                cudaStream_t stream) {
   ValidateUploadPixels(source);
-  if (!device.get() || !device.get()->data ||
-      reinterpret_cast<const AVHWDeviceContext*>(device.get()->data)->type !=
-          AV_HWDEVICE_TYPE_CUDA) {
-    throw std::invalid_argument("上传需要已初始化的 CUDA 设备");
-  }
-  auto device_ref = device.Ref();
-  const auto* cuda = static_cast<const AVCUDADeviceContext*>(
-      reinterpret_cast<const AVHWDeviceContext*>(device_ref.get()->data)
-          ->hwctx);
-  if (!cuda || !cuda->cuda_ctx) {
-    throw std::invalid_argument("CUDA 设备上下文未初始化");
-  }
+  ContextScope context_scope(impl_->context);
+  CheckStream(stream, impl_->context);
   const auto format = static_cast<AVPixelFormat>(source->format);
   const auto free_constraints = [](AVHWFramesConstraints* value) {
     av_hwframe_constraints_free(&value);
   };
   const std::unique_ptr<AVHWFramesConstraints, decltype(free_constraints)>
       constraints(
-          av_hwdevice_get_hwframe_constraints(device_ref.get(), nullptr),
+          av_hwdevice_get_hwframe_constraints(impl_->device.get(), nullptr),
           free_constraints);
   if (!constraints) throw std::runtime_error("无法查询 CUDA 帧格式限制");
   if (!Contains(constraints->valid_sw_formats, format)) {
     throw std::invalid_argument("CUDA 不支持上传该 CPU 像素布局");
   }
-  const auto unref = [](AVBufferRef* value) { av_buffer_unref(&value); };
-  const std::unique_ptr<AVBufferRef, decltype(unref)> pool(
-      av_hwframe_ctx_alloc(device_ref.get()), unref);
-  if (!pool) throw std::bad_alloc();
-  auto* frames = reinterpret_cast<AVHWFramesContext*>(pool->data);
-  frames->format = AV_PIX_FMT_CUDA;
-  frames->sw_format = format;
-  frames->width = source->width;
-  frames->height = source->height;
-  ffmpeg::FfmpegException::throwIfError(av_hwframe_ctx_init(pool.get()),
-                                        "初始化 CUDA 上传帧池");
-  AVPixelFormat* supported = nullptr;
-  ffmpeg::FfmpegException::throwIfError(
-      av_hwframe_transfer_get_formats(
-          pool.get(), AV_HWFRAME_TRANSFER_DIRECTION_TO, &supported, 0),
-      "查询 CUDA 上传支持格式");
-  const std::unique_ptr<AVPixelFormat, decltype(&av_free)> supported_owner(
-      supported, av_free);
-  if (!Contains(supported, format)) {
-    throw std::invalid_argument("CUDA 帧池不支持该上传格式");
-  }
-  ffmpeg::Frame output;
-  ffmpeg::FfmpegException::throwIfError(
-      av_hwframe_get_buffer(pool.get(), output.get(), 0), "分配 CUDA 上传帧");
-  ContextScope context_scope(cuda->cuda_ctx);
-  ConversionCompletion upload(cuda->stream);
-  ffmpeg::FfmpegException::throwIfError(
-      av_hwframe_transfer_data(output.get(), source.get(), 0), "上传 CPU 帧");
-  upload.Finish();
-  context_scope.Finish();
+  auto output = impl_->uploads.Get(impl_->device.get(), format, source->width,
+                                   source->height);
   output.CopyPropertiesFrom(source);
+  int row_bytes[4] = {};
+  ffmpeg::FfmpegException::throwIfError(
+      av_image_fill_linesizes(row_bytes, format, source->width),
+      "查询 CUDA 上传平面步长");
+  std::ptrdiff_t strides[4] = {};
+  for (int plane = 0; plane < 4; ++plane) strides[plane] = row_bytes[plane];
+  std::size_t sizes[4] = {};
+  ffmpeg::FfmpegException::throwIfError(
+      av_image_fill_plane_sizes(sizes, format, source->height, strides),
+      "查询 CUDA 上传平面尺寸");
+  try {
+    for (int plane = 0; plane < 4; ++plane) {
+      if (row_bytes[plane] == 0) continue;
+      CheckCuda(cudaMemcpy2DAsync(
+          output->data[plane],
+          static_cast<std::size_t>(output->linesize[plane]),
+          source->data[plane],
+          static_cast<std::size_t>(source->linesize[plane]),
+          static_cast<std::size_t>(row_bytes[plane]),
+          sizes[plane] / static_cast<std::size_t>(row_bytes[plane]),
+          cudaMemcpyHostToDevice, stream));
+    }
+    context_scope.Finish();
+  } catch (...) {
+    impl_->uploads.Discard(output);
+    throw;
+  }
   return output;
 }
 

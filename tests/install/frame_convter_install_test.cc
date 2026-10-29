@@ -6,6 +6,8 @@
 int main() {
   namespace ffmpeg = mw::streamer::ffmpeg;
   using mw::frame_convter::OpencvCpuConvter;
+  auto volatile allocate = &mw::frame_convter::OpencvCudaConvter::allocate;
+  if (allocate == nullptr) return 1;
   ffmpeg::Frame reference;
   reference->format = AV_PIX_FMT_YUV420P;
   reference->colorspace = AVCOL_SPC_BT709;
@@ -14,16 +16,11 @@ int main() {
   const cv::Mat image(48, 64, CV_8UC3, cv::Scalar(40, 120, 200));
   const auto frame = OpencvCpuConvter::ToFrame(image, reference);
   const auto restored = OpencvCpuConvter::ToMat(frame);
-  // Also resolve the CUDA API and its static dependencies without requiring
-  // a GPU in an SDK consumer's install check. CPU input must be rejected.
-  try {
-    mw::frame_convter::OpencvCudaConvter::ToMat(frame);
-    return 1;
-  } catch (const std::invalid_argument&) {
-  }
+  // Resolve the instance API and its static dependencies without requiring a
+  // GPU. A CPU device must be rejected before initializing CUDA.
   ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
   try {
-    mw::frame_convter::OpencvCudaConvter::CpuFrameToCuda(frame, cpu);
+    mw::frame_convter::OpencvCudaConvter converter(cpu);
     return 1;
   } catch (const std::invalid_argument&) {
   }

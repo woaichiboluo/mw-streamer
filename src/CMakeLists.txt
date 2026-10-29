@@ -145,7 +145,7 @@ if(BUILD_FRAME_CONVTER)
         CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED YES
         CUDA_RUNTIME_LIBRARY Shared)
     target_link_libraries(mw_frame_convter
-        PUBLIC mw::streamer opencv_core
+        PUBLIC mw::streamer opencv_core CUDA::cudart
         PRIVATE FFmpeg::swscale
-            CUDA::cuda_driver CUDA::cudart CUDA::nppicc CUDA::nppc)
+            CUDA::cuda_driver CUDA::nppicc CUDA::nppc)
 endif()
