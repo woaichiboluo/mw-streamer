@@ -712,6 +712,83 @@ TEST_CASE("Scheduler continues producing both tracks after normal source EOF",
 }
 
 TEST_CASE(
+    "Scheduler generates silent samples on every channel for video-only input",
+    "[scheduler][audio][silence]") {
+  const auto format =
+      GENERATE(AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_U8);
+  CAPTURE(format);
+  TemporaryVideoJump video;
+  auto source = Source();
+  auto config = Config();
+  config.syncer.encoder.audio_sample_format = format;
+  config.syncer.encoder.audio_sample_rate = 48000;
+  config.syncer.encoder.audio_channel_layout = AV_CHANNEL_LAYOUT_STEREO;
+  std::atomic<int> video_frames{0};
+  std::atomic<int> audio_frames{0};
+  std::atomic<int> audio_inputs{0};
+  std::atomic<int> errors{0};
+  std::atomic<bool> malformed{false};
+  std::atomic<bool> non_silent{false};
+  Scheduler scheduler(source, config);
+  scheduler.media_filter().SetOnAudio([&](const ffmpeg::Frame& frame) {
+    ++audio_inputs;
+    return frame.Ref();
+  });
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
+    ++video_frames;
+    return true;
+  });
+  scheduler.SetOnAudioFrame([&](const ffmpeg::Frame& frame) {
+    ++audio_frames;
+    if (frame->format != format || frame->sample_rate != 48000 ||
+        frame->ch_layout.nb_channels != 2 || frame->nb_samples <= 0 ||
+        !frame->extended_data) {
+      malformed.store(true);
+      return true;
+    }
+    const bool planar = av_sample_fmt_is_planar(format) != 0;
+    const int planes = planar ? frame->ch_layout.nb_channels : 1;
+    const auto bytes =
+        static_cast<std::size_t>(frame->nb_samples) *
+        static_cast<std::size_t>(av_get_bytes_per_sample(format)) *
+        (planar ? 1U : 2U);
+    const std::uint8_t silence = format == AV_SAMPLE_FMT_U8 ? 0x80 : 0;
+    for (int plane = 0; plane < planes; ++plane) {
+      const auto* samples = frame->extended_data[plane];
+      if (!samples) {
+        malformed.store(true);
+      } else if (!std::all_of(samples, samples + bytes,
+                              [silence](std::uint8_t value) {
+                                return value == silence;
+                              })) {
+        non_silent.store(true);
+      }
+    }
+    return true;
+  });
+  scheduler.SetOnError([&](std::exception_ptr) { ++errors; });
+  REQUIRE(source->Start(video.path()));
+  REQUIRE(WaitFor([&] { return source->info() != nullptr; }));
+  const auto info = source->info();
+  REQUIRE(info != nullptr);
+  REQUIRE(info->video_stream_index >= 0);
+  REQUIRE(info->audio_stream_index == -1);
+  REQUIRE(scheduler.Start());
+  // The absent input track must cross the two-second shared clock hold before
+  // Syncer starts producing its replacement audio frames.
+  const bool received = WaitFor([&] { return audio_frames.load() >= 8; }, 5s);
+  scheduler.Stop();
+  source->Stop();
+  CHECK(received);
+  CHECK(video_frames.load() > 0);
+  CHECK(audio_inputs.load() == 0);
+  CHECK_FALSE(malformed.load());
+  CHECK_FALSE(non_silent.load());
+  CHECK(errors.load() == 0);
+  CHECK_FALSE(scheduler.error());
+}
+
+TEST_CASE(
     "Scheduler adapts audio format and block size before business filtering",
     "[scheduler][audio][frame-size]") {
   auto source = Source();

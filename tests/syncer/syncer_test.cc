@@ -17,6 +17,7 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/mathematics.h>
 #include <libavutil/pixfmt.h>
+#include <libavutil/samplefmt.h>
 }
 
 #include "mw/streamer/ffmpeg/hw_device_context.h"
@@ -311,8 +312,14 @@ TEST_CASE("Syncer backup output does not restart the real-frame timeout",
 TEST_CASE("Syncer audio backups contain actual silence including unsigned PCM",
           "[syncer][timing]") {
   const auto format =
-      GENERATE(AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_U8, AV_SAMPLE_FMT_FLTP);
-  Syncer timing(AudioConfig(48000, format));
+      GENERATE(AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_S16P, AV_SAMPLE_FMT_U8,
+               AV_SAMPLE_FMT_U8P, AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_FLTP);
+  const int channels = GENERATE(1, 2, 6);
+  CAPTURE(format, channels);
+  auto config = AudioConfig(48000, format);
+  av_channel_layout_uninit(&config.encoder.audio_channel_layout);
+  av_channel_layout_default(&config.encoder.audio_channel_layout, channels);
+  Syncer timing(config);
   REQUIRE_FALSE(timing.Step(false, nullptr, 0).frame);
   REQUIRE_FALSE(timing.Step(false, nullptr, 4000000).frame);
   auto output = timing.Step(false, nullptr, 6000000);
@@ -320,16 +327,28 @@ TEST_CASE("Syncer audio backups contain actual silence including unsigned PCM",
   const auto& frame = *output.frame;
   REQUIRE(frame->format == format);
   REQUIRE(frame->sample_rate == 48000);
-  REQUIRE(frame->ch_layout.nb_channels == 1);
+  REQUIRE(frame->ch_layout.nb_channels == channels);
+  REQUIRE(av_channel_layout_compare(&frame->ch_layout,
+                                    &config.encoder.audio_channel_layout) == 0);
   REQUIRE(frame->nb_samples > 0);
   REQUIRE(frame->nb_samples <= 1024);
   REQUIRE(frame->time_base.num == 1);
   REQUIRE(frame->time_base.den == 48000);
   REQUIRE(frame->pts == 0);
-  const int bytes = frame->nb_samples * av_get_bytes_per_sample(format);
-  const int zero = format == AV_SAMPLE_FMT_U8 ? 128 : 0;
-  for (int i = 0; i < bytes; ++i) {
-    REQUIRE(frame->extended_data[0][i] == zero);
+  const bool planar = av_sample_fmt_is_planar(format) != 0;
+  const int planes = planar ? channels : 1;
+  const auto bytes = static_cast<std::size_t>(frame->nb_samples) *
+                     static_cast<std::size_t>(av_get_bytes_per_sample(format)) *
+                     static_cast<std::size_t>(planar ? 1 : channels);
+  const std::uint8_t zero =
+      format == AV_SAMPLE_FMT_U8 || format == AV_SAMPLE_FMT_U8P ? 0x80 : 0;
+  REQUIRE(frame->extended_data != nullptr);
+  for (int plane = 0; plane < planes; ++plane) {
+    CAPTURE(plane);
+    const auto* samples = frame->extended_data[plane];
+    REQUIRE(samples != nullptr);
+    REQUIRE(std::all_of(samples, samples + bytes,
+                        [zero](std::uint8_t value) { return value == zero; }));
   }
 }
 

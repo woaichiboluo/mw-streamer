@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <array>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -22,6 +24,7 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/error.h>
+#include <libavutil/samplefmt.h>
 }
 
 #include "mw/log.h"
@@ -31,6 +34,7 @@ extern "C" {
 #include "mw/streamer/ffmpeg/packet.h"
 #include "mw/streamer/platform/wait_signal.h"
 #include "mw/streamer/platform/write_signal.h"
+#include "mw/streamer/syncer/syncer.h"
 
 namespace {
 
@@ -467,6 +471,113 @@ TEST_CASE("AvEncoder 自行对齐 AAC frame_size 并在 Stop 排空尾部",
   CHECK(source->duration == 0);
   CHECK(source->nb_samples == 3008);
   CHECK(source->time_base.den == 1000);
+}
+
+TEST_CASE("Syncer 无音频输入生成的静音经 AAC 编解码后保持静音",
+          "[av-encoder][audio][silence][drain]") {
+  const auto format =
+      GENERATE(AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_U8);
+  auto config = Config();
+  config.video_pixel_format = AV_PIX_FMT_NONE;
+  config.audio_sample_format = format;
+  mw::streamer::SyncerConfig syncer_config;
+  syncer_config.encoder = config;
+  syncer_config.options.initial_timeout = 20ms;
+  mw::streamer::Syncer syncer(syncer_config);
+  std::vector<ffmpeg::Frame> silence;
+  constexpr std::size_t kFrameCount = 160;
+  std::int64_t now_us = 0;
+  std::int64_t source_samples = 0;
+  bool has_short_block = false;
+  // Advancing the simulated clock also exercises the short fillers at the
+  // edge of a timeout batch, without sleeping through the shared clock hold.
+  for (int step = 0; step < 4096 && silence.size() < kFrameCount; ++step) {
+    auto result = syncer.Step(false, nullptr, now_us);
+    if (result.frame) {
+      const auto& frame = *result.frame;
+      REQUIRE(frame->format == format);
+      REQUIRE(frame->sample_rate == 48000);
+      REQUIRE(frame->ch_layout.nb_channels == 2);
+      REQUIRE(frame->nb_samples > 0);
+      REQUIRE(frame->nb_samples <= 1024);
+      CHECK(frame->pts == source_samples);
+      CHECK(frame->duration == frame->nb_samples);
+      CHECK(frame->time_base.num == 1);
+      CHECK(frame->time_base.den == 48000);
+      const bool planar = av_sample_fmt_is_planar(format) != 0;
+      const int planes = planar ? frame->ch_layout.nb_channels : 1;
+      const auto plane_bytes =
+          static_cast<std::size_t>(frame->nb_samples) *
+          static_cast<std::size_t>(av_get_bytes_per_sample(format)) *
+          (planar ? 1U : 2U);
+      const std::uint8_t expected = format == AV_SAMPLE_FMT_U8 ? 128 : 0;
+      for (int plane = 0; plane < planes; ++plane) {
+        REQUIRE(frame->extended_data[plane] != nullptr);
+        CHECK(std::all_of(
+            frame->extended_data[plane],
+            frame->extended_data[plane] + plane_bytes,
+            [expected](std::uint8_t value) { return value == expected; }));
+      }
+      source_samples += frame->nb_samples;
+      has_short_block = has_short_block || frame->nb_samples < 1024;
+      silence.push_back(std::move(*result.frame));
+    }
+    const auto wake_us = std::max(now_us, result.wake_us);
+    now_us = !result.frame && wake_us == now_us ? now_us + 1 : wake_us;
+  }
+  REQUIRE(silence.size() == kFrameCount);
+  REQUIRE(has_short_block);
+  ffmpeg::HwDeviceContext cpu(ffmpeg::HwDeviceType::kCpu);
+  Capture capture;
+  AvEncoder encoder(cpu);
+  capture.Bind(encoder);
+  REQUIRE(encoder.Start(config));
+  const auto streams = encoder.streams();
+  REQUIRE(streams.size() == 1);
+  REQUIRE(streams[0].codec_parameters.get()->codec_id == AV_CODEC_ID_AAC);
+  for (const auto& frame : silence) {
+    REQUIRE(RetryUntilAccepted([&] { return encoder.TryPushAudio(frame); }));
+  }
+  encoder.Stop();
+  CHECK_FALSE(encoder.error());
+  CHECK_FALSE(capture.error);
+  REQUIRE_FALSE(capture.packets.empty());
+  const auto decoded = Decode(streams[0], capture.packets);
+  REQUIRE_FALSE(decoded.empty());
+  bool finite = true;
+  double maximum = 0;
+  long double squared = 0;
+  std::size_t decoded_samples = 0;
+  for (const auto& frame : decoded) {
+    REQUIRE(frame->format == AV_SAMPLE_FMT_FLTP);
+    REQUIRE(frame->sample_rate == 48000);
+    REQUIRE(frame->ch_layout.nb_channels == 2);
+    REQUIRE(frame->nb_samples > 0);
+    for (int channel = 0; channel < frame->ch_layout.nb_channels; ++channel) {
+      REQUIRE(frame->extended_data[channel] != nullptr);
+      const auto* samples =
+          reinterpret_cast<const float*>(frame->extended_data[channel]);
+      for (int sample = 0; sample < frame->nb_samples; ++sample) {
+        const double value = samples[sample];
+        ++decoded_samples;
+        if (!std::isfinite(value)) {
+          finite = false;
+          continue;
+        }
+        maximum = std::max(maximum, std::abs(value));
+        const auto wide_value = static_cast<long double>(value);
+        squared += wide_value * wide_value;
+      }
+    }
+  }
+  REQUIRE(decoded_samples >= static_cast<std::size_t>(source_samples) * 2);
+  const auto rms =
+      std::sqrt(squared / static_cast<long double>(decoded_samples));
+  CAPTURE(av_get_sample_fmt_name(format), source_samples, decoded_samples,
+          maximum, rms);
+  CHECK(finite);
+  CHECK(maximum <= 1e-6);
+  CHECK(rms <= 1e-6L);
 }
 
 TEST_CASE("AvEncoder 双轨并行产包且 Stop 排空延迟视频编码",
