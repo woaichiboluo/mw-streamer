@@ -3,8 +3,8 @@
 #include <stdexcept>
 #include <vector>
 
-#include "mw/streamer/remuxer/packet_interleaver.h"
 #include "remuxer_test_support.h"
+#include "streamer/remuxer/packet_interleaver.h"
 
 namespace {
 namespace ffmpeg = mw::streamer::ffmpeg;

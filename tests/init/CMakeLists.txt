@@ -15,5 +15,6 @@ if(BUILD_SHARED)
     target_link_libraries(mw_streamer_lifecycle_tests PRIVATE
         Catch2::Catch2WithMain mw_streamer_test_static ZLMediaKit::MediaKit mw::log)
     add_test(NAME mw_streamer_lifecycle_tests COMMAND mw_streamer_lifecycle_tests)
+    set_tests_properties(mw_streamer_lifecycle_tests PROPERTIES TIMEOUT 30)
     mw_copy_test_runtime_dlls(mw_streamer_lifecycle_tests)
 endif()

@@ -1,5 +1,5 @@
-#ifndef MW_STREAMER_SYNCER_SYNCER_TIMING_H_
-#define MW_STREAMER_SYNCER_SYNCER_TIMING_H_
+#ifndef MW_SRC_STREAMER_SYNCER_SYNCER_TIMING_H_
+#define MW_SRC_STREAMER_SYNCER_SYNCER_TIMING_H_
 
 #include <cstdint>
 #include <memory>
@@ -28,4 +28,4 @@ class SyncerTiming final {
 
 }  // namespace mw::streamer::internal
 
-#endif  // MW_STREAMER_SYNCER_SYNCER_TIMING_H_
+#endif  // MW_SRC_STREAMER_SYNCER_SYNCER_TIMING_H_

@@ -251,6 +251,15 @@ void TaskExecutorGetterImp::close() noexcept {
         _issued_executors.clear();
         _thread_pos = 0;
     }
+    // Tasks can retain their executor after the pool releases its references.
+    // Join while we still own every poller, so the last task cannot destroy
+    // its own event loop as it unwinds on that loop's thread.
+    for (auto &executor : exclusive_pollers) {
+        static_pointer_cast<EventPoller>(executor)->shutdown();
+    }
+    for (auto &executor : threads) {
+        static_pointer_cast<EventPoller>(executor)->shutdown();
+    }
     exclusive_pollers.clear();
     threads.clear();
 }

@@ -185,8 +185,9 @@ void ZeroPixels(const ffmpeg::Frame& frame) {
   for (int plane = 0; plane < 2; ++plane) {
     const auto rows = static_cast<std::size_t>(plane == 0 ? frame->height
                                                           : frame->height / 2);
-    REQUIRE(cudaMemset2DAsync(frame->data[plane], frame->linesize[plane], 0,
-                              bytes, rows, nullptr) == cudaSuccess);
+    REQUIRE(cudaMemset2DAsync(frame->data[plane],
+                              static_cast<std::size_t>(frame->linesize[plane]),
+                              0, bytes, rows, nullptr) == cudaSuccess);
   }
   REQUIRE(cudaStreamSynchronize(nullptr) == cudaSuccess);
 }
@@ -631,11 +632,12 @@ TEST_CASE("CUDA mat pool reuses blocks after unordered releases",
   for (int index = 0; index < 6; ++index) {
     images.push_back(converter.ToMat(frame));
     REQUIRE(images.back().allocator != cv::cuda::GpuMat::getStdAllocator());
-    REQUIRE(images.back().step * images.back().rows == kBudget / 6);
+    REQUIRE(images.back().step * static_cast<std::size_t>(images.back().rows) ==
+            kBudget / 6);
   }
   REQUIRE(cudaStreamSynchronize(nullptr) == cudaSuccess);
   std::vector<std::uint8_t*> released;
-  for (const int index : {4, 1, 5, 0, 3, 2}) {
+  for (const auto index : std::array<std::size_t, 6>{4, 1, 5, 0, 3, 2}) {
     released.push_back(images[index].data);
     images[index].release();
   }
@@ -1034,12 +1036,12 @@ TEST_CASE("CUDA allocate validates references and restores the calling context",
                                  AVCOL_RANGE_MPEG, 16, 128, 128);
   auto reference = converter.CpuFrameToCuda(software);
   WaitForFrame(reference);
-  for (const auto dimensions : {std::pair<int, int>{0, 16},
-                                {-2, 16},
-                                {15, 16},
-                                {16, 0},
-                                {16, -2},
-                                {16, 15}}) {
+  for (const auto& dimensions : {std::pair<int, int>{0, 16},
+                                 {-2, 16},
+                                 {15, 16},
+                                 {16, 0},
+                                 {16, -2},
+                                 {16, 15}}) {
     REQUIRE_THROWS_AS(
         converter.allocate(reference, dimensions.first, dimensions.second),
         std::invalid_argument);

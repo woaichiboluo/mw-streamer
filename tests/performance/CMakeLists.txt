@@ -3,6 +3,7 @@ add_executable(mw_latency_unit_tests
     latency_test.cc
     "${PROJECT_SOURCE_DIR}/src/streamer/performance/latency.cc"
     "${PROJECT_SOURCE_DIR}/src/streamer/performance/settings.cc")
+target_include_directories(mw_latency_unit_tests PRIVATE "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(mw_latency_unit_tests PRIVATE
     Catch2::Catch2WithMain mw::log FFmpeg::avutil)
 mw_copy_test_runtime_dlls(mw_latency_unit_tests)

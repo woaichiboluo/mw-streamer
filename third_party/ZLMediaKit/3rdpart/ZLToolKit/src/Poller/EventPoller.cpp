@@ -84,6 +84,9 @@ EventPoller::EventPoller(std::string name) {
 }
 
 void EventPoller::shutdown() {
+    if (!_loop_thread) {
+        return;
+    }
     async_l([]() { throw ExitException(); }, false, true);
 
     if (_loop_thread) {
@@ -96,6 +99,22 @@ void EventPoller::shutdown() {
         }
         delete _loop_thread;
         _loop_thread = nullptr;
+    }
+    // Pending callbacks can retain this poller. Cancel timers without running
+    // them and flush teardown work while the pool still owns us. Destruction
+    // of those callbacks may enqueue more work, so repeat until both are empty.
+    for (;;) {
+        {
+            decltype(_delay_task_map) cancelled;
+            cancelled.swap(_delay_task_map);
+        }
+        {
+            lock_guard<mutex> lock(_mtx_task);
+            if (_list_task.empty() && _delay_task_map.empty()) {
+                break;
+            }
+        }
+        onPipeEvent(true);
     }
 }
 

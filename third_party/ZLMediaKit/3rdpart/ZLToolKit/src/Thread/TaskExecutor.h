@@ -293,12 +293,12 @@ public:
 
     /**
      * Release all shared and exclusive pollers held by this pool.
-     * Pollers are destroyed after the collection lock is released.
+     * Pollers are stopped and joined after the collection lock is released.
      */
     void releaseAllPollers();
 
     /**
-     * Close this pool and release all shared and exclusive pollers.
+     * Close this pool, join all shared and exclusive pollers, then release them.
      * Repeated and concurrent calls from outside the pool are safe.
      */
     void close() noexcept;

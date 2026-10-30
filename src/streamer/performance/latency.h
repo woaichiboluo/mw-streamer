@@ -1,5 +1,5 @@
-#ifndef MW_STREAMER_PERFORMANCE_LATENCY_H_
-#define MW_STREAMER_PERFORMANCE_LATENCY_H_
+#ifndef MW_SRC_STREAMER_PERFORMANCE_LATENCY_H_
+#define MW_SRC_STREAMER_PERFORMANCE_LATENCY_H_
 
 #include <chrono>
 #include <cstdint>
@@ -70,4 +70,4 @@ class StageLatency final {
 
 }  // namespace mw::streamer::internal
 
-#endif  // MW_STREAMER_PERFORMANCE_LATENCY_H_
+#endif  // MW_SRC_STREAMER_PERFORMANCE_LATENCY_H_

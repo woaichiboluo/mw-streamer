@@ -16,8 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include "log/performance.h"
 #include "mw/log.h"
-#include "mw/log/internal/performance.h"
 
 namespace mw::log {
 namespace {

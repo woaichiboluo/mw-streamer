@@ -1,5 +1,5 @@
-#ifndef MW_STREAMER_PERFORMANCE_INTERNAL_SETTINGS_H_
-#define MW_STREAMER_PERFORMANCE_INTERNAL_SETTINGS_H_
+#ifndef MW_SRC_STREAMER_PERFORMANCE_SETTINGS_H_
+#define MW_SRC_STREAMER_PERFORMANCE_SETTINGS_H_
 
 #include "mw/streamer/performance/config.h"
 
@@ -37,4 +37,4 @@ PerformanceMode GetPerformanceMode(PerformanceStage stage) noexcept;
 
 }  // namespace mw::streamer::internal
 
-#endif  // MW_STREAMER_PERFORMANCE_INTERNAL_SETTINGS_H_
+#endif  // MW_SRC_STREAMER_PERFORMANCE_SETTINGS_H_

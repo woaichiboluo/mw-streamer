@@ -17,10 +17,10 @@ extern "C" {
 }
 
 #include "mw/log.h"
-#include "mw/streamer/pipeline/internal/audio_probe_timeout.h"
-#include "mw/streamer/pipeline/internal/remux_audio_probe.h"
 #include "mw/streamer/platform/thread.h"
-#include "mw/streamer/remuxer/remux_output.h"
+#include "streamer/pipeline/audio_probe_timeout.h"
+#include "streamer/pipeline/remux_audio_probe.h"
+#include "streamer/remuxer/remux_output.h"
 
 namespace mw::streamer {
 namespace {
@@ -786,8 +786,8 @@ class RemuxPipeline::Impl final {
   std::exception_ptr error_;
   OnPacket on_packet_;
   OnError on_error_;
-  internal::Thread retirement_;
-  internal::Thread worker_;
+  Thread retirement_;
+  Thread worker_;
 };
 
 RemuxPipeline::RemuxPipeline(RemuxPipelineConfig config)

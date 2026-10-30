@@ -1,5 +1,5 @@
-#ifndef MW_STREAMER_REMUXER_REMUX_OUTPUT_H_
-#define MW_STREAMER_REMUXER_REMUX_OUTPUT_H_
+#ifndef MW_SRC_STREAMER_REMUXER_REMUX_OUTPUT_H_
+#define MW_SRC_STREAMER_REMUXER_REMUX_OUTPUT_H_
 
 #include <cstdint>
 #include <exception>
@@ -102,4 +102,4 @@ class RemuxOutput final : public mediakit::MediaSourceEvent,
 
 }  // namespace mw::streamer::internal
 
-#endif  // MW_STREAMER_REMUXER_REMUX_OUTPUT_H_
+#endif  // MW_SRC_STREAMER_REMUXER_REMUX_OUTPUT_H_

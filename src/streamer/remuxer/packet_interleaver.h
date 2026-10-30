@@ -1,5 +1,5 @@
-#ifndef MW_STREAMER_REMUXER_PACKET_INTERLEAVER_H_
-#define MW_STREAMER_REMUXER_PACKET_INTERLEAVER_H_
+#ifndef MW_SRC_STREAMER_REMUXER_PACKET_INTERLEAVER_H_
+#define MW_SRC_STREAMER_REMUXER_PACKET_INTERLEAVER_H_
 
 #include <algorithm>
 #include <cstddef>
@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-#include "mw/streamer/remuxer/media_timestamp_converter.h"
+#include "streamer/remuxer/media_timestamp_converter.h"
 
 namespace mw::streamer::internal {
 
@@ -135,4 +135,4 @@ class PacketInterleaver final {
 
 }  // namespace mw::streamer::internal
 
-#endif  // MW_STREAMER_REMUXER_PACKET_INTERLEAVER_H_
+#endif  // MW_SRC_STREAMER_REMUXER_PACKET_INTERLEAVER_H_

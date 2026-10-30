@@ -1,15 +1,19 @@
 #include "mw/streamer/init/init.h"
 
 #include <array>
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 extern "C" {
@@ -269,6 +273,72 @@ TEST_CASE("ZLM public lifecycle supports shutdown and reinitialization") {
   }
   CHECK_THROWS_AS(mediakit::MediaSource::NullMediaSource(), std::logic_error);
   CHECK_THROWS_AS(toolkit::getCurrentMillisecond(), std::logic_error);
+}
+
+TEST_CASE("ZLM pool close joins tasks retaining their own poller") {
+  ContextOwner context(Init(TestConfig()), &Shutdown);
+  const auto check_close = [](auto pool, toolkit::EventPoller::Ptr poller) {
+    std::weak_ptr<toolkit::EventPoller> lifetime = poller;
+    std::promise<void> entered;
+    auto ready = entered.get_future();
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    std::atomic<bool> completed{false};
+    std::atomic<bool> followup_completed{false};
+    std::atomic<bool> delayed_executed{false};
+    poller->doDelayTask(60000, [held = poller, &delayed_executed] {
+      delayed_executed.store(true);
+      return std::uint64_t{0};
+    });
+    poller->async(
+        [held = poller, &entered, released, &completed, &followup_completed] {
+          entered.set_value();
+          released.wait();
+          held->async(
+              [held, &followup_completed] {
+                held->async(
+                    [held, &followup_completed] {
+                      followup_completed.store(true);
+                    },
+                    false);
+              },
+              false);
+          completed.store(true);
+        },
+        false);
+    ready.wait();
+    poller.reset();
+    // Closing must join the worker even while its callback owns the last
+    // reference outside the pool. Otherwise it can destroy its own event loop.
+    std::thread releaser([&] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      release.set_value();
+    });
+    pool->close();
+    const bool joined = completed.load();
+    const bool flushed = followup_completed.load();
+    releaser.join();
+    CHECK(joined);
+    CHECK(flushed);
+    CHECK_FALSE(delayed_executed.load());
+    CHECK(lifetime.expired());
+    CHECK_NOTHROW(pool->close());
+  };
+  SECTION("event pool") {
+    auto pool = toolkit::EventPollerPool::createPool();
+    auto poller = pool->getPoller();
+    check_close(std::move(pool), std::move(poller));
+  }
+  SECTION("exclusive event poller") {
+    auto pool = toolkit::EventPollerPool::createPool();
+    auto poller = pool->extractPoller();
+    check_close(std::move(pool), std::move(poller));
+  }
+  SECTION("work pool") {
+    auto pool = toolkit::WorkThreadPool::createPool();
+    auto poller = pool->getPoller();
+    check_close(std::move(pool), std::move(poller));
+  }
 }
 #endif
 

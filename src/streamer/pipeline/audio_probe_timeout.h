@@ -1,5 +1,5 @@
-#ifndef MW_STREAMER_PIPELINE_INTERNAL_AUDIO_PROBE_TIMEOUT_H_
-#define MW_STREAMER_PIPELINE_INTERNAL_AUDIO_PROBE_TIMEOUT_H_
+#ifndef MW_SRC_STREAMER_PIPELINE_AUDIO_PROBE_TIMEOUT_H_
+#define MW_SRC_STREAMER_PIPELINE_AUDIO_PROBE_TIMEOUT_H_
 
 #include <chrono>
 #include <condition_variable>
@@ -75,4 +75,4 @@ class AudioProbeTimeout final {
 
 }  // namespace mw::streamer::internal
 
-#endif  // MW_STREAMER_PIPELINE_INTERNAL_AUDIO_PROBE_TIMEOUT_H_
+#endif  // MW_SRC_STREAMER_PIPELINE_AUDIO_PROBE_TIMEOUT_H_

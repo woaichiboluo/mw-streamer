@@ -652,7 +652,7 @@ class StalledHttpServer final {
   std::mutex mutex_;
   std::condition_variable changed_;
   bool accepted_ = false;
-  mw::streamer::internal::Thread worker_;
+  mw::streamer::Thread worker_;
 };
 
 TEST_CASE("AvInputProxy Stop cancels opening I/O and empty consumers",

@@ -19,8 +19,8 @@ extern "C" {
 }
 
 #include "cuda_pixels.h"
-#include "mw/frame_convter/internal/cuda_buffer_pool.h"
-#include "mw/frame_convter/internal/cuda_frame_pool.h"
+#include "frame_convter/cuda_buffer_pool.h"
+#include "frame_convter/cuda_frame_pool.h"
 #include "mw/streamer/ffmpeg/error.h"
 
 namespace mw::frame_convter {

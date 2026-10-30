@@ -16,18 +16,10 @@ install(TARGETS mw_log mw_streamer EXPORT mw_streamerTargets
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 
-# These implementation headers are not part of the exported SDK API.
+# Only public SDK headers live in include/; implementation headers stay in src/.
 install(DIRECTORY "${PROJECT_SOURCE_DIR}/include/"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
-    FILES_MATCHING PATTERN "*.h"
-    PATTERN "internal" EXCLUDE
-    PATTERN "remux_output.h" EXCLUDE
-    PATTERN "packet_converter.h" EXCLUDE
-    PATTERN "packet_interleaver.h" EXCLUDE
-    PATTERN "media_timestamp_converter.h" EXCLUDE
-    PATTERN "syncer_timing.h" EXCLUDE
-    PATTERN "latency.h" EXCLUDE
-    PATTERN "runtime.h" EXCLUDE)
+    FILES_MATCHING PATTERN "*.h")
 
 if(NOT BUILD_SHARED)
     # The bundled SDK has no relocatable export of its own. Preserve its target

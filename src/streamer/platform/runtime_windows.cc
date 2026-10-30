@@ -4,7 +4,7 @@
 #include <stdexcept>
 #include <system_error>
 
-#include "mw/streamer/platform/runtime.h"
+#include "streamer/platform/runtime.h"
 
 namespace mw::streamer::internal {
 

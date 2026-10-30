@@ -1,4 +1,5 @@
 add_executable(mw_scheduler_tests scheduler_test.cc realtime_timing_test.cc)
+target_include_directories(mw_scheduler_tests PRIVATE "${PROJECT_SOURCE_DIR}/src")
 target_compile_definitions(mw_scheduler_tests PRIVATE
     MW_SCHEDULER_TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests/data"
 )

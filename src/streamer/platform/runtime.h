@@ -1,5 +1,5 @@
-#ifndef MW_STREAMER_PLATFORM_RUNTIME_H_
-#define MW_STREAMER_PLATFORM_RUNTIME_H_
+#ifndef MW_SRC_STREAMER_PLATFORM_RUNTIME_H_
+#define MW_SRC_STREAMER_PLATFORM_RUNTIME_H_
 
 namespace mw::streamer::internal {
 
@@ -22,4 +22,4 @@ class ScopedTimerResolution final {
 
 }  // namespace mw::streamer::internal
 
-#endif  // MW_STREAMER_PLATFORM_RUNTIME_H_
+#endif  // MW_SRC_STREAMER_PLATFORM_RUNTIME_H_

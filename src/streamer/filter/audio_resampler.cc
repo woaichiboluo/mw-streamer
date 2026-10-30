@@ -13,9 +13,9 @@ extern "C" {
 }
 
 #include "mw/log.h"
-#include "mw/streamer/ffmpeg/audio_frame_adapter.h"
 #include "mw/streamer/ffmpeg/error.h"
-#include "mw/streamer/performance/latency.h"
+#include "streamer/ffmpeg/audio_frame_adapter.h"
+#include "streamer/performance/latency.h"
 
 namespace mw::streamer {
 namespace {

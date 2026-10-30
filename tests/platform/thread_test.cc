@@ -9,7 +9,7 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::internal::Thread;
+using mw::streamer::Thread;
 
 TEST_CASE("Thread Start returns while its task is still running",
           "[platform][thread][start]") {

@@ -1,5 +1,5 @@
-#ifndef MW_STREAMER_FFMPEG_AUDIO_FRAME_ADAPTER_H_
-#define MW_STREAMER_FFMPEG_AUDIO_FRAME_ADAPTER_H_
+#ifndef MW_SRC_STREAMER_FFMPEG_AUDIO_FRAME_ADAPTER_H_
+#define MW_SRC_STREAMER_FFMPEG_AUDIO_FRAME_ADAPTER_H_
 
 extern "C" {
 #include <libavutil/channel_layout.h>
@@ -41,4 +41,4 @@ class AudioFrameAdapter final {
 
 }  // namespace mw::streamer::ffmpeg::internal
 
-#endif  // MW_STREAMER_FFMPEG_AUDIO_FRAME_ADAPTER_H_
+#endif  // MW_SRC_STREAMER_FFMPEG_AUDIO_FRAME_ADAPTER_H_

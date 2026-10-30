@@ -1,5 +1,5 @@
-#ifndef MW_STREAMER_REMUXER_PACKET_CONVERTER_H_
-#define MW_STREAMER_REMUXER_PACKET_CONVERTER_H_
+#ifndef MW_SRC_STREAMER_REMUXER_PACKET_CONVERTER_H_
+#define MW_SRC_STREAMER_REMUXER_PACKET_CONVERTER_H_
 
 #include <cstdint>
 #include <vector>
@@ -38,4 +38,4 @@ class PacketConverter final {
 
 }  // namespace mw::streamer::internal
 
-#endif  // MW_STREAMER_REMUXER_PACKET_CONVERTER_H_
+#endif  // MW_SRC_STREAMER_REMUXER_PACKET_CONVERTER_H_

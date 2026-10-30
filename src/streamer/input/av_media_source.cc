@@ -618,7 +618,7 @@ class AvMediaSource::Impl final {
   OnPacket on_packet_;
   std::weak_ptr<internal::WaitSignal> read_signal_;
   std::string url_;
-  internal::Thread worker_;
+  Thread worker_;
 };
 
 AvMediaSource::AvMediaSource(AvMediaSourceConfig config)

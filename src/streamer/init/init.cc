@@ -16,8 +16,8 @@ extern "C" {
 
 #include "Common/Runtime.h"
 #include "mw/streamer/ffmpeg/error.h"
-#include "mw/streamer/performance/internal/settings.h"
-#include "mw/streamer/platform/runtime.h"
+#include "streamer/performance/settings.h"
+#include "streamer/platform/runtime.h"
 
 namespace mw::streamer {
 namespace {

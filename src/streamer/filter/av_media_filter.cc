@@ -26,7 +26,7 @@ extern "C" {
 
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/hw_device_context.h"
-#include "mw/streamer/performance/latency.h"
+#include "streamer/performance/latency.h"
 
 namespace mw::streamer {
 namespace {

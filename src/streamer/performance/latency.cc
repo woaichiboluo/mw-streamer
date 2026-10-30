@@ -1,12 +1,12 @@
-#include "mw/streamer/performance/latency.h"
+#include "streamer/performance/latency.h"
 
 #include <algorithm>
 #include <atomic>
 #include <memory>
 #include <new>
 
-#include "mw/log/internal/performance.h"
-#include "mw/streamer/performance/internal/settings.h"
+#include "log/performance.h"
+#include "streamer/performance/settings.h"
 
 namespace mw::streamer::internal {
 namespace {

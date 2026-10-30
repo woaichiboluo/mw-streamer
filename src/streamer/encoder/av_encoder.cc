@@ -19,13 +19,13 @@ extern "C" {
 }
 
 #include "mw/log.h"
-#include "mw/streamer/ffmpeg/audio_frame_adapter.h"
 #include "mw/streamer/ffmpeg/av_dictionary.h"
 #include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/ffmpeg/error.h"
-#include "mw/streamer/performance/latency.h"
 #include "mw/streamer/platform/blocking_queue.h"
 #include "mw/streamer/platform/thread.h"
+#include "streamer/ffmpeg/audio_frame_adapter.h"
+#include "streamer/performance/latency.h"
 
 namespace mw::streamer {
 namespace {
@@ -390,7 +390,7 @@ class AudioFilter final {
 }  // namespace
 
 class AvEncoder::Impl final {
-  using FrameQueue = internal::BlockingQueue<std::optional<ffmpeg::Frame>>;
+  using FrameQueue = BlockingQueue<std::optional<ffmpeg::Frame>>;
 
  public:
   explicit Impl(const ffmpeg::HwDeviceContext& device)
@@ -573,7 +573,7 @@ class AvEncoder::Impl final {
     // only the consumer can free capacity after the check above.
     if (track.frames->Push(std::optional<ffmpeg::Frame>(frame.Ref()),
                            std::chrono::steady_clock::duration::zero()) !=
-        internal::BlockingQueueResult::kSuccess)
+        BlockingQueueResult::kSuccess)
       return false;
     MW_LOG_TRACE("streamer",
                  "AvEncoder 帧入队: instance={} track={} stream={} pts={} "
@@ -615,7 +615,7 @@ class AvEncoder::Impl final {
 
  private:
   struct Track {
-    internal::Thread worker;
+    Thread worker;
     std::shared_ptr<FrameQueue> frames;
     std::weak_ptr<internal::WriteSignal> write_signal;
     bool backpressured = false;
@@ -744,7 +744,7 @@ class AvEncoder::Impl final {
         {
           std::lock_guard lock(mutex_);
           if (error_) return;
-          if (read == internal::BlockingQueueResult::kSuccess) {
+          if (read == BlockingQueueResult::kSuccess) {
             MW_LOG_TRACE(
                 "streamer",
                 "AvEncoder 消费输入: instance={} track={} stream={} pts={} "
@@ -791,8 +791,7 @@ class AvEncoder::Impl final {
         if (!frames) continue;
         frames->Close();
         std::optional<ffmpeg::Frame> discarded;
-        while (frames->TryPop(discarded) ==
-               internal::BlockingQueueResult::kSuccess) {
+        while (frames->TryPop(discarded) == BlockingQueueResult::kSuccess) {
           discarded.reset();
         }
       }

@@ -1,4 +1,4 @@
-#include "mw/streamer/pipeline/internal/remux_audio_probe.h"
+#include "streamer/pipeline/remux_audio_probe.h"
 
 #include <algorithm>
 #include <array>

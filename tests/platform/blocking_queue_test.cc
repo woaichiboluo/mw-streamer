@@ -21,10 +21,10 @@
 namespace {
 
 using namespace std::chrono_literals;
-using mw::streamer::internal::BlockingQueue;
+using mw::streamer::BlockingQueue;
 using mw::streamer::internal::WaitSignal;
 using mw::streamer::internal::WriteSignal;
-using Result = mw::streamer::internal::BlockingQueueResult;
+using Result = mw::streamer::BlockingQueueResult;
 
 TEST_CASE("BlockingQueue enforces positive capacity and FIFO order",
           "[platform][blocking_queue]") {

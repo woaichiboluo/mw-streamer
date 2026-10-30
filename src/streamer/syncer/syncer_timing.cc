@@ -1,4 +1,4 @@
-#include "mw/streamer/syncer/syncer_timing.h"
+#include "streamer/syncer/syncer_timing.h"
 
 #include <algorithm>
 #include <limits>

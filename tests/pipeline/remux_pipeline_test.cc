@@ -28,8 +28,8 @@ extern "C" {
 
 #include "mw/streamer/ffmpeg/frame.h"
 #include "mw/streamer/init/init.h"
-#include "mw/streamer/pipeline/internal/audio_probe_timeout.h"
 #include "mw/streamer/recorder/recorder.h"
+#include "streamer/pipeline/audio_probe_timeout.h"
 
 namespace {
 

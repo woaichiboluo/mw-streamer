@@ -11,6 +11,7 @@ target_include_directories(mw_log
     PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
         "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+    PRIVATE "${PROJECT_SOURCE_DIR}/src"
 )
 
 target_link_libraries(mw_log
@@ -85,6 +86,7 @@ add_library(mw::streamer ALIAS mw_streamer)
 target_include_directories(mw_streamer PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+    PRIVATE "${PROJECT_SOURCE_DIR}/src"
 )
 target_compile_features(mw_streamer PUBLIC cxx_std_17)
 target_include_directories(mw_streamer SYSTEM PRIVATE
@@ -103,7 +105,8 @@ if(BUILD_TESTS AND BUILD_SHARED)
     add_library(mw_streamer_test_static STATIC ${MW_STREAMER_SOURCES})
     target_compile_definitions(mw_streamer_test_static PUBLIC MW_STREAMER_STATIC_LIBRARY)
     target_include_directories(mw_streamer_test_static PUBLIC
-        "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>")
+        "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+        PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_include_directories(mw_streamer_test_static SYSTEM PRIVATE
         "${PROJECT_SOURCE_DIR}/third_party/nv-codec-headers/include")
     target_link_libraries(mw_streamer_test_static PUBLIC
@@ -140,6 +143,7 @@ if(BUILD_FRAME_CONVTER)
         target_compile_definitions(mw_frame_convter PUBLIC MW_FRAME_CONVTER_STATIC_LIBRARY)
     endif()
     add_library(mw::frame_convter ALIAS mw_frame_convter)
+    target_include_directories(mw_frame_convter PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_compile_features(mw_frame_convter PUBLIC cxx_std_17)
     set_target_properties(mw_frame_convter PROPERTIES
         CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED YES

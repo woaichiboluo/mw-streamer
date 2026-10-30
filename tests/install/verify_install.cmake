@@ -16,6 +16,16 @@ mw_run("${CMAKE_COMMAND}" --install "${MW_BUILD_DIR}"
     --config "${MW_CONFIG}" --prefix "${prefix}")
 file(RENAME "${prefix}" "${relocated}")
 
+# The installed SDK must contain exactly the public header tree, never private
+# implementation headers from src/.
+file(GLOB_RECURSE public_headers RELATIVE "${MW_TEST_SOURCE_DIR}/../../include/mw"
+    "${MW_TEST_SOURCE_DIR}/../../include/mw/*.h")
+file(GLOB_RECURSE installed_headers RELATIVE "${relocated}/${MW_INSTALL_INCLUDEDIR}/mw"
+    "${relocated}/${MW_INSTALL_INCLUDEDIR}/mw/*.h")
+if(NOT "${public_headers}" STREQUAL "${installed_headers}")
+    message(FATAL_ERROR "Installed headers do not match the public include tree")
+endif()
+
 set(generator_options)
 if(MW_GENERATOR_PLATFORM)
     list(APPEND generator_options -A "${MW_GENERATOR_PLATFORM}")

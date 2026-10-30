@@ -1,5 +1,5 @@
-#ifndef MW_STREAMER_PIPELINE_INTERNAL_REMUX_AUDIO_PROBE_H_
-#define MW_STREAMER_PIPELINE_INTERNAL_REMUX_AUDIO_PROBE_H_
+#ifndef MW_SRC_STREAMER_PIPELINE_REMUX_AUDIO_PROBE_H_
+#define MW_SRC_STREAMER_PIPELINE_REMUX_AUDIO_PROBE_H_
 
 #include <vector>
 
@@ -20,4 +20,4 @@ ffmpeg::StreamInfo ProbeRemuxAudio(const ffmpeg::StreamInfo& stream,
 
 }  // namespace mw::streamer::internal
 
-#endif  // MW_STREAMER_PIPELINE_INTERNAL_REMUX_AUDIO_PROBE_H_
+#endif  // MW_SRC_STREAMER_PIPELINE_REMUX_AUDIO_PROBE_H_

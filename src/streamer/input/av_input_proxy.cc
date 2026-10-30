@@ -430,7 +430,7 @@ class AvInputProxy::Impl final {
   std::optional<AvInputStatus> terminal_;
   std::shared_ptr<AvInput> input_;
   std::string url_;
-  internal::Thread worker_;
+  Thread worker_;
   OnStateChanged on_state_changed_;
 };
 

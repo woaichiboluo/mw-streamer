@@ -20,8 +20,8 @@ extern "C" {
 #include "ext-codec/H265.h"
 #include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/init/init.h"
-#include "mw/streamer/remuxer/packet_converter.h"
 #include "remuxer_test_support.h"
+#include "streamer/remuxer/packet_converter.h"
 
 namespace {
 

@@ -27,6 +27,8 @@
 #include "mw/streamer/pipeline/live_pipeline.h"
 #include "mw/streamer/pipeline/offline_pipeline.h"
 #include "mw/streamer/pipeline/remux_pipeline.h"
+#include "mw/streamer/platform/blocking_queue.h"
+#include "mw/streamer/platform/thread.h"
 #include "mw/streamer/recorder/recorder.h"
 #include "mw/streamer/remuxer/remuxer.h"
 #include "mw/streamer/scheduler/realtime_timing.h"

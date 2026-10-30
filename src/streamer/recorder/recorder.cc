@@ -413,7 +413,7 @@ class Recorder::Impl final {
   RecorderStatus status_;
   std::shared_ptr<OnError> on_error_;
   std::chrono::steady_clock::time_point last_warning_{};
-  internal::Thread worker_;
+  Thread worker_;
 };
 
 Recorder::Recorder() : impl_(std::make_unique<Impl>()) {}

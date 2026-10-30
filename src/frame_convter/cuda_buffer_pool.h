@@ -1,5 +1,5 @@
-#ifndef MW_FRAME_CONVTER_INTERNAL_CUDA_BUFFER_POOL_H_
-#define MW_FRAME_CONVTER_INTERNAL_CUDA_BUFFER_POOL_H_
+#ifndef MW_SRC_FRAME_CONVTER_CUDA_BUFFER_POOL_H_
+#define MW_SRC_FRAME_CONVTER_CUDA_BUFFER_POOL_H_
 
 #include <cuda.h>
 #include <cuda_runtime_api.h>
@@ -159,4 +159,4 @@ class GpuMatBufferPool final : public cv::cuda::GpuMat::Allocator {
 
 }  // namespace mw::frame_convter::internal
 
-#endif  // MW_FRAME_CONVTER_INTERNAL_CUDA_BUFFER_POOL_H_
+#endif  // MW_SRC_FRAME_CONVTER_CUDA_BUFFER_POOL_H_

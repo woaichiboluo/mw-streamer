@@ -11,8 +11,8 @@ extern "C" {
 }
 
 #include "mw/streamer/ffmpeg/error.h"
-#include "mw/streamer/performance/latency.h"
-#include "mw/streamer/syncer/syncer_timing.h"
+#include "streamer/performance/latency.h"
+#include "streamer/syncer/syncer_timing.h"
 
 namespace mw::streamer {
 namespace {

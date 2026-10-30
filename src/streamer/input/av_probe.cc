@@ -12,7 +12,7 @@ extern "C" {
 
 #include "mw/streamer/ffmpeg/av_dictionary.h"
 #include "mw/streamer/ffmpeg/error.h"
-#include "mw/streamer/input/internal/input_info.h"
+#include "streamer/input/input_info.h"
 
 namespace mw::streamer {
 namespace {

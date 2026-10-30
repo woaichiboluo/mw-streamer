@@ -1,5 +1,5 @@
-#ifndef MW_FRAME_CONVTER_INTERNAL_CUDA_FRAME_POOL_H_
-#define MW_FRAME_CONVTER_INTERNAL_CUDA_FRAME_POOL_H_
+#ifndef MW_SRC_FRAME_CONVTER_CUDA_FRAME_POOL_H_
+#define MW_SRC_FRAME_CONVTER_CUDA_FRAME_POOL_H_
 
 #include <memory>
 #include <mutex>
@@ -66,4 +66,4 @@ class FramePool final {
 
 }  // namespace mw::frame_convter::internal
 
-#endif  // MW_FRAME_CONVTER_INTERNAL_CUDA_FRAME_POOL_H_
+#endif  // MW_SRC_FRAME_CONVTER_CUDA_FRAME_POOL_H_

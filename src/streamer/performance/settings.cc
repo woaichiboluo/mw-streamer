@@ -1,4 +1,4 @@
-#include "mw/streamer/performance/internal/settings.h"
+#include "streamer/performance/settings.h"
 
 #include <array>
 #include <atomic>

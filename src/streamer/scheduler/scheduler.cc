@@ -16,6 +16,7 @@
 #include "mw/streamer/platform/thread.h"
 #include "mw/streamer/platform/wait_signal.h"
 #include "mw/streamer/platform/write_signal.h"
+#include "streamer/scheduler/realtime_timing.h"
 
 namespace mw::streamer {
 namespace {
@@ -471,9 +472,9 @@ class Scheduler::Impl final {
   OnVideoFrame on_video_frame_;
   OnAudioFrame on_audio_frame_;
   OnError on_error_;
-  internal::Thread video_worker_;
-  internal::Thread audio_worker_;
-  internal::Thread driver_;
+  Thread video_worker_;
+  Thread audio_worker_;
+  Thread driver_;
 };
 
 Scheduler::Scheduler(std::shared_ptr<AvMediaSource> source,

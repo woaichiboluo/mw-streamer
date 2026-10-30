@@ -10,9 +10,9 @@
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/codec_context.h"
 #include "mw/streamer/ffmpeg/error.h"
-#include "mw/streamer/performance/latency.h"
 #include "mw/streamer/platform/blocking_queue.h"
 #include "mw/streamer/platform/thread.h"
+#include "streamer/performance/latency.h"
 
 namespace mw::streamer {
 namespace {
@@ -184,7 +184,7 @@ class AvDecoder::Impl final {
                 stream_.time_base,
                 AV_NOPTS_VALUE};
       }
-      if (read == internal::BlockingQueueResult::kSuccess) {
+      if (read == BlockingQueueResult::kSuccess) {
         MW_LOG_TRACE(
             "streamer",
             "AvDecoder 消费输出: instance={} stream={} kind={} pts={} "
@@ -227,8 +227,7 @@ class AvDecoder::Impl final {
     latency_.Finish();
     DiscardInput();
     AvDecoderReadResult discarded;
-    while (frames_.TryPop(discarded) ==
-           internal::BlockingQueueResult::kSuccess) {
+    while (frames_.TryPop(discarded) == BlockingQueueResult::kSuccess) {
       discarded = {};
     }
     if (had_worker) {
@@ -285,7 +284,7 @@ class AvDecoder::Impl final {
     }
     Input input{kind,
                 packet ? std::optional<ffmpeg::Packet>(*packet) : std::nullopt};
-    internal::BlockingQueueResult result;
+    BlockingQueueResult result;
     if (wait) {
       lock.unlock();
       result = packets_.Push(std::move(input));
@@ -296,7 +295,7 @@ class AvDecoder::Impl final {
       result = packets_.Push(std::move(input),
                              std::chrono::steady_clock::duration::zero());
     }
-    if (result != internal::BlockingQueueResult::kSuccess) return false;
+    if (result != BlockingQueueResult::kSuccess) return false;
     submitted_eof_ = kind == InputKind::kEof;
     if (packet) {
       MW_LOG_TRACE("streamer",
@@ -319,8 +318,7 @@ class AvDecoder::Impl final {
 
   void DiscardInput() {
     Input discarded;
-    while (packets_.TryPop(discarded) ==
-           internal::BlockingQueueResult::kSuccess) {
+    while (packets_.TryPop(discarded) == BlockingQueueResult::kSuccess) {
       discarded = {};
     }
   }
@@ -360,8 +358,7 @@ class AvDecoder::Impl final {
                  result.frame ? result.frame->get()->duration : 0,
                  stream_.time_base.num, stream_.time_base.den, frames_.Size(),
                  config_.frame_capacity);
-    return frames_.Push(std::move(result)) ==
-           internal::BlockingQueueResult::kSuccess;
+    return frames_.Push(std::move(result)) == BlockingQueueResult::kSuccess;
   }
 
   void Run() noexcept {
@@ -416,8 +413,7 @@ class AvDecoder::Impl final {
           }
         }
         Input input;
-        if (packets_.Pop(input) != internal::BlockingQueueResult::kSuccess)
-          return;
+        if (packets_.Pop(input) != BlockingQueueResult::kSuccess) return;
         {
           std::lock_guard<std::mutex> lock(mutex_);
           if (stopping_) return;
@@ -507,10 +503,10 @@ class AvDecoder::Impl final {
   bool stopping_ = false;
   bool submitted_eof_ = false;
   std::exception_ptr error_;
-  internal::BlockingQueue<Input> packets_;
-  internal::BlockingQueue<AvDecoderReadResult> frames_;
+  BlockingQueue<Input> packets_;
+  BlockingQueue<AvDecoderReadResult> frames_;
   internal::StageLatency latency_;
-  internal::Thread worker_;
+  Thread worker_;
 };
 
 AvDecoder::AvDecoder(const ffmpeg::StreamInfo& stream, AvDecoderConfig config)

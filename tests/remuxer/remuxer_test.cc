@@ -537,9 +537,13 @@ TEST_CASE("Remuxer 动态录像直接接收当前非关键帧不等待恢复点"
   const auto recordings = remuxer.recording_statuses();
   REQUIRE(recordings.size() == 1);
   CHECK(recordings.front().status.state == RecorderState::kStopped);
-  const auto expected = static_cast<std::uint64_t>(
+  CHECK(recordings.front().status.error.empty());
+  const auto subsequent_packets = static_cast<std::uint64_t>(
       std::distance(first_non_key, media.packets.end()));
-  CHECK(recordings.front().status.written_packets == expected);
+  // Packets submitted before registration may still be awaiting dispatch and
+  // reach the new recording. All packets submitted afterwards must be written.
+  CHECK(recordings.front().status.written_packets >= subsequent_packets);
+  CHECK(recordings.front().status.written_packets <= media.packets.size());
   CHECK(recordings.front().status.dropped_packets == 0);
   CHECK(fs::file_size(fs::u8path(path)) > 0);
 }

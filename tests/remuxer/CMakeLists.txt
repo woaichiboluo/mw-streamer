@@ -1,5 +1,7 @@
 add_executable(mw_remuxer_media_timestamp_converter_tests
     remuxer_media_timestamp_converter_test.cc)
+target_include_directories(mw_remuxer_media_timestamp_converter_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(mw_remuxer_media_timestamp_converter_tests PRIVATE
     Catch2::Catch2WithMain mw::streamer)
 add_test(NAME mw_remuxer_media_timestamp_converter_tests
@@ -10,6 +12,8 @@ mw_copy_test_runtime_dlls(mw_remuxer_media_timestamp_converter_tests)
 
 add_executable(mw_remuxer_packet_interleaver_tests
     remuxer_packet_interleaver_test.cc)
+target_include_directories(mw_remuxer_packet_interleaver_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(mw_remuxer_packet_interleaver_tests PRIVATE
     Catch2::Catch2WithMain mw::streamer)
 add_test(NAME mw_remuxer_packet_interleaver_tests
@@ -19,6 +23,7 @@ set_tests_properties(mw_remuxer_packet_interleaver_tests PROPERTIES
 mw_copy_test_runtime_dlls(mw_remuxer_packet_interleaver_tests)
 
 add_executable(mw_packet_converter_tests packet_converter_test.cc)
+target_include_directories(mw_packet_converter_tests PRIVATE "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(mw_packet_converter_tests PRIVATE
     Catch2::Catch2WithMain ZLMediaKit::MediaKit ZLMediaKit::ext-codec)
 if(BUILD_SHARED)

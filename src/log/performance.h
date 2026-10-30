@@ -1,5 +1,5 @@
-#ifndef MW_LOG_INTERNAL_PERFORMANCE_H_
-#define MW_LOG_INTERNAL_PERFORMANCE_H_
+#ifndef MW_SRC_LOG_PERFORMANCE_H_
+#define MW_SRC_LOG_PERFORMANCE_H_
 
 #include "mw/log.h"
 
@@ -33,4 +33,4 @@ void WritePerformance(std::string_view label, LogLevel level, const char* file,
       label, ::mw::log::LogLevel::kTrace, __FILE__, \
       static_cast<std::uint32_t>(__LINE__), __VA_ARGS__)
 
-#endif  // MW_LOG_INTERNAL_PERFORMANCE_H_
+#endif  // MW_SRC_LOG_PERFORMANCE_H_

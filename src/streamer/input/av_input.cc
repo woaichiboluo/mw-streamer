@@ -16,10 +16,10 @@ extern "C" {
 #include "mw/log.h"
 #include "mw/streamer/ffmpeg/av_dictionary.h"
 #include "mw/streamer/ffmpeg/error.h"
-#include "mw/streamer/input/internal/input_info.h"
-#include "mw/streamer/performance/latency.h"
 #include "mw/streamer/platform/blocking_queue.h"
 #include "mw/streamer/platform/thread.h"
+#include "streamer/input/input_info.h"
+#include "streamer/performance/latency.h"
 
 namespace mw::streamer {
 namespace {
@@ -53,7 +53,7 @@ std::int64_t NowNs() {
 }  // namespace
 
 class AvInput::Impl final {
-  using PacketQueue = internal::BlockingQueue<AvInputReadResult>;
+  using PacketQueue = BlockingQueue<AvInputReadResult>;
 
  public:
   explicit Impl(AvInputConfig config) : config_(std::move(config)) {
@@ -157,7 +157,7 @@ class AvInput::Impl final {
         status_.state == AvInputState::kCancelled || packets != packets_) {
       return {AvInputReadStatus::kNull, {}};
     }
-    if (result == internal::BlockingQueueResult::kSuccess) {
+    if (result == BlockingQueueResult::kSuccess) {
       const auto buffered = packets->Size();
       lock.unlock();
       // Only EOF drain acknowledgement uses the state condition variable.
@@ -209,8 +209,7 @@ class AvInput::Impl final {
     }
     AvInputReadResult discarded;
     if (packets) {
-      while (packets->TryPop(discarded) ==
-             internal::BlockingQueueResult::kSuccess) {
+      while (packets->TryPop(discarded) == BlockingQueueResult::kSuccess) {
         discarded = {};
       }
     }
@@ -364,7 +363,7 @@ class AvInput::Impl final {
         // Demuxing precedes admission: in addition to the bounded queue, the
         // producer can retain at most one packet while waiting for capacity.
         if (packets->Push({AvInputReadStatus::kPacket, std::move(packet)}) !=
-            internal::BlockingQueueResult::kSuccess)
+            BlockingQueueResult::kSuccess)
           break;
         const auto buffered = packets->Size();
         MW_LOG_TRACE(
@@ -399,7 +398,7 @@ class AvInput::Impl final {
   AvInputInfo info_;
   std::shared_ptr<PacketQueue> packets_;
   AVFormatContext* format_ = nullptr;
-  internal::Thread worker_;
+  Thread worker_;
   OnStateChanged on_state_changed_;
   internal::StageLatency latency_;
 };

@@ -6,7 +6,7 @@
 
 #include "mw/export.h"
 
-namespace mw::streamer::internal {
+namespace mw::streamer {
 
 // Start/Join/destruction must be externally serialized and cannot be called
 // from this thread's task. The owner must arrange for the task to return before
@@ -35,6 +35,6 @@ class MW_STREAMER_API Thread final {
   std::thread thread_;
 };
 
-}  // namespace mw::streamer::internal
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_PLATFORM_THREAD_H_

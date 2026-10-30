@@ -9,6 +9,7 @@ set_tests_properties(mw_live_pipeline_tests PROPERTIES
 mw_copy_test_runtime_dlls(mw_live_pipeline_tests)
 
 add_executable(mw_remux_pipeline_tests remux_pipeline_test.cc)
+target_include_directories(mw_remux_pipeline_tests PRIVATE "${PROJECT_SOURCE_DIR}/src")
 target_compile_definitions(mw_remux_pipeline_tests PRIVATE
     MW_STREAMER_TEST_DATA_DIR="${MW_STREAMER_TEST_DATA_DIR}")
 target_link_libraries(mw_remux_pipeline_tests PRIVATE

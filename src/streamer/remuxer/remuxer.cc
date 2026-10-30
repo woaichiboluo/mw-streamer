@@ -13,15 +13,15 @@ extern "C" {
 
 #include "Poller/EventPoller.h"
 #include "mw/log.h"
-#include "mw/streamer/performance/latency.h"
 #include "mw/streamer/platform/blocking_queue.h"
-#include "mw/streamer/remuxer/packet_converter.h"
-#include "mw/streamer/remuxer/packet_interleaver.h"
-#include "mw/streamer/remuxer/remux_output.h"
+#include "streamer/performance/latency.h"
+#include "streamer/remuxer/packet_converter.h"
+#include "streamer/remuxer/packet_interleaver.h"
+#include "streamer/remuxer/remux_output.h"
 
 namespace mw::streamer {
 class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
-  using PacketQueue = internal::BlockingQueue<ffmpeg::Packet>;
+  using PacketQueue = BlockingQueue<ffmpeg::Packet>;
 
  public:
   explicit Impl(RemuxerConfig config)
@@ -147,8 +147,8 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
       MW_LOG_DEBUG("streamer",
                    "Remuxer 交接槽等待结束: instance={} accepted={}",
                    static_cast<const void*>(this),
-                   admitted == internal::BlockingQueueResult::kSuccess);
-    if (admitted != internal::BlockingQueueResult::kSuccess) return false;
+                   admitted == BlockingQueueResult::kSuccess);
+    if (admitted != BlockingQueueResult::kSuccess) return false;
     std::lock_guard<std::mutex> lock(mutex_);
     MW_LOG_TRACE(
         "streamer",
@@ -400,8 +400,7 @@ class Remuxer::Impl final : public std::enable_shared_from_this<Impl> {
           return;
         }
         ffmpeg::Packet packet;
-        if (packets_->TryPop(packet) ==
-            internal::BlockingQueueResult::kSuccess) {
+        if (packets_->TryPop(packet) == BlockingQueueResult::kSuccess) {
           interleaver_->Push(packet);
           MW_LOG_TRACE("streamer",
                        "Remuxer 交接到交织队列: instance={} stream={} pts={} "

@@ -1,4 +1,4 @@
-#include "mw/streamer/input/internal/input_info.h"
+#include "streamer/input/input_info.h"
 
 #include <utility>
 

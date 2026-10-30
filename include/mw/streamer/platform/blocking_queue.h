@@ -14,7 +14,7 @@
 #include "mw/streamer/platform/wait_signal.h"
 #include "mw/streamer/platform/write_signal.h"
 
-namespace mw::streamer::internal {
+namespace mw::streamer {
 
 enum class BlockingQueueResult { kSuccess, kTimeout, kEmpty, kClosed };
 
@@ -67,8 +67,8 @@ class BlockingQueue {
 
   // Optional readiness signal for a consumer selecting among several queues.
   // Registration/replacement is thread-safe; no user callbacks are invoked.
-  void SetReadSignal(std::weak_ptr<WaitSignal> signal) {
-    std::shared_ptr<WaitSignal> ready;
+  void SetReadSignal(std::weak_ptr<internal::WaitSignal> signal) {
+    std::shared_ptr<internal::WaitSignal> ready;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       read_signal_ = std::move(signal);
@@ -79,8 +79,8 @@ class BlockingQueue {
 
   // Wakes an event-loop producer on capacity release or closure. Registration
   // replays existing space, so binding after a failed Push cannot lose it.
-  void SetWriteSignal(std::weak_ptr<WriteSignal> signal) {
-    std::shared_ptr<WriteSignal> writable;
+  void SetWriteSignal(std::weak_ptr<internal::WriteSignal> signal) {
+    std::shared_ptr<internal::WriteSignal> writable;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       write_signal_ = std::move(signal);
@@ -90,8 +90,8 @@ class BlockingQueue {
   }
 
   void Close() {
-    std::shared_ptr<WaitSignal> ready;
-    std::shared_ptr<WriteSignal> writable;
+    std::shared_ptr<internal::WaitSignal> ready;
+    std::shared_ptr<internal::WriteSignal> writable;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       closed_ = true;
@@ -168,11 +168,11 @@ class BlockingQueue {
   std::condition_variable not_full_;
   std::condition_variable not_empty_;
   std::deque<T> queue_;
-  std::weak_ptr<WaitSignal> read_signal_;
-  std::weak_ptr<WriteSignal> write_signal_;
+  std::weak_ptr<internal::WaitSignal> read_signal_;
+  std::weak_ptr<internal::WriteSignal> write_signal_;
   bool closed_ = false;
 };
 
-}  // namespace mw::streamer::internal
+}  // namespace mw::streamer
 
 #endif  // MW_STREAMER_PLATFORM_BLOCKING_QUEUE_H_

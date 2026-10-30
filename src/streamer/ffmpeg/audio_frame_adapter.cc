@@ -1,4 +1,4 @@
-#include "mw/streamer/ffmpeg/audio_frame_adapter.h"
+#include "streamer/ffmpeg/audio_frame_adapter.h"
 
 #include <cstdint>
 #include <limits>

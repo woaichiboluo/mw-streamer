@@ -6,7 +6,7 @@
 
 #include "mw/log.h"
 
-namespace mw::streamer::internal {
+namespace mw::streamer {
 
 Thread::~Thread() { Join(); }
 
@@ -37,4 +37,4 @@ void Thread::Join() noexcept {
 
 bool Thread::joinable() const noexcept { return thread_.joinable(); }
 
-}  // namespace mw::streamer::internal
+}  // namespace mw::streamer

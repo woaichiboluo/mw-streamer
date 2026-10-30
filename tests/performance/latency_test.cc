@@ -1,4 +1,4 @@
-#include "mw/streamer/performance/latency.h"
+#include "streamer/performance/latency.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
@@ -8,7 +8,7 @@
 
 #include "mw/log.h"
 #include "mw/streamer/performance/config.h"
-#include "mw/streamer/performance/internal/settings.h"
+#include "streamer/performance/settings.h"
 
 namespace {
 

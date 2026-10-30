@@ -4,8 +4,8 @@
 #include <stdexcept>
 #include <vector>
 
-#include "mw/streamer/remuxer/media_timestamp_converter.h"
 #include "remuxer_test_support.h"
+#include "streamer/remuxer/media_timestamp_converter.h"
 
 namespace {
 namespace ffmpeg = mw::streamer::ffmpeg;

@@ -304,7 +304,7 @@ class OfflinePipeline::Impl final {
   OnError on_error_;
   AvMediaSource source_;
   AvMediaFilter filter_;
-  internal::Thread worker_;
+  Thread worker_;
 };
 
 OfflinePipeline::OfflinePipeline(OfflinePipelineConfig config)
