@@ -90,6 +90,10 @@ class MW_STREAMER_API LivePipeline final {
   // destroy the pipeline. Stop externally to finish cleanup before restarting.
   void SetOnError(OnError callback);
   // Business filter configuration only while stopped; lifecycle is owned here.
+  // Scheduler serializes OnReset with audio/video processing after normal EOF
+  // and before a reconnected input generation. Live output keeps running;
+  // reconnects may discard old queued processing data. See Scheduler's filter
+  // contract for reset ordering. Reset callback exceptions fail the session.
   AvMediaFilter& media_filter();
 
   // Forward output registration to Remuxer. Control calls must be serialized

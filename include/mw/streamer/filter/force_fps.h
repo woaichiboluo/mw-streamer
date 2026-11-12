@@ -48,7 +48,8 @@ class MW_STREAMER_API ForceFps final {
   // picture. EOF follows prior outputs, is rescaled to output time base and
   // does not extend the final picture. A PTS regression or a forward step
   // exceeding one output period plus 500ms reanchors without filling that jump,
-  // missing PTS is never synthesized.
+  // missing PTS is never synthesized. A generation change clears picture and
+  // timing history before processing the new input. Outputs retain generation.
   AvDecoderReadResult TryReadFrame();
   // Closes admission, discards pending input and makes reads
   // return kNull. Does not wait for producer or reader calls to finish.

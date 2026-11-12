@@ -162,8 +162,8 @@ class AvDecoder::Impl final {
     return Push(InputKind::kEof, nullptr, wait);
   }
 
-  bool Reset(bool wait = true) {
-    return Push(InputKind::kReset, nullptr, wait);
+  bool Reset(std::uint64_t generation, bool wait = true) {
+    return Push(InputKind::kReset, nullptr, wait, generation);
   }
 
   AvDecoderReadResult ReadFrame(bool wait) {
@@ -267,9 +267,11 @@ class AvDecoder::Impl final {
   struct Input {
     InputKind kind = InputKind::kPacket;
     std::optional<ffmpeg::Packet> packet;
+    std::uint64_t generation = 0;
   };
 
-  bool Push(InputKind kind, const ffmpeg::Packet* packet, bool wait) {
+  bool Push(InputKind kind, const ffmpeg::Packet* packet, bool wait,
+            std::uint64_t generation = 0) {
     std::unique_lock<std::mutex> lock(mutex_);
     if (stopping_ || error_) return false;
     if (submitted_eof_ && kind != InputKind::kReset) {
@@ -283,7 +285,8 @@ class AvDecoder::Impl final {
       return false;
     }
     Input input{kind,
-                packet ? std::optional<ffmpeg::Packet>(*packet) : std::nullopt};
+                packet ? std::optional<ffmpeg::Packet>(*packet) : std::nullopt,
+                generation};
     BlockingQueueResult result;
     if (wait) {
       lock.unlock();
@@ -367,6 +370,7 @@ class AvDecoder::Impl final {
       bool drained = false;
       std::optional<Input> pending;
       std::int64_t next_pts = AV_NOPTS_VALUE;
+      std::uint64_t generation = 0;
       for (;;) {
         {
           std::lock_guard<std::mutex> lock(mutex_);
@@ -387,7 +391,8 @@ class AvDecoder::Impl final {
                        {},
                        stream_.stream_index,
                        stream_.time_base,
-                       next_pts})) {
+                       next_pts,
+                       generation})) {
               return;
             }
             drained = true;
@@ -407,8 +412,8 @@ class AvDecoder::Impl final {
             frame->time_base = stream_.time_base;
             next_pts = FrameEndPts(frame);
             if (!Emit({AvDecoderReadStatus::kFrame, std::move(frame),
-                       stream_.stream_index, stream_.time_base,
-                       AV_NOPTS_VALUE})) {
+                       stream_.stream_index, stream_.time_base, AV_NOPTS_VALUE,
+                       generation})) {
               return;
             }
             continue;
@@ -434,6 +439,7 @@ class AvDecoder::Impl final {
           started = false;
           drained = false;
           next_pts = AV_NOPTS_VALUE;
+          generation = input.generation;
           continue;
         }
         // EOF is ordered behind all submitted packets. After a drain the codec
@@ -536,12 +542,16 @@ bool AvDecoder::PushPacket(const ffmpeg::Packet& packet) {
   return impl_->PushPacket(packet);
 }
 bool AvDecoder::PushEof() { return impl_->PushEof(); }
-bool AvDecoder::Reset() { return impl_->Reset(); }
+bool AvDecoder::Reset(std::uint64_t generation) {
+  return impl_->Reset(generation);
+}
 bool AvDecoder::TryPushPacket(const ffmpeg::Packet& packet) {
   return impl_->PushPacket(packet, false);
 }
 bool AvDecoder::TryPushEof() { return impl_->PushEof(false); }
-bool AvDecoder::TryReset() { return impl_->Reset(false); }
+bool AvDecoder::TryReset(std::uint64_t generation) {
+  return impl_->Reset(generation, false);
+}
 AvDecoderReadResult AvDecoder::ReadFrame() { return impl_->ReadFrame(true); }
 AvDecoderReadResult AvDecoder::TryReadFrame() {
   return impl_->ReadFrame(false);

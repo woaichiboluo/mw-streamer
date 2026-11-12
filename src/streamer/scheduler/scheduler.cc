@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -95,6 +96,8 @@ class Scheduler::Impl final {
       stopping_ = false;
       for (auto& track : tracks_) track.Clear();
     }
+    generation_ = 0;
+    pending_generation_.reset();
     started_ = true;
     try {
       syncer_.Reset();
@@ -165,6 +168,9 @@ class Scheduler::Impl final {
     bool completed = false;
     AvDecoderReadResult task;
     AvDecoderReadResult result;
+    // Worker-owned while busy; the driver may clear it only after completion.
+    AvDecoderReadResult pending;
+    bool eof = false;
     bool needs_input = true;
     AvDecoderReadResult source_head;
     AvDecoderReadResult head;
@@ -174,7 +180,8 @@ class Scheduler::Impl final {
     std::int64_t output_retry_us = 0;
     void Clear() {
       busy = requested = completed = false;
-      task = result = source_head = head = {};
+      task = result = pending = source_head = head = {};
+      eof = false;
       needs_input = true;
       syncer_wake_us = 0;
       output_blocked = false;
@@ -208,6 +215,53 @@ class Scheduler::Impl final {
   }
   AvDecoderReadResult Read(std::size_t index) {
     return index == 0 ? source_->TryReadVideo() : source_->TryReadAudio();
+  }
+
+  bool WorkersIdle() const {
+    std::lock_guard lock(mutex_);
+    return std::all_of(tracks_.begin(), tracks_.end(),
+                       [](const Track& track) { return !track.busy; });
+  }
+
+  void ResetFilter() {
+    // The driver has paused dispatch and both workers are idle, including
+    // converter accesses outside the business callbacks. Keep a head already
+    // exposed to Syncer: a forward-fill batch or suspension still requires
+    // that same input. Release other old work and retain new input lookahead.
+    if (force_fps_) force_fps_->Reset();
+    if (resampler_) resampler_->Reset();
+    {
+      std::lock_guard lock(mutex_);
+      for (auto& track : tracks_) {
+        track.task = track.result = track.pending = {};
+        track.requested = track.completed = false;
+        track.eof = false;
+        track.needs_input = true;
+        if (track.source_head.generation < generation_) track.source_head = {};
+      }
+    }
+    realtime_.Reset();
+    // Syncer and its epoch keep the live output timeline advancing.
+    filter_.Reset();
+  }
+
+  void ResetAtEof() {
+    const auto info = source_->info();
+    if (!info) return;
+    const std::array<bool, 2> present{info->video_stream_index >= 0,
+                                      info->audio_stream_index >= 0};
+    bool any = false;
+    for (std::size_t index = 0; index < tracks_.size(); ++index) {
+      if (!tracks_[index].enabled || !present[index]) continue;
+      any = true;
+      if (!tracks_[index].eof) return;
+    }
+    if (any && WorkersIdle() && !stopping()) {
+      MW_LOG_DEBUG("streamer",
+                   "Scheduler 全轨 EOF，重置业务缓存: generation={}",
+                   generation_);
+      ResetFilter();
+    }
   }
 
   void Complete(std::size_t index) {
@@ -251,6 +305,7 @@ class Scheduler::Impl final {
 
   std::int64_t Prepare(std::size_t index, std::int64_t now) {
     auto& track = tracks_[index];
+    if (track.eof || pending_generation_) return kNoWake;
     {
       std::lock_guard lock(mutex_);
       if (track.busy || track.completed) return kNoWake;
@@ -266,6 +321,14 @@ class Scheduler::Impl final {
         // Frame readiness wakes the driver; no periodic empty-source reads.
         return kNoWake;
       }
+    }
+    if (track.source_head.generation < generation_) {
+      track.source_head = {};
+      return now;
+    }
+    if (track.source_head.generation > generation_) {
+      pending_generation_ = track.source_head.generation;
+      return now;
     }
     if (track.source_head.status == AvDecoderReadStatus::kFrame) {
       const auto pts_us = InputPts(track.source_head);
@@ -315,7 +378,12 @@ class Scheduler::Impl final {
                    head != nullptr, step.consumed,
                    step.frame ? step.frame->get()->pts : AV_NOPTS_VALUE,
                    step.blocked, step.wake_us);
-    if (step.consumed) track.head = {};
+    if (step.consumed) {
+      if (track.head.status == AvDecoderReadStatus::kEof &&
+          track.head.generation == generation_)
+        track.eof = true;
+      track.head = {};
+    }
     track.syncer_wake_us = step.wake_us;
     if (step.blocked) {
       if (!retrying)
@@ -335,6 +403,20 @@ class Scheduler::Impl final {
       while (!stopping()) {
         const auto observed = signal_->GetRevision();
         CheckSource();
+        if (pending_generation_) {
+          if (!WorkersIdle()) {
+            signal_->Wait(observed);
+            continue;
+          }
+          generation_ = *pending_generation_;
+          pending_generation_.reset();
+          if (stopping()) return;
+          MW_LOG_DEBUG("streamer",
+                       "Scheduler 重连切代，重置业务缓存: generation={}",
+                       generation_);
+          ResetFilter();
+          if (stopping()) return;
+        }
         auto wake = kNoWake;
         for (std::size_t index = 0; index < tracks_.size(); ++index) {
           if (tracks_[index].enabled) {
@@ -345,6 +427,8 @@ class Scheduler::Impl final {
           }
           if (stopping()) return;
         }
+        ResetAtEof();
+        if (stopping()) return;
         for (std::size_t index = 0; index < tracks_.size(); ++index) {
           if (!tracks_[index].enabled) continue;
           wake = std::min(wake, Prepare(index, Now()));
@@ -372,7 +456,7 @@ class Scheduler::Impl final {
 
   template <typename Converter>
   void Process(std::size_t index, Converter& converter) {
-    AvDecoderReadResult pending;
+    auto& pending = tracks_[index].pending;
     while (true) {
       AvDecoderReadResult input;
       {
@@ -459,6 +543,8 @@ class Scheduler::Impl final {
   std::unique_ptr<ForceFps> force_fps_;
   std::unique_ptr<AudioResampler> resampler_;
   std::array<Track, 2> tracks_;
+  std::uint64_t generation_ = 0;
+  std::optional<std::uint64_t> pending_generation_;
   mutable std::mutex mutex_;
   std::shared_ptr<internal::WaitSignal> signal_ =
       std::make_shared<internal::WaitSignal>();

@@ -286,7 +286,7 @@ class SourceFeeder {
 };
 
 void CheckSource(AvDecoder& decoder, const Source& source,
-                 const Reference& reference) {
+                 const Reference& reference, std::uint64_t generation = 0) {
   for (const auto& expected : reference.frames) {
     auto result = ReadAvailable(decoder);
     REQUIRE(result.status == AvDecoderReadStatus::kFrame);
@@ -294,6 +294,7 @@ void CheckSource(AvDecoder& decoder, const Source& source,
     CHECK(result.stream_index == source.stream.stream_index);
     CHECK(result.time_base.num == source.stream.time_base.num);
     CHECK(result.time_base.den == source.stream.time_base.den);
+    CHECK(result.generation == generation);
     CHECK(Record(*result.frame->get(), result.frame->get()->pts) == expected);
   }
   const auto eof = ReadAvailable(decoder);
@@ -303,6 +304,7 @@ void CheckSource(AvDecoder& decoder, const Source& source,
   CHECK(eof.time_base.num == source.stream.time_base.num);
   CHECK(eof.time_base.den == source.stream.time_base.den);
   CHECK(eof.end_pts == reference.end_pts);
+  CHECK(eof.generation == generation);
 }
 
 TEST_CASE("AvDecoder matches native video pixels, audio samples and source PTS",
@@ -384,15 +386,16 @@ TEST_CASE(
     return decoder.buffered_frames() == partial.frames.size() &&
            decoder.buffered_packets() == 0;
   }));
-  REQUIRE(decoder.TryReset());
+  REQUIRE(decoder.TryReset(7));
   SourceFeeder feeder(decoder, source);
   for (const auto& expected : partial.frames) {
     const auto result = ReadAvailable(decoder);
     REQUIRE(result.status == AvDecoderReadStatus::kFrame);
     REQUIRE(result.frame.has_value());
+    CHECK(result.generation == 0);
     CHECK(Record(*result.frame->get(), result.frame->get()->pts) == expected);
   }
-  CheckSource(decoder, source, complete);
+  CheckSource(decoder, source, complete, 7);
   feeder.Join();
   CHECK(decoder.TryReadFrame().status == AvDecoderReadStatus::kNull);
 }
@@ -496,7 +499,7 @@ TEST_CASE("AvDecoder retries bounded EOF and Reset without losing FIFO order",
     return decoder.buffered_frames() == 1 && decoder.buffered_packets() == 1;
   }));
   CHECK_FALSE(decoder.TryPushEof());
-  CHECK_FALSE(decoder.TryReset());
+  CHECK_FALSE(decoder.TryReset(19));
   // Neither rejected control item changed EOF acceptance state.
   CHECK_FALSE(decoder.TryPushPacket(source.packets[submitted]));
 
@@ -508,7 +511,7 @@ TEST_CASE("AvDecoder retries bounded EOF and Reset without losing FIFO order",
   // One decoded frame is blocked behind the full output queue. EOF fills the
   // sole input slot; Reset must retry without clearing accepted EOF state.
   REQUIRE(decoder.TryPushEof());
-  CHECK_FALSE(decoder.TryReset());
+  CHECK_FALSE(decoder.TryReset(19));
   CHECK_THROWS_AS(decoder.TryPushPacket(source.packets[submitted]),
                   std::logic_error);
   CHECK_THROWS_AS(decoder.TryPushEof(), std::logic_error);
@@ -525,7 +528,7 @@ TEST_CASE("AvDecoder retries bounded EOF and Reset without losing FIFO order",
     });
     REQUIRE(accepted);
   };
-  submit([&] { return decoder.TryReset(); });
+  submit([&] { return decoder.TryReset(23); });
   for (const auto& packet : source.packets) {
     submit([&] { return decoder.TryPushPacket(packet); });
   }
@@ -549,15 +552,18 @@ TEST_CASE("AvDecoder retries bounded EOF and Reset without losing FIFO order",
       ReferenceDecode(native.get(), source.stream, source.packets);
   std::size_t index = 0;
   for (const auto* expected : {&first, &second}) {
+    const std::uint64_t generation = expected == &first ? 0 : 23;
     for (const auto& frame : expected->frames) {
       REQUIRE(index < output.size());
       const auto& actual = output[index++];
       REQUIRE(actual.status == AvDecoderReadStatus::kFrame);
       REQUIRE(actual.frame.has_value());
+      CHECK(actual.generation == generation);
       CHECK(Record(*actual.frame->get(), actual.frame->get()->pts) == frame);
     }
     REQUIRE(index < output.size());
     CHECK(output[index].status == AvDecoderReadStatus::kEof);
+    CHECK(output[index].generation == generation);
     CHECK(output[index++].end_pts == expected->end_pts);
   }
   CHECK(index == output.size());
@@ -830,7 +836,7 @@ TEST_CASE(
       };
       submit(decoder.PushEof());
       accepted_first_eof.store(true);
-      submit(decoder.Reset());
+      submit(decoder.Reset(41));
       for (const auto& packet : source.packets)
         submit(decoder.PushPacket(packet));
       submit(decoder.PushEof());
@@ -864,14 +870,17 @@ TEST_CASE(
   REQUIRE(eof_count == 2);
   std::size_t index = 0;
   for (const auto* expected : {&first, &second}) {
+    const std::uint64_t generation = expected == &first ? 0 : 41;
     for (const auto& frame : expected->frames) {
       REQUIRE(index < output.size());
       const auto& actual = output[index++];
       REQUIRE(actual.frame);
+      CHECK(actual.generation == generation);
       CHECK(Record(*actual.frame->get(), actual.frame->get()->pts) == frame);
     }
     REQUIRE(index < output.size());
     CHECK(output[index].status == AvDecoderReadStatus::kEof);
+    CHECK(output[index].generation == generation);
     CHECK(output[index++].end_pts == expected->end_pts);
   }
   CHECK(index == output.size());

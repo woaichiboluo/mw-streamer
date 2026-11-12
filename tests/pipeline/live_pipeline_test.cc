@@ -305,8 +305,10 @@ TEST_CASE("LivePipeline delivers decodable AV and continues after input EOF",
   const auto runtime = InitRuntime();
   OutputDirectory directory;
   Observations observations;
+  std::atomic<int> resets{0};
   LivePipeline pipeline(Config());
   Observe(pipeline, observations);
+  pipeline.media_filter().SetOnReset([&] { ++resets; });
   CHECK(pipeline.state() == LivePipelineState::kStopped);
   const auto output = pipeline.AddPushUrl(directory.File("live.mp4"));
   REQUIRE(pipeline.Start(SamplePath()));
@@ -324,6 +326,7 @@ TEST_CASE("LivePipeline delivers decodable AV and continues after input EOF",
   }
   REQUIRE(observations.Wait(
       [&] { return observations.output.size() >= before + 8; }));
+  REQUIRE(observations.Wait([&] { return resets.load() == 1; }));
   const auto snapshot = pipeline.status();
   CHECK(snapshot.state == LivePipelineState::kRunning);
   CHECK(snapshot.input.state == AvMediaSourceState::kEnded);
@@ -342,6 +345,7 @@ TEST_CASE("LivePipeline delivers decodable AV and continues after input EOF",
   CHECK(pushes.front().status == 1);
   REQUIRE(pipeline.status().remuxer.size() == 1);
   pipeline.Stop();
+  CHECK(resets.load() == 1);
   CHECK(pipeline.state() == LivePipelineState::kStopped);
   REQUIRE(observations.errors.empty());
   REQUIRE_FALSE(observations.input.empty());

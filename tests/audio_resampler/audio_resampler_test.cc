@@ -213,6 +213,50 @@ TEST_CASE("AudioResampler preserves same-format samples and source timestamps",
   REQUIRE(actual.eof.front().end_pts == 48000 + 12 * 257);
 }
 
+TEST_CASE("AudioResampler isolates reconnect generations with matching PTS",
+          "[audio-resampler][generation]") {
+  AudioResamplerConfig config;
+  config.output_samples_per_frame = GENERATE(0, 1024);
+  const int previous_samples = GENERATE(1, 333);
+  AudioResampler resampler(config);
+  auto previous = Audio(previous_samples, 0, 44100);
+  previous.generation = 3;
+  REQUIRE(resampler.TryPushFrame(previous));
+  Capture discarded;
+  Drain(resampler, discarded);
+
+  // Same format and PTS as the old connection; only generation distinguishes
+  // its resampling delay and unfinished fixed-size block from the new input.
+  auto next = Audio(997, 0, 44100);
+  next.generation = 4;
+  auto eof = Eof(997, 44100);
+  eof.generation = 4;
+  AudioResampler fresh(config);
+  REQUIRE(fresh.TryPushFrame(next));
+  REQUIRE(fresh.TryPushFrame(eof));
+  Capture expected;
+  Drain(fresh, expected);
+  REQUIRE(resampler.TryPushFrame(next));
+  REQUIRE(resampler.TryPushFrame(eof));
+  Capture actual;
+  for (int count = 0; count < 10; ++count) {
+    auto output = resampler.TryReadFrame();
+    if (output.status == AvDecoderReadStatus::kNull) break;
+    CHECK(output.generation == 4);
+    if (output.status == AvDecoderReadStatus::kEof) {
+      actual.eof.push_back(std::move(output));
+    } else {
+      REQUIRE(output.frame.has_value());
+      CaptureFrame(*output.frame->get(), actual);
+    }
+  }
+  CheckPcm(actual, expected);
+  CHECK(actual.pts == expected.pts);
+  REQUIRE(actual.eof.size() == 1);
+  CHECK(actual.eof.front().end_pts == expected.eof.front().end_pts);
+  CHECK(resampler.TryReadFrame().status == AvDecoderReadStatus::kNull);
+}
+
 TEST_CASE("AudioResampler rate conversion matches native Swr including tails",
           "[audio-resampler]") {
   const int input_rate = GENERATE(44100, 48000);

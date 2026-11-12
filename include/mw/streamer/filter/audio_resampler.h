@@ -60,7 +60,8 @@ class MW_STREAMER_API AudioResampler final {
   // discontinuities and stream/format changes drain the old block before the
   // new segment. Conversion failures throw and are retained until Reset; later
   // reads rethrow and further submissions return false. Invalid submissions do
-  // not poison the converter.
+  // not poison the converter. A generation change discards old conversion
+  // delay and partial blocks; frames and EOF retain their input generation.
   AvDecoderReadResult TryReadFrame();
   // Closes admission, discards queued inputs and conversion delay. Finish old
   // producer/reader calls before Reset or destruction; Stop does not join them.

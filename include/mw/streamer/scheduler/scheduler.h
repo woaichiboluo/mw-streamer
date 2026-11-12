@@ -62,6 +62,12 @@ class MW_STREAMER_API Scheduler final {
   // Configure business callbacks only while Scheduler is stopped. Scheduler
   // owns this filter's lifecycle; callers must not Start/Stop/process it.
   // Audio and video business callbacks may run concurrently.
+  // OnReset runs on the driver with both processing workers idle: once after
+  // all present enabled tracks drain EOF, and before processing a newer input
+  // generation. Reconnects discard old-generation processing/converter data;
+  // processed output already held by Syncer may finish delivery.
+  // normal EOF drains tails and pauses the next loop until reset completes.
+  // Reset exceptions fail Scheduler. Stop/cancellation does not invoke Reset.
   AvMediaFilter& media_filter();
   // Configure only while stopped. Output callbacks run serially on the driver's
   // thread and must return promptly. True accepts the read-only frame; false

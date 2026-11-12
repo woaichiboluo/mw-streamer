@@ -100,6 +100,38 @@ TEST_CASE("ForceFps equal source timestamps do not emit duplicate slots",
   REQUIRE(fps.TryReadFrame().status == AvDecoderReadStatus::kNull);
 }
 
+TEST_CASE("ForceFps isolates generations despite matching or nearby PTS",
+          "[force-fps][generation]") {
+  std::int64_t next_pts = 0;
+  SECTION("matching timestamps produce the new picture") {}
+  SECTION("a forward gap never repeats the old picture") { next_pts = 120; }
+  ForceFps fps;
+  auto previous = Video(0, 11);
+  previous.generation = 3;
+  auto next = Video(next_pts, 22);
+  next.generation = 4;
+  AvDecoderReadResult eof;
+  eof.status = AvDecoderReadStatus::kEof;
+  eof.end_pts = next_pts + 40;
+  eof.time_base = {1, 1000};
+  eof.stream_index = 3;
+  eof.generation = 4;
+  REQUIRE(fps.TryPushFrame(previous));
+  REQUIRE(fps.TryPushFrame(next));
+  REQUIRE(fps.TryPushFrame(eof));
+  auto output = fps.TryReadFrame();
+  Check(output, 0, 11);
+  CHECK(output.generation == 3);
+  output = fps.TryReadFrame();
+  Check(output, next_pts / 40, 22);
+  CHECK(output.generation == 4);
+  output = fps.TryReadFrame();
+  REQUIRE(output.status == AvDecoderReadStatus::kEof);
+  CHECK(output.end_pts == next_pts / 40 + 1);
+  CHECK(output.generation == 4);
+  CHECK(fps.TryReadFrame().status == AvDecoderReadStatus::kNull);
+}
+
 TEST_CASE("ForceFps rational frame rates preserve exact grid over long runs",
           "[force-fps]") {
   ForceFps fps(ForceFpsConfig{AVRational{30000, 1001}, 2});

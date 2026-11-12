@@ -269,6 +269,7 @@ void CheckSource(AvMediaSource& input, const NativeSource& reference,
     const auto result =
         video_track ? input.TryReadVideo() : input.TryReadAudio();
     if (result.status == AvDecoderReadStatus::kNull) return false;
+    CHECK((result.generation == 0));
     const std::size_t index = video_track ? 0 : 1;
     const auto cycle = eof_counts[index];
     REQUIRE((cycle < cycles));
@@ -496,11 +497,13 @@ TEST_CASE("AvMediaSource retries a missing source and recovers when it appears",
   }));
   CHECK((input.status().retry_count == 1));
   CHECK((input.status().retry_delay == 1s));
+  CHECK((input.status().generation == 0));
   REQUIRE((input.status().error != nullptr));
   temporary.RestoreVideo();
   // A short source may already be draining when the test thread wakes.
   REQUIRE(WaitFor([&] { return recovered.load(); }));
   CHECK((input.status().retry_count == 0));
+  CHECK((input.status().generation == 0));
   CHECK((input.status().error == nullptr));
   CheckSource(input, ReadNative(temporary.path()));
 }
@@ -729,6 +732,7 @@ TEST_CASE("AvMediaSource loops retain frame contents and per-track EOF order",
   AvMediaSource input(config);
   REQUIRE(input.Start(SamplePath()));
   CheckSource(input, reference, 2, video_first);
+  CHECK((input.status().generation == 0));
   CHECK((input.status().state != AvMediaSourceState::kEnded));
   input.Stop();
   CHECK((input.status().state == AvMediaSourceState::kStopped));

@@ -128,6 +128,7 @@ class AudioResampler::Impl final {
     inputs_.clear();
     ClearConverter();
     ClearBlocks();
+    source_generation_ = 0;
     failure_ = nullptr;
     latency_.Start(PerformanceStage::kAudioResampler, this);
     stopped_ = false;
@@ -139,6 +140,13 @@ class AudioResampler::Impl final {
   AvDecoderReadResult ReadConverted() {
     while (!inputs_.empty()) {
       const auto& input = inputs_.front();
+      if (input.generation != source_generation_) {
+        // A reconnect invalidates delay and partial blocks even when source
+        // format and timestamps happen to match the preceding connection.
+        ClearConverter();
+        ClearBlocks();
+        source_generation_ = input.generation;
+      }
       const bool eof = input.status == AvDecoderReadStatus::kEof;
       if (context_ && (eof || !Matches(input))) {
         auto output = Drain();
@@ -357,6 +365,7 @@ class AudioResampler::Impl final {
     result.frame = std::move(frame);
     result.stream_index = last_input_->stream_index;
     result.time_base = time_base();
+    result.generation = last_input_->generation;
     return result;
   }
 
@@ -423,6 +432,7 @@ class AudioResampler::Impl final {
   std::optional<std::int64_t> block_next_pts_;
   bool block_ending_ = false;
   std::int64_t pts_precision_ = 1;
+  std::uint64_t source_generation_ = 0;
   std::uint64_t generation_ = 0;
   std::uint64_t block_generation_ = 0;
   ChannelLayout layout_;

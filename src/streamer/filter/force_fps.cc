@@ -97,6 +97,7 @@ class ForceFps::Impl final {
     const auto started = latency_.Begin();
     while (!inputs_.empty()) {
       const auto& input = inputs_.front();
+      if (last_ && last_->generation != input.generation) ClearHistory();
       if (input.status == AvDecoderReadStatus::kEof) {
         auto output = input;
         if (output.end_pts != AV_NOPTS_VALUE) {

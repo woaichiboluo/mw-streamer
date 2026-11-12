@@ -58,8 +58,9 @@ bool WaitFor(Predicate predicate, std::chrono::milliseconds timeout = 5s) {
   return true;
 }
 
-std::shared_ptr<AvMediaSource> Source() {
+std::shared_ptr<AvMediaSource> Source(bool loop = false) {
   AvMediaSourceConfig config;
+  config.proxy.loop = loop;
   config.proxy.max_retries = 0;
   config.proxy.input.packet_capacity = 2;
   config.video_decoder.thread_count = 1;
@@ -682,8 +683,34 @@ TEST_CASE("Scheduler continues producing both tracks after normal source EOF",
   std::atomic<int> audio_frames{0};
   std::atomic<bool> bad_audio_format{false};
   std::atomic<int> errors{0};
+  std::atomic<int> active_filters{0};
+  std::atomic<int> filtered_video{0};
+  std::atomic<int> filtered_audio{0};
+  std::atomic<int> resets{0};
+  std::atomic<bool> invalid_reset{false};
   Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
                       source, Config());
+  scheduler.media_filter().SetOnVideo([&](const ffmpeg::Frame& frame) {
+    ++active_filters;
+    if (resets.load() != 0) invalid_reset.store(true);
+    ++filtered_video;
+    --active_filters;
+    return frame.Ref();
+  });
+  scheduler.media_filter().SetOnAudio([&](const ffmpeg::Frame& frame) {
+    ++active_filters;
+    if (resets.load() != 0) invalid_reset.store(true);
+    ++filtered_audio;
+    --active_filters;
+    return frame.Ref();
+  });
+  scheduler.media_filter().SetOnReset([&] {
+    if (active_filters.load() != 0 || filtered_video.load() == 0 ||
+        filtered_audio.load() == 0) {
+      invalid_reset.store(true);
+    }
+    ++resets;
+  });
   scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
     ++video_frames;
     return true;
@@ -702,6 +729,7 @@ TEST_CASE("Scheduler continues producing both tracks after normal source EOF",
   REQUIRE(WaitFor(
       [&] { return source->status().state == AvMediaSourceState::kEnded; },
       8s));
+  CHECK(WaitFor([&] { return resets.load() == 1; }));
   // Let the two-second sample and queued frames finish before checking that
   // the live output continues to fill the missing input with video/silence.
   std::this_thread::sleep_for(2500ms);
@@ -716,7 +744,139 @@ TEST_CASE("Scheduler continues producing both tracks after normal source EOF",
   CHECK(audio_after_eof > 0);
   CHECK_FALSE(bad_audio_format.load());
   CHECK(errors.load() == 0);
+  CHECK(resets.load() == 1);
+  CHECK_FALSE(invalid_reset.load());
   CHECK_FALSE(scheduler.error());
+}
+
+TEST_CASE("Scheduler resets after the audio EOF tail unless cancelled",
+          "[scheduler][reset][eof][stop]") {
+  bool cancel = false;
+  SECTION("normal EOF waits for the padded tail business callback") {}
+  SECTION("cancellation while processing the tail skips Reset") {
+    cancel = true;
+  }
+  TemporaryAudio audio;
+  auto source = Source();
+  auto config = Config();
+  config.syncer.encoder.video_pixel_format = AV_PIX_FMT_NONE;
+  std::mutex mutex;
+  std::condition_variable changed;
+  bool tail_entered = false;
+  bool release_tail = false;
+  std::atomic<int> calls{0};
+  std::atomic<int> resets{0};
+  std::atomic<bool> active{false};
+  std::atomic<bool> invalid_reset{false};
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
+  scheduler.media_filter().SetOnAudio([&](const ffmpeg::Frame& frame) {
+    active.store(true);
+    if (++calls == 4) {
+      std::unique_lock lock(mutex);
+      tail_entered = true;
+      changed.notify_all();
+      changed.wait_for(lock, 5s, [&] { return release_tail; });
+    }
+    active.store(false);
+    return frame.Ref();
+  });
+  scheduler.media_filter().SetOnReset([&] {
+    if (active.load() || calls.load() != 4) invalid_reset.store(true);
+    ++resets;
+  });
+  REQUIRE(source->Start(audio.path()));
+  REQUIRE(scheduler.Start());
+  bool reached_tail;
+  {
+    std::unique_lock lock(mutex);
+    reached_tail = changed.wait_for(lock, 3s, [&] { return tail_entered; });
+  }
+  CHECK(reached_tail);
+  CHECK(WaitFor(
+      [&] { return source->status().state == AvMediaSourceState::kEnded; }));
+  CHECK(resets.load() == 0);
+  if (cancel) scheduler.RequestStop();
+  {
+    std::lock_guard lock(mutex);
+    release_tail = true;
+  }
+  changed.notify_all();
+  if (!cancel) CHECK(WaitFor([&] { return resets.load() == 1; }));
+  scheduler.Stop();
+  CHECK(calls.load() == 4);
+  CHECK(resets.load() == (cancel ? 0 : 1));
+  CHECK_FALSE(invalid_reset.load());
+  CHECK_FALSE(scheduler.error());
+}
+
+TEST_CASE("Scheduler resets each audio loop before the next business frame",
+          "[scheduler][reset][loop]") {
+  TemporaryAudio audio;
+  auto source = Source(true);
+  auto config = Config();
+  config.syncer.encoder.video_pixel_format = AV_PIX_FMT_NONE;
+  std::atomic<int> calls{0};
+  std::atomic<int> resets{0};
+  std::atomic<bool> wrong_order{false};
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
+  scheduler.media_filter().SetOnAudio([&](const ffmpeg::Frame& frame) {
+    const int index = calls.fetch_add(1);
+    if (resets.load() != index / 4) wrong_order.store(true);
+    return frame.Ref();
+  });
+  scheduler.media_filter().SetOnReset([&] {
+    const int completed = resets.fetch_add(1) + 1;
+    if (calls.load() != completed * 4) wrong_order.store(true);
+    if (completed == 2) scheduler.RequestStop();
+  });
+  REQUIRE(source->Start(audio.path()));
+  REQUIRE(scheduler.Start());
+  const bool completed = WaitFor([&] { return resets.load() == 2; });
+  scheduler.Stop();
+  source->Stop();
+  CHECK(completed);
+  CHECK(resets.load() == 2);
+  CHECK(calls.load() == 8);
+  CHECK_FALSE(wrong_order.load());
+  CHECK_FALSE(scheduler.error());
+}
+
+TEST_CASE("Scheduler retains and reports a Reset callback failure once",
+          "[scheduler][reset][error]") {
+  TemporaryAudio audio;
+  auto source = Source();
+  auto config = Config();
+  config.syncer.encoder.video_pixel_format = AV_PIX_FMT_NONE;
+  const auto failure =
+      std::make_exception_ptr(std::runtime_error("scheduler reset failure"));
+  std::atomic<int> resets{0};
+  std::atomic<int> errors{0};
+  std::atomic<int> stops{0};
+  std::atomic<bool> original_error{false};
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
+  scheduler.media_filter().SetOnReset([&] {
+    ++resets;
+    std::rethrow_exception(failure);
+  });
+  scheduler.media_filter().SetOnStop([&] { ++stops; });
+  scheduler.SetOnError([&](std::exception_ptr error) {
+    original_error.store(error == failure);
+    ++errors;
+  });
+  REQUIRE(source->Start(audio.path()));
+  REQUIRE(scheduler.Start());
+  const bool failed = WaitFor([&] { return errors.load() != 0; });
+  scheduler.Stop();
+  scheduler.Stop();
+  CHECK(failed);
+  CHECK(resets.load() == 1);
+  CHECK(errors.load() == 1);
+  CHECK(stops.load() == 1);
+  CHECK(original_error.load());
+  CHECK(scheduler.error() == failure);
 }
 
 TEST_CASE(

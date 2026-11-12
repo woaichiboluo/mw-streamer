@@ -236,6 +236,8 @@ class AvMediaSource::Impl final {
     // Description of the last input whose packets were dispatched. State
     // notifications may describe a newer input before old reads finish.
     std::shared_ptr<const AvInputInfo> dispatched_info;
+    bool dispatched_eof = false;
+    std::uint64_t generation = 0;
     std::unique_ptr<AvDecoder> video;
     std::unique_ptr<AvDecoder> audio;
   };
@@ -468,7 +470,8 @@ class AvMediaSource::Impl final {
 
   bool SubmitControl(const Session& session, bool reset) {
     for (auto* decoder : {session.video.get(), session.audio.get()}) {
-      if (decoder && !(reset ? decoder->Reset() : decoder->PushEof())) {
+      if (decoder &&
+          !(reset ? decoder->Reset(session.generation) : decoder->PushEof())) {
         CheckFailure();
         if (const auto failure = decoder->error())
           std::rethrow_exception(failure);
@@ -487,11 +490,22 @@ class AvMediaSource::Impl final {
     CheckFailure();
     if (Stopping()) return false;
     if (session->dispatched_info && session->dispatched_info != result.info) {
+      if (!session->dispatched_eof) {
+        ++session->generation;
+        {
+          std::lock_guard lock(mutex_);
+          status_.generation = session->generation;
+        }
+        // Wake observers before either blocking Reset submission. Queue items
+        // retain their own generation until consumers reach the new input.
+        NotifyReadSignal();
+      }
       // Both tracks must accept their ordered reset before the first new
       // packet/EOF. Each blocking submission happens exactly once.
       if (!SubmitControl(*session, true)) return false;
     }
     session->dispatched_info = result.info;
+    session->dispatched_eof = result.status == AvInputReadStatus::kEof;
     if (result.status == AvInputReadStatus::kEof) {
       if (!SubmitControl(*session, false)) return false;
       MW_LOG_DEBUG("streamer", "AvMediaSource [{}] 已分发源 EOF: loop={}",

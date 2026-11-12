@@ -46,6 +46,9 @@ struct AvDecoderReadResult {
   // Source-time endpoint of the final frame, only for EOF; unknown when timing
   // cannot be determined. EOF is a separate item, never an empty AVFrame.
   std::int64_t end_pts = AV_NOPTS_VALUE;
+  // Input continuity generation. Frames and EOF retain the generation in
+  // effect when decoded, including output still queued across a Reset.
+  std::uint64_t generation = 0;
 };
 
 // One decoder/worker per track, with Packet input and Frame output
@@ -91,7 +94,7 @@ class MW_STREAMER_API AvDecoder final {
   // retained while waiting; the caller's packet remains unchanged.
   bool PushPacket(const ffmpeg::Packet& packet);
   bool PushEof();
-  bool Reset();
+  bool Reset(std::uint64_t generation = 0);
 
   // Never waits for queue space. Copies a packet reference only on acceptance;
   // false preserves the caller's packet and means full, stopped or failed.
@@ -105,10 +108,12 @@ class MW_STREAMER_API AvDecoder final {
   bool TryPushEof();
   // Queues an ordered codec flush for an input reopen. Discards codec delay
   // and clears drain/timing state, while already decoded output remains FIFO.
+  // The generation takes effect when the worker executes this flush; it does
+  // not relabel previously decoded frames or EOF.
   // Does not publish an output item. False means full, stopped or failed and
   // leaves the accepted EOF state unchanged; retry before submitting more
   // media.
-  bool TryReset();
+  bool TryReset(std::uint64_t generation = 0);
   // Waits for a queued frame/EOF or Stop/failure. Failure drains already
   // decoded output before kNull; Stop returns kNull immediately. Normal EOF
   // leaves the worker and output queue available for a subsequent Reset.
