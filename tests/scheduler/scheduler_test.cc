@@ -810,6 +810,53 @@ TEST_CASE("Scheduler resets after the audio EOF tail unless cancelled",
   CHECK_FALSE(scheduler.error());
 }
 
+TEST_CASE(
+    "Scheduler drains audio EOF when business callbacks buffer every frame",
+    "[scheduler][reset][eof][buffering]") {
+  const bool audio_only = GENERATE(true, false);
+  TemporaryAudio audio;
+  auto source = Source();
+  auto config = Config();
+  if (audio_only) config.syncer.encoder.video_pixel_format = AV_PIX_FMT_NONE;
+  std::atomic<int> audio_calls{0};
+  std::atomic<int> video_calls{0};
+  std::atomic<int> resets{0};
+  std::atomic<bool> processing_after_reset{false};
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
+  scheduler.media_filter().SetOnVideo(
+      [&](const ffmpeg::Frame&) -> std::optional<ffmpeg::Frame> {
+        if (resets.load() != 0) processing_after_reset.store(true);
+        ++video_calls;
+        return std::nullopt;
+      });
+  scheduler.media_filter().SetOnAudio(
+      [&](const ffmpeg::Frame&) -> std::optional<ffmpeg::Frame> {
+        if (resets.load() != 0) processing_after_reset.store(true);
+        ++audio_calls;
+        return std::nullopt;
+      });
+  scheduler.media_filter().SetOnReset([&] { ++resets; });
+  REQUIRE(source->Start(audio_only ? audio.path() : SamplePath()));
+  REQUIRE(scheduler.Start());
+  const bool completed = WaitFor([&] { return resets.load() == 1; });
+  scheduler.Stop();
+  source->Stop();
+  CHECK(completed);
+  CHECK(resets.load() == 1);
+  CHECK(source->status().state == AvMediaSourceState::kEnded);
+  if (audio_only) {
+    // 100 ms at 32000 Hz includes the fourth, padded 1024-sample tail block.
+    CHECK(audio_calls.load() == 4);
+    CHECK(video_calls.load() == 0);
+  } else {
+    CHECK(audio_calls.load() > 0);
+    CHECK(video_calls.load() > 0);
+  }
+  CHECK_FALSE(processing_after_reset.load());
+  CHECK_FALSE(scheduler.error());
+}
+
 TEST_CASE("Scheduler resets each audio loop before the next business frame",
           "[scheduler][reset][loop]") {
   TemporaryAudio audio;

@@ -478,13 +478,16 @@ class Scheduler::Impl final {
         pending = {};
       }
       auto output = converter.TryReadFrame();
+      // Business buffering does not mean the converter is empty. Keep draining
+      // its queued frames and EOF even when the audio callback drops output.
+      const bool needs_input = pending.status == AvDecoderReadStatus::kNull &&
+                               output.status == AvDecoderReadStatus::kNull;
       if (index == 1 && output.status != AvDecoderReadStatus::kNull)
         output = filter_.ProcessAudio(std::move(output));
       {
         std::lock_guard lock(mutex_);
         auto& track = tracks_[index];
-        track.needs_input = pending.status == AvDecoderReadStatus::kNull &&
-                            output.status == AvDecoderReadStatus::kNull;
+        track.needs_input = needs_input;
         track.result = std::move(output);
         track.busy = false;
         track.completed = true;
