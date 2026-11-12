@@ -30,6 +30,7 @@ extern "C" {
 #include <libavutil/samplefmt.h>
 }
 
+#include "mw/streamer/ffmpeg/hw_device_context.h"
 #include "mw/streamer/input/av_media_source.h"
 #include "mw/streamer/platform/write_signal.h"
 
@@ -208,7 +209,8 @@ TEST_CASE("Scheduler processes audio while the video filter is blocked",
   std::atomic<bool> audio_during_video{false};
   std::atomic<int> delivered_video{0};
   std::atomic<int> delivered_audio{0};
-  Scheduler scheduler(source, Config());
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, Config());
   scheduler.media_filter().SetOnVideo([&](const ffmpeg::Frame& frame) {
     std::unique_lock lock(mutex);
     video_entered = true;
@@ -260,7 +262,8 @@ TEST_CASE("Scheduler paces file processing before business filtering",
   auto source = Source();
   std::atomic<int> video_filtered{0};
   std::atomic<int> audio_filtered{0};
-  Scheduler scheduler(source, Config());
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, Config());
   scheduler.media_filter().SetOnVideo([&](const ffmpeg::Frame& frame) {
     ++video_filtered;
     return frame.Ref();
@@ -302,7 +305,8 @@ TEST_CASE("Scheduler starts with buffered business frames instead of standby",
   config.syncer.options.initial_timeout = 4s;
   config.syncer.options.timeout = 1s;
   config.syncer.options.forward_start_shift = true;
-  Scheduler scheduler(source, config);
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
   std::deque<ffmpeg::Frame> video_buffer;
   std::deque<ffmpeg::Frame> audio_buffer;
   std::atomic<const std::uint8_t*> first_video{nullptr};
@@ -438,7 +442,8 @@ TEST_CASE(
   auto config = Config();
   config.syncer.options = {};
   config.syncer.encoder.fps = {30, 1};
-  Scheduler scheduler(source, config);
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
   std::array<std::deque<ffmpeg::Frame>, 2> buffered;
   std::array<std::unordered_map<const std::uint8_t*, SourceFrame>, 2> inputs;
   std::mutex inputs_mutex;
@@ -588,7 +593,8 @@ TEST_CASE("Scheduler retains timeout standby when business filters stay empty",
   auto source = Source();
   auto config = Config();
   config.syncer.options.initial_timeout = 100ms;
-  Scheduler scheduler(source, config);
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
   std::atomic<int> video_calls{0};
   std::atomic<int> audio_calls{0};
   std::atomic<int> video_frames{0};
@@ -638,7 +644,8 @@ TEST_CASE("Scheduler standby output follows the Syncer shared clock",
   std::vector<std::chrono::steady_clock::time_point> delivered;
   std::vector<std::int64_t> pts;
   const auto wanted = static_cast<std::size_t>(fps * 4 / 5 + 1);
-  Scheduler scheduler(source, config);
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
   scheduler.SetOnVideoFrame([&](const ffmpeg::Frame& frame) {
     std::lock_guard lock(mutex);
     delivered.push_back(std::chrono::steady_clock::now());
@@ -675,7 +682,8 @@ TEST_CASE("Scheduler continues producing both tracks after normal source EOF",
   std::atomic<int> audio_frames{0};
   std::atomic<bool> bad_audio_format{false};
   std::atomic<int> errors{0};
-  Scheduler scheduler(source, Config());
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, Config());
   scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
     ++video_frames;
     return true;
@@ -729,7 +737,8 @@ TEST_CASE(
   std::atomic<int> errors{0};
   std::atomic<bool> malformed{false};
   std::atomic<bool> non_silent{false};
-  Scheduler scheduler(source, config);
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
   scheduler.media_filter().SetOnAudio([&](const ffmpeg::Frame& frame) {
     ++audio_inputs;
     return frame.Ref();
@@ -796,7 +805,8 @@ TEST_CASE(
   config.output_samples_per_frame = GENERATE(256, 1024);
   std::atomic<int> filtered{0};
   std::atomic<bool> invalid{false};
-  Scheduler scheduler(source, config);
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
   scheduler.media_filter().SetOnAudio([&](const ffmpeg::Frame& frame) {
     if (frame->sample_rate != 32000 || frame->format != AV_SAMPLE_FMT_S16 ||
         frame->ch_layout.nb_channels != 1 ||
@@ -826,7 +836,8 @@ TEST_CASE("Scheduler reports a filter failure once and can start a new session",
   std::atomic<int> starts{0};
   std::atomic<int> stops{0};
   std::atomic<int> frames{0};
-  Scheduler scheduler(source, Config());
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, Config());
   scheduler.media_filter().SetOnStart([&] { ++starts; });
   scheduler.media_filter().SetOnStop([&] { ++stops; });
   scheduler.media_filter().SetOnVideo(
@@ -883,7 +894,8 @@ TEST_CASE(
   }
   std::atomic<int> frames{0};
   std::atomic<int> disabled_frames{0};
-  Scheduler scheduler(source, config);
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
   scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
     ++(video_only ? frames : disabled_frames);
     return true;
@@ -912,7 +924,8 @@ TEST_CASE("Scheduler drains disabled audio independently of low video FPS",
   std::atomic<int> video_frames{0};
   std::atomic<int> audio_frames{0};
   std::atomic<int> audio_filtered{0};
-  Scheduler scheduler(source, config);
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
   scheduler.media_filter().SetOnAudio([&](const ffmpeg::Frame& frame) {
     ++audio_filtered;
     return frame.Ref();
@@ -950,7 +963,8 @@ TEST_CASE("Scheduler releases converted frames in input-paced batches",
   std::condition_variable changed;
   std::vector<std::chrono::steady_clock::time_point> delivered;
   constexpr std::size_t kWanted = 21;
-  Scheduler scheduler(source, config);
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
   scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
     std::lock_guard lock(mutex);
     delivered.push_back(std::chrono::steady_clock::now());
@@ -1001,7 +1015,8 @@ TEST_CASE("Scheduler fills missing tracks and drains opposite-only input",
   std::atomic<int> audio_frames{0};
   std::atomic<int> video_filtered{0};
   std::atomic<int> audio_filtered{0};
-  Scheduler scheduler(source, config);
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
   scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
     ++video_frames;
     return true;
@@ -1043,7 +1058,8 @@ TEST_CASE("Scheduler reports unrecoverable external source failure once",
           "[scheduler]") {
   auto source = Source();
   std::atomic<int> errors{0};
-  Scheduler scheduler(source, Config());
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, Config());
   scheduler.SetOnError([&](std::exception_ptr) { ++errors; });
   REQUIRE(scheduler.Start());
   REQUIRE(source->Start(std::string(MW_SCHEDULER_TEST_DATA_DIR) +
@@ -1061,7 +1077,8 @@ TEST_CASE("Scheduler owns a source reference without controlling its lifecycle",
   std::weak_ptr<AvMediaSource> retained = source;
   std::atomic<int> frames{0};
   {
-    Scheduler scheduler(source, Config());
+    Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                        source, Config());
     source.reset();
     REQUIRE_FALSE(retained.expired());
     scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
@@ -1085,7 +1102,8 @@ TEST_CASE(
     "Scheduler Stop leaves the running source readable and permits restart",
     "[scheduler][lifecycle][restart]") {
   auto source = Source();
-  Scheduler scheduler(source, Config());
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, Config());
   std::atomic<int> frames{0};
   scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
     ++frames;
@@ -1123,7 +1141,8 @@ TEST_CASE("Scheduler Stop wakes an idle driver before the initial timeout",
   auto source = Source();
   auto config = Config();
   config.syncer.options.initial_timeout = 4s;
-  Scheduler scheduler(source, config);
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
   std::atomic<int> frames{0};
   scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
     ++frames;
@@ -1141,7 +1160,8 @@ TEST_CASE("Scheduler Stop wakes an idle driver before the initial timeout",
 TEST_CASE("Scheduler forwards an output callback failure once", "[scheduler]") {
   auto source = Source();
   std::atomic<int> errors{0};
-  Scheduler scheduler(source, Config());
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, Config());
   scheduler.SetOnVideoFrame([](const ffmpeg::Frame&) -> bool {
     throw std::runtime_error("scheduler output failure");
   });
@@ -1158,7 +1178,8 @@ TEST_CASE("Scheduler reports filter startup failure once and permits restart",
   auto source = Source();
   std::atomic<int> errors{0};
   std::atomic<int> frames{0};
-  Scheduler scheduler(source, Config());
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, Config());
   scheduler.media_filter().SetOnStart(
       [] { throw std::runtime_error("scheduler filter startup failure"); });
   scheduler.SetOnError([&](std::exception_ptr) { ++errors; });
@@ -1191,7 +1212,8 @@ TEST_CASE("Scheduler preserves cancellation requested during filter startup",
   std::atomic<int> video_frames{0};
   std::atomic<int> audio_frames{0};
   std::atomic<int> errors{0};
-  Scheduler scheduler(source, Config());
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, Config());
   scheduler.media_filter().SetOnStart([&] { scheduler.RequestStop(); });
   scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
     ++video_frames;
@@ -1224,12 +1246,16 @@ TEST_CASE("Scheduler preserves cancellation requested during filter startup",
 
 TEST_CASE("Scheduler rejects a null source or configurations without tracks",
           "[scheduler]") {
-  CHECK_THROWS_AS(Scheduler(nullptr, Config()), std::invalid_argument);
+  CHECK_THROWS_AS(Scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                            nullptr, Config()),
+                  std::invalid_argument);
   auto source = Source();
   auto config = Config();
   config.syncer.encoder.video_pixel_format = AV_PIX_FMT_NONE;
   config.syncer.encoder.audio_sample_format = AV_SAMPLE_FMT_NONE;
-  CHECK_THROWS_AS(Scheduler(source, config), std::invalid_argument);
+  CHECK_THROWS_AS(Scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                            source, config),
+                  std::invalid_argument);
 }
 
 TEST_CASE("Scheduler preserves sentinel forward-jump batches and their pause",
@@ -1241,7 +1267,8 @@ TEST_CASE("Scheduler preserves sentinel forward-jump batches and their pause",
   config.syncer.encoder.audio_sample_format = AV_SAMPLE_FMT_NONE;
   config.syncer.options.timeout = 5s;
   config.realtime.discontinuity_threshold = 2s;
-  Scheduler scheduler(source, config);
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
   std::mutex mutex;
   std::vector<Clock::time_point> arrivals;
   std::vector<std::int64_t> pts;
@@ -1272,7 +1299,8 @@ TEST_CASE("Scheduler preserves sentinel forward-jump batches and their pause",
 TEST_CASE("Scheduler waits for video output space while audio continues",
           "[scheduler][backpressure]") {
   auto source = Source();
-  Scheduler scheduler(source, Config());
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, Config());
   std::atomic<int> video_calls{0};
   std::atomic<int> audio_calls{0};
   std::atomic<int> accepted_frames{0};
@@ -1321,7 +1349,8 @@ TEST_CASE("Scheduler preserves output space notification before rejection",
           "[scheduler][backpressure]") {
   using Clock = std::chrono::steady_clock;
   auto source = Source();
-  Scheduler scheduler(source, Config());
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, Config());
   std::mutex mutex;
   std::condition_variable changed;
   std::vector<Clock::time_point> attempts;
@@ -1360,7 +1389,8 @@ TEST_CASE(
   using Clock = std::chrono::steady_clock;
   const bool video = GENERATE(false, true);
   auto source = Source();
-  Scheduler scheduler(source, Config());
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, Config());
   std::mutex mutex;
   std::condition_variable changed;
   std::vector<Clock::time_point> attempts;
@@ -1400,7 +1430,8 @@ TEST_CASE(
 TEST_CASE("Scheduler stops promptly while both outputs await space",
           "[scheduler][backpressure]") {
   auto source = Source();
-  Scheduler scheduler(source, Config());
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, Config());
   std::atomic<int> video_attempts{0};
   std::atomic<int> audio_attempts{0};
   scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
@@ -1429,7 +1460,8 @@ TEST_CASE("Scheduler wakes for source frames before a long Syncer timeout",
   auto source = Source();
   auto config = Config();
   config.syncer.options.timeout = 30s;
-  Scheduler scheduler(source, config);
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
   std::atomic<int> frames{0};
   scheduler.SetOnVideoFrame([&](const ffmpeg::Frame&) {
     ++frames;

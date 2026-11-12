@@ -1109,7 +1109,7 @@ TEST_CASE("CUDA converted frames feed NVENC directly and flush encoded packets",
       SoftwareSample(format, AVCOL_SPC_BT709, AVCOL_RANGE_MPEG, 16, 128, 128);
   auto reference = converter.CpuFrameToCuda(software);
   cv::Mat host(360, 640, CV_8UC3, cv::Scalar(40, 120, 200));
-  mw::streamer::AvMediaFilter filter;
+  mw::streamer::AvMediaFilter filter(device);
   filter.SetOnVideo([&](const ffmpeg::Frame& input) {
     cv::cuda::GpuMat image;
     image.upload(host);
@@ -1189,7 +1189,7 @@ TEST_CASE(
               reinterpret_cast<CUdeviceptr>(source->data[0])) == CUDA_SUCCESS);
   REQUIRE(expected != caller);
   bool called = false;
-  mw::streamer::AvMediaFilter filter;
+  mw::streamer::AvMediaFilter filter(device);
   filter.SetOnVideo([&](const ffmpeg::Frame& input) {
     auto image = converter.ToMat(input);
     CUcontext current = nullptr;

@@ -42,7 +42,7 @@ std::string LocalPath(std::string_view path) {
 class OfflinePipeline::Impl final {
  public:
   Impl(const ffmpeg::HwDeviceContext& device, OfflinePipelineConfig config)
-      : source_(device, MakeSourceConfig(std::move(config))) {
+      : source_(device, MakeSourceConfig(std::move(config))), filter_(device) {
     source_.SetReadSignal(signal_);
     source_.SetOnStateChanged([this](const AvMediaSourceStatus& status) {
       if (status.state == AvMediaSourceState::kFailed) {

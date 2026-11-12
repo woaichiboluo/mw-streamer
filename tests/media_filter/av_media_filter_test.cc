@@ -173,7 +173,7 @@ void CheckTiming(const AvDecoderReadResult& output, std::int64_t pts = 12000,
 
 TEST_CASE("Business filters can explicitly copy source timing with new content",
           "[media_filter]") {
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   filter.SetOnVideo([](const ffmpeg::Frame& frame) {
     auto output = Video(static_cast<std::uint8_t>(frame->data[0][0] + 3));
     output.CopyPropertiesFrom(frame);
@@ -204,7 +204,7 @@ TEST_CASE("Business filters own every returned frame timing field",
   returned->best_effort_timestamp = -95000;
   returned->time_base = {1001, 30000};
   returned->duration = 19;
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   auto callback = [&](const ffmpeg::Frame&) { return returned.Ref(); };
   filter.SetOnVideo(callback);
   filter.SetOnAudio(callback);
@@ -241,7 +241,7 @@ TEST_CASE("Business filters buffer one hundred frames without forwarding null",
     buffered.pop_front();
     return output;
   };
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   filter.SetOnVideo(callback);
   filter.SetOnAudio(callback);
   filter.Start();
@@ -261,7 +261,7 @@ TEST_CASE("Business filters buffer one hundred frames without forwarding null",
 
 TEST_CASE("Missing business callbacks pass through the original frames",
           "[media_filter]") {
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   filter.Start();
   auto video = Input(Video());
   auto audio = Input(Audio());
@@ -278,7 +278,7 @@ TEST_CASE("Missing business callbacks pass through the original frames",
 TEST_CASE("Interleaved tracks retain business state until Stop and Start",
           "[media_filter]") {
   std::vector<std::string> calls;
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   filter.SetOnStart([&] { calls.emplace_back("start"); });
   filter.SetOnStop([&] { calls.emplace_back("stop"); });
   filter.SetOnVideo([&](const ffmpeg::Frame& frame) {
@@ -307,7 +307,7 @@ TEST_CASE("Interleaved tracks retain business state until Stop and Start",
 
 TEST_CASE("PTS jumps do not reset or repair business-filter timestamps",
           "[media_filter]") {
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   int processed = 0;
   filter.SetOnVideo([&](const ffmpeg::Frame& frame) {
     auto output = Video(static_cast<std::uint8_t>(++processed));
@@ -326,7 +326,7 @@ TEST_CASE("PTS jumps do not reset or repair business-filter timestamps",
 TEST_CASE("EOF and underflow pass through without resetting or stopping",
           "[media_filter]") {
   int stops = 0;
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   filter.SetOnStop([&] { ++stops; });
   filter.Start();
   filter.ProcessVideo(Input(Video()));
@@ -359,7 +359,7 @@ TEST_CASE("Callback failures require a fresh filter session",
   const auto failure =
       std::make_exception_ptr(BusinessError("Business processing failed"));
   int stops = 0;
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   REQUIRE_FALSE(filter.error());
   filter.SetOnStop([&] { ++stops; });
   filter.SetOnVideo([&](const ffmpeg::Frame&) -> ffmpeg::Frame {
@@ -387,7 +387,7 @@ TEST_CASE("Callback failures require a fresh filter session",
 
 TEST_CASE("Session callbacks have explicit lifecycle semantics",
           "[media_filter]") {
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   REQUIRE_THROWS_AS(filter.ProcessVideo(Input(Video())), std::logic_error);
   filter.SetOnStart([] { throw std::runtime_error("Start failed"); });
   REQUIRE_THROWS_AS(filter.Start(), std::runtime_error);
@@ -412,7 +412,7 @@ TEST_CASE("Session callbacks have explicit lifecycle semantics",
 
 TEST_CASE("Frame consumers ignore invalid business callback output",
           "[media_filter]") {
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   int videos = 0;
   int audios = 0;
   filter.SetOnVideo([&](const ffmpeg::Frame&) {
@@ -436,7 +436,7 @@ TEST_CASE("Frame consumers ignore invalid business callback output",
 
 TEST_CASE("Consumer callback failures retain their original exception",
           "[media_filter]") {
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   const auto failure = std::make_exception_ptr(std::runtime_error("Consume"));
   filter.SetOnAudio([&](const ffmpeg::Frame&) -> ffmpeg::Frame {
     std::rethrow_exception(failure);
@@ -455,7 +455,7 @@ TEST_CASE("Consumer callback failures retain their original exception",
 
 TEST_CASE("Explicit reset clears business history without restarting filters",
           "[media_filter]") {
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   int starts = 0;
   int resets = 0;
   int history = 0;
@@ -492,7 +492,7 @@ TEST_CASE("Explicit reset clears business history without restarting filters",
 
 TEST_CASE("Reset waits for an active consumer before invoking its callback",
           "[media_filter]") {
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   std::promise<void> entered;
   auto entry = entered.get_future();
   std::promise<void> release;
@@ -523,7 +523,7 @@ TEST_CASE("Reset waits for an active consumer before invoking its callback",
 
 TEST_CASE("Reset callback failures poison the session but still allow Stop",
           "[media_filter]") {
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   const auto failure = std::make_exception_ptr(std::runtime_error("Reset"));
   filter.SetOnReset([&] { std::rethrow_exception(failure); });
   int stops = 0;
@@ -548,7 +548,7 @@ TEST_CASE("Destruction stops an active session even when Stop throws",
           "[media_filter]") {
   int stops = 0;
   {
-    AvMediaFilter filter;
+    AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
     filter.SetOnStop([&] {
       ++stops;
       throw std::runtime_error("Stop failed");
@@ -564,7 +564,7 @@ TEST_CASE("Audio processing completes while the video callback is blocked",
   auto entered = video_entered.get_future();
   std::promise<void> release_video;
   auto released = release_video.get_future().share();
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   filter.SetOnVideo([&](const ffmpeg::Frame& frame) {
     video_entered.set_value();
     released.wait();
@@ -614,7 +614,7 @@ TEST_CASE("Stop waits for both concurrent callbacks before OnStop",
   auto audio_release = release_audio.get_future().share();
   std::atomic<int> completed_callbacks = 0;
   int callbacks_when_stopped = -1;
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   filter.SetOnVideo([&](const ffmpeg::Frame& frame) {
     video_entered.set_value();
     video_release.wait();
@@ -705,7 +705,7 @@ TEST_CASE("A failing callback leaves the concurrent callback able to finish",
   auto audio_entry = audio_entered.get_future();
   std::promise<void> release_audio;
   auto audio_release = release_audio.get_future().share();
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   filter.SetOnAudio([&](const ffmpeg::Frame& frame) {
     audio_entered.set_value();
     audio_release.wait();
@@ -783,7 +783,7 @@ TEST_CASE("CUDA business filters retain hardware surfaces and input timing",
   const auto* surface = frame->data[0];
   const auto* frame_context = frame->hw_frames_ctx->data;
 
-  AvMediaFilter filter;
+  AvMediaFilter filter(device);
   filter.SetOnVideo([](const ffmpeg::Frame& input) { return input.Ref(); });
   filter.Start();
   auto output = filter.ProcessVideo(Input(std::move(frame)));
@@ -803,7 +803,7 @@ TEST_CASE("CUDA video callbacks reject missing hardware context before calling",
   ffmpeg::Frame frame;
   frame->format = AV_PIX_FMT_CUDA;
   bool called = false;
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   filter.SetOnVideo([&](const ffmpeg::Frame& input) {
     called = true;
     return input.Ref();
@@ -847,7 +847,7 @@ TEST_CASE("CUDA video callbacks bind frame context and restore the caller",
   CUcontext observed = nullptr;
   CUcontext switched = nullptr;
   CUcontext returned = nullptr;
-  AvMediaFilter filter;
+  AvMediaFilter filter(device);
   filter.SetOnVideo([&](const ffmpeg::Frame& input) {
     if (driver.current(&observed) != CUDA_SUCCESS) {
       throw std::runtime_error("Cannot query callback CUDA context");
@@ -916,10 +916,12 @@ TEST_CASE("CUDA video callbacks bind frame context and restore the caller",
 
 TEST_CASE("CUDA lifecycle callbacks retain session context and restore callers",
           "[.][media_filter][cuda]") {
-  // 0: success, 1: reset failure, 2: stop failure, 3: video failure.
-  auto failure = GENERATE(0, 1, 2, 3);
+  // 0: success, 1: reset failure, 2: stop failure, 3: video failure,
+  // 4: start failure followed by a successful restart.
+  auto failure = GENERATE(0, 1, 2, 3, 4);
+  const auto process_video = GENERATE(false, true);
   const auto different_caller_context = GENERATE(false, true);
-  CAPTURE(failure, different_caller_context);
+  CAPTURE(failure, different_caller_context, process_video);
   ffmpeg::HwDeviceContext device(ffmpeg::HwDeviceType::kCuda);
   ffmpeg::HwDeviceContext other(ffmpeg::HwDeviceType::kCuda);
   const auto native_context = [](const ffmpeg::HwDeviceContext& hardware) {
@@ -948,111 +950,149 @@ TEST_CASE("CUDA lifecycle callbacks retain session context and restore callers",
     return frame;
   };
   const TestCudaDriver driver;
+  CUcontext start_context = nullptr;
   CUcontext reset_context = nullptr;
   CUcontext stop_context = nullptr;
   int stops = 0;
-  AvMediaFilter filter;
-  filter.SetOnVideo([&](const ffmpeg::Frame& input) {
-    if (failure == 3) throw std::runtime_error("Video callback failed");
-    return input.Ref();
-  });
-  filter.SetOnReset([&] {
-    if (driver.current(&reset_context) != CUDA_SUCCESS) {
-      throw std::runtime_error("Cannot query reset CUDA context");
-    }
-    if (failure == 1) throw std::runtime_error("Reset callback failed");
-  });
-  filter.SetOnStop([&] {
-    ++stops;
-    if (driver.current(&stop_context) != CUDA_SUCCESS) {
-      throw std::runtime_error("Cannot query stop CUDA context");
-    }
-    if (failure == 2) throw std::runtime_error("Stop callback failed");
-  });
-  // Lifecycle calls run on a fresh thread, with either no current context or
-  // a different context. Check restoration after both return and exception.
-  const auto invoke = [&](auto operation) {
-    return std::async(
-               std::launch::async,
-               [&, operation] {
-                 if (driver.set(previous) != CUDA_SUCCESS) {
-                   throw std::runtime_error("Cannot set caller CUDA context");
-                 }
-                 std::exception_ptr error;
-                 try {
-                   operation();
-                 } catch (...) {
-                   error = std::current_exception();
-                 }
-                 CUcontext after = nullptr;
-                 const auto queried = driver.current(&after);
-                 const auto cleared = driver.set(nullptr);
-                 return std::make_pair(error, queried == CUDA_SUCCESS &&
-                                                  after == previous &&
-                                                  cleared == CUDA_SUCCESS);
-               })
-        .get();
-  };
   REQUIRE(av_buffer_get_ref_count(device.get()) == 1);
-  filter.Start();
-  if (failure == 3) {
-    REQUIRE_THROWS_MATCHES(filter.ConsumeVideo(Input(cuda_frame(device))),
-                           std::runtime_error,
-                           Catch::Matchers::Message("Video callback failed"));
-  } else {
-    filter.ConsumeVideo(Input(cuda_frame(device)));
-  }
-  // No input frame or frame pool remains. The session must own its device.
-  REQUIRE(av_buffer_get_ref_count(device.get()) == 2);
-  if (failure != 3) {
-    const auto reset = invoke([&] { filter.Reset(); });
-    REQUIRE(reset.second);
-    REQUIRE(reset_context == expected);
-    if (failure == 1) {
-      CheckException<std::runtime_error>(reset.first, "Reset callback failed");
-      CheckException<std::runtime_error>(filter.error(),
-                                         "Reset callback failed");
+  {
+    AvMediaFilter filter(device);
+    filter.SetOnStart([&] {
+      if (driver.current(&start_context) != CUDA_SUCCESS) {
+        throw std::runtime_error("Cannot query start CUDA context");
+      }
+      if (failure == 4) throw std::runtime_error("Start callback failed");
+    });
+    filter.SetOnVideo([&](const ffmpeg::Frame& input) {
+      if (failure == 3) throw std::runtime_error("Video callback failed");
+      return input.Ref();
+    });
+    filter.SetOnReset([&] {
+      if (driver.current(&reset_context) != CUDA_SUCCESS) {
+        throw std::runtime_error("Cannot query reset CUDA context");
+      }
+      if (failure == 1) throw std::runtime_error("Reset callback failed");
+    });
+    filter.SetOnStop([&] {
+      ++stops;
+      if (driver.current(&stop_context) != CUDA_SUCCESS) {
+        throw std::runtime_error("Cannot query stop CUDA context");
+      }
+      if (failure == 2) throw std::runtime_error("Stop callback failed");
+    });
+    // Lifecycle calls run on a fresh thread, with either no current context or
+    // a different context. Check restoration after both return and exception.
+    const auto invoke = [&](auto operation) {
+      return std::async(
+                 std::launch::async,
+                 [&, operation] {
+                   if (driver.set(previous) != CUDA_SUCCESS) {
+                     throw std::runtime_error("Cannot set caller CUDA context");
+                   }
+                   std::exception_ptr error;
+                   try {
+                     operation();
+                   } catch (...) {
+                     error = std::current_exception();
+                   }
+                   CUcontext after = nullptr;
+                   const auto queried = driver.current(&after);
+                   const auto cleared = driver.set(nullptr);
+                   return std::make_pair(error, queried == CUDA_SUCCESS &&
+                                                    after == previous &&
+                                                    cleared == CUDA_SUCCESS);
+                 })
+          .get();
+    };
+    REQUIRE(av_buffer_get_ref_count(device.get()) == 2);
+    const auto started = invoke([&] { filter.Start(); });
+    REQUIRE(started.second);
+    REQUIRE(start_context == expected);
+    if (failure == 4) {
+      CheckException<std::runtime_error>(started.first,
+                                         "Start callback failed");
+      REQUIRE_NOTHROW(filter.Stop());
+      REQUIRE(stops == 0);
+      failure = 0;
+      const auto restarted = invoke([&] { filter.Start(); });
+      REQUIRE_FALSE(restarted.first);
+      REQUIRE(restarted.second);
+      REQUIRE(start_context == expected);
     } else {
-      REQUIRE_FALSE(reset.first);
-      REQUIRE_NOTHROW(filter.ConsumeVideo(Input(cuda_frame(device))));
+      REQUIRE_FALSE(started.first);
+    }
+    if (failure == 3) {
+      REQUIRE_THROWS_MATCHES(filter.ConsumeVideo(Input(cuda_frame(device))),
+                             std::runtime_error,
+                             Catch::Matchers::Message("Video callback failed"));
+    } else if (process_video) {
+      filter.ConsumeVideo(Input(cuda_frame(device)));
+    }
+    // The construction reference remains even when no video was processed.
+    REQUIRE(av_buffer_get_ref_count(device.get()) == 2);
+    if (failure != 3) {
+      const auto reset = invoke([&] { filter.Reset(); });
+      REQUIRE(reset.second);
+      REQUIRE(reset_context == expected);
+      if (failure == 1) {
+        CheckException<std::runtime_error>(reset.first,
+                                           "Reset callback failed");
+        CheckException<std::runtime_error>(filter.error(),
+                                           "Reset callback failed");
+      } else {
+        REQUIRE_FALSE(reset.first);
+        if (process_video) {
+          REQUIRE_NOTHROW(filter.ConsumeVideo(Input(cuda_frame(device))));
+        }
+      }
+      REQUIRE(av_buffer_get_ref_count(device.get()) == 2);
+    }
+    const auto stopped = invoke([&] { filter.Stop(); });
+    REQUIRE(stopped.second);
+    REQUIRE(stop_context == expected);
+    if (failure == 2) {
+      CheckException<std::runtime_error>(stopped.first, "Stop callback failed");
+    } else {
+      REQUIRE_FALSE(stopped.first);
     }
     REQUIRE(av_buffer_get_ref_count(device.get()) == 2);
-  }
-  const auto stopped = invoke([&] { filter.Stop(); });
-  REQUIRE(stopped.second);
-  REQUIRE(stop_context == expected);
-  if (failure == 2) {
-    CheckException<std::runtime_error>(stopped.first, "Stop callback failed");
-  } else {
-    REQUIRE_FALSE(stopped.first);
+    REQUIRE_NOTHROW(filter.Stop());
+    REQUIRE(stops == 1);
+
+    // Restarting without video still binds the construction context.
+    failure = 0;
+    const auto empty_start = invoke([&] { filter.Start(); });
+    REQUIRE_FALSE(empty_start.first);
+    REQUIRE(empty_start.second);
+    REQUIRE(start_context == expected);
+    const auto empty_reset = invoke([&] { filter.Reset(); });
+    REQUIRE_FALSE(empty_reset.first);
+    REQUIRE(empty_reset.second);
+    REQUIRE(reset_context == expected);
+    const auto empty_stop = invoke([&] { filter.Stop(); });
+    REQUIRE_FALSE(empty_stop.first);
+    REQUIRE(empty_stop.second);
+    REQUIRE(stop_context == expected);
+
+    // Video from another device must not change the lifecycle context.
+    bool video_called = false;
+    filter.SetOnVideo([&](const ffmpeg::Frame& input) {
+      video_called = true;
+      return input.Ref();
+    });
+    filter.Start();
+    REQUIRE_THROWS_AS(filter.ConsumeVideo(Input(cuda_frame(other))),
+                      std::invalid_argument);
+    REQUIRE_FALSE(video_called);
+    REQUIRE(filter.error());
+    REQUIRE(av_buffer_get_ref_count(device.get()) == 2);
+    REQUIRE(av_buffer_get_ref_count(other.get()) == 1);
+    const auto restarted_stop = invoke([&] { filter.Stop(); });
+    REQUIRE_FALSE(restarted_stop.first);
+    REQUIRE(restarted_stop.second);
+    REQUIRE(stop_context == expected);
   }
   REQUIRE(av_buffer_get_ref_count(device.get()) == 1);
-  REQUIRE_NOTHROW(filter.Stop());
-  REQUIRE(stops == 1);
-
-  // A session with no CUDA video processing must not inherit the old context.
-  failure = 0;
-  filter.Start();
-  const auto empty_reset = invoke([&] { filter.Reset(); });
-  REQUIRE_FALSE(empty_reset.first);
-  REQUIRE(empty_reset.second);
-  REQUIRE(reset_context == previous);
-  const auto empty_stop = invoke([&] { filter.Stop(); });
-  REQUIRE_FALSE(empty_stop.first);
-  REQUIRE(empty_stop.second);
-  REQUIRE(stop_context == previous);
-
-  // The next CUDA session can use another context without retaining the old
-  // device, even if the previous session ended through a callback exception.
-  filter.Start();
-  filter.ConsumeVideo(Input(cuda_frame(other)));
-  REQUIRE(av_buffer_get_ref_count(device.get()) == 1);
-  REQUIRE(av_buffer_get_ref_count(other.get()) == 2);
-  const auto restarted_stop = invoke([&] { filter.Stop(); });
-  REQUIRE_FALSE(restarted_stop.first);
-  REQUIRE(restarted_stop.second);
-  REQUIRE(stop_context == native_context(other));
-  REQUIRE(av_buffer_get_ref_count(other.get()) == 1);
 }
 
 }  // namespace

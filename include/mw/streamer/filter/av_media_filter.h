@@ -9,6 +9,7 @@
 #include "mw/export.h"
 #include "mw/streamer/decoder/av_decoder.h"
 #include "mw/streamer/ffmpeg/frame.h"
+#include "mw/streamer/ffmpeg/hw_device_context.h"
 
 namespace mw::streamer {
 
@@ -22,11 +23,10 @@ namespace mw::streamer {
 // Callbacks must not reenter this object. Finish all calls before destruction.
 // Callback exceptions propagate to the caller and reject subsequent processing;
 // already active calls may finish. Call Stop before starting another session.
-// CUDA video callbacks in one session must use the same CUDA context. Its
-// device is retained from the first CUDA video callback through OnStop.
-// OnReset and OnStop run with that context current and restore the caller's
-// context on return or throw. Before any CUDA video callback, they leave the
-// caller's context unchanged. OnStart does not bind a CUDA context.
+// CUDA video callback inputs must use the constructor device's CUDA context.
+// OnStart, OnReset and OnStop run with that context current, even before any
+// video frame arrives, and restore the caller's context on return or throw.
+// A CPU device leaves the caller's context unchanged.
 class MW_STREAMER_API AvMediaFilter final {
  public:
   using OnStart = std::function<void()>;
@@ -46,7 +46,8 @@ class MW_STREAMER_API AvMediaFilter final {
   using OnVideo =
       std::function<std::optional<ffmpeg::Frame>(const ffmpeg::Frame&)>;
 
-  AvMediaFilter();
+  // Retains the device through destruction, including stopped sessions.
+  explicit AvMediaFilter(const ffmpeg::HwDeviceContext& device);
   // Stops an active session; exceptions from OnStop are logged here.
   ~AvMediaFilter();
   AvMediaFilter(const AvMediaFilter&) = delete;

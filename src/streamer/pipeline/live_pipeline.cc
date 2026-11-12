@@ -29,7 +29,7 @@ class LivePipeline::Impl final {
   Impl(const ffmpeg::HwDeviceContext& device, LivePipelineConfig config)
       : config_(std::move(config)),
         source_(std::make_shared<AvMediaSource>(device, config_.input)),
-        scheduler_(source_, MakeSchedulerConfig(config_)),
+        scheduler_(device, source_, MakeSchedulerConfig(config_)),
         encoder_(device),
         remuxer_(config_.remuxer) {
     auto& target = config_.encoder;

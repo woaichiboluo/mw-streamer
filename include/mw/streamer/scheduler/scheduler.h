@@ -50,7 +50,9 @@ class MW_STREAMER_API Scheduler final {
 
   // Null source or invalid target configuration throws synchronously.
   // Target channel layout and standby frame references are retained separately.
-  Scheduler(std::shared_ptr<AvMediaSource> source, SchedulerConfig config);
+  // Use the source's device so lifecycle and video callbacks share a context.
+  Scheduler(const ffmpeg::HwDeviceContext& device,
+            std::shared_ptr<AvMediaSource> source, SchedulerConfig config);
   ~Scheduler();
   Scheduler(const Scheduler&) = delete;
   Scheduler& operator=(const Scheduler&) = delete;

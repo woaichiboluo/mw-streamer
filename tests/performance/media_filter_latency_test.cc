@@ -17,6 +17,7 @@ extern "C" {
 }
 
 #include "mw/log.h"
+#include "mw/streamer/ffmpeg/hw_device_context.h"
 #include "mw/streamer/filter/av_media_filter.h"
 #include "mw/streamer/init/init.h"
 
@@ -130,7 +131,7 @@ double MeanMs(const std::string& line) {
 TEST_CASE("业务过滤器分别统计音视频回调且旁路和EOF不计样本",
           "[latency][media_filter]") {
   MediaFilterLatencyLog logging;
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   filter.SetOnVideo([](const ffmpeg::Frame& frame) {
     std::this_thread::sleep_for(12ms);
     return frame.Ref();
@@ -171,7 +172,7 @@ TEST_CASE("业务过滤器分别统计音视频回调且旁路和EOF不计样本
 TEST_CASE("业务过滤器失败调用不计成功样本且重启重新统计",
           "[latency][media_filter]") {
   MediaFilterLatencyLog logging;
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   filter.SetOnVideo([](const ffmpeg::Frame&) -> ffmpeg::Frame {
     throw std::runtime_error("business failure");
   });
@@ -193,7 +194,7 @@ TEST_CASE("业务过滤器失败调用不计成功样本且重启重新统计",
 TEST_CASE("业务过滤器允许同轨并行并在Stop等待后汇总",
           "[latency][media_filter]") {
   MediaFilterLatencyLog logging;
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   std::promise<void> first_entered;
   std::promise<void> second_entered;
   auto first_ready = first_entered.get_future();
@@ -237,7 +238,7 @@ TEST_CASE("性能阶段独立于日志模块且分别控制汇总和明细",
           "[performance][latency][media_filter]") {
   MediaFilterLatencyLog logging(PerformanceMode::kDetail,
                                 PerformanceMode::kSummary);
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   filter.SetOnVideo([](const ffmpeg::Frame& frame) { return frame.Ref(); });
   filter.SetOnAudio([](const ffmpeg::Frame& frame) { return frame.Ref(); });
   filter.Start();
@@ -281,7 +282,7 @@ TEST_CASE("Trace日志模块不能开启未配置的性能阶段",
           "[performance][latency][media_filter][disabled]") {
   MediaFilterLatencyLog logging(PerformanceMode::kSummary,
                                 PerformanceMode::kOff, false);
-  AvMediaFilter filter;
+  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
   filter.SetOnVideo([](const ffmpeg::Frame& frame) { return frame.Ref(); });
   filter.SetOnAudio([](const ffmpeg::Frame& frame) { return frame.Ref(); });
   filter.Start();

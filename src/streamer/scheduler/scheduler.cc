@@ -45,10 +45,12 @@ std::int64_t InputPts(const AvDecoderReadResult& input) {
 
 class Scheduler::Impl final {
  public:
-  Impl(std::shared_ptr<AvMediaSource> source, SchedulerConfig config)
+  Impl(const ffmpeg::HwDeviceContext& device,
+       std::shared_ptr<AvMediaSource> source, SchedulerConfig config)
       : source_(std::move(source)),
         syncer_(config.syncer),
-        realtime_(config.realtime) {
+        realtime_(config.realtime),
+        filter_(device) {
     if (!source_) {
       throw std::invalid_argument("Scheduler 需要有效的 MediaSource");
     }
@@ -477,9 +479,11 @@ class Scheduler::Impl final {
   Thread driver_;
 };
 
-Scheduler::Scheduler(std::shared_ptr<AvMediaSource> source,
+Scheduler::Scheduler(const ffmpeg::HwDeviceContext& device,
+                     std::shared_ptr<AvMediaSource> source,
                      SchedulerConfig config)
-    : impl_(std::make_unique<Impl>(std::move(source), std::move(config))) {}
+    : impl_(std::make_unique<Impl>(device, std::move(source),
+                                   std::move(config))) {}
 Scheduler::~Scheduler() = default;
 AvMediaFilter& Scheduler::media_filter() { return impl_->media_filter(); }
 void Scheduler::SetOnVideoFrame(OnVideoFrame callback) {
