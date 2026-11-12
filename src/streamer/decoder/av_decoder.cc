@@ -365,6 +365,7 @@ class AvDecoder::Impl final {
     try {
       bool started = false;
       bool drained = false;
+      std::optional<Input> pending;
       std::int64_t next_pts = AV_NOPTS_VALUE;
       for (;;) {
         {
@@ -393,8 +394,9 @@ class AvDecoder::Impl final {
             continue;
           }
           if (received != AVERROR(EAGAIN)) {
-            ffmpeg::FfmpegException::throwIfError(received,
-                                                  "avcodec_receive_frame");
+            // Like ffplay, keep receiving after a damaged packet. Only
+            // EAGAIN requests input; decode errors do not end the stream.
+            if (received < 0) continue;
             if (context_.get()->hw_device_ctx &&
                 (frame->format != AV_PIX_FMT_CUDA || !frame->hw_frames_ctx)) {
               throw ffmpeg::FfmpegException(AVERROR_INVALIDDATA,
@@ -413,7 +415,13 @@ class AvDecoder::Impl final {
           }
         }
         Input input;
-        if (packets_.Pop(input) != BlockingQueueResult::kSuccess) return;
+        const bool retry = pending.has_value();
+        if (retry) {
+          input = std::move(*pending);
+          pending.reset();
+        } else if (packets_.Pop(input) != BlockingQueueResult::kSuccess) {
+          return;
+        }
         {
           std::lock_guard<std::mutex> lock(mutex_);
           if (stopping_) return;
@@ -431,7 +439,7 @@ class AvDecoder::Impl final {
         // EOF is ordered behind all submitted packets. After a drain the codec
         // waits for Reset, instead of closing its worker/context.
 #ifdef AV_CODEC_FLAG_COPY_OPAQUE
-        if (input.packet) {
+        if (input.packet && !retry) {
           latency_.Attach(input.packet->get()->opaque_ref, latency_.Begin());
         }
 #endif
@@ -448,10 +456,12 @@ class AvDecoder::Impl final {
           MW_LOG_DEBUG("streamer", "AvDecoder 提交 EOF: instance={} stream={}",
                        fmt::ptr(this), stream_.stream_index);
         }
-        ffmpeg::FfmpegException::throwIfError(
-            avcodec_send_packet(context_.get(),
-                                input.packet ? input.packet->get() : nullptr),
-            "avcodec_send_packet");
+        const int sent = avcodec_send_packet(
+            context_.get(), input.packet ? input.packet->get() : nullptr);
+        // EAGAIN leaves the input unconsumed, including an ordered EOF. Other
+        // results release it, as in ffplay, so bad packets cannot stop
+        // playback.
+        if (sent == AVERROR(EAGAIN)) pending = std::move(input);
         started = true;
       }
     } catch (...) {

@@ -395,6 +395,112 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "AvDecoder CUDA skips corrupt HEVC packets and drains ordered replays",
+    "[.][av-decoder][cuda][corrupt][reset][eof][backpressure]") {
+  auto source = ReadSource("h265_cuda.mp4");
+  const auto expected = ReferenceDecode(source);
+  REQUIRE(source.packets.size() > 2);
+  const auto* parameters = source.stream.codec_parameters.get();
+  REQUIRE(parameters->extradata_size >= 22);
+  REQUIRE(parameters->extradata[0] == 1);
+  REQUIRE((parameters->extradata[21] & 3) + 1 == 4);
+  ffmpeg::Packet invalid;
+  REQUIRE(av_new_packet(invalid.get(), 6) >= 0);
+  invalid->data[0] = 0;
+  invalid->data[1] = 0;
+  invalid->data[2] = 0x15;
+  invalid->data[3] = 0x4e;
+  invalid->data[4] = 0x26;
+  invalid->data[5] = 0x01;
+  invalid->stream_index = source.stream.stream_index;
+  const auto* codec = avcodec_find_decoder(AV_CODEC_ID_HEVC);
+  REQUIRE(codec != nullptr);
+  std::unique_ptr<AVCodecContext, CodecDeleter> context(
+      avcodec_alloc_context3(codec));
+  REQUIRE(context != nullptr);
+  REQUIRE(avcodec_parameters_to_context(context.get(), parameters) >= 0);
+  context->thread_count = 1;
+  REQUIRE(avcodec_open2(context.get(), codec, nullptr) >= 0);
+  const int sent = avcodec_send_packet(context.get(), invalid.get());
+  if (sent != AVERROR_INVALIDDATA) {
+    REQUIRE(sent >= 0);
+    ffmpeg::Frame frame;
+    REQUIRE(avcodec_receive_frame(context.get(), frame.get()) ==
+            AVERROR_INVALIDDATA);
+  }
+  // Extra malformed packets leave every valid packet available for an exact
+  // pixel/PTS comparison, including valid frames after the middle corruption.
+  source.packets.insert(source.packets.begin() + static_cast<std::ptrdiff_t>(
+                                                     source.packets.size() / 2),
+                        invalid);
+  source.packets.push_back(invalid);
+  ffmpeg::HwDeviceContext device(ffmpeg::HwDeviceType::kCuda);
+  for (const auto name : {"hevc", "hevc_cuvid"}) {
+    CAPTURE(name);
+    AvDecoderConfig config;
+    config.decoder_name = name;
+    config.packet_capacity = 1;
+    config.frame_capacity = 1;
+    std::atomic<int> errors{0};
+    AvDecoder decoder(source.stream, device, config);
+    decoder.SetOnError([&](std::exception_ptr) { ++errors; });
+    SourceFeeder feeder(decoder, source, 2);
+    for (int replay = 0; replay < 2; ++replay) {
+      CAPTURE(replay);
+      for (const auto& frame : expected) {
+        const auto result = ReadAvailable(decoder);
+        REQUIRE(result.status == AvDecoderReadStatus::kFrame);
+        REQUIRE(result.frame.has_value());
+        REQUIRE(result.frame->get()->format == AV_PIX_FMT_CUDA);
+        REQUIRE(result.frame->get()->hw_frames_ctx != nullptr);
+        CHECK(Download(*result.frame) == frame);
+        CHECK(decoder.buffered_packets() <= config.packet_capacity);
+        CHECK(decoder.buffered_frames() <= config.frame_capacity);
+      }
+      const auto eof = ReadAvailable(decoder);
+      CHECK(eof.status == AvDecoderReadStatus::kEof);
+      CHECK_FALSE(eof.frame.has_value());
+      CHECK(eof.end_pts != AV_NOPTS_VALUE);
+    }
+    feeder.Join();
+    CHECK(decoder.TryReadFrame().status == AvDecoderReadStatus::kNull);
+    REQUIRE(decoder.TryReset());
+    // Stop while the worker is blocked behind a full output queue, with a
+    // queued input packet still waiting for the worker to make progress.
+    std::size_t submitted = 0;
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    for (;;) {
+      REQUIRE(decoder.error() == nullptr);
+      REQUIRE(std::chrono::steady_clock::now() < deadline);
+      while (submitted < source.packets.size() &&
+             decoder.TryPushPacket(source.packets[submitted])) {
+        ++submitted;
+      }
+      if (decoder.buffered_frames() == config.frame_capacity &&
+          decoder.buffered_packets() == config.packet_capacity) {
+        std::this_thread::sleep_for(20ms);
+        if (decoder.buffered_frames() == config.frame_capacity &&
+            decoder.buffered_packets() == config.packet_capacity) {
+          break;
+        }
+      }
+      std::this_thread::sleep_for(1ms);
+    }
+    REQUIRE(submitted < source.packets.size());
+    CHECK_FALSE(decoder.TryPushPacket(source.packets[submitted]));
+    CHECK_FALSE(decoder.TryPushEof());
+    CHECK_FALSE(decoder.TryReset());
+    const auto stopped = std::chrono::steady_clock::now();
+    decoder.Stop();
+    CHECK(std::chrono::steady_clock::now() - stopped < 500ms);
+    CHECK(decoder.buffered_frames() == 0);
+    CHECK(decoder.buffered_packets() == 0);
+    CHECK(decoder.error() == nullptr);
+    CHECK(errors.load() == 0);
+  }
+}
+
+TEST_CASE(
     "AvDecoder CUDA device keeps audio on CPU and rejects unsupported codecs",
     "[.][av-decoder][cuda]") {
   ffmpeg::HwDeviceContext device(ffmpeg::HwDeviceType::kCuda);

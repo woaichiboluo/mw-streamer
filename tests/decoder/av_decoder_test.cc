@@ -9,7 +9,6 @@
 #include <exception>
 #include <future>
 #include <memory>
-#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -646,81 +645,48 @@ TEST_CASE("AvDecoder reset clears the previous EOF endpoint without media",
 }
 
 TEST_CASE(
-    "AvDecoder reports native decode failures once without publishing EOF",
-    "[av-decoder][error][notification]") {
-  const auto source = ReadSource("h264_aac.mp4", AVMEDIA_TYPE_VIDEO);
-  const auto* parameters = source.stream.codec_parameters.get();
-  REQUIRE(parameters->extradata_size >= 5);
-  REQUIRE(parameters->extradata[0] == 1);
-  REQUIRE((parameters->extradata[4] & 3) + 1 > 1);
-  ffmpeg::Packet invalid;
-  REQUIRE(av_new_packet(invalid.get(), 1) >= 0);
-  invalid->data[0] = 0;
-  invalid->stream_index = source.stream.stream_index;
-  invalid->pts = 0;
-  invalid->dts = 0;
-  auto native = OpenReferenceCodec(source.stream);
-  const int native_error = avcodec_send_packet(native.get(), invalid.get());
-  REQUIRE(native_error == AVERROR_INVALIDDATA);
-
-  std::atomic<std::size_t> callbacks{0};
-  std::atomic<std::size_t> replacement_callbacks{0};
-  std::mutex mutex;
-  std::exception_ptr observed;
-  bool callback_error_matches = false;
-  AvDecoderReadStatus callback_read_status = AvDecoderReadStatus::kEof;
-  AvDecoderConfig config;
-  config.thread_count = 1;
-  AvDecoder decoder(source.stream, config);
-  decoder.SetOnError([&](std::exception_ptr error) {
-    {
-      std::lock_guard<std::mutex> lock(mutex);
-      observed = error;
-      callback_error_matches = decoder.error() == error;
-      callback_read_status = decoder.TryReadFrame().status;
+    "AvDecoder skips corrupt packets and preserves frames across EOF and Reset",
+    "[av-decoder][corrupt][error][notification][reset][eof]") {
+  for (const auto file : {"h264_aac.mp4", "h265_aac.mp4"}) {
+    CAPTURE(file);
+    auto source = ReadSource(file, AVMEDIA_TYPE_VIDEO);
+    const auto reference = ReferenceDecode(source.stream, source.packets);
+    ffmpeg::Packet invalid;
+    REQUIRE(av_new_packet(invalid.get(), 6) >= 0);
+    // A length-prefixed NAL declares 5454 bytes but only has its header.
+    invalid->data[0] = 0;
+    invalid->data[1] = 0;
+    invalid->data[2] = 0x15;
+    invalid->data[3] = 0x4e;
+    invalid->data[4] = 0x26;
+    invalid->data[5] = 1;
+    invalid->stream_index = source.stream.stream_index;
+    invalid->pts = invalid->dts = AV_NOPTS_VALUE;
+    auto native = OpenReferenceCodec(source.stream);
+    REQUIRE(avcodec_send_packet(native.get(), invalid.get()) ==
+            AVERROR_INVALIDDATA);
+    const auto middle = source.packets.size() / 2;
+    source.packets.insert(
+        source.packets.begin() + static_cast<std::ptrdiff_t>(middle), invalid);
+    source.packets.push_back(invalid);
+    for (const int threads : {1, 0}) {
+      CAPTURE(threads);
+      std::atomic<int> callbacks{0};
+      AvDecoderConfig config;
+      config.thread_count = threads;
+      config.packet_capacity = 1;
+      config.frame_capacity = 1;
+      AvDecoder decoder(source.stream, config);
+      decoder.SetOnError([&](std::exception_ptr) { ++callbacks; });
+      SourceFeeder feeder(decoder, source, 2);
+      CheckSource(decoder, source, reference);
+      CheckSource(decoder, source, reference);
+      feeder.Join();
+      CHECK(decoder.TryReadFrame().status == AvDecoderReadStatus::kNull);
+      decoder.Stop();
+      CHECK(decoder.error() == nullptr);
+      CHECK(callbacks.load() == 0);
     }
-    decoder.RequestStop();
-    ++callbacks;
-    throw std::runtime_error("observer failure");
-  });
-  bool replaced = false;
-  bool cleared = false;
-  SECTION("throwing observer can query the failure and request stop") {}
-  SECTION("replacement invokes only the new observer") {
-    replaced = true;
-    decoder.SetOnError([&](std::exception_ptr error) {
-      observed = error;
-      ++replacement_callbacks;
-    });
-  }
-  SECTION("cleared observer leaves the original failure queryable") {
-    cleared = true;
-    decoder.SetOnError({});
-  }
-  REQUIRE(decoder.TryPushPacket(invalid));
-  REQUIRE(WaitFor([&] {
-    return cleared ? decoder.error() != nullptr
-                   : callbacks.load() + replacement_callbacks.load() != 0;
-  }));
-  decoder.Stop();
-  CHECK(callbacks.load() == (replaced || cleared ? 0u : 1u));
-  CHECK(replacement_callbacks.load() == (replaced ? 1u : 0u));
-  CHECK(decoder.TryReadFrame().status == AvDecoderReadStatus::kNull);
-  CHECK_FALSE(decoder.TryPushPacket(source.packets.front()));
-  CHECK_FALSE(decoder.TryPushEof());
-  CHECK_FALSE(decoder.TryReset());
-  std::lock_guard<std::mutex> lock(mutex);
-  if (!replaced && !cleared) {
-    CHECK(callback_error_matches);
-    CHECK(callback_read_status == AvDecoderReadStatus::kNull);
-  }
-  const auto retained_error = decoder.error();
-  CHECK(observed == (cleared ? nullptr : retained_error));
-  REQUIRE(retained_error != nullptr);
-  try {
-    std::rethrow_exception(retained_error);
-  } catch (const ffmpeg::FfmpegException& error) {
-    CHECK(error.error_code() == native_error);
   }
 }
 
@@ -981,11 +947,12 @@ TEST_CASE(
   CHECK(decoder.error() == nullptr);
 }
 
-TEST_CASE("AvDecoder blocking reader wakes on Stop and decode failure",
-          "[av-decoder][blocking][stop][error][notification]") {
-  bool fail = false;
+TEST_CASE(
+    "AvDecoder blocking reader wakes on Stop and EOF after a corrupt packet",
+    "[av-decoder][blocking][stop][error][notification]") {
+  bool corrupt = false;
   SECTION("Stop closes an empty output queue") {}
-  SECTION("decode failure closes an empty output queue") { fail = true; }
+  SECTION("corrupt packet still permits normal EOF") { corrupt = true; }
   const auto source = ReadSource("h264_aac.mp4", AVMEDIA_TYPE_VIDEO);
   ffmpeg::Packet invalid;
   REQUIRE(av_new_packet(invalid.get(), 1) >= 0);
@@ -1012,10 +979,11 @@ TEST_CASE("AvDecoder blocking reader wakes on Stop and decode failure",
   });
   const auto blocked = completed.wait_for(40ms);
   bool submitted = true;
-  if (fail)
-    submitted = decoder.PushPacket(invalid);
-  else
+  if (corrupt) {
+    submitted = decoder.PushPacket(invalid) && decoder.PushEof();
+  } else {
     decoder.RequestStop();
+  }
   const bool signaled =
       signal->WaitUntil(revision, std::chrono::steady_clock::now() + 1s);
   const auto resumed = completed.wait_for(1s);
@@ -1026,9 +994,10 @@ TEST_CASE("AvDecoder blocking reader wakes on Stop and decode failure",
   CHECK(signaled);
   CHECK(resumed == std::future_status::ready);
   CHECK_FALSE(reader_failure);
-  CHECK(output.status == AvDecoderReadStatus::kNull);
+  CHECK(output.status ==
+        (corrupt ? AvDecoderReadStatus::kEof : AvDecoderReadStatus::kNull));
   CHECK_FALSE(output.frame);
-  CHECK(static_cast<bool>(decoder.error()) == fail);
+  CHECK(decoder.error() == nullptr);
 }
 
 }  // namespace
