@@ -635,6 +635,92 @@ TEST_CASE("Syncer first real frame starts after the last emitted backup ends",
   REQUIRE(PtsUs(*first.frame) >= previous_end);
 }
 
+TEST_CASE("Syncer drops startup video covered by backup on the audio timeline",
+          "[syncer][timing]") {
+  Syncer timing(MixedConfig());
+  for (std::int64_t pts = 0; pts <= 192000; pts += 960) {
+    auto audio = AudioInput(pts);
+    const auto step = timing.Step(false, &audio, pts * 1000000 / 48000);
+    REQUIRE(step.consumed);
+    REQUIRE(step.frame);
+    CHECK((*step.frame)->pts == pts);
+  }
+  const auto backup = DrainAt(timing, true, 4000000);
+  REQUIRE_FALSE(backup.empty());
+  const auto& last = backup.back();
+  const auto resume_pts = av_rescale_q(last->pts + last->duration,
+                                       last->time_base, AVRational{1, 1000000});
+  REQUIRE(resume_pts > 0);
+  for (std::int64_t pts = 0; pts < resume_pts; pts += 40000) {
+    auto video = VideoInput(pts);
+    const auto step = timing.Step(true, &video, 4000000);
+    REQUIRE(step.consumed);
+    CHECK_FALSE(step.frame);
+  }
+  auto audio = AudioInput(192960);
+  auto next = timing.Step(false, &audio, 4020000);
+  REQUIRE(next.consumed);
+  REQUIRE(next.frame);
+  CHECK((*next.frame)->pts == 192960);
+  CHECK((*next.frame)->data[0][0] == 0x31);
+
+  auto video = VideoInput(resume_pts);
+  const auto blocked =
+      timing.Step(true, &video, 4020000, [](const auto&) { return false; });
+  CHECK(blocked.blocked);
+  CHECK_FALSE(blocked.consumed);
+  const auto resumed = timing.Step(true, &video, 4020000);
+  REQUIRE(resumed.consumed);
+  REQUIRE(resumed.frame);
+  CHECK(PtsUs(*resumed.frame) == resume_pts);
+  CHECK((*resumed.frame)->data[0][0] == 99);
+}
+
+TEST_CASE("Syncer resumes loop video on the new audio timeline after EOF",
+          "[syncer][timing]") {
+  Syncer timing(MixedConfig());
+  auto old_video = VideoInput(0);
+  REQUIRE(timing.Step(true, &old_video, 0).consumed);
+  for (std::int64_t pts = 0; pts < 1920; pts += 960) {
+    auto audio = AudioInput(pts);
+    REQUIRE(timing.Step(false, &audio, pts * 1000000 / 48000).consumed);
+  }
+  const auto eof = Eof();
+  REQUIRE(timing.Step(true, &eof, 40000).consumed);
+  REQUIRE(timing.Step(false, &eof, 40000).consumed);
+  for (std::int64_t pts = 0; pts <= 49920; pts += 960) {
+    auto audio = AudioInput(pts);
+    const auto step = timing.Step(false, &audio, 40000 + pts * 1000000 / 48000);
+    REQUIRE(step.consumed);
+    REQUIRE(step.frame);
+    CHECK((*step.frame)->pts == pts + 1920);
+  }
+  const auto backup = DrainAt(timing, true, 1080000);
+  REQUIRE_FALSE(backup.empty());
+  const auto& last = backup.back();
+  const auto resume_pts = PtsUs(last) + 40000;
+  REQUIRE(resume_pts > 40000);
+  for (std::int64_t pts = 0; pts < resume_pts - 40000; pts += 40000) {
+    auto video = VideoInput(pts);
+    const auto step = timing.Step(true, &video, 1080000);
+    REQUIRE(step.consumed);
+    CHECK_FALSE(step.frame);
+  }
+  auto audio = AudioInput(50880);
+  const auto next = timing.Step(false, &audio, 1100000);
+  REQUIRE(next.consumed);
+  REQUIRE(next.frame);
+  CHECK((*next.frame)->pts == 52800);
+  CHECK((*next.frame)->data[0][0] == 0x31);
+
+  auto video = VideoInput(resume_pts - 40000);
+  const auto resumed = timing.Step(true, &video, 1100000);
+  REQUIRE(resumed.consumed);
+  REQUIRE(resumed.frame);
+  CHECK(PtsUs(*resumed.frame) == resume_pts);
+  CHECK((*resumed.frame)->data[0][0] == 99);
+}
+
 TEST_CASE("Syncer ignores disabled audio fields and rejects no enabled tracks",
           "[syncer]") {
   auto config = VideoConfig();

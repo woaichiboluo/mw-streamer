@@ -133,6 +133,8 @@ struct Track {
   std::optional<std::int64_t> next;
   std::optional<std::int64_t> shift;
   std::optional<ffmpeg::Frame> last_real;
+  std::optional<std::uint64_t> generation;
+  std::uint64_t eof_count = 0;
   std::int64_t last_real_pts = 0;
   bool last_success = true;
   bool has_output = false;
@@ -200,6 +202,8 @@ class SyncerTiming::Impl final {
     if (head) {
       if (head->status == AvDecoderReadStatus::kEof) {
         // Like a live sentinel, consume EOF and keep both clocks running.
+        ++track.eof_count;
+        track.generation.reset();
         MW_LOG_INFO("streamer",
                     "Syncer[{}] 消费输入 EOF，继续实时输出: track={} "
                     "end_pts={} time_base={}/{} now_us={}",
@@ -297,6 +301,27 @@ class SyncerTiming::Impl final {
                      track.next.has_value(), track.next.value_or(0), now);
       }
       pts = Add(original, *track.shift);
+      // A normal loop reuses the decoder generation. Match both the EOF
+      // boundary and the generation before using the live audio's mapping.
+      if (video && track.generation != input.generation && track.has_output &&
+          track.next && track.eof_count == audio_.eof_count &&
+          audio_.generation == input.generation && audio_.last_success &&
+          now < audio_.wait_until) {
+        track.shift = FromUs(*clock_.shift, track);
+        pts = Add(original, *track.shift);
+        if (pts >= *track.next)
+          return Real(track, video, input, pts, now, on_output);
+        MW_LOG_DEBUG(
+            "streamer",
+            "Syncer[{}] 丢弃已覆盖的视频帧: generation={} input_pts={} "
+            "mapped_pts={} next_pts={} output_tb={}/{} now_us={}",
+            log_context_, input.generation, input.frame->get()->pts, pts,
+            *track.next, track.time_base.num, track.time_base.den, now);
+        // Input is progressing toward the end of the backup range. Extending
+        // that range between input frames would move the recovery point.
+        track.wait_until = Add(now, config_.options.timeout.count());
+        return {true, {}, now};
+      }
       if (track.next && (pts != *track.next &&
                          Apart(ToUs(pts, track), ToUs(*track.next, track),
                                config_.options.max_streams_diff.count()))) {
@@ -448,6 +473,7 @@ class SyncerTiming::Impl final {
     if (on_output && !on_output(frame)) return {false, {}, now, true};
     track.next = Add(pts, duration);
     track.has_output = true;
+    track.generation = input.generation;
     if (track.timed_out) {
       MW_LOG_INFO("streamer", "Syncer[{}] 输入超时恢复 track={} now_us={}",
                   log_context_, TrackName(video), now);
