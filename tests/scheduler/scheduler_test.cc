@@ -5,6 +5,7 @@
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -901,7 +902,7 @@ TEST_CASE("Scheduler retains and reports a Reset callback failure once",
   std::atomic<int> resets{0};
   std::atomic<int> errors{0};
   std::atomic<int> stops{0};
-  std::atomic<bool> original_error{false};
+  std::exception_ptr reported;
   Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
                       source, config);
   scheduler.media_filter().SetOnReset([&] {
@@ -910,7 +911,7 @@ TEST_CASE("Scheduler retains and reports a Reset callback failure once",
   });
   scheduler.media_filter().SetOnStop([&] { ++stops; });
   scheduler.SetOnError([&](std::exception_ptr error) {
-    original_error.store(error == failure);
+    reported = error;
     ++errors;
   });
   REQUIRE(source->Start(audio.path()));
@@ -922,8 +923,11 @@ TEST_CASE("Scheduler retains and reports a Reset callback failure once",
   CHECK(resets.load() == 1);
   CHECK(errors.load() == 1);
   CHECK(stops.load() == 1);
-  CHECK(original_error.load());
-  CHECK(scheduler.error() == failure);
+  REQUIRE(reported);
+  CHECK(scheduler.error() == reported);
+  CHECK_THROWS_AS(std::rethrow_exception(reported), std::runtime_error);
+  CHECK_THROWS_WITH(std::rethrow_exception(reported),
+                    "scheduler reset failure");
 }
 
 TEST_CASE(
