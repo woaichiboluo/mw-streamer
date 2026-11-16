@@ -59,7 +59,6 @@ class StageLatency final {
   Samples interval_;
   TimePoint started_{};
   TimePoint reported_{};
-  const char* module_ = nullptr;
   const char* stage_ = nullptr;
   const void* instance_ = nullptr;
   std::uint64_t token_ = 0;

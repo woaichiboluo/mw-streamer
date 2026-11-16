@@ -17,6 +17,7 @@
 #include "mw/streamer/platform/thread.h"
 #include "mw/streamer/platform/wait_signal.h"
 #include "mw/streamer/platform/write_signal.h"
+#include "streamer/performance/live_performance.h"
 #include "streamer/scheduler/realtime_timing.h"
 
 namespace mw::streamer {
@@ -75,6 +76,9 @@ class Scheduler::Impl final {
 
   ~Impl() { Stop(); }
   AvMediaFilter& media_filter() { return filter_; }
+  void SetPerformance(internal::LivePerformance* performance) noexcept {
+    performance_ = performance;
+  }
   void SetOnVideoFrame(OnVideoFrame callback) {
     CheckStopped();
     on_video_frame_ = std::move(callback);
@@ -317,6 +321,10 @@ class Scheduler::Impl final {
     }
     if (track.source_head.status == AvDecoderReadStatus::kNull) {
       track.source_head = Read(index);
+      if (performance_ && index == 0 &&
+          track.source_head.status == AvDecoderReadStatus::kFrame) {
+        performance_->ReadVideo();
+      }
       if (track.source_head.status == AvDecoderReadStatus::kNull) {
         // Frame readiness wakes the driver; no periodic empty-source reads.
         return kNoWake;
@@ -333,6 +341,7 @@ class Scheduler::Impl final {
     if (track.source_head.status == AvDecoderReadStatus::kFrame) {
       const auto pts_us = InputPts(track.source_head);
       const auto decision = realtime_.Schedule(pts_us, now);
+      if (performance_ && decision.resynced) performance_->Resynced();
       MW_LOG_TRACE("streamer",
                    "Scheduler[{}] 实时调度决策: track={} pts_us={} now_us={} "
                    "ready={} discard={} wake_us={}",
@@ -369,6 +378,8 @@ class Scheduler::Impl final {
         track.head.status == AvDecoderReadStatus::kNull ? nullptr : &track.head;
     const auto& output = index == 0 ? on_video_frame_ : on_audio_frame_;
     auto step = syncer_.Step(index == 0, head, now, output);
+    if (performance_ && index == 0 && step.frame)
+      performance_->VideoToEncoder();
     if (head || step.frame || step.blocked)
       MW_LOG_TRACE("streamer",
                    "Scheduler[{}] 同步交付结果: track={} now_us={} "
@@ -386,6 +397,7 @@ class Scheduler::Impl final {
     }
     track.syncer_wake_us = step.wake_us;
     if (step.blocked) {
+      if (performance_ && index == 0 && !retrying) performance_->BlockedVideo();
       if (!retrying)
         MW_LOG_DEBUG("streamer", "Scheduler 下游背压，暂停交付: track={}",
                      index == 0 ? "video" : "audio");
@@ -402,10 +414,15 @@ class Scheduler::Impl final {
     try {
       while (!stopping()) {
         const auto observed = signal_->GetRevision();
+        const auto perf_wake = performance_ ? performance_->Report(Clock::now())
+                                            : Clock::time_point::max();
         CheckSource();
         if (pending_generation_) {
           if (!WorkersIdle()) {
-            signal_->Wait(observed);
+            if (performance_)
+              signal_->WaitUntil(observed, perf_wake);
+            else
+              signal_->Wait(observed);
             continue;
           }
           generation_ = *pending_generation_;
@@ -444,9 +461,13 @@ class Scheduler::Impl final {
         }
         if (stopping()) return;
         if (wake == kNoWake) {
-          signal_->Wait(observed);
+          if (performance_)
+            signal_->WaitUntil(observed, perf_wake);
+          else
+            signal_->Wait(observed);
         } else {
-          signal_->WaitUntil(observed, epoch_ + Microseconds(wake));
+          signal_->WaitUntil(observed,
+                             std::min(perf_wake, epoch_ + Microseconds(wake)));
         }
       }
     } catch (...) {
@@ -470,8 +491,18 @@ class Scheduler::Impl final {
         track.requested = false;
       }
       if (input.status != AvDecoderReadStatus::kNull) {
-        pending = index == 0 ? filter_.ProcessVideo(std::move(input))
-                             : std::move(input);
+        if (index == 0) {
+          const bool measure =
+              performance_ && input.status == AvDecoderReadStatus::kFrame;
+          const auto begin = measure ? Clock::now() : Clock::time_point{};
+          pending = filter_.ProcessVideo(std::move(input));
+          if (measure)
+            performance_->FilteredVideo(
+                Clock::now() - begin,
+                pending.status == AvDecoderReadStatus::kFrame);
+        } else {
+          pending = std::move(input);
+        }
       }
       if (pending.status != AvDecoderReadStatus::kNull &&
           converter.TryPushFrame(pending)) {
@@ -542,6 +573,7 @@ class Scheduler::Impl final {
   std::shared_ptr<AvMediaSource> source_;
   Syncer syncer_;
   internal::RealtimeTiming realtime_;
+  internal::LivePerformance* performance_ = nullptr;
   AvMediaFilter filter_;
   std::unique_ptr<ForceFps> force_fps_;
   std::unique_ptr<AudioResampler> resampler_;
@@ -575,6 +607,10 @@ Scheduler::Scheduler(const ffmpeg::HwDeviceContext& device,
                                    std::move(config))) {}
 Scheduler::~Scheduler() = default;
 AvMediaFilter& Scheduler::media_filter() { return impl_->media_filter(); }
+void Scheduler::SetPerformance(
+    internal::LivePerformance* performance) noexcept {
+  impl_->SetPerformance(performance);
+}
 void Scheduler::SetOnVideoFrame(OnVideoFrame callback) {
   impl_->SetOnVideoFrame(std::move(callback));
 }

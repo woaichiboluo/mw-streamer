@@ -14,8 +14,9 @@
 namespace mw::streamer {
 
 namespace internal {
+class LivePerformance;
 class WriteSignal;
-}
+}  // namespace internal
 
 struct SchedulerConfig {
   SyncerConfig syncer;
@@ -101,6 +102,9 @@ class MW_STREAMER_API Scheduler final {
   void Stop() noexcept;
 
  private:
+  friend class LivePipeline;
+  // LivePipeline attaches its own session counters before Start.
+  void SetPerformance(internal::LivePerformance* performance) noexcept;
   class Impl;
   std::unique_ptr<Impl> impl_;
 };

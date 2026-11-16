@@ -35,6 +35,7 @@ RealtimeTiming::RealtimeTiming(RealtimeConfig config) : config_(config) {
 RealtimeTiming::Decision RealtimeTiming::Schedule(std::int64_t pts_us,
                                                   std::int64_t now_us) {
   bool reset = !offset_us_;
+  const bool had_mapping = offset_us_.has_value();
   bool forward_jump = false;
   if (offset_us_) {
     const auto due_us = Subtract(pts_us, *offset_us_);
@@ -70,7 +71,7 @@ RealtimeTiming::Decision RealtimeTiming::Schedule(std::int64_t pts_us,
                 pts_us, now_us, forward_jump, offset);
     offset_us_ = offset;
   }
-  return {true, false, now_us};
+  return {true, false, now_us, had_mapping && reset};
 }
 
 void RealtimeTiming::Reset() { offset_us_.reset(); }

@@ -39,9 +39,7 @@ StageLatency::~StageLatency() { Finish(); }
 void StageLatency::Start(PerformanceStage stage, const void* instance,
                          int stream_index) noexcept {
   Finish();
-  const auto& names = GetPerformanceStageNames(stage);
-  module_ = names.module;
-  stage_ = names.stage;
+  stage_ = GetPerformanceStageName(stage);
   instance_ = instance;
   stream_index_ = stream_index;
   total_ = interval_ = {};
@@ -115,12 +113,12 @@ void StageLatency::Observe(std::optional<std::int64_t> nanoseconds) noexcept {
   }
   if (trace_) {
     if (valid) {
-      MW_PERF_LOG_TRACE(module_,
+      MW_PERF_LOG_TRACE(kPerformanceLogModule,
                         "Stage[{}] stage={} stream_index={} latency({:.3f}ms)",
                         instance_, stage_, stream_index_,
                         static_cast<double>(*nanoseconds) / 1e6);
     } else {
-      MW_PERF_LOG_TRACE(module_,
+      MW_PERF_LOG_TRACE(kPerformanceLogModule,
                         "Stage[{}] stage={} stream_index={} latency(N/A)",
                         instance_, stage_, stream_index_);
     }
@@ -141,7 +139,7 @@ void StageLatency::Report(bool final) noexcept {
       seconds > 0 ? static_cast<double>(count) / seconds : 0;
   if (sample.valid) {
     MW_PERF_LOG_INFO(
-        module_,
+        kPerformanceLogModule,
         "Stage[{}] stage={} stream_index={} report={} window_s={:.3f} "
         "samples={} unavailable={} throughput={:.3f}/s "
         "latency(mean:{:.3f}ms,max:{:.3f}ms)",
@@ -152,7 +150,7 @@ void StageLatency::Report(bool final) noexcept {
         static_cast<double>(sample.max_ns) / 1e6);
   } else {
     MW_PERF_LOG_INFO(
-        module_,
+        kPerformanceLogModule,
         "Stage[{}] stage={} stream_index={} report={} window_s={:.3f} "
         "samples={} unavailable={} throughput={:.3f}/s "
         "latency(mean:N/A,max:N/A)",

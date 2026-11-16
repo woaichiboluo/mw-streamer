@@ -55,8 +55,7 @@ class MediaFilterLatencyLog final {
     config.log.rotating_file.enabled = true;
     config.log.rotating_file.path = path_.string();
     config.log.modules = {{"streamer", mw::log::LogLevel::kOff},
-                          {"perf.filter.video", mw::log::LogLevel::kOff},
-                          {"perf.filter.audio", mw::log::LogLevel::kTrace}};
+                          {"streamer.perf", mw::log::LogLevel::kOff}};
     config.performance.stages = {{PerformanceStage::kMediaFilterVideo, video}};
     if (configure_audio) {
       config.performance.stages.emplace(PerformanceStage::kMediaFilterAudio,
@@ -131,7 +130,7 @@ double MeanMs(const std::string& line) {
 TEST_CASE("业务过滤器分别统计音视频回调且旁路和EOF不计样本",
           "[latency][media_filter]") {
   MediaFilterLatencyLog logging;
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   filter.SetOnVideo([](const ffmpeg::Frame& frame) {
     std::this_thread::sleep_for(12ms);
     return frame.Ref();
@@ -172,7 +171,7 @@ TEST_CASE("业务过滤器分别统计音视频回调且旁路和EOF不计样本
 TEST_CASE("业务过滤器失败调用不计成功样本且重启重新统计",
           "[latency][media_filter]") {
   MediaFilterLatencyLog logging;
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   filter.SetOnVideo([](const ffmpeg::Frame&) -> ffmpeg::Frame {
     throw std::runtime_error("business failure");
   });
@@ -194,7 +193,7 @@ TEST_CASE("业务过滤器失败调用不计成功样本且重启重新统计",
 TEST_CASE("业务过滤器允许同轨并行并在Stop等待后汇总",
           "[latency][media_filter]") {
   MediaFilterLatencyLog logging;
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   std::promise<void> first_entered;
   std::promise<void> second_entered;
   auto first_ready = first_entered.get_future();
@@ -238,7 +237,7 @@ TEST_CASE("性能阶段独立于日志模块且分别控制汇总和明细",
           "[performance][latency][media_filter]") {
   MediaFilterLatencyLog logging(PerformanceMode::kDetail,
                                 PerformanceMode::kSummary);
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   filter.SetOnVideo([](const ffmpeg::Frame& frame) { return frame.Ref(); });
   filter.SetOnAudio([](const ffmpeg::Frame& frame) { return frame.Ref(); });
   filter.Start();
@@ -247,8 +246,7 @@ TEST_CASE("性能阶段独立于日志模块且分别控制汇总和明细",
   filter.Stop();
 
   const auto log = logging.Read();
-  CHECK(log.find("[perf.filter.video]") != std::string::npos);
-  CHECK(log.find("[perf.filter.audio]") != std::string::npos);
+  CHECK(log.find("[streamer.perf]") != std::string::npos);
   std::size_t video_details = 0;
   std::size_t audio_details = 0;
   std::size_t video_summaries = 0;
@@ -282,7 +280,7 @@ TEST_CASE("Trace日志模块不能开启未配置的性能阶段",
           "[performance][latency][media_filter][disabled]") {
   MediaFilterLatencyLog logging(PerformanceMode::kSummary,
                                 PerformanceMode::kOff, false);
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   filter.SetOnVideo([](const ffmpeg::Frame& frame) { return frame.Ref(); });
   filter.SetOnAudio([](const ffmpeg::Frame& frame) { return frame.Ref(); });
   filter.Start();

@@ -8,30 +8,31 @@
 namespace mw::streamer::internal {
 namespace {
 
-constexpr std::array<PerformanceStageNames, 14> kStageNames{{
-    {"perf.input", "read.packet"},
-    {"perf.decoder.video", "decode.video"},
-    {"perf.decoder.audio", "decode.audio"},
-    {"perf.filter.video", "filter.video"},
-    {"perf.filter.audio", "filter.audio"},
-    {"perf.filter.force_fps", "filter.force_fps"},
-    {"perf.filter.audio_resampler", "filter.audio_resampler"},
-    {"perf.syncer.video", "syncer.video"},
-    {"perf.syncer.audio", "syncer.audio"},
-    {"perf.encoder.video", "encode.video"},
-    {"perf.encoder.audio", "encode.audio"},
-    {"perf.filter.encoder.audio", "filter.encoder.audio"},
-    {"perf.remuxer.convert", "remux.convert"},
-    {"perf.remuxer.output", "remux.output"},
+constexpr std::array<const char*, 15> kStageNames{{
+    "read.packet",
+    "decode.video",
+    "decode.audio",
+    "filter.video",
+    "filter.audio",
+    "filter.force_fps",
+    "filter.audio_resampler",
+    "syncer.video",
+    "syncer.audio",
+    "encode.video",
+    "encode.audio",
+    "filter.encoder.audio",
+    "remux.convert",
+    "remux.output",
+    "live.pipeline",
 }};
-static_assert(static_cast<std::size_t>(PerformanceStage::kRemuxerOutput) + 1 ==
+static_assert(static_cast<std::size_t>(PerformanceStage::kLivePipeline) + 1 ==
               kStageNames.size());
 
 std::atomic<const PerformanceSettings*> g_settings{nullptr};
 
 }  // namespace
 
-const PerformanceStageNames& GetPerformanceStageNames(PerformanceStage stage) {
+const char* GetPerformanceStageName(PerformanceStage stage) {
   return kStageNames.at(static_cast<std::size_t>(stage));
 }
 

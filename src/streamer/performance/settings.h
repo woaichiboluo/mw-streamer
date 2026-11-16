@@ -5,13 +5,10 @@
 
 namespace mw::streamer::internal {
 
-struct PerformanceStageNames {
-  const char* module;
-  const char* stage;
-};
+inline constexpr char kPerformanceLogModule[] = "streamer.perf";
 
 // Only valid, built-in stages may be used by instrumentation.
-const PerformanceStageNames& GetPerformanceStageNames(PerformanceStage stage);
+const char* GetPerformanceStageName(PerformanceStage stage);
 
 // Init owns one immutable configuration. Stop and destroy instrumented objects
 // before destruction. Tests may own settings without initializing media

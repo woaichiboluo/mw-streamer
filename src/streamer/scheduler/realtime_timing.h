@@ -21,6 +21,7 @@ class MW_STREAMER_API RealtimeTiming final {
     bool ready = false;
     bool discard = false;
     std::int64_t wake_us = 0;
+    bool resynced = false;
   };
 
   // A future deadline leaves input unconsumed and does not change the mapping.

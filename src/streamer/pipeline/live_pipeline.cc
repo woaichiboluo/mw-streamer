@@ -8,6 +8,8 @@
 #include "mw/streamer/encoder/av_encoder.h"
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/scheduler/scheduler.h"
+#include "streamer/performance/live_performance.h"
+#include "streamer/performance/settings.h"
 
 namespace mw::streamer {
 namespace {
@@ -59,6 +61,10 @@ class LivePipeline::Impl final {
     encoder_.SetWriteSignal(false, scheduler_.output_signal(false));
     scheduler_.SetOnError([this](std::exception_ptr error) { Fail(error); });
     encoder_.SetOnPacket([this](const ffmpeg::Packet& packet) {
+      if (performance_active_ && packet->stream_index == 0 &&
+          packet->size > 0) {
+        performance_.EncodedVideo();
+      }
       if (on_output_packet_) on_output_packet_(packet);
       if (!remuxer_.SubmitPacket(packet)) {
         if (const auto failure = remuxer_.error())
@@ -113,6 +119,15 @@ class LivePipeline::Impl final {
     MW_LOG_INFO("streamer", "LivePipeline 开始启动: instance={}",
                 static_cast<const void*>(this));
     try {
+      performance_active_ =
+          internal::GetPerformanceMode(PerformanceStage::kLivePipeline) !=
+          PerformanceMode::kOff;
+      if (performance_active_)
+        performance_.Start(this,
+                           config_.encoder.video_pixel_format == AV_PIX_FMT_NONE
+                               ? 0.
+                               : av_q2d(config_.encoder.fps));
+      scheduler_.SetPerformance(performance_active_ ? &performance_ : nullptr);
       if (!encoder_.Start(config_.encoder)) {
         if (const auto failure = encoder_.error())
           std::rethrow_exception(failure);
@@ -278,6 +293,8 @@ class LivePipeline::Impl final {
   }
 
   LivePipelineConfig config_;
+  internal::LivePerformance performance_;
+  bool performance_active_ = false;
   ffmpeg::Frame audio_format_;
   std::shared_ptr<AvMediaSource> source_;
   Scheduler scheduler_;

@@ -8,6 +8,7 @@
 
 #include "mw/log.h"
 #include "mw/streamer/performance/config.h"
+#include "streamer/performance/live_performance.h"
 #include "streamer/performance/settings.h"
 
 namespace {
@@ -16,6 +17,7 @@ using mw::streamer::PerformanceConfig;
 using mw::streamer::PerformanceMode;
 using mw::streamer::PerformanceStage;
 using mw::streamer::internal::GetPerformanceMode;
+using mw::streamer::internal::LivePerformanceHistory;
 using mw::streamer::internal::PerformanceSettings;
 using mw::streamer::internal::StageLatency;
 using namespace std::chrono_literals;
@@ -23,7 +25,7 @@ using namespace std::chrono_literals;
 mw::log::LogConfig LogConfig() {
   mw::log::LogConfig config;
   config.console.enabled = false;
-  config.modules = {{"perf.input", mw::log::LogLevel::kOff}};
+  config.modules = {{"streamer.perf", mw::log::LogLevel::kOff}};
   return config;
 }
 
@@ -39,6 +41,20 @@ struct Buffer {
 };
 
 }  // namespace
+
+TEST_CASE("滚动吞吐按实际时长统计最近五个报告区间", "[latency][unit]") {
+  LivePerformanceHistory history;
+  history.Add({2., 110, 100, 1s});
+  history.Add({3., 120, 120, 2s});
+  history.Add({2., 100, 100, 1s});
+  history.Add({2., 90, 80, 1s});
+  history.Add({2., 100, 100, 2s});
+  const auto recent = history.Add({1., 50, 48, 500ms});
+  CHECK(recent.output == 448);
+  CHECK(recent.input == 460);
+  CHECK(recent.seconds == 10.);
+  CHECK(recent.work == 6500ms);
+}
 
 TEST_CASE("阶段延迟只用有效样本计算均值与最大值", "[latency][unit]") {
   mw::log::Logging logging(LogConfig());
@@ -226,7 +242,7 @@ TEST_CASE("性能配置拒绝非法阶段和档位且不发布失败实例", "[l
 
 TEST_CASE("日志模块级别不能开启性能采集", "[latency][unit]") {
   auto log_config = LogConfig();
-  log_config.modules["perf.input"] = mw::log::LogLevel::kTrace;
+  log_config.modules["streamer.perf"] = mw::log::LogLevel::kTrace;
   mw::log::Logging logging(log_config);
   PerformanceSettings settings(PerformanceConfig{});
   StageLatency latency;

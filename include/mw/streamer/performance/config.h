@@ -28,6 +28,7 @@ enum class PerformanceStage {
   kEncoderAudioFilter,
   kRemuxerConvert,
   kRemuxerOutput,
+  kLivePipeline,
 };
 
 struct PerformanceConfig {
