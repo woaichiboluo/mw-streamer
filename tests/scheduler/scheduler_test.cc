@@ -123,7 +123,7 @@ class TemporaryAudio final {
 
 class TemporaryVideoJump final {
  public:
-  TemporaryVideoJump()
+  explicit TemporaryVideoJump(bool variable_frame_rate = false)
       : path_(
             std::filesystem::temp_directory_path() /
             ("mw-scheduler-jump-" +
@@ -167,10 +167,20 @@ class TemporaryVideoJump final {
         av_packet_alloc(), release_packet);
     REQUIRE(packet != nullptr);
     bool first = true;
+    std::int64_t video_index = 0;
     int result;
     while ((result = av_read_frame(input.get(), packet.get())) >= 0) {
       if (packet->stream_index == video) {
-        if (!first) {
+        if (variable_frame_rate) {
+          // The fixture has no B frames. Remux its twenty pictures at
+          // alternating 20/40 ms intervals without invoking an encoder.
+          packet->pts = packet->dts = av_rescale_q(
+              video_index * 3 / 2, AVRational{1, 50}, original->time_base);
+          packet->duration =
+              av_rescale_q(video_index % 2 == 0 ? 1 : 2, AVRational{1, 50},
+                           original->time_base);
+          ++video_index;
+        } else if (!first) {
           const auto jump =
               av_rescale_q(1, AVRational{1, 1}, original->time_base);
           if (packet->pts != AV_NOPTS_VALUE) packet->pts += jump;
@@ -291,6 +301,88 @@ TEST_CASE("Scheduler paces file processing before business filtering",
   CHECK(early_audio >= 1);
   CHECK(early_audio <= 20);
   CHECK_FALSE(scheduler.error());
+}
+
+TEST_CASE("Scheduler processes every converted video slot before output",
+          "[scheduler][video][frame-rate][buffering]") {
+  const std::size_t buffered_frames = GENERATE(0U, 3U, 100U);
+  CAPTURE(buffered_frames);
+  TemporaryVideoJump video(true);
+  auto source = Source();
+  auto config = Config();
+  config.syncer.encoder.fps = {50, 1};
+  config.syncer.encoder.audio_sample_format = AV_SAMPLE_FMT_NONE;
+  config.syncer.options.initial_timeout = 2s;
+  config.syncer.options.forward_start_shift = false;
+  Scheduler scheduler(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu),
+                      source, config);
+  struct Record {
+    std::int64_t pts;
+    AVRational time_base;
+    std::int64_t duration;
+    std::uint8_t marker;
+  };
+  std::vector<Record> filtered;
+  std::vector<Record> delivered;
+  std::deque<ffmpeg::Frame> buffer;
+  std::atomic<int> resets{0};
+  const auto record = [](const ffmpeg::Frame& frame) {
+    return Record{frame->pts, frame->time_base, frame->duration,
+                  frame->data[0][0]};
+  };
+  scheduler.media_filter().SetOnVideo(
+      [&](const ffmpeg::Frame& frame) -> std::optional<ffmpeg::Frame> {
+        auto output = frame.Ref();
+        if (av_frame_make_writable(output.get()) < 0)
+          throw std::runtime_error("Cannot allocate video callback output");
+        // A distinct rendering for every callback, including repeated source
+        // pictures, must survive all the way to the final output slots.
+        output->data[0][0] = static_cast<std::uint8_t>(filtered.size() + 1);
+        filtered.push_back(record(output));
+        buffer.push_back(std::move(output));
+        if (buffer.size() <= buffered_frames) return std::nullopt;
+        auto ready = std::move(buffer.front());
+        buffer.pop_front();
+        return ready;
+      });
+  scheduler.SetOnVideoFrame([&](const ffmpeg::Frame& frame) {
+    delivered.push_back(record(frame));
+    return true;
+  });
+  scheduler.media_filter().SetOnReset([&] {
+    ++resets;
+    scheduler.RequestStop();
+  });
+  REQUIRE(source->Start(video.path()));
+  REQUIRE(scheduler.Start());
+  const bool completed = WaitFor([&] { return resets.load() == 1; });
+  scheduler.Stop();
+  source->Stop();
+  REQUIRE(completed);
+  CHECK_FALSE(scheduler.error());
+  CHECK(resets.load() == 1);
+  // Source indices 0..19 land in output slots 0,1,3,4,...,28. EOF must
+  // follow all twenty-nine converted slots, even if callbacks return null.
+  REQUIRE(filtered.size() == 29);
+  for (std::size_t index = 0; index < filtered.size(); ++index) {
+    CAPTURE(index);
+    const auto& frame = filtered[index];
+    CHECK(frame.pts == static_cast<std::int64_t>(index));
+    CHECK(av_cmp_q(frame.time_base, AVRational{1, 50}) == 0);
+    CHECK(frame.duration == 1);
+    CHECK(frame.marker == static_cast<std::uint8_t>(index + 1));
+  }
+  const auto expected =
+      buffered_frames < filtered.size() ? filtered.size() - buffered_frames : 0;
+  REQUIRE(delivered.size() == expected);
+  for (std::size_t index = 0; index < delivered.size(); ++index) {
+    CAPTURE(index);
+    const auto& frame = delivered[index];
+    CHECK(frame.pts == filtered[index].pts);
+    CHECK(av_cmp_q(frame.time_base, filtered[index].time_base) == 0);
+    CHECK(frame.duration == filtered[index].duration);
+    CHECK(frame.marker == filtered[index].marker);
+  }
 }
 
 TEST_CASE("Scheduler starts with buffered business frames instead of standby",

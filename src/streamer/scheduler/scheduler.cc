@@ -491,30 +491,33 @@ class Scheduler::Impl final {
         track.requested = false;
       }
       if (input.status != AvDecoderReadStatus::kNull) {
-        if (index == 0) {
-          const bool measure =
-              performance_ && input.status == AvDecoderReadStatus::kFrame;
-          const auto begin = measure ? Clock::now() : Clock::time_point{};
-          pending = filter_.ProcessVideo(std::move(input));
-          if (measure)
-            performance_->FilteredVideo(
-                Clock::now() - begin,
-                pending.status == AvDecoderReadStatus::kFrame);
-        } else {
-          pending = std::move(input);
-        }
+        pending = std::move(input);
       }
       if (pending.status != AvDecoderReadStatus::kNull &&
           converter.TryPushFrame(pending)) {
         pending = {};
       }
       auto output = converter.TryReadFrame();
-      // Business buffering does not mean the converter is empty. Keep draining
-      // its queued frames and EOF even when the audio callback drops output.
+      // Business buffering does not mean the converter is empty. Determine
+      // admission before callbacks, then drain every converted frame and EOF.
       const bool needs_input = pending.status == AvDecoderReadStatus::kNull &&
                                output.status == AvDecoderReadStatus::kNull;
-      if (index == 1 && output.status != AvDecoderReadStatus::kNull)
-        output = filter_.ProcessAudio(std::move(output));
+      if (output.status != AvDecoderReadStatus::kNull) {
+        if (index == 0) {
+          // Run camera motion once per target-FPS slot, including repeated
+          // source images, rather than repeating an already-rendered view.
+          const bool measure =
+              performance_ && output.status == AvDecoderReadStatus::kFrame;
+          const auto begin = measure ? Clock::now() : Clock::time_point{};
+          output = filter_.ProcessVideo(std::move(output));
+          if (measure)
+            performance_->FilteredVideo(
+                Clock::now() - begin,
+                output.status == AvDecoderReadStatus::kFrame);
+        } else {
+          output = filter_.ProcessAudio(std::move(output));
+        }
+      }
       {
         std::lock_guard lock(mutex_);
         auto& track = tracks_[index];
