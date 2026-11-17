@@ -21,7 +21,8 @@ std::string Headroom(double budget_ms, LivePerformance::Clock::duration elapsed,
   if (!calls || budget_ms <= 0.) return "n/a";
   const double busy_ms =
       std::chrono::duration<double, std::milli>(elapsed).count();
-  return fmt::format("{:+.2f} ms", budget_ms - busy_ms / calls);
+  return fmt::format("{:+.2f} ms",
+                     budget_ms - busy_ms / static_cast<double>(calls));
 }
 
 }  // namespace
