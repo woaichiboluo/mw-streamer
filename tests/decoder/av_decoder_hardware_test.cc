@@ -69,7 +69,9 @@ Source ReadSource(std::string_view file,
   Source source;
   source.stream = {index, ffmpeg::CodecParameters(*stream->codecpar),
                    stream->time_base};
-  source.stream.frame_rate =
+  source.stream.frame_rate = stream->avg_frame_rate;
+  source.stream.base_frame_rate = stream->r_frame_rate;
+  source.stream.decoder_frame_rate =
       av_guess_frame_rate(input, input->streams[index], nullptr);
   source.stream.sample_aspect_ratio =
       av_guess_sample_aspect_ratio(input, input->streams[index], nullptr);
@@ -163,7 +165,9 @@ std::vector<FrameRecord> ReferenceDecode(const Source& source) {
   REQUIRE(avcodec_parameters_to_context(
               context.get(), source.stream.codec_parameters.get()) >= 0);
   context->pkt_timebase = source.stream.time_base;
-  context->framerate = source.stream.frame_rate;
+  if (source.stream.decoder_frame_rate.num > 0 &&
+      source.stream.decoder_frame_rate.den > 0)
+    context->framerate = source.stream.decoder_frame_rate;
   context->thread_count = 1;
   REQUIRE(avcodec_open2(context.get(), codec, nullptr) >= 0);
   std::vector<FrameRecord> records;

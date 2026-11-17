@@ -22,9 +22,17 @@ struct MW_STREAMER_API StreamInfo {
   // filter construction. Encoder-generated descriptions keep these empty.
   int disposition = 0;
   std::map<std::string, std::string> metadata{};
-  // Demuxer-derived video hints, independent of the original codec parameters.
+  // Average input video rate (AVStream::avg_frame_rate), matching FFmpeg's
+  // displayed fps. A zero numerator or denominator means unknown; this does
+  // not guarantee constant frame intervals. Used for automatic output fps.
   AVRational frame_rate{0, 1};
   AVRational sample_aspect_ratio{0, 1};
+  // Base rate (AVStream::r_frame_rate), displayed by FFmpeg as tbr. This can
+  // exceed the average rate and must not substitute for an unknown average.
+  AVRational base_frame_rate{0, 1};
+  // av_guess_frame_rate() hint for decoder setup and missing-duration
+  // estimates. Kept separate so average-fps selection does not alter decoding.
+  AVRational decoder_frame_rate{0, 1};
 
   // Compare track identity, time base and audio/video format properties.
   // Other codec metadata and extradata are ignored.

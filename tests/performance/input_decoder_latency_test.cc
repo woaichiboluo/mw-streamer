@@ -112,7 +112,9 @@ DecodeFixture NativeFixture(AVMediaType type) {
   DecodeFixture result;
   result.stream = {index, ffmpeg::CodecParameters(*track->codecpar),
                    track->time_base};
-  result.stream.frame_rate =
+  result.stream.frame_rate = track->avg_frame_rate;
+  result.stream.base_frame_rate = track->r_frame_rate;
+  result.stream.decoder_frame_rate =
       av_guess_frame_rate(native, native->streams[index], nullptr);
   for (;;) {
     ffmpeg::Packet packet;

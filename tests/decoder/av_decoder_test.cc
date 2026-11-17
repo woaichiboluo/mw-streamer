@@ -70,7 +70,9 @@ Source ReadSource(std::string_view file, AVMediaType type) {
   Source source;
   source.stream = {index, ffmpeg::CodecParameters(*stream->codecpar),
                    stream->time_base};
-  source.stream.frame_rate =
+  source.stream.frame_rate = stream->avg_frame_rate;
+  source.stream.base_frame_rate = stream->r_frame_rate;
+  source.stream.decoder_frame_rate =
       av_guess_frame_rate(context, context->streams[index], nullptr);
   source.stream.sample_aspect_ratio =
       av_guess_sample_aspect_ratio(context, context->streams[index], nullptr);
@@ -145,9 +147,10 @@ std::int64_t FrameEnd(const AVFrame& frame, const ffmpeg::StreamInfo& stream) {
   if (duration <= 0 && frame.nb_samples > 0 && frame.sample_rate > 0) {
     duration = av_rescale_q(frame.nb_samples, AVRational{1, frame.sample_rate},
                             stream.time_base);
-  } else if (duration <= 0 && stream.frame_rate.num > 0 &&
-             stream.frame_rate.den > 0) {
-    duration = av_rescale_q(1, av_inv_q(stream.frame_rate), stream.time_base);
+  } else if (duration <= 0 && stream.decoder_frame_rate.num > 0 &&
+             stream.decoder_frame_rate.den > 0) {
+    duration =
+        av_rescale_q(1, av_inv_q(stream.decoder_frame_rate), stream.time_base);
   }
   return duration > 0 ? frame.best_effort_timestamp + duration : AV_NOPTS_VALUE;
 }
@@ -169,7 +172,8 @@ std::unique_ptr<AVCodecContext, CodecDeleter> OpenReferenceCodec(
   REQUIRE(avcodec_parameters_to_context(context.get(),
                                         stream.codec_parameters.get()) >= 0);
   context->pkt_timebase = stream.time_base;
-  context->framerate = stream.frame_rate;
+  if (stream.decoder_frame_rate.num > 0 && stream.decoder_frame_rate.den > 0)
+    context->framerate = stream.decoder_frame_rate;
   context->sample_aspect_ratio = stream.sample_aspect_ratio;
   context->thread_count = 1;
   REQUIRE(avcodec_open2(context.get(), codec, nullptr) >= 0);
@@ -332,6 +336,23 @@ TEST_CASE("AvDecoder matches native video pixels, audio samples and source PTS",
   }
 }
 
+TEST_CASE("AvDecoder keeps source timing independent of average frame rate",
+          "[av-decoder][decode][frame-rate]") {
+  auto source = ReadSource("h265_aac.mp4", AVMEDIA_TYPE_VIDEO);
+  const auto reference = ReferenceDecode(source.stream, source.packets);
+  REQUIRE_FALSE(reference.frames.empty());
+  source.stream.frame_rate = {7, 3};
+  REQUIRE(av_cmp_q(source.stream.frame_rate,
+                   source.stream.decoder_frame_rate) != 0);
+  AvDecoderConfig config;
+  config.thread_count = 1;
+  config.frame_capacity = 2;
+  AvDecoder decoder(source.stream, config);
+  SourceFeeder feeder(decoder, source);
+  CheckSource(decoder, source, reference);
+  feeder.Join();
+}
+
 TEST_CASE("AvDecoder drains delayed B frames before its separate EOF item",
           "[av-decoder][eof]") {
   const auto source = ReadSource("h265_aac.mp4", AVMEDIA_TYPE_VIDEO);
@@ -461,6 +482,8 @@ TEST_CASE("AvDecoder retries bounded EOF and Reset without losing FIFO order",
   source.stream.stream_index = 0;
   source.stream.time_base = {1, 25};
   source.stream.frame_rate = {25, 1};
+  source.stream.base_frame_rate = {25, 1};
+  source.stream.decoder_frame_rate = {25, 1};
   auto* parameters = source.stream.codec_parameters.get();
   parameters->codec_type = AVMEDIA_TYPE_VIDEO;
   parameters->codec_id = AV_CODEC_ID_RAWVIDEO;

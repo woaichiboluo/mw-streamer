@@ -6,6 +6,17 @@
 
 使用 CMake 构建，支持静态库和动态库。主要依赖 FFmpeg、ZLMediaKit、OpenSSL 和 SRT。
 
+## 输入帧率
+
+`AvProbe` 和 `AvInput` 的 `StreamInfo.frame_rate` 保存输入的平均帧率
+（`AVStream::avg_frame_rate`），与 FFmpeg 显示的 `fps` 一致。
+`base_frame_rate` 单独保存 `r_frame_rate`（`tbr`），`decoder_frame_rate`
+保存解码器使用的 `av_guess_frame_rate()` 提示。平均帧率未知时保持未知，
+自动输出配置不得用基础帧率冒充平均帧率；显式配置的输出帧率独立生效。
+可变帧率输入仍按源 PTS 调度，平均 FPS 不表示每帧具有相同持续时间。
+
+新增字段改变了 `StreamInfo` 的 ABI；升级时须一起重新编译 SDK 和所有调用方。
+
 ## 性能日志
 
 直播优先开启 `InitConfig.performance.stages[PerformanceStage::kLivePipeline]`

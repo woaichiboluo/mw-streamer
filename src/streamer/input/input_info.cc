@@ -5,6 +5,13 @@
 #include "mw/streamer/ffmpeg/av_dictionary.h"
 
 namespace mw::streamer::internal {
+namespace {
+
+AVRational FrameRateOrUnknown(AVRational rate) {
+  return rate.num > 0 && rate.den > 0 ? rate : AVRational{0, 1};
+}
+
+}  // namespace
 
 AvInputInfo MakeInputInfo(AVFormatContext& format) {
   AvInputInfo info;
@@ -19,7 +26,10 @@ AvInputInfo MakeInputInfo(AVFormatContext& format) {
                                    ffmpeg::CodecParameters(*stream->codecpar),
                                    stream->time_base};
     if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-      description.frame_rate = av_guess_frame_rate(&format, stream, nullptr);
+      description.frame_rate = FrameRateOrUnknown(stream->avg_frame_rate);
+      description.base_frame_rate = FrameRateOrUnknown(stream->r_frame_rate);
+      description.decoder_frame_rate =
+          FrameRateOrUnknown(av_guess_frame_rate(&format, stream, nullptr));
       description.sample_aspect_ratio =
           av_guess_sample_aspect_ratio(&format, stream, nullptr);
     }

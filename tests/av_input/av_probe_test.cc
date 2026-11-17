@@ -4,8 +4,10 @@
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -18,6 +20,7 @@
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
+#include <libavutil/mathematics.h>
 }
 
 #include <fmt/format.h>
@@ -57,6 +60,84 @@ std::unique_ptr<AVFormatContext, FormatDeleter> OpenNative(
   REQUIRE(result == 0);
   REQUIRE(avformat_find_stream_info(context, nullptr) >= 0);
   return owner;
+}
+
+class VariableFrameRateVideo final {
+ public:
+  VariableFrameRateVideo()
+      : path_(
+            std::filesystem::temp_directory_path() /
+            fmt::format(
+                "mw-probe-vfr-{}.mp4",
+                std::chrono::steady_clock::now().time_since_epoch().count())) {
+    auto input = OpenNative(SamplePath("h264_video.mp4"));
+    const int video = av_find_best_stream(input.get(), AVMEDIA_TYPE_VIDEO, -1,
+                                          -1, nullptr, 0);
+    REQUIRE(video >= 0);
+    const auto* original = input->streams[video];
+    AVFormatContext* raw = nullptr;
+    REQUIRE(avformat_alloc_output_context2(&raw, nullptr, nullptr,
+                                           path().c_str()) >= 0);
+    const auto close_output = [](AVFormatContext* context) {
+      if (context->pb) avio_closep(&context->pb);
+      avformat_free_context(context);
+    };
+    std::unique_ptr<AVFormatContext, decltype(close_output)> output(
+        raw, close_output);
+    auto* stream = avformat_new_stream(output.get(), nullptr);
+    REQUIRE(stream != nullptr);
+    REQUIRE(avcodec_parameters_copy(stream->codecpar, original->codecpar) >= 0);
+    stream->codecpar->codec_tag = 0;
+    stream->time_base = original->time_base;
+    REQUIRE(avio_open(&output->pb, path().c_str(), AVIO_FLAG_WRITE) >= 0);
+    REQUIRE(avformat_write_header(output.get(), nullptr) >= 0);
+    const auto release_packet = [](AVPacket* packet) {
+      av_packet_free(&packet);
+    };
+    std::unique_ptr<AVPacket, decltype(release_packet)> packet(
+        av_packet_alloc(), release_packet);
+    REQUIRE(packet != nullptr);
+    std::int64_t index = 0;
+    int status;
+    while ((status = av_read_frame(input.get(), packet.get())) >= 0) {
+      if (packet->stream_index == video) {
+        // The fixture contains no B frames. Only its test timestamps change;
+        // alternating 20/40 ms durations distinguish average FPS from TBR.
+        packet->pts = packet->dts =
+            av_rescale_q(index * 3 / 2, AVRational{1, 50}, original->time_base);
+        packet->duration = av_rescale_q(index % 2 == 0 ? 1 : 2,
+                                        AVRational{1, 50}, original->time_base);
+        ++index;
+        packet->stream_index = stream->index;
+        packet->pos = -1;
+        av_packet_rescale_ts(packet.get(), original->time_base,
+                             stream->time_base);
+        REQUIRE(av_interleaved_write_frame(output.get(), packet.get()) >= 0);
+      }
+      av_packet_unref(packet.get());
+    }
+    REQUIRE(status == AVERROR_EOF);
+    REQUIRE(index == 20);
+    REQUIRE(av_write_trailer(output.get()) >= 0);
+  }
+
+  ~VariableFrameRateVideo() {
+    std::error_code error;
+    std::filesystem::remove(path_, error);
+  }
+  VariableFrameRateVideo(const VariableFrameRateVideo&) = delete;
+  VariableFrameRateVideo& operator=(const VariableFrameRateVideo&) = delete;
+
+  std::string path() const { return path_.string(); }
+
+ private:
+  std::filesystem::path path_;
+};
+
+void CheckFrameRate(AVRational actual, AVRational expected) {
+  if (expected.num <= 0 || expected.den <= 0) expected = {0, 1};
+  CHECK(actual.num == expected.num);
+  CHECK(actual.den == expected.den);
 }
 
 std::map<std::string, std::string> Metadata(const AVDictionary* dictionary) {
@@ -124,9 +205,10 @@ TEST_CASE("AvProbe preserves native media information after closing input",
     }
     if (parameters->codec_type == AVMEDIA_TYPE_VIDEO) {
       if (video_index < 0) video_index = expected->index;
-      const auto fps = av_guess_frame_rate(native.get(), expected, nullptr);
-      CHECK(stream.frame_rate.num == fps.num);
-      CHECK(stream.frame_rate.den == fps.den);
+      CheckFrameRate(stream.frame_rate, expected->avg_frame_rate);
+      CheckFrameRate(stream.base_frame_rate, expected->r_frame_rate);
+      CheckFrameRate(stream.decoder_frame_rate,
+                     av_guess_frame_rate(native.get(), expected, nullptr));
       const auto aspect =
           av_guess_sample_aspect_ratio(native.get(), expected, nullptr);
       CHECK(stream.sample_aspect_ratio.num == aspect.num);
@@ -139,6 +221,28 @@ TEST_CASE("AvProbe preserves native media information after closing input",
   CHECK(info.video_stream_index == video_index);
   CHECK(info.audio_stream_index == audio_index);
   if (name == "h264_video.mp4") CHECK(info.audio_stream_index == -1);
+}
+
+TEST_CASE("AvProbe distinguishes average FPS from the VFR base rate",
+          "[av-probe][info][frame-rate]") {
+  const VariableFrameRateVideo video;
+  auto native = OpenNative(video.path());
+  const int index =
+      av_find_best_stream(native.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+  REQUIRE(index >= 0);
+  auto* expected = native->streams[index];
+  REQUIRE(av_cmp_q(expected->avg_frame_rate, AVRational{100, 3}) == 0);
+  REQUIRE(av_cmp_q(expected->r_frame_rate, AVRational{50, 1}) == 0);
+  const auto result = AvProbe::Probe(video.path());
+  REQUIRE(result.info);
+  CHECK(result.error == nullptr);
+  REQUIRE(result.info->video_stream_index == index);
+  const auto& stream = result.info->streams[static_cast<std::size_t>(index)];
+  CheckFrameRate(stream.frame_rate, expected->avg_frame_rate);
+  CheckFrameRate(stream.base_frame_rate, expected->r_frame_rate);
+  CheckFrameRate(stream.decoder_frame_rate,
+                 av_guess_frame_rate(native.get(), expected, nullptr));
+  CHECK(av_cmp_q(stream.frame_rate, stream.base_frame_rate) != 0);
 }
 
 TEST_CASE("AvProbe returns failures without throwing", "[av-probe][error]") {

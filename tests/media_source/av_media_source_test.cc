@@ -111,7 +111,9 @@ NativeSource ReadNative(const std::string& path) {
     Track track;
     track.stream = {stream->index, ffmpeg::CodecParameters(*stream->codecpar),
                     stream->time_base};
-    track.stream.frame_rate =
+    track.stream.frame_rate = stream->avg_frame_rate;
+    track.stream.base_frame_rate = stream->r_frame_rate;
+    track.stream.decoder_frame_rate =
         av_guess_frame_rate(context, context->streams[index], nullptr);
     track.stream.sample_aspect_ratio =
         av_guess_sample_aspect_ratio(context, context->streams[index], nullptr);
@@ -209,7 +211,9 @@ std::vector<std::vector<FrameRecord>> DecodeNativeCycles(const Track& track,
   REQUIRE((avcodec_parameters_to_context(
                context.get(), track.stream.codec_parameters.get()) >= 0));
   context->pkt_timebase = track.stream.time_base;
-  context->framerate = track.stream.frame_rate;
+  if (track.stream.decoder_frame_rate.num > 0 &&
+      track.stream.decoder_frame_rate.den > 0)
+    context->framerate = track.stream.decoder_frame_rate;
   context->thread_count = 1;
   REQUIRE((avcodec_open2(context.get(), codec, nullptr) >= 0));
   std::vector<FrameRecord> records;

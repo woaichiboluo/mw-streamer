@@ -101,8 +101,9 @@ class AvDecoder::Impl final {
     context->pkt_timebase = stream_.time_base;
     context->thread_count = config_.thread_count;
     if (context->codec_type == AVMEDIA_TYPE_VIDEO) {
-      if (stream_.frame_rate.num > 0 && stream_.frame_rate.den > 0) {
-        context->framerate = stream_.frame_rate;
+      if (stream_.decoder_frame_rate.num > 0 &&
+          stream_.decoder_frame_rate.den > 0) {
+        context->framerate = stream_.decoder_frame_rate;
       }
       if (stream_.sample_aspect_ratio.num > 0 &&
           stream_.sample_aspect_ratio.den > 0) {
