@@ -173,7 +173,7 @@ void CheckTiming(const AvDecoderReadResult& output, std::int64_t pts = 12000,
 
 TEST_CASE("Business filters can explicitly copy source timing with new content",
           "[media_filter]") {
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   filter.SetOnVideo([](const ffmpeg::Frame& frame) {
     auto output = Video(static_cast<std::uint8_t>(frame->data[0][0] + 3));
     output.CopyPropertiesFrom(frame);
@@ -204,7 +204,7 @@ TEST_CASE("Business filters own every returned frame timing field",
   returned->best_effort_timestamp = -95000;
   returned->time_base = {1001, 30000};
   returned->duration = 19;
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   auto callback = [&](const ffmpeg::Frame&) { return returned.Ref(); };
   filter.SetOnVideo(callback);
   filter.SetOnAudio(callback);
@@ -241,7 +241,7 @@ TEST_CASE("Business filters buffer one hundred frames without forwarding null",
     buffered.pop_front();
     return output;
   };
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   filter.SetOnVideo(callback);
   filter.SetOnAudio(callback);
   filter.Start();
@@ -261,7 +261,7 @@ TEST_CASE("Business filters buffer one hundred frames without forwarding null",
 
 TEST_CASE("Missing business callbacks pass through the original frames",
           "[media_filter]") {
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   filter.Start();
   auto video = Input(Video());
   auto audio = Input(Audio());
@@ -278,7 +278,7 @@ TEST_CASE("Missing business callbacks pass through the original frames",
 TEST_CASE("Interleaved tracks retain business state until Stop and Start",
           "[media_filter]") {
   std::vector<std::string> calls;
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   filter.SetOnStart([&] { calls.emplace_back("start"); });
   filter.SetOnStop([&] { calls.emplace_back("stop"); });
   filter.SetOnVideo([&](const ffmpeg::Frame& frame) {
@@ -307,7 +307,7 @@ TEST_CASE("Interleaved tracks retain business state until Stop and Start",
 
 TEST_CASE("PTS jumps do not reset or repair business-filter timestamps",
           "[media_filter]") {
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   int processed = 0;
   filter.SetOnVideo([&](const ffmpeg::Frame& frame) {
     auto output = Video(static_cast<std::uint8_t>(++processed));
@@ -326,7 +326,7 @@ TEST_CASE("PTS jumps do not reset or repair business-filter timestamps",
 TEST_CASE("EOF and underflow pass through without resetting or stopping",
           "[media_filter]") {
   int stops = 0;
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   filter.SetOnStop([&] { ++stops; });
   filter.Start();
   filter.ProcessVideo(Input(Video()));
@@ -359,7 +359,7 @@ TEST_CASE("Callback failures require a fresh filter session",
   const auto failure =
       std::make_exception_ptr(BusinessError("Business processing failed"));
   int stops = 0;
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   REQUIRE_FALSE(filter.error());
   filter.SetOnStop([&] { ++stops; });
   filter.SetOnVideo([&](const ffmpeg::Frame&) -> ffmpeg::Frame {
@@ -387,7 +387,7 @@ TEST_CASE("Callback failures require a fresh filter session",
 
 TEST_CASE("Session callbacks have explicit lifecycle semantics",
           "[media_filter]") {
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   REQUIRE_THROWS_AS(filter.ProcessVideo(Input(Video())), std::logic_error);
   filter.SetOnStart([] { throw std::runtime_error("Start failed"); });
   REQUIRE_THROWS_AS(filter.Start(), std::runtime_error);
@@ -412,7 +412,7 @@ TEST_CASE("Session callbacks have explicit lifecycle semantics",
 
 TEST_CASE("Frame consumers ignore invalid business callback output",
           "[media_filter]") {
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   int videos = 0;
   int audios = 0;
   filter.SetOnVideo([&](const ffmpeg::Frame&) {
@@ -436,7 +436,7 @@ TEST_CASE("Frame consumers ignore invalid business callback output",
 
 TEST_CASE("Consumer callback failures retain their original exception",
           "[media_filter]") {
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   const auto failure = std::make_exception_ptr(std::runtime_error("Consume"));
   filter.SetOnAudio([&](const ffmpeg::Frame&) -> ffmpeg::Frame {
     std::rethrow_exception(failure);
@@ -455,7 +455,7 @@ TEST_CASE("Consumer callback failures retain their original exception",
 
 TEST_CASE("Explicit reset clears business history without restarting filters",
           "[media_filter]") {
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   int starts = 0;
   int resets = 0;
   int history = 0;
@@ -492,7 +492,7 @@ TEST_CASE("Explicit reset clears business history without restarting filters",
 
 TEST_CASE("Reset waits for an active consumer before invoking its callback",
           "[media_filter]") {
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   std::promise<void> entered;
   auto entry = entered.get_future();
   std::promise<void> release;
@@ -523,7 +523,7 @@ TEST_CASE("Reset waits for an active consumer before invoking its callback",
 
 TEST_CASE("Reset callback failures poison the session but still allow Stop",
           "[media_filter]") {
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   const auto failure = std::make_exception_ptr(std::runtime_error("Reset"));
   filter.SetOnReset([&] { std::rethrow_exception(failure); });
   int stops = 0;
@@ -548,7 +548,7 @@ TEST_CASE("Destruction stops an active session even when Stop throws",
           "[media_filter]") {
   int stops = 0;
   {
-    AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+    AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
     filter.SetOnStop([&] {
       ++stops;
       throw std::runtime_error("Stop failed");
@@ -564,7 +564,7 @@ TEST_CASE("Audio processing completes while the video callback is blocked",
   auto entered = video_entered.get_future();
   std::promise<void> release_video;
   auto released = release_video.get_future().share();
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   filter.SetOnVideo([&](const ffmpeg::Frame& frame) {
     video_entered.set_value();
     released.wait();
@@ -614,7 +614,7 @@ TEST_CASE("Stop waits for both concurrent callbacks before OnStop",
   auto audio_release = release_audio.get_future().share();
   std::atomic<int> completed_callbacks = 0;
   int callbacks_when_stopped = -1;
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   filter.SetOnVideo([&](const ffmpeg::Frame& frame) {
     video_entered.set_value();
     video_release.wait();
@@ -705,7 +705,7 @@ TEST_CASE("A failing callback leaves the concurrent callback able to finish",
   auto audio_entry = audio_entered.get_future();
   std::promise<void> release_audio;
   auto audio_release = release_audio.get_future().share();
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   filter.SetOnAudio([&](const ffmpeg::Frame& frame) {
     audio_entered.set_value();
     audio_release.wait();
@@ -803,7 +803,7 @@ TEST_CASE("CUDA video callbacks reject missing hardware context before calling",
   ffmpeg::Frame frame;
   frame->format = AV_PIX_FMT_CUDA;
   bool called = false;
-  AvMediaFilter filter(ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu));
+  AvMediaFilter filter{ffmpeg::HwDeviceContext(ffmpeg::HwDeviceType::kCpu)};
   filter.SetOnVideo([&](const ffmpeg::Frame& input) {
     called = true;
     return input.Ref();
