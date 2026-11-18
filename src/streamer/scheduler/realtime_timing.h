@@ -1,6 +1,7 @@
 #ifndef MW_SRC_STREAMER_SCHEDULER_REALTIME_TIMING_H_
 #define MW_SRC_STREAMER_SCHEDULER_REALTIME_TIMING_H_
 
+#include <array>
 #include <cstdint>
 #include <optional>
 
@@ -26,12 +27,15 @@ class MW_STREAMER_API RealtimeTiming final {
 
   // A future deadline leaves input unconsumed and does not change the mapping.
   // Only ready/discard allows the owner to advance that track's input.
-  Decision Schedule(std::int64_t pts_us, std::int64_t now_us);
+  // Processing lateness keeps the shared mapping so both tracks can catch up.
+  // Source timestamp history is tracked separately to detect real jumps.
+  Decision Schedule(bool video, std::int64_t pts_us, std::int64_t now_us);
   void Reset();
 
  private:
   RealtimeConfig config_;
   std::optional<std::int64_t> offset_us_;
+  std::array<std::optional<std::int64_t>, 2> last_pts_us_;
 };
 
 }  // namespace mw::streamer::internal

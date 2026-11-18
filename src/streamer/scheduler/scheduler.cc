@@ -340,7 +340,7 @@ class Scheduler::Impl final {
     }
     if (track.source_head.status == AvDecoderReadStatus::kFrame) {
       const auto pts_us = InputPts(track.source_head);
-      const auto decision = realtime_.Schedule(pts_us, now);
+      const auto decision = realtime_.Schedule(index == 0, pts_us, now);
       if (performance_ && decision.resynced) performance_->Resynced();
       MW_LOG_TRACE("streamer",
                    "Scheduler[{}] 实时调度决策: track={} pts_us={} now_us={} "

@@ -32,15 +32,23 @@ RealtimeTiming::RealtimeTiming(RealtimeConfig config) : config_(config) {
   }
 }
 
-RealtimeTiming::Decision RealtimeTiming::Schedule(std::int64_t pts_us,
+RealtimeTiming::Decision RealtimeTiming::Schedule(bool video,
+                                                  std::int64_t pts_us,
                                                   std::int64_t now_us) {
+  auto& last_pts_us = last_pts_us_[video ? 0 : 1];
   bool reset = !offset_us_;
   const bool had_mapping = offset_us_.has_value();
   bool forward_jump = false;
   if (offset_us_) {
     const auto due_us = Subtract(pts_us, *offset_us_);
     const auto difference_us = Subtract(due_us, now_us);
-    if (difference_us < -config_.negative_time_tolerance.count()) {
+    // A slow callback must not turn its accumulated delay into a new clock
+    // origin. Only a backward jump on this same source track can reanchor a
+    // late frame; a peer adopting an already-corrected mapping need not reset.
+    if (difference_us < -config_.negative_time_tolerance.count() &&
+        last_pts_us && pts_us < *last_pts_us &&
+        Subtract(pts_us, *last_pts_us) <
+            -config_.negative_time_tolerance.count()) {
       reset = true;
     } else if (difference_us >= config_.discontinuity_threshold.count()) {
       reset = true;
@@ -50,6 +58,7 @@ RealtimeTiming::Decision RealtimeTiming::Schedule(std::int64_t pts_us,
       MW_LOG_DEBUG("streamer",
                    "Scheduler 丢弃迟到输入: pts_us={} now_us={} diff_us={}",
                    pts_us, now_us, difference_us);
+      last_pts_us = pts_us;
       return {false, true, now_us};
     } else if (difference_us > 0) {
       // Both deadlines and clock reads use whole microseconds. A returned
@@ -60,8 +69,8 @@ RealtimeTiming::Decision RealtimeTiming::Schedule(std::int64_t pts_us,
   if (reset) {
     const auto candidate =
         Subtract(Subtract(pts_us, now_us), config_.jitter_margin.count());
-    // RealtimeTeam chooses the smaller offset so late audio/video cannot
-    // accelerate the other track. A forward discontinuity resets the team.
+    // A backward source jump cannot accelerate the peer. A forward
+    // discontinuity resets the team; ordinary lateness never changes it.
     const auto offset = !offset_us_ || forward_jump
                             ? candidate
                             : std::min(*offset_us_, candidate);
@@ -71,9 +80,13 @@ RealtimeTiming::Decision RealtimeTiming::Schedule(std::int64_t pts_us,
                 pts_us, now_us, forward_jump, offset);
     offset_us_ = offset;
   }
+  last_pts_us = pts_us;
   return {true, false, now_us, had_mapping && reset};
 }
 
-void RealtimeTiming::Reset() { offset_us_.reset(); }
+void RealtimeTiming::Reset() {
+  offset_us_.reset();
+  last_pts_us_ = {};
+}
 
 }  // namespace mw::streamer::internal

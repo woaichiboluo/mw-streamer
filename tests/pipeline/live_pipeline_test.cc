@@ -18,6 +18,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -298,6 +299,165 @@ void CheckRecording(const std::string& path, bool video, bool audio,
     receive(index);
     CHECK(frames[index] > 0);
   }
+}
+
+TEST_CASE("LivePipeline catches up after video overload without shifting AV",
+          "[pipeline][integration][recovery]") {
+  using Clock = std::chrono::steady_clock;
+  const auto runtime = InitRuntime();
+  const auto buffered_frames = GENERATE(0, 96);
+  CAPTURE(buffered_frames);
+  OutputDirectory directory;
+  auto config = Config();
+  config.encoder.fps = {50, 1};
+  config.syncer = {};
+  Observations observations;
+  std::vector<std::int64_t> video_source_pts;
+  std::vector<std::int64_t> audio_source_pts;
+  std::vector<std::int64_t> video_lateness;
+  std::deque<ffmpeg::Frame> video_buffer;
+  std::int64_t latest_video_pts = -1;
+  std::int64_t latest_audio_pts = -1;
+  LivePipeline pipeline(config);
+  Observe(pipeline, observations);
+  pipeline.media_filter().SetOnVideo(
+      [&](const ffmpeg::Frame& frame) -> std::optional<ffmpeg::Frame> {
+        video_source_pts.push_back(
+            av_rescale_q(frame->pts, frame->time_base, AVRational{1, 1000000}));
+        video_buffer.push_back(frame.Ref());
+        const auto produced =
+            static_cast<int>(video_source_pts.size()) - buffered_frames;
+        // Warm the optional business FIFO at normal speed, then create over
+        // 250 ms of lateness. Recovery must retain the FIFO's original delay.
+        std::this_thread::sleep_for(produced > 0 && produced <= 10 ? 60ms
+                                                                   : 2ms);
+        if (produced <= 0) return std::nullopt;
+        auto output = std::move(video_buffer.front());
+        video_buffer.pop_front();
+        return output;
+      });
+  pipeline.media_filter().SetOnAudio([&](const ffmpeg::Frame& frame) {
+    audio_source_pts.push_back(
+        av_rescale_q(frame->pts, frame->time_base, AVRational{1, 1000000}));
+    return frame.Ref();
+  });
+  const auto started = Clock::now();
+  pipeline.SetOnOutputPacket([&](const ffmpeg::Packet& packet) {
+    const auto pts =
+        av_rescale_q(packet->pts, packet->time_base, AVRational{1, 1000000});
+    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                             Clock::now() - started)
+                             .count();
+    {
+      std::lock_guard lock(observations.mutex);
+      if (packet->stream_index == 0) {
+        latest_video_pts = pts;
+        video_lateness.push_back(elapsed - pts);
+      } else {
+        latest_audio_pts = pts;
+      }
+      observations.output.push_back(packet.Ref());
+    }
+    observations.changed.notify_all();
+  });
+  const auto input =
+      (fs::u8path(MW_STREAMER_TEST_DATA_DIR) / "h264_aac_30fps.mp4")
+          .generic_u8string();
+  const auto recording = pipeline.AddPushUrl(directory.File("recovery.mp4"));
+  REQUIRE(pipeline.Start(input));
+  const bool delivered = observations.Wait([&] {
+    return (latest_video_pts >= 1600000 && latest_audio_pts >= 1600000) ||
+           !observations.errors.empty();
+  });
+  pipeline.Stop();
+  REQUIRE(delivered);
+  REQUIRE(observations.errors.empty());
+  CHECK_FALSE(pipeline.error());
+  REQUIRE(video_lateness.size() >= 80);
+  const auto maximum_lateness =
+      *std::max_element(video_lateness.begin(), video_lateness.end());
+  INFO("Initial/max/final video lateness (us): "
+       << video_lateness.front() << "/" << maximum_lateness << "/"
+       << video_lateness.back());
+  CHECK(maximum_lateness - video_lateness.front() >= 250000);
+  // Allow scheduler/encoder jitter while rejecting a retained >=250 ms
+  // realtime reanchor. Compare multiple recovered frames rather than one wake.
+  for (auto frame = video_lateness.end() - 10; frame != video_lateness.end();
+       ++frame) {
+    CHECK(*frame - video_lateness.front() < 120000);
+  }
+  std::vector<std::int64_t> video_output_pts;
+  std::vector<std::int64_t> audio_output_pts;
+  for (const auto& packet : observations.output) {
+    const auto pts =
+        av_rescale_q(packet->pts, packet->time_base, AVRational{1, 1000000});
+    auto& output =
+        packet->stream_index == 0 ? video_output_pts : audio_output_pts;
+    if (!output.empty()) CHECK(pts > output.back());
+    output.push_back(pts);
+  }
+  REQUIRE_FALSE(video_source_pts.empty());
+  REQUIRE_FALSE(audio_source_pts.empty());
+  REQUIRE(video_output_pts.size() <= video_source_pts.size());
+  for (std::size_t index = 0; index < video_output_pts.size(); ++index) {
+    CHECK(video_output_pts[index] == video_source_pts[index]);
+  }
+  // AAC emits an initial encoder-delay packet before the source's first
+  // sample. Every subsequent packet retains the same source-to-output mapping
+  // as video; lateness recovery must not retime either track independently.
+  const auto first_audio =
+      std::lower_bound(audio_output_pts.begin(), audio_output_pts.end(),
+                       audio_source_pts.front());
+  REQUIRE(first_audio != audio_output_pts.end());
+  const auto audio_count =
+      static_cast<std::size_t>(audio_output_pts.end() - first_audio);
+  REQUIRE(audio_count <= audio_source_pts.size());
+  for (std::size_t index = 0; index < audio_count; ++index) {
+    CHECK(*(first_audio + static_cast<std::ptrdiff_t>(index)) ==
+          audio_source_pts[index]);
+  }
+  CheckRecording(recording, true, true);
+  const auto recorded = OpenMedia(recording);
+  std::size_t video_recorded = 0;
+  std::size_t audio_recorded = 0;
+  std::optional<std::int64_t> video_shift;
+  std::optional<std::int64_t> audio_shift;
+  for (;;) {
+    ffmpeg::Packet packet;
+    const int result = av_read_frame(recorded.get(), packet.get());
+    if (result == AVERROR_EOF) break;
+    REQUIRE(result >= 0);
+    const bool video =
+        recorded->streams[packet->stream_index]->codecpar->codec_type ==
+        AVMEDIA_TYPE_VIDEO;
+    auto& count = video ? video_recorded : audio_recorded;
+    const auto& encoded = video ? video_output_pts : audio_output_pts;
+    REQUIRE(count < encoded.size());
+    const auto pts = av_rescale_q(
+        packet->pts, recorded->streams[packet->stream_index]->time_base,
+        AVRational{1, 1000000});
+    const auto shift = pts - encoded[count++];
+    auto& track_shift = video ? video_shift : audio_shift;
+    if (!track_shift) track_shift = shift;
+    // Subtracting independently rounded microsecond timestamps can differ by
+    // one microsecond, but the container mapping must remain constant.
+    CHECK(shift >= *track_shift - 1);
+    CHECK(shift <= *track_shift + 1);
+  }
+  CHECK(video_recorded == video_output_pts.size());
+  CHECK(audio_recorded == audio_output_pts.size());
+  REQUIRE(video_shift.has_value());
+  REQUIRE(audio_shift.has_value());
+  // Recorder quantizes its shared origin to each encoder's time base before
+  // container rescaling. Allow half a video tick, rather than normalizing the
+  // tracks separately and losing AAC's initial encoder-delay relationship.
+  const auto tolerance =
+      av_rescale_q(1, av_inv_q(config.encoder.fps), AVRational{1, 1000000}) /
+          2 +
+      1;
+  const auto shift_difference = *video_shift - *audio_shift;
+  CHECK(shift_difference >= -tolerance);
+  CHECK(shift_difference <= tolerance);
 }
 
 TEST_CASE("LivePipeline delivers decodable AV and continues after input EOF",

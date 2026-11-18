@@ -7,6 +7,9 @@
 namespace mw::streamer {
 
 struct RealtimeConfig {
+  // Reanchor a late track only when its source PTS also jumps backward beyond
+  // this tolerance. Processing overload keeps the shared realtime reference
+  // so audio and video can catch up once throughput recovers.
   std::chrono::microseconds negative_time_tolerance{250000};
   std::optional<std::chrono::microseconds> negative_time_discard;
   std::chrono::microseconds discontinuity_threshold{1000000};
