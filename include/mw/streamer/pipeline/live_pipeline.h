@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "mw/export.h"
+#include "mw/streamer/clip/clip.h"
 #include "mw/streamer/encoder/av_encoder_config.h"
 #include "mw/streamer/ffmpeg/frame.h"
 #include "mw/streamer/filter/av_media_filter.h"
@@ -29,6 +30,8 @@ struct LivePipelineConfig {
   SyncerOptions syncer;
   RealtimeConfig realtime;
   RemuxerConfig remuxer;
+  // Live-only output clip cache; fixed for the duration of a run.
+  ClipConfig clip;
   // Retains a frame reference during construction. Ignored for audio-only
   // output; empty uses CPU black frames. Must match encoder video dimensions.
   // Pixels remain shared read-only; no implicit resizing is performed.
@@ -105,6 +108,16 @@ class MW_STREAMER_API LivePipeline final {
   std::string AddHlsPublish(const std::string& ip, std::uint16_t port,
                             bool tls = false);
   Remuxer::OutputInfo output_info() const;
+  // Thread-safe, including from business callbacks. Only dispatches to the
+  // optional clip output. Missing module logs ERROR; clip validation, IO and
+  // completion are logged by that output and never fail this live session.
+  // No return value or result callback; request strings are owned on return.
+  void SubmitClip(const ClipRequest& request) noexcept;
+  // Capture alongside the source frame timestamp when detecting an event;
+  // retain it with asynchronous detections rather than querying at submission.
+  // Uses the decoded input generation, starting at zero. Loops/reconnects
+  // advance it. Returns zero also when clipping is disabled.
+  std::uint64_t clip_generation() const noexcept;
 
   // Initializes encoder/output synchronously, then starts input/scheduling.
   // Running means local initialization succeeded, not that a remote input or

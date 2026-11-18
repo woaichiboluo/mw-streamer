@@ -20,6 +20,8 @@ class SyncerTiming final {
   // without consuming the head. No input is represented by nullptr, not EOF.
   SyncerStep Step(bool video, const AvDecoderReadResult* head,
                   std::int64_t now_us, const Syncer::OnOutput& on_output);
+  void SetOnVideoMapping(Syncer::OnVideoMapping callback);
+  void SetOnAudioMapping(Syncer::OnAudioMapping callback);
 
  private:
   class Impl;

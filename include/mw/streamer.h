@@ -2,6 +2,7 @@
 #define MW_STREAMER_H_
 
 #include "mw/log.h"
+#include "mw/streamer/clip/clip.h"
 #include "mw/streamer/decoder/av_decoder.h"
 #include "mw/streamer/encoder/av_encoder.h"
 #include "mw/streamer/encoder/av_encoder_config.h"

@@ -32,3 +32,23 @@
 排查单个阶段时，可在调用 `Init` 前将对应的 `InitConfig.performance.stages` 项设为
 `PerformanceMode::kSummary`。例如 `PerformanceStage::kAudioResampler` 的记录
 同样使用 `streamer.perf`，通过 `stage=filter.audio_resampler` 识别。
+
+## Live 事件剪辑
+
+`LivePipelineConfig.clip.enabled` 默认为 `false`。启动前开启并设置
+`cache_duration`（默认 30 秒）和 `max_cache_bytes`（默认 64 MiB），即可在编码输出
+旁维护按 GOP 对齐的历史缓存。`OfflinePipeline` 不接入此功能；运行中不动态启停。
+
+业务在事件来源帧进入处理时保存 `pipeline.clip_generation()` 和该帧的
+`pts/time_base`。异步检测或业务 FIFO 延迟后发布事件时，仍使用当时保存的代次和
+来源时间，不能读取通知时刻的当前时间。使用 `ClipRequest` 指定 `event_id`、
+`time`、`before`、`after` 和本地 MP4 `path`，再调用 `pipeline.SubmitClip(request)`。
+路径父目录须存在；业务为不同事件选择不同路径，并自行避免事件重叠。
+
+Pipeline 仅负责转交请求，未创建剪辑模块时记录 ERROR。剪辑模块负责历史时间映射、
+编码包缓存、GOP 边界选择和异步录盘，所有剪辑相关错误、终止和完成均通过日志输出，
+没有返回值或结果回调，失败不停止直播。剪辑不会重新编码或改变直播的音视频时间线。
+开始和结束按可解码 GOP 对齐，实际文件可能包含请求窗口以外的画面。
+输入代次改变会丢弃旧缓存、旧映射和未完成剪辑；已经写出的部分文件保留并记录终止。
+
+新增配置和接口会改变 C++ ABI，SDK 和调用方须一起重新编译。

@@ -68,6 +68,18 @@ class MW_STREAMER_API Syncer final {
   // leaves the track's next PTS unchanged. Must not reenter Syncer; exceptions
   // propagate to the caller. Empty means the caller accepts the returned frame.
   using OnOutput = std::function<bool(const ffmpeg::Frame&)>;
+  // Observes a real video's source/output time correspondence immediately
+  // before downstream admission. Rejection can repeat this same mapping.
+  // No notification for generated freeze/backup frames. Both headers are
+  // borrowed for this call only. Configure/execute under the owner's serial
+  // Syncer contract; the callback must not reenter this object.
+  using OnVideoMapping =
+      std::function<void(std::uint64_t generation, const ffmpeg::Frame& source,
+                         const ffmpeg::Frame& output)>;
+  // Audio provenance before admission; null generation denotes generated
+  // silence. Used to retire delayed encoded packets across business resets.
+  using OnAudioMapping = std::function<void(
+      std::optional<std::uint64_t> generation, const ffmpeg::Frame& output)>;
 
   // Requires at least one enabled track. Invalid config throws synchronously.
   // Audio layout and backup frame references are independently retained.
@@ -85,6 +97,8 @@ class MW_STREAMER_API Syncer final {
                   std::int64_t now_us, const OnOutput& on_output = {});
   // Starts a fresh shared timeline; the caller also resets its clock epoch.
   void Reset();
+  void SetOnVideoMapping(OnVideoMapping callback);
+  void SetOnAudioMapping(OnAudioMapping callback);
 
  private:
   class Impl;

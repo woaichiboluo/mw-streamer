@@ -25,6 +25,7 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/mem.h>
 #include <libavutil/samplefmt.h>
 }
@@ -1177,3 +1178,177 @@ TEST_CASE("LivePipeline honors RequestStop during startup without an error",
 }
 
 }  // namespace
+
+namespace {
+
+void CheckProcessorClip(bool cuda) {
+  const auto runtime = InitRuntime();
+  const OutputDirectory directory;
+  auto config = Config();
+  config.encoder.gop_size = 5;
+  config.clip.enabled = true;
+  config.syncer.initial_timeout = 2s;
+  config.syncer.timeout = 2s;
+  config.syncer.start_ts = 30s;
+  if (cuda) {
+    // NVENC can require larger dimensions than the 64x64 CPU fixture.
+    config.encoder.width = 1920;
+    config.encoder.height = 1080;
+    config.encoder.fps = {30, 1};
+    config.encoder.video_encoder_name = "h264_nvenc";
+    config.encoder.video_pixel_format = AV_PIX_FMT_NV12;
+    config.encoder.video_options = {{"preset", "p1"}, {"tune", "ull"}};
+  }
+  const ffmpeg::HwDeviceContext device(cuda ? ffmpeg::HwDeviceType::kCuda
+                                            : ffmpeg::HwDeviceType::kCpu);
+  LivePipeline pipeline(device, config);
+  std::atomic<int> inputs{0};
+  std::atomic<bool> submitted{false};
+  std::atomic<bool> saw_cuda{false};
+  std::atomic<bool> invalid_cuda_frame{false};
+  pipeline.media_filter().SetOnVideo(
+      [&](const ffmpeg::Frame& input) -> std::optional<ffmpeg::Frame> {
+        if (cuda) {
+          if (input->format == AV_PIX_FMT_CUDA && input->hw_frames_ctx) {
+            const auto* frames = reinterpret_cast<const AVHWFramesContext*>(
+                input->hw_frames_ctx->data);
+            saw_cuda = true;
+            if (frames->sw_format != AV_PIX_FMT_NV12) invalid_cuda_frame = true;
+          } else {
+            invalid_cuda_frame = true;
+          }
+        }
+        if (inputs.fetch_add(1) == 10) {
+          mw::streamer::ClipRequest request;
+          request.event_id = "processor-goal";
+          request.time = {pipeline.clip_generation(), input->pts,
+                          input->time_base};
+          request.before = 80ms;
+          request.after = 80ms;
+          request.path = directory.File("event.mp4");
+          pipeline.SubmitClip(request);
+          submitted = true;
+        }
+        return input.Ref();
+      });
+  Observations observations;
+  Observe(pipeline, observations);
+  const auto source =
+      cuda
+          ? (fs::u8path(MW_STREAMER_TEST_DATA_DIR) / "h264_aac_1080p_30fps.mp4")
+                .generic_u8string()
+          : SamplePath();
+  const bool started = pipeline.Start(source);
+  if (!started && pipeline.error()) std::rethrow_exception(pipeline.error());
+  REQUIRE(started);
+  REQUIRE(observations.Wait([&] { return inputs.load() >= 35; }));
+  pipeline.Stop();
+  CHECK(submitted.load());
+  CHECK_FALSE(pipeline.error());
+  if (cuda) {
+    CHECK(saw_cuda.load());
+    CHECK_FALSE(invalid_cuda_frame.load());
+  }
+  CheckRecording(directory.File("event.mp4"), true, true);
+}
+
+}  // namespace
+
+TEST_CASE("LivePipeline clips processor source time on its output timeline",
+          "[live_pipeline][clip][integration]") {
+  CheckProcessorClip(false);
+}
+
+TEST_CASE("LivePipeline clips CUDA frames through NVENC without downloading",
+          "[.][live_pipeline][clip][cuda]") {
+  CheckProcessorClip(true);
+}
+
+TEST_CASE("LivePipeline rejects disabled clip requests without failing live",
+          "[live_pipeline][clip]") {
+  const auto runtime = InitRuntime();
+  const OutputDirectory directory;
+  LivePipeline pipeline(Config());
+  mw::streamer::ClipRequest request;
+  request.event_id = "disabled";
+  request.path = directory.File("disabled.mp4");
+  pipeline.SubmitClip(request);
+  CHECK_FALSE(pipeline.error());
+  Observations observations;
+  Observe(pipeline, observations);
+  REQUIRE(pipeline.Start(SamplePath()));
+  pipeline.SubmitClip(request);
+  REQUIRE(observations.Wait([&] { return observations.output.size() >= 10; }));
+  pipeline.Stop();
+  CHECK_FALSE(pipeline.error());
+  CHECK(directory.empty());
+}
+
+TEST_CASE("LivePipeline loop epochs reject events from a previous source pass",
+          "[live_pipeline][clip][loop][generation]") {
+  const auto runtime = InitRuntime();
+  const OutputDirectory directory;
+  auto config = Config();
+  config.input.proxy.loop = true;
+  config.encoder.gop_size = 5;
+  config.clip.enabled = true;
+  config.syncer.initial_timeout = 2s;
+  config.syncer.timeout = 2s;
+  LivePipeline pipeline(config);
+  std::uint64_t first_generation = 0;
+  std::uint64_t last_video_generation = 0;
+  int generation_inputs = 0;
+  mw::streamer::ClipRequest first_event;
+  std::int64_t repeated_pts = AV_NOPTS_VALUE;
+  std::atomic<int> second_inputs{0};
+  std::atomic<std::uint64_t> eof_generation{0};
+  std::atomic<std::uint64_t> second_generation{0};
+  pipeline.media_filter().SetOnReset([&] {
+    if (first_generation != 0 && pipeline.clip_generation() == first_generation)
+      eof_generation = pipeline.clip_generation();
+  });
+  pipeline.media_filter().SetOnVideo(
+      [&](const ffmpeg::Frame& input) -> std::optional<ffmpeg::Frame> {
+        const auto generation = pipeline.clip_generation();
+        if (first_generation == 0) first_generation = generation;
+        if (generation != last_video_generation) {
+          generation_inputs = 0;
+          last_video_generation = generation;
+        }
+        const int index = generation_inputs++;
+        if (generation != first_generation) {
+          second_generation = generation;
+          ++second_inputs;
+        }
+        if (index == 10) {
+          mw::streamer::ClipRequest request;
+          request.event_id = "loop-goal";
+          request.time = {generation, input->pts, input->time_base};
+          request.before = 80ms;
+          request.after = 80ms;
+          request.path = directory.File("current-loop.mp4");
+          if (generation == first_generation) {
+            first_event = request;
+            first_event.path = directory.File("stale-loop.mp4");
+          } else {
+            repeated_pts = input->pts;
+            pipeline.SubmitClip(first_event);
+            pipeline.SubmitClip(request);
+          }
+        }
+        return input.Ref();
+      });
+  Observations observations;
+  Observe(pipeline, observations);
+  REQUIRE(pipeline.Start(SamplePath()));
+  REQUIRE(observations.Wait([&] { return second_inputs.load() >= 35; }));
+  pipeline.Stop();
+  CHECK_FALSE(pipeline.error());
+  CHECK(eof_generation.load() == first_generation);
+  CHECK(second_generation.load() > first_generation);
+  CHECK(repeated_pts == first_event.time.pts);
+  CHECK_FALSE(fs::exists(fs::u8path(directory.File("stale-loop.mp4"))));
+  REQUIRE(fs::exists(fs::u8path(directory.File("current-loop.mp4"))));
+  const auto recording = OpenMedia(directory.File("current-loop.mp4"));
+  CHECK(recording->nb_streams == 2);
+}

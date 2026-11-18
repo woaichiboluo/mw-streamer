@@ -1082,3 +1082,58 @@ TEST_CASE("Syncer retains CUDA surfaces without download for real and backup",
 }
 
 }  // namespace
+
+TEST_CASE("Syncer observes source to output mapping before video admission",
+          "[syncer][mapping][backpressure]") {
+  Syncer syncer(VideoConfig());
+  auto input = VideoInput(50000000);
+  input.generation = 17;
+  int mappings = 0;
+  syncer.SetOnVideoMapping([&](std::uint64_t generation,
+                               const ffmpeg::Frame& source,
+                               const ffmpeg::Frame& output) {
+    ++mappings;
+    CHECK(generation == 17);
+    CHECK(PtsUs(source) == 50000000);
+    CHECK(PtsUs(output) == 0);
+    CHECK(output->data[0] == source->data[0]);
+  });
+  const auto rejected =
+      syncer.Step(true, &input, 0, [&](const ffmpeg::Frame& output) {
+        CHECK(mappings == 1);
+        CHECK(PtsUs(output) == 0);
+        return false;
+      });
+  CHECK(rejected.blocked);
+  CHECK_FALSE(rejected.consumed);
+  const auto accepted =
+      syncer.Step(true, &input, 0, [&](const ffmpeg::Frame& output) {
+        CHECK(mappings == 2);
+        CHECK(PtsUs(output) == 0);
+        return true;
+      });
+  REQUIRE(accepted.frame);
+  CHECK(accepted.consumed);
+  CHECK(PtsUs(*input.frame) == 50000000);
+  syncer.Reset();
+  REQUIRE(syncer.Step(true, &input, 0).frame);
+  CHECK(mappings == 3);
+}
+
+TEST_CASE("Syncer generated freeze and backup frames have no source mapping",
+          "[syncer][mapping]") {
+  Syncer syncer(VideoConfig());
+  int mappings = 0;
+  syncer.SetOnVideoMapping([&](std::uint64_t, const ffmpeg::Frame&,
+                               const ffmpeg::Frame&) { ++mappings; });
+  auto input = VideoInput(50000000);
+  REQUIRE(syncer.Step(true, &input, 0).frame);
+  CHECK(mappings == 1);
+  REQUIRE_FALSE(DrainAt(syncer, true, 2000000).empty());
+  CHECK(mappings == 1);
+  syncer.Reset();
+  REQUIRE_FALSE(syncer.Step(true, nullptr, 0).frame);
+  REQUIRE_FALSE(syncer.Step(true, nullptr, 4000000).frame);
+  REQUIRE(syncer.Step(true, nullptr, 6000000).frame);
+  CHECK(mappings == 1);
+}

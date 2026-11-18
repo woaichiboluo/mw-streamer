@@ -236,7 +236,6 @@ class AvMediaSource::Impl final {
     // Description of the last input whose packets were dispatched. State
     // notifications may describe a newer input before old reads finish.
     std::shared_ptr<const AvInputInfo> dispatched_info;
-    bool dispatched_eof = false;
     std::uint64_t generation = 0;
     std::unique_ptr<AvDecoder> video;
     std::unique_ptr<AvDecoder> audio;
@@ -490,22 +489,20 @@ class AvMediaSource::Impl final {
     CheckFailure();
     if (Stopping()) return false;
     if (session->dispatched_info && session->dispatched_info != result.info) {
-      if (!session->dispatched_eof) {
-        ++session->generation;
-        {
-          std::lock_guard lock(mutex_);
-          status_.generation = session->generation;
-        }
-        // Wake observers before either blocking Reset submission. Queue items
-        // retain their own generation until consumers reach the new input.
-        NotifyReadSignal();
+      ++session->generation;
+      {
+        std::lock_guard lock(mutex_);
+        status_.generation = session->generation;
       }
+      // Every reopened input starts a new generation, including normal loops.
+      // Wake observers before either blocking Reset submission. Queued frames
+      // and EOF retain their own generation until consumers reach new input.
+      NotifyReadSignal();
       // Both tracks must accept their ordered reset before the first new
       // packet/EOF. Each blocking submission happens exactly once.
       if (!SubmitControl(*session, true)) return false;
     }
     session->dispatched_info = result.info;
-    session->dispatched_eof = result.status == AvInputReadStatus::kEof;
     if (result.status == AvInputReadStatus::kEof) {
       if (!SubmitControl(*session, false)) return false;
       MW_LOG_DEBUG("streamer", "AvMediaSource [{}] 已分发源 EOF: loop={}",

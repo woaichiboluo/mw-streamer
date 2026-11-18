@@ -114,6 +114,7 @@ class FileWriter final {
     // Delay moov until the first fragment so edit lists can represent initial
     // audio padding and video reorder delay.
     options.Set("movflags", "frag_keyframe+delay_moov+default_base_moof");
+    options.Set("movie_timescale", "1000000");
     // Also fragment audio-only recordings and long GOPs to avoid retaining an
     // entire recording in the muxer. This does not change frame timestamps.
     options.Set("frag_duration", "1000000");

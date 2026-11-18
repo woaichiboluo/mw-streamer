@@ -87,6 +87,14 @@ class MW_STREAMER_API Scheduler final {
   void SetOnVideoFrame(OnVideoFrame callback);
   void SetOnAudioFrame(OnAudioFrame callback);
   void SetOnError(OnError callback);
+  // Optional live observers, configured while stopped. The input generation
+  // advances on reconnect and loop reopen. Notifications run on
+  // the driver before new-generation business work, and before real video
+  // admission respectively. Must return promptly without reentering lifecycle.
+  void SetOnGeneration(std::function<void(std::uint64_t)> callback);
+  void SetOnVideoMapping(Syncer::OnVideoMapping callback);
+  void SetOnAudioMapping(
+      std::function<void(std::uint64_t, const ffmpeg::Frame&)> callback);
 
   // Starts internal components only. False if already started or startup
   // fails; startup failures are retained in error() and notified via OnError.

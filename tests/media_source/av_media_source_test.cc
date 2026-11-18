@@ -268,15 +268,19 @@ void CheckSource(AvMediaSource& input, const NativeSource& reference,
                          : std::vector<std::vector<FrameRecord>>(cycles);
   std::vector<std::array<std::size_t, 2>> counts(cycles);
   std::vector<std::array<bool, 2>> ended(cycles);
+  std::vector<std::array<std::optional<std::uint64_t>, 2>> eof_generations(
+      cycles);
   std::array<std::size_t, 2> eof_counts{};
   const auto consume = [&](bool video_track) {
     const auto result =
         video_track ? input.TryReadVideo() : input.TryReadAudio();
     if (result.status == AvDecoderReadStatus::kNull) return false;
-    CHECK((result.generation == 0));
     const std::size_t index = video_track ? 0 : 1;
     const auto cycle = eof_counts[index];
     REQUIRE((cycle < cycles));
+    // Each track advances only after reading its own old-generation EOF,
+    // even if the dispatcher/status has already moved to a newer input.
+    CHECK((result.generation == cycle));
     const auto& expected = video_track ? video[cycle] : audio[cycle];
     const auto& track = video_track ? reference.video : reference.audio;
     REQUIRE(track.has_value());
@@ -289,6 +293,7 @@ void CheckSource(AvMediaSource& input, const NativeSource& reference,
       CHECK((counts[cycle][index] == expected.size()));
       CHECK_FALSE(result.frame.has_value());
       ended[cycle][index] = true;
+      eof_generations[cycle][index] = result.generation;
       ++eof_counts[index];
     } else {
       REQUIRE((result.status == AvDecoderReadStatus::kFrame));
@@ -314,6 +319,11 @@ void CheckSource(AvMediaSource& input, const NativeSource& reference,
       },
       std::chrono::seconds(cycles * 3 + 2));
   REQUIRE(finished);
+  if (reference.video && reference.audio) {
+    for (std::size_t cycle = 0; cycle < cycles; ++cycle) {
+      CHECK(eof_generations[cycle][0] == eof_generations[cycle][1]);
+    }
+  }
 }
 
 class TemporaryMedia final {
@@ -736,7 +746,7 @@ TEST_CASE("AvMediaSource loops retain frame contents and per-track EOF order",
   AvMediaSource input(config);
   REQUIRE(input.Start(SamplePath()));
   CheckSource(input, reference, 2, video_first);
-  CHECK((input.status().generation == 0));
+  CHECK((input.status().generation >= 1));
   CHECK((input.status().state != AvMediaSourceState::kEnded));
   input.Stop();
   CHECK((input.status().state == AvMediaSourceState::kStopped));
@@ -790,6 +800,7 @@ TEST_CASE("AvMediaSource blocks EOF and Reset without duplicating input",
         track == 0 ? input.TryReadVideo() : input.TryReadAudio();
     if (result.status == AvDecoderReadStatus::kNull) return false;
     REQUIRE((eof_counts[track] < cycles));
+    CHECK((result.generation == eof_counts[track]));
     const auto& frames = expected[track][eof_counts[track]];
     if (result.status == AvDecoderReadStatus::kEof) {
       CHECK((frame_counts[track] == frames.size()));

@@ -40,9 +40,9 @@ struct AvMediaSourceStatus {
   // Recoverable connection failure in WaitingRetry, terminal failure in Failed.
   std::exception_ptr error;
   std::shared_ptr<const AvInputInfo> info;
-  // Increments before dispatching a reopened input after an interrupted read.
-  // Starts at zero; normal EOF/loop reopens retain the same generation. Queued
-  // read results keep their own generation, which may be older than this one.
+  // Starts at zero and increments before dispatching every reopened input,
+  // including normal EOF loops. Queued read results and EOF keep their own
+  // generation, which may be older than this one.
   std::uint64_t generation = 0;
 };
 
@@ -105,8 +105,9 @@ class MW_STREAMER_API AvMediaSource final {
   // Absent tracks, underflow, opening/retry, Stop or failure may return kNull;
   // cached frames remain readable during retries. info() identifies absent
   // tracks. Normal EOF follows each track's delayed frames once per input;
-  // looping reopens the input. Reconnects reset decoder state in packet order
-  // without synthesizing an EOF and tag new output with a new generation.
+  // looping reopens the input. Every reopened input resets decoder state in
+  // packet order and tags new output with a new generation. Reconnects do not
+  // synthesize an EOF; loop EOF retains the generation of its preceding frames.
   // Consumers may discard old generations on reconnect. EOF never stops a Live
   // output. Final Ended requires reading EOF from all present tracks.
   AvDecoderReadResult TryReadVideo();

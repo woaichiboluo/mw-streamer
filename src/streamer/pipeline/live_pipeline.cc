@@ -8,6 +8,7 @@
 #include "mw/streamer/encoder/av_encoder.h"
 #include "mw/streamer/ffmpeg/error.h"
 #include "mw/streamer/scheduler/scheduler.h"
+#include "streamer/clip/clip_output.h"
 #include "streamer/performance/live_performance.h"
 #include "streamer/performance/settings.h"
 
@@ -42,6 +43,21 @@ class LivePipeline::Impl final {
           "复制 LivePipeline 音频布局");
       target.audio_channel_layout = audio_format_->ch_layout;
     }
+    if (config_.clip.enabled) {
+      clip_ = std::make_unique<internal::ClipOutput>(config_.clip);
+      scheduler_.SetOnGeneration([this](std::uint64_t generation) {
+        clip_->SetGeneration(generation);
+      });
+      scheduler_.SetOnVideoMapping([this](std::uint64_t generation,
+                                          const ffmpeg::Frame& source,
+                                          const ffmpeg::Frame& output) {
+        clip_->MapVideo(generation, source, output);
+      });
+      scheduler_.SetOnAudioMapping(
+          [this](std::uint64_t generation, const ffmpeg::Frame& output) {
+            clip_->MapAudio(generation, output);
+          });
+    }
     source_->SetOnStateChanged([this](const AvMediaSourceStatus& status) {
       MW_LOG_DEBUG(
           "streamer", "LivePipeline 输入状态变化: instance={} state={}",
@@ -66,6 +82,7 @@ class LivePipeline::Impl final {
         performance_.EncodedVideo();
       }
       if (on_output_packet_) on_output_packet_(packet);
+      if (clip_) clip_->SubmitPacket(packet);
       if (!remuxer_.SubmitPacket(packet)) {
         if (const auto failure = remuxer_.error())
           std::rethrow_exception(failure);
@@ -107,6 +124,17 @@ class LivePipeline::Impl final {
     return remuxer_.AddHlsPublish(ip, port, tls);
   }
   Remuxer::OutputInfo output_info() const { return remuxer_.output_info(); }
+  void SubmitClip(const ClipRequest& request) noexcept {
+    if (clip_) {
+      clip_->SubmitClip(request);
+    } else {
+      MW_LOG_ERROR("streamer", "LivePipeline 剪辑模块未启用: event={}",
+                   request.event_id);
+    }
+  }
+  std::uint64_t clip_generation() const noexcept {
+    return clip_ ? clip_->generation() : 0;
+  }
 
   bool Start(std::string_view url) {
     {
@@ -136,6 +164,7 @@ class LivePipeline::Impl final {
       MW_LOG_DEBUG("streamer", "LivePipeline 编码器启动完成: instance={}",
                    static_cast<const void*>(this));
       CheckFailure();
+      if (clip_) clip_->Start(encoder_.streams());
       if (!remuxer_.Start(encoder_.streams())) {
         if (const auto failure = remuxer_.error())
           std::rethrow_exception(failure);
@@ -237,6 +266,7 @@ class LivePipeline::Impl final {
       MW_LOG_DEBUG("streamer", "LivePipeline 排空编码器与输出: instance={}",
                    static_cast<const void*>(this));
     encoder_.Stop();
+    if (clip_) clip_->Stop();
     remuxer_.Stop();
     {
       std::lock_guard lock(mutex_);
@@ -300,6 +330,7 @@ class LivePipeline::Impl final {
   Scheduler scheduler_;
   AvEncoder encoder_;
   Remuxer remuxer_;
+  std::unique_ptr<internal::ClipOutput> clip_;
   mutable std::mutex mutex_;
   LivePipelineState state_ = LivePipelineState::kStopped;
   bool started_ = false;
@@ -339,6 +370,12 @@ std::string LivePipeline::AddHlsPublish(const std::string& ip,
 }
 Remuxer::OutputInfo LivePipeline::output_info() const {
   return impl_->output_info();
+}
+void LivePipeline::SubmitClip(const ClipRequest& request) noexcept {
+  impl_->SubmitClip(request);
+}
+std::uint64_t LivePipeline::clip_generation() const noexcept {
+  return impl_->clip_generation();
 }
 bool LivePipeline::Start(std::string_view url) { return impl_->Start(url); }
 LivePipelineState LivePipeline::state() const { return impl_->state(); }

@@ -91,6 +91,33 @@ class Scheduler::Impl final {
     CheckStopped();
     on_error_ = std::move(callback);
   }
+  void SetOnGeneration(std::function<void(std::uint64_t)> callback) {
+    CheckStopped();
+    on_generation_ = std::move(callback);
+  }
+  void SetOnVideoMapping(Syncer::OnVideoMapping callback) {
+    CheckStopped();
+    on_video_mapping_ = std::move(callback);
+    syncer_.SetOnVideoMapping([this](std::uint64_t generation,
+                                     const ffmpeg::Frame& source,
+                                     const ffmpeg::Frame& output) {
+      // A pending old head may finish after a reconnect reset. It must
+      // not acquire the new business generation's source identity.
+      if (generation == generation_ && on_video_mapping_)
+        on_video_mapping_(generation_, source, output);
+    });
+  }
+
+  void SetOnAudioMapping(
+      std::function<void(std::uint64_t, const ffmpeg::Frame&)> callback) {
+    CheckStopped();
+    on_audio_mapping_ = std::move(callback);
+    syncer_.SetOnAudioMapping([this](std::optional<std::uint64_t> generation,
+                                     const ffmpeg::Frame& output) {
+      if ((!generation || *generation == generation_) && on_audio_mapping_)
+        on_audio_mapping_(generation_, output);
+    });
+  }
 
   bool Start() {
     if (started_) return false;
@@ -101,10 +128,12 @@ class Scheduler::Impl final {
       for (auto& track : tracks_) track.Clear();
     }
     generation_ = 0;
+    reset_at_eof_ = false;
     pending_generation_.reset();
     started_ = true;
     try {
       syncer_.Reset();
+      if (on_generation_) on_generation_(generation_);
       realtime_.Reset();
       if (force_fps_) force_fps_->Reset();
       if (resampler_) resampler_->Reset();
@@ -265,6 +294,7 @@ class Scheduler::Impl final {
                    "Scheduler 全轨 EOF，重置业务缓存: generation={}",
                    generation_);
       ResetFilter();
+      reset_at_eof_ = true;
     }
   }
 
@@ -428,10 +458,15 @@ class Scheduler::Impl final {
           generation_ = *pending_generation_;
           pending_generation_.reset();
           if (stopping()) return;
+          if (on_generation_) on_generation_(generation_);
           MW_LOG_DEBUG("streamer",
                        "Scheduler 重连切代，重置业务缓存: generation={}",
                        generation_);
-          ResetFilter();
+          // Ordered loop EOF already drained and reset business work. The
+          // new decoder generation still retires event/cache identity, but
+          // must not deliver a second OnReset for the same boundary.
+          if (!reset_at_eof_) ResetFilter();
+          reset_at_eof_ = false;
           if (stopping()) return;
         }
         auto wake = kNoWake;
@@ -582,6 +617,7 @@ class Scheduler::Impl final {
   std::unique_ptr<AudioResampler> resampler_;
   std::array<Track, 2> tracks_;
   std::uint64_t generation_ = 0;
+  bool reset_at_eof_ = false;
   std::optional<std::uint64_t> pending_generation_;
   mutable std::mutex mutex_;
   std::shared_ptr<internal::WaitSignal> signal_ =
@@ -598,6 +634,9 @@ class Scheduler::Impl final {
   OnVideoFrame on_video_frame_;
   OnAudioFrame on_audio_frame_;
   OnError on_error_;
+  std::function<void(std::uint64_t)> on_generation_;
+  Syncer::OnVideoMapping on_video_mapping_;
+  std::function<void(std::uint64_t, const ffmpeg::Frame&)> on_audio_mapping_;
   Thread video_worker_;
   Thread audio_worker_;
   Thread driver_;
@@ -622,6 +661,16 @@ void Scheduler::SetOnAudioFrame(OnAudioFrame callback) {
 }
 void Scheduler::SetOnError(OnError callback) {
   impl_->SetOnError(std::move(callback));
+}
+void Scheduler::SetOnGeneration(std::function<void(std::uint64_t)> callback) {
+  impl_->SetOnGeneration(std::move(callback));
+}
+void Scheduler::SetOnVideoMapping(Syncer::OnVideoMapping callback) {
+  impl_->SetOnVideoMapping(std::move(callback));
+}
+void Scheduler::SetOnAudioMapping(
+    std::function<void(std::uint64_t, const ffmpeg::Frame&)> callback) {
+  impl_->SetOnAudioMapping(std::move(callback));
 }
 bool Scheduler::Start() { return impl_->Start(); }
 std::exception_ptr Scheduler::error() const { return impl_->error(); }

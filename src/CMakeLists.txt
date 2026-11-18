@@ -64,6 +64,7 @@ set(MW_STREAMER_SOURCES
     streamer/remuxer/remux_output.cc
     streamer/remuxer/remuxer.cc
     streamer/recorder/recorder.cc
+    streamer/clip/clip_output.cc
 )
 
 if(WIN32)

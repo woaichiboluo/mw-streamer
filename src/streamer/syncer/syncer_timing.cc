@@ -301,8 +301,8 @@ class SyncerTiming::Impl final {
                      track.next.has_value(), track.next.value_or(0), now);
       }
       pts = Add(original, *track.shift);
-      // A normal loop reuses the decoder generation. Match both the EOF
-      // boundary and the generation before using the live audio's mapping.
+      // Match both the EOF boundary and the input generation before using
+      // the live audio's mapping across a reconnect or loop restart.
       if (video && track.generation != input.generation && track.has_output &&
           track.next && track.eof_count == audio_.eof_count &&
           audio_.generation == input.generation && audio_.last_success &&
@@ -467,6 +467,9 @@ class SyncerTiming::Impl final {
     auto frame = input.frame->Ref();
     const auto duration = video ? VideoDuration(track) : frame->nb_samples;
     Stamp(frame, track, pts, duration);
+    if (video && on_video_mapping_)
+      on_video_mapping_(input.generation, *input.frame, frame);
+    if (!video && on_audio_mapping_) on_audio_mapping_(input.generation, frame);
     // Sentinel anchors its shared clock before submitting the real frame.
     // Admission failure must not consume the head or advance this track.
     clock_.Update(ToUs(pts, track), now);
@@ -504,6 +507,7 @@ class SyncerTiming::Impl final {
     const std::int64_t duration =
         video ? VideoDuration(track) : frame->nb_samples;
     Stamp(frame, track, pts, duration);
+    if (!video && on_audio_mapping_) on_audio_mapping_(std::nullopt, frame);
     if (on_output && !on_output(frame)) {
       return {false, {}, FinishFill(track, video, input, pts, now, true), true};
     }
@@ -575,6 +579,17 @@ class SyncerTiming::Impl final {
     return wake;
   }
 
+ public:
+  void SetOnVideoMapping(Syncer::OnVideoMapping callback) {
+    on_video_mapping_ = std::move(callback);
+  }
+  void SetOnAudioMapping(Syncer::OnAudioMapping callback) {
+    on_audio_mapping_ = std::move(callback);
+  }
+
+ private:
+  Syncer::OnVideoMapping on_video_mapping_;
+  Syncer::OnAudioMapping on_audio_mapping_;
   SyncerConfig config_;
   const void* log_context_;
   ffmpeg::Frame audio_layout_;
@@ -586,6 +601,12 @@ class SyncerTiming::Impl final {
 SyncerTiming::SyncerTiming(const SyncerConfig& config, const void* log_context)
     : impl_(std::make_unique<Impl>(config, log_context ? log_context : this)) {}
 SyncerTiming::~SyncerTiming() = default;
+void SyncerTiming::SetOnVideoMapping(Syncer::OnVideoMapping callback) {
+  impl_->SetOnVideoMapping(std::move(callback));
+}
+void SyncerTiming::SetOnAudioMapping(Syncer::OnAudioMapping callback) {
+  impl_->SetOnAudioMapping(std::move(callback));
+}
 SyncerStep SyncerTiming::Step(bool video, const AvDecoderReadResult* head,
                               std::int64_t now_us,
                               const Syncer::OnOutput& on_output) {

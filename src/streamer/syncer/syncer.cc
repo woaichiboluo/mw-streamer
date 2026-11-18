@@ -149,7 +149,18 @@ class Syncer::Impl final {
 
   void Reset() {
     timing_ = std::make_unique<internal::SyncerTiming>(config_, this);
+    timing_->SetOnVideoMapping(on_video_mapping_);
+    timing_->SetOnAudioMapping(on_audio_mapping_);
     StartLatency();
+  }
+
+  void SetOnVideoMapping(OnVideoMapping callback) {
+    on_video_mapping_ = std::move(callback);
+    timing_->SetOnVideoMapping(on_video_mapping_);
+  }
+  void SetOnAudioMapping(OnAudioMapping callback) {
+    on_audio_mapping_ = std::move(callback);
+    timing_->SetOnAudioMapping(on_audio_mapping_);
   }
 
  private:
@@ -160,6 +171,8 @@ class Syncer::Impl final {
       audio_latency_.Start(PerformanceStage::kSyncerAudio, this);
   }
 
+  OnVideoMapping on_video_mapping_;
+  OnAudioMapping on_audio_mapping_;
   SyncerConfig config_;
   ffmpeg::Frame audio_format_;
   std::unique_ptr<internal::SyncerTiming> timing_;
@@ -175,5 +188,11 @@ SyncerStep Syncer::Step(bool video, const AvDecoderReadResult* head,
   return impl_->Step(video, head, now_us, on_output);
 }
 void Syncer::Reset() { impl_->Reset(); }
+void Syncer::SetOnVideoMapping(OnVideoMapping callback) {
+  impl_->SetOnVideoMapping(std::move(callback));
+}
+void Syncer::SetOnAudioMapping(OnAudioMapping callback) {
+  impl_->SetOnAudioMapping(std::move(callback));
+}
 
 }  // namespace mw::streamer
