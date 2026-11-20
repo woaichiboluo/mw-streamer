@@ -20,11 +20,15 @@ namespace mw::streamer {
 struct RemuxPipelineConfig {
   AvInputProxyConfig input;
   RemuxerConfig remuxer;
-  // Packet retrieval/delivery speed only. Positive and finite; timestamps and
+  // Delivery speed when pace is enabled. Positive and finite; timestamps and
   // encoded payloads remain unchanged, so file playback duration is unchanged.
   double speed = 1.0;
   // Permitted delivery lead against the scaled source DTS clock, in wall time.
   std::chrono::milliseconds max_ahead{100};
+  // Deliver packets immediately by default, including live inputs and file
+  // recording. Enable only to publish a file at its scaled playback rate;
+  // the transport protocol does not distinguish live streams from files.
+  bool pace = false;
 };
 
 enum class RemuxPipelineState {
@@ -75,7 +79,8 @@ class MW_STREAMER_API RemuxPipeline final {
   RemuxPipeline& operator=(RemuxPipeline&&) = delete;
 
   // Configure callbacks only before Start/after Stop. OnPacket runs once per
-  // paced packet before submission, with original payload/PTS/DTS/time base.
+  // packet before submission (after optional pacing), with original
+  // payload/PTS/DTS/time base.
   // Ref() retains storage; callback exceptions fail the pipeline.
   void SetOnPacket(OnPacket callback);
   // First terminal error only, outside locks on the failing worker/caller.
@@ -101,7 +106,8 @@ class MW_STREAMER_API RemuxPipeline final {
   // Returns false on invalid URL or worker startup failure; reports OnError.
   [[nodiscard]] bool Start(std::string_view url);
   // Positive finite values only; invalid values throw invalid_argument.
-  // Takes effect during a scheduling wait without restarting input/output.
+  // With pace enabled, takes effect during a scheduling wait without restarting
+  // input/output. Immediate delivery does not wait regardless of this value.
   void SetSpeed(double speed);
   double speed() const;
   RemuxPipelineState state() const;

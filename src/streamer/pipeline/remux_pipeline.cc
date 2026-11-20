@@ -160,10 +160,11 @@ class RemuxPipeline::Impl final {
       history_.clear();
       media_clock_.reset();
     }
-    MW_LOG_INFO("streamer",
-                "RemuxPipeline 开始启动: instance={} speed={} max_ahead_ms={}",
-                static_cast<const void*>(this), speed(),
-                config_.max_ahead.count());
+    MW_LOG_INFO(
+        "streamer",
+        "RemuxPipeline 开始启动: instance={} pace={} speed={} max_ahead_ms={}",
+        static_cast<const void*>(this), config_.pace, speed(),
+        config_.max_ahead.count());
     fixed_streams_.clear();
     last_times_.clear();
     try {
@@ -392,9 +393,13 @@ class RemuxPipeline::Impl final {
     std::unique_lock lock(mutex_);
     const auto now = Clock::now();
     AdvanceClock(now);
-    // A late source/backpressure reanchors rather than bursting through an
-    // accumulated backlog. Small cross-track interleaving stays on one clock.
-    if (!media_clock_ || *media_clock_ - dts_us > 250000.0L * speed_) {
+    // A source/processing stall may reanchor the leading media position, but
+    // an older packet from another track must never pull the shared clock back.
+    const bool leading = std::all_of(
+        last_times_.begin(), last_times_.end(),
+        [dts_us](const auto& track) { return dts_us >= track.second.dts_us; });
+    if (!media_clock_ ||
+        (leading && *media_clock_ - dts_us > 250000.0L * speed_)) {
       MW_LOG_DEBUG(
           "streamer",
           "RemuxPipeline 建立取包时间基准: instance={} dts_us={} speed={}",
@@ -634,7 +639,7 @@ class RemuxPipeline::Impl final {
           Initialize(streams, discontinuity);
           description = input.info;
         }
-        if (!Pace(time.dts_us)) break;
+        if (config_.pace && !Pace(time.dts_us)) break;
         if (on_packet_) on_packet_(*input.packet);
         if (Stopping()) break;
         const auto output = Current();

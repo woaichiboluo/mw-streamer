@@ -17,6 +17,19 @@
 
 新增字段改变了 `StreamInfo` 的 ABI；升级时须一起重新编译 SDK 和所有调用方。
 
+## 编码包交付与录制
+
+`RemuxPipeline` 默认立即交付输入编码包，不按播放时钟等待。实时流录制不再额外
+节流；本地文件或网络点播文件的转封装按可处理的速度完成，媒体时间戳和播放时长
+保持不变。
+
+只有需要将文件按播放速度推送时，才显式设置 `RemuxPipelineConfig::pace = true`。
+此时 `speed` 和 `max_ahead` 控制交付节奏，`SetSpeed()` 可动态调整倍速。输入 URL
+的协议不用于推断直播或点播。落后于其他轨道的旧包不能拉回共享调度时钟。
+
+默认交付行为及 `RemuxPipelineConfig` 的 ABI 已改变；升级时一起重编 SDK 和调用方。
+原来依赖默认限速的文件推流调用须显式开启 `pace`。
+
 ## 性能日志
 
 直播优先开启 `InitConfig.performance.stages[PerformanceStage::kLivePipeline]`

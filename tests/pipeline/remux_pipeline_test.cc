@@ -61,6 +61,7 @@ RemuxPipelineConfig Config(double speed = 1.0) {
   RemuxPipelineConfig config;
   config.input.max_retries = 0;
   config.input.input.packet_capacity = 2;
+  config.pace = true;
   config.speed = speed;
   return config;
 }
@@ -113,6 +114,58 @@ std::vector<ffmpeg::Packet> ReadPackets(AVFormatContext& input) {
   }
   REQUIRE(result == AVERROR_EOF);
   return packets;
+}
+
+void WriteLaggingAudio(const std::string& path) {
+  const auto input = OpenMedia(SamplePath());
+  std::vector<ffmpeg::Packet> video, audio;
+  for (auto& packet : ReadPackets(*input)) {
+    const auto type =
+        input->streams[packet->stream_index]->codecpar->codec_type;
+    if (type == AVMEDIA_TYPE_VIDEO) video.push_back(std::move(packet));
+    if (type == AVMEDIA_TYPE_AUDIO) audio.push_back(std::move(packet));
+  }
+  REQUIRE(video.size() >= 10);
+  REQUIRE(audio.size() >= 11);
+  struct OutputCloser {
+    void operator()(AVFormatContext* context) const {
+      if (context->pb) avio_closep(&context->pb);
+      avformat_free_context(context);
+    }
+  };
+  AVFormatContext* raw = nullptr;
+  REQUIRE(avformat_alloc_output_context2(&raw, nullptr, "flv", path.c_str()) >=
+          0);
+  std::unique_ptr<AVFormatContext, OutputCloser> output(raw);
+  REQUIRE(output != nullptr);
+  for (unsigned index = 0; index < input->nb_streams; ++index) {
+    auto* stream = avformat_new_stream(output.get(), nullptr);
+    REQUIRE(stream != nullptr);
+    REQUIRE(avcodec_parameters_copy(stream->codecpar,
+                                    input->streams[index]->codecpar) >= 0);
+    stream->codecpar->codec_tag = 0;
+    stream->time_base = {1, 1000};
+  }
+  REQUIRE(avio_open(&output->pb, path.c_str(), AVIO_FLAG_WRITE) >= 0);
+  REQUIRE(avformat_write_header(output.get(), nullptr) >= 0);
+  const auto write = [&](const ffmpeg::Packet& original, std::int64_t dts_ms) {
+    auto packet = original.Ref();
+    const auto base = output->streams[packet->stream_index]->time_base;
+    packet->pts = packet->dts = av_rescale_q(dts_ms, {1, 1000}, base);
+    packet->duration = av_rescale_q(20, {1, 1000}, base);
+    packet->time_base = base;
+    // Preserve physical arrival order instead of sorting the tracks by DTS.
+    REQUIRE(av_write_frame(output.get(), packet.get()) >= 0);
+  };
+  // The earliest audio packet establishes a nonnegative FLV origin. Later
+  // audio stays 480 ms behind the preceding video, while both tracks advance.
+  write(audio.front(), 500);
+  for (std::size_t index = 0; index < 10; ++index) {
+    const auto step = static_cast<std::int64_t>(index) * 20;
+    write(video[index], 1000 + step);
+    write(audio[index + 1], 520 + step);
+  }
+  REQUIRE(av_write_trailer(output.get()) >= 0);
 }
 
 void WriteAacWithoutConfig(
@@ -500,6 +553,79 @@ TEST_CASE("RemuxPipeline paces packet consumption and supports runtime speed",
   CHECK(doubled > 600ms);
   CHECK(doubled < normal * 0.85);
   CHECK(changed < normal * 0.75);
+}
+
+TEST_CASE("RemuxPipeline delivers packets immediately by default",
+          "[remux_pipeline][integration][timing]") {
+  const auto runtime = InitRuntime();
+  const OutputDirectory directory;
+  const auto source = SamplePath();
+  const auto input = OpenMedia(source);
+  const auto expected = ReadPackets(*input);
+  RemuxPipelineConfig config;
+  config.input.max_retries = 0;
+  config.input.input.packet_capacity = 2;
+  config.speed = .001;
+  config.max_ahead = 0ms;
+  RemuxPipeline pipeline(config);
+  Observations observations;
+  Observe(pipeline, observations);
+  const auto output = pipeline.AddPushUrl(directory.File("immediate.mp4"));
+  const auto started = std::chrono::steady_clock::now();
+  REQUIRE(pipeline.Start(source));
+  const bool ended = WaitFor(
+      [&] { return pipeline.state() == RemuxPipelineState::kEnded; }, 2s);
+  pipeline.Stop();
+  REQUIRE(ended);
+  CHECK(std::chrono::steady_clock::now() - started < 2s);
+  CHECK_FALSE(pipeline.error());
+  CHECK(observations.errors.empty());
+  CheckOriginalPackets(observations.packets, expected);
+  const auto recordings = pipeline.recording_statuses();
+  REQUIRE(recordings.size() == 1);
+  CHECK(recordings.front().status.written_packets == expected.size());
+  CHECK(recordings.front().status.dropped_packets == 0);
+  CheckRecording(output, source);
+}
+
+TEST_CASE("RemuxPipeline pacing ignores late cross-track DTS for reanchoring",
+          "[remux_pipeline][integration][timing]") {
+  const auto runtime = InitRuntime();
+  const OutputDirectory directory;
+  const auto source = directory.File("lagging-audio.flv");
+  WriteLaggingAudio(source);
+  const auto input = OpenMedia(source);
+  const auto expected = ReadPackets(*input);
+  REQUIRE(expected.size() == 21);
+  std::size_t cross_track_regressions = 0;
+  for (std::size_t index = 1; index < expected.size(); ++index) {
+    const auto& previous = expected[index - 1];
+    const auto& current = expected[index];
+    if (av_compare_ts(current->dts, current->time_base, previous->dts,
+                      previous->time_base) < 0) {
+      REQUIRE(current->stream_index != previous->stream_index);
+      ++cross_track_regressions;
+    }
+  }
+  // Verify that probing/demuxing did not sort away the arrival pattern.
+  REQUIRE(cross_track_regressions == 10);
+  auto config = Config();
+  config.max_ahead = 0ms;
+  RemuxPipeline pipeline(config);
+  Observations observations;
+  Observe(pipeline, observations);
+  const auto started = std::chrono::steady_clock::now();
+  REQUIRE(pipeline.Start(source));
+  const bool ended =
+      WaitFor([&] { return pipeline.state() == RemuxPipelineState::kEnded; });
+  pipeline.Stop();
+  REQUIRE(ended);
+  // The complete media span is 680 ms. Reanchoring on each old audio packet
+  // instead makes ten video deliveries each wait about 500 ms.
+  CHECK(std::chrono::steady_clock::now() - started < 1800ms);
+  CHECK_FALSE(pipeline.error());
+  CHECK(observations.errors.empty());
+  CheckOriginalPackets(observations.packets, expected);
 }
 
 TEST_CASE("RemuxPipeline stop wakes a slow pacing wait and works in callbacks",
