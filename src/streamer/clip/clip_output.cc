@@ -280,8 +280,7 @@ class ClipOutput::Impl final {
   }
 
   void SubmitClip(const ClipRequest& request) {
-    const auto source_us =
-        Microseconds(request.time.pts, request.time.time_base);
+    Microseconds(request.time.pts, request.time.time_base);
     const auto before_us = Duration(request.before);
     const auto after_us = Duration(request.after);
     if (request.event_id.empty() || request.path.empty() ||
@@ -305,6 +304,12 @@ class ClipOutput::Impl final {
                    request.event_id);
       return;
     }
+    // Business events precede ForceFps. Use the same nearest-slot rounding as
+    // that converter, including source pictures dropped during downsampling.
+    const auto source_us =
+        Microseconds(av_rescale_q(request.time.pts, request.time.time_base,
+                                  video_time_base_),
+                     video_time_base_);
     task_.emplace();
     task_->request = request;
     task_->source_us = source_us;

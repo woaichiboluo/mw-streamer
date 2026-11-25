@@ -526,33 +526,32 @@ class Scheduler::Impl final {
         track.requested = false;
       }
       if (input.status != AvDecoderReadStatus::kNull) {
-        pending = std::move(input);
+        if (index == 0) {
+          // Process each source frame once, preserving delayed business
+          // output's own timing before ForceFps drops or repeats images.
+          const bool measure =
+              performance_ && input.status == AvDecoderReadStatus::kFrame;
+          const auto begin = measure ? Clock::now() : Clock::time_point{};
+          pending = filter_.ProcessVideo(std::move(input));
+          if (measure)
+            performance_->FilteredVideo(
+                Clock::now() - begin,
+                pending.status == AvDecoderReadStatus::kFrame);
+        } else {
+          pending = std::move(input);
+        }
       }
       if (pending.status != AvDecoderReadStatus::kNull &&
           converter.TryPushFrame(pending)) {
         pending = {};
       }
       auto output = converter.TryReadFrame();
-      // Business buffering does not mean the converter is empty. Determine
-      // admission before callbacks, then drain every converted frame and EOF.
+      // Audio business buffering does not mean the converter is empty. Keep
+      // draining queued frames and EOF even when its callback returns null.
       const bool needs_input = pending.status == AvDecoderReadStatus::kNull &&
                                output.status == AvDecoderReadStatus::kNull;
-      if (output.status != AvDecoderReadStatus::kNull) {
-        if (index == 0) {
-          // Run camera motion once per target-FPS slot, including repeated
-          // source images, rather than repeating an already-rendered view.
-          const bool measure =
-              performance_ && output.status == AvDecoderReadStatus::kFrame;
-          const auto begin = measure ? Clock::now() : Clock::time_point{};
-          output = filter_.ProcessVideo(std::move(output));
-          if (measure)
-            performance_->FilteredVideo(
-                Clock::now() - begin,
-                output.status == AvDecoderReadStatus::kFrame);
-        } else {
-          output = filter_.ProcessAudio(std::move(output));
-        }
-      }
+      if (index == 1 && output.status != AvDecoderReadStatus::kNull)
+        output = filter_.ProcessAudio(std::move(output));
       {
         std::lock_guard lock(mutex_);
         auto& track = tracks_[index];

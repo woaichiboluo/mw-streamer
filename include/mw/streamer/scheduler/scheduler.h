@@ -62,10 +62,11 @@ class MW_STREAMER_API Scheduler final {
 
   // Configure business callbacks only while Scheduler is stopped. Scheduler
   // owns this filter's lifecycle; callers must not Start/Stop/process it.
-  // Video callbacks receive target-FPS frames after conversion, once for every
-  // output slot, including slots reusing the same decoded image. Audio
-  // callbacks receive resampled target-format frames. Buffered callback output
-  // retains its own timing; it is not converted again after processing.
+  // Video callbacks receive source frames with their original PTS/time base,
+  // before ForceFps drops or repeats processed images at the target FPS.
+  // Buffered callback output retains its own timing as ForceFps input. Audio
+  // callbacks receive resampled target-format frames, without conversion after
+  // processing.
   // Audio and video business callbacks may run concurrently.
   // OnReset runs on the driver with both processing workers idle: once after
   // all present enabled tracks drain EOF, and before processing a newer input

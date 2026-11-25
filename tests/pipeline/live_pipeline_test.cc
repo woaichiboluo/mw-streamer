@@ -399,10 +399,23 @@ TEST_CASE("LivePipeline catches up after video overload without shifting AV",
   }
   REQUIRE_FALSE(video_source_pts.empty());
   REQUIRE_FALSE(audio_source_pts.empty());
-  REQUIRE(video_output_pts.size() <= video_source_pts.size());
+  REQUIRE(video_source_pts.size() > static_cast<std::size_t>(buffered_frames));
+  const auto video_time_base = av_inv_q(config.encoder.fps);
+  const auto first_slot = av_rescale_q(video_source_pts.front(),
+                                       AVRational{1, 1000000}, video_time_base);
   for (std::size_t index = 0; index < video_output_pts.size(); ++index) {
-    CHECK(video_output_pts[index] == video_source_pts[index]);
+    // Filtering observes 30 FPS source frames; ForceFps then supplies the
+    // 50 FPS output slots without shifting the source media timeline.
+    CHECK(video_output_pts[index] ==
+          av_rescale_q(first_slot + static_cast<std::int64_t>(index),
+                       video_time_base, AVRational{1, 1000000}));
   }
+  const auto last_returned =
+      video_source_pts.size() - static_cast<std::size_t>(buffered_frames) - 1;
+  const auto last_slot = av_rescale_q(video_source_pts[last_returned],
+                                      AVRational{1, 1000000}, video_time_base);
+  CHECK(video_output_pts.back() <=
+        av_rescale_q(last_slot, video_time_base, AVRational{1, 1000000}));
   // AAC emits an initial encoder-delay packet before the source's first
   // sample. Every subsequent packet retains the same source-to-output mapping
   // as video; lateness recovery must not retime either track independently.
@@ -1181,10 +1194,11 @@ TEST_CASE("LivePipeline honors RequestStop during startup without an error",
 
 namespace {
 
-void CheckProcessorClip(bool cuda) {
+void CheckProcessorClip(bool cuda, int output_fps = 25) {
   const auto runtime = InitRuntime();
   const OutputDirectory directory;
   auto config = Config();
+  config.encoder.fps = {output_fps, 1};
   config.encoder.gop_size = 5;
   config.clip.enabled = true;
   config.syncer.initial_timeout = 2s;
@@ -1206,6 +1220,9 @@ void CheckProcessorClip(bool cuda) {
   std::atomic<bool> submitted{false};
   std::atomic<bool> saw_cuda{false};
   std::atomic<bool> invalid_cuda_frame{false};
+  std::atomic<bool> event_off_grid{false};
+  std::atomic<bool> event_dropped{false};
+  std::optional<std::int64_t> previous_slot;
   pipeline.media_filter().SetOnVideo(
       [&](const ffmpeg::Frame& input) -> std::optional<ffmpeg::Frame> {
         if (cuda) {
@@ -1218,7 +1235,13 @@ void CheckProcessorClip(bool cuda) {
             invalid_cuda_frame = true;
           }
         }
+        const auto target_time_base = av_inv_q(config.encoder.fps);
+        const auto slot =
+            av_rescale_q(input->pts, input->time_base, target_time_base);
         if (inputs.fetch_add(1) == 10) {
+          event_off_grid = av_compare_ts(input->pts, input->time_base, slot,
+                                         target_time_base) != 0;
+          event_dropped = previous_slot && *previous_slot == slot;
           mw::streamer::ClipRequest request;
           request.event_id = "processor-goal";
           request.time = {pipeline.clip_generation(), input->pts,
@@ -1229,6 +1252,7 @@ void CheckProcessorClip(bool cuda) {
           pipeline.SubmitClip(request);
           submitted = true;
         }
+        previous_slot = slot;
         return input.Ref();
       });
   Observations observations;
@@ -1237,7 +1261,8 @@ void CheckProcessorClip(bool cuda) {
       cuda
           ? (fs::u8path(MW_STREAMER_TEST_DATA_DIR) / "h264_aac_1080p_30fps.mp4")
                 .generic_u8string()
-          : SamplePath();
+          : (fs::u8path(MW_STREAMER_TEST_DATA_DIR) / "h264_aac_30fps.mp4")
+                .generic_u8string();
   const bool started = pipeline.Start(source);
   if (!started && pipeline.error()) std::rethrow_exception(pipeline.error());
   REQUIRE(started);
@@ -1248,6 +1273,9 @@ void CheckProcessorClip(bool cuda) {
   if (cuda) {
     CHECK(saw_cuda.load());
     CHECK_FALSE(invalid_cuda_frame.load());
+  } else {
+    CHECK(event_off_grid.load());
+    CHECK(event_dropped.load() == (output_fps < 30));
   }
   CheckRecording(directory.File("event.mp4"), true, true);
 }
@@ -1256,7 +1284,7 @@ void CheckProcessorClip(bool cuda) {
 
 TEST_CASE("LivePipeline clips processor source time on its output timeline",
           "[live_pipeline][clip][integration]") {
-  CheckProcessorClip(false);
+  CheckProcessorClip(false, GENERATE(10, 25, 50));
 }
 
 TEST_CASE("LivePipeline clips CUDA frames through NVENC without downloading",

@@ -303,14 +303,15 @@ TEST_CASE("Scheduler paces file processing before business filtering",
   CHECK_FALSE(scheduler.error());
 }
 
-TEST_CASE("Scheduler processes every converted video slot before output",
+TEST_CASE("Scheduler filters source video before frame-rate conversion",
           "[scheduler][video][frame-rate][buffering]") {
   const std::size_t buffered_frames = GENERATE(0U, 3U, 100U);
-  CAPTURE(buffered_frames);
+  const int output_fps = GENERATE(25, 50);
+  CAPTURE(buffered_frames, output_fps);
   TemporaryVideoJump video(true);
   auto source = Source();
   auto config = Config();
-  config.syncer.encoder.fps = {50, 1};
+  config.syncer.encoder.fps = {output_fps, 1};
   config.syncer.encoder.audio_sample_format = AV_SAMPLE_FMT_NONE;
   config.syncer.options.initial_timeout = 2s;
   config.syncer.options.forward_start_shift = false;
@@ -335,8 +336,8 @@ TEST_CASE("Scheduler processes every converted video slot before output",
         auto output = frame.Ref();
         if (av_frame_make_writable(output.get()) < 0)
           throw std::runtime_error("Cannot allocate video callback output");
-        // A distinct rendering for every callback, including repeated source
-        // pictures, must survive all the way to the final output slots.
+        // Each source frame is rendered once. ForceFps may then drop or repeat
+        // this rendered image without invoking the business callback again.
         output->data[0][0] = static_cast<std::uint8_t>(filtered.size() + 1);
         filtered.push_back(record(output));
         buffer.push_back(std::move(output));
@@ -361,27 +362,46 @@ TEST_CASE("Scheduler processes every converted video slot before output",
   REQUIRE(completed);
   CHECK_FALSE(scheduler.error());
   CHECK(resets.load() == 1);
-  // Source indices 0..19 land in output slots 0,1,3,4,...,28. EOF must
-  // follow all twenty-nine converted slots, even if callbacks return null.
-  REQUIRE(filtered.size() == 29);
+  // All twenty source pictures must reach the callback with their original
+  // alternating 20/40 ms intervals, regardless of the target output rate.
+  REQUIRE(filtered.size() == 20);
   for (std::size_t index = 0; index < filtered.size(); ++index) {
     CAPTURE(index);
     const auto& frame = filtered[index];
-    CHECK(frame.pts == static_cast<std::int64_t>(index));
-    CHECK(av_cmp_q(frame.time_base, AVRational{1, 50}) == 0);
-    CHECK(frame.duration == 1);
+    CHECK(av_rescale_q(frame.pts, frame.time_base, AVRational{1, 50}) ==
+          static_cast<std::int64_t>(index * 3 / 2));
+    CHECK(av_cmp_q(frame.time_base, AVRational{1, output_fps}) != 0);
     CHECK(frame.marker == static_cast<std::uint8_t>(index + 1));
   }
-  const auto expected =
+  const auto returned =
       buffered_frames < filtered.size() ? filtered.size() - buffered_frames : 0;
+  const auto expected =
+      returned == 0
+          ? 0
+          : static_cast<std::size_t>(av_rescale_q(
+                filtered[returned - 1].pts, filtered[returned - 1].time_base,
+                AVRational{1, output_fps})) +
+                1;
   REQUIRE(delivered.size() == expected);
   for (std::size_t index = 0; index < delivered.size(); ++index) {
     CAPTURE(index);
     const auto& frame = delivered[index];
-    CHECK(frame.pts == filtered[index].pts);
-    CHECK(av_cmp_q(frame.time_base, filtered[index].time_base) == 0);
-    CHECK(frame.duration == filtered[index].duration);
-    CHECK(frame.marker == filtered[index].marker);
+    CHECK(frame.pts == static_cast<std::int64_t>(index));
+    CHECK(av_cmp_q(frame.time_base, AVRational{1, output_fps}) == 0);
+    CHECK(frame.duration == 1);
+    // A source picture landing in this slot supplies the rendered image.
+    // Slots between source pictures repeat the preceding processed image.
+    std::size_t source_index = 0;
+    while (source_index + 1 < returned &&
+           av_rescale_q(filtered[source_index].pts,
+                        filtered[source_index].time_base,
+                        AVRational{1, output_fps}) < frame.pts)
+      ++source_index;
+    if (av_rescale_q(filtered[source_index].pts,
+                     filtered[source_index].time_base,
+                     AVRational{1, output_fps}) > frame.pts)
+      --source_index;
+    CHECK(frame.marker == filtered[source_index].marker);
   }
 }
 

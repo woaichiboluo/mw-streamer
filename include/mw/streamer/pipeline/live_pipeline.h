@@ -111,6 +111,8 @@ class MW_STREAMER_API LivePipeline final {
   // Thread-safe, including from business callbacks. Only dispatches to the
   // optional clip output. Missing module logs ERROR; clip validation, IO and
   // completion are logged by that output and never fail this live session.
+  // Event source PTS is rounded to the nearest target-FPS slot before output
+  // mapping, including events from source pictures dropped by ForceFps.
   // No return value or result callback; request strings are owned on return.
   void SubmitClip(const ClipRequest& request) noexcept;
   // Capture alongside the source frame timestamp when detecting an event;
