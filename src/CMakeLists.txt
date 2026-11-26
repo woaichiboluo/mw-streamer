@@ -57,6 +57,7 @@ set(MW_STREAMER_SOURCES
     streamer/pipeline/offline_pipeline.cc
     streamer/platform/thread.cc
     streamer/encoder/av_encoder.cc
+    streamer/writer/video_writer.cc
     streamer/performance/latency.cc
     streamer/performance/live_performance.cc
     streamer/performance/settings.cc

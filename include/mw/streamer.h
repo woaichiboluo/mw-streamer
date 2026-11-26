@@ -35,5 +35,6 @@
 #include "mw/streamer/scheduler/realtime_timing.h"
 #include "mw/streamer/scheduler/scheduler.h"
 #include "mw/streamer/syncer/syncer.h"
+#include "mw/streamer/writer/video_writer.h"
 
 #endif  // MW_STREAMER_H_

@@ -43,6 +43,11 @@ int main() {
     mw::streamer::ffmpeg::AvDictionary dictionary;
     dictionary.Set("installed", "yes");
     mw::streamer::Remuxer remuxer;
+    mw::streamer::ffmpeg::HwDeviceContext device(
+        mw::streamer::ffmpeg::HwDeviceType::kCpu);
+    mw::streamer::VideoWriter writer(device);
+    if (writer.source_start_time()) result = 1;
+    writer.RequestStop();
     const auto probe = mw::streamer::AvProbe::Probe("");
     if (!frame.get() || !packet.get() || dictionary.Get("installed") != "yes" ||
         !remuxer.output_info().output_urls.empty() || probe.info ||
