@@ -172,7 +172,8 @@ DecodedFile DecodeFile(const std::string& path) {
       ffmpeg::FfmpegException::throwIfError(result, "解码 writer 输出帧");
       const auto pts = frame->best_effort_timestamp;
       if (pts == AV_NOPTS_VALUE) throw std::runtime_error("输出帧缺少时间戳");
-      const double time = pts * av_q2d(raw->streams[index]->time_base);
+      const double time =
+          static_cast<double>(pts) * av_q2d(raw->streams[index]->time_base);
       if (decoder->codec_type == AVMEDIA_TYPE_VIDEO) {
         output.video_times.push_back(time);
       } else if (decoder->codec_type == AVMEDIA_TYPE_AUDIO) {
@@ -199,7 +200,7 @@ DecodedFile DecodeFile(const std::string& path) {
   while ((result = av_read_frame(raw, packet.get())) >= 0) {
     const auto index = static_cast<unsigned>(packet->stream_index);
     if (raw->streams[index]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-      output.video_packet_pts.push_back(packet->pts *
+      output.video_packet_pts.push_back(static_cast<double>(packet->pts) *
                                         av_q2d(raw->streams[index]->time_base));
       output.reordered = output.reordered || packet->pts != packet->dts;
     }
@@ -246,7 +247,7 @@ TEST_CASE("VideoWriter 保存全部视频帧并保留缺口与编码重排",
     CHECK(frame->time_base.num == 1);
     CHECK(frame->time_base.den == 90000);
     CHECK(frame->data[0][0] == 80);
-    expected.push_back(offset / 25.0);
+    expected.push_back(static_cast<double>(offset) / 25.0);
   }
   const auto origin = writer.source_start_time();
   REQUIRE(origin);
@@ -320,7 +321,8 @@ TEST_CASE("VideoWriter 非视频帧格的来源起点仍输出零起点",
   const auto decoded = DecodeFile(directory.File());
   REQUIRE(decoded.video_times.size() == 6);
   for (std::size_t index = 0; index < decoded.video_times.size(); ++index)
-    CHECK(std::abs(decoded.video_times[index] - index / 25.0) < 0.0001);
+    CHECK(std::abs(decoded.video_times[index] -
+                   static_cast<double>(index) / 25.0) < 0.0001);
 }
 
 TEST_CASE("VideoWriter 音频早于视频时保留反向偏移而不按到达顺序归零",
@@ -346,8 +348,8 @@ TEST_CASE("VideoWriter 音频早于视频时保留反向偏移而不按到达顺
   const auto decoded = DecodeFile(directory.File());
   REQUIRE(decoded.video_times.size() == 12);
   for (std::size_t index = 0; index < decoded.video_times.size(); ++index)
-    CHECK(std::abs(decoded.video_times[index] - (0.08 + index / 25.0)) <
-          0.0001);
+    CHECK(std::abs(decoded.video_times[index] -
+                   (0.08 + static_cast<double>(index) / 25.0)) < 0.0001);
   CHECK(decoded.first_audible_time < 0.03);
   CHECK(decoded.decoded_audio_samples >= 19200);
 }
@@ -528,7 +530,8 @@ TEST_CASE("VideoWriter 复用 CUDA 设备编码硬件帧并保留来源属性",
   const auto decoded = DecodeFile(directory.File());
   REQUIRE(decoded.video_times.size() == 8);
   for (std::size_t index = 0; index < decoded.video_times.size(); ++index)
-    CHECK(std::abs(decoded.video_times[index] - index / 25.0) < 0.0001);
+    CHECK(std::abs(decoded.video_times[index] -
+                   static_cast<double>(index) / 25.0) < 0.0001);
 }
 
 }  // namespace
